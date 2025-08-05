@@ -30,6 +30,7 @@ class PlayerGroup:
         # - how to communicate to the caller what audio_format is preferred,
         #   especially on topology changes
         # - how to sync metadata/media_art with this audio stream?
+        # TODO: port _stream_audio
         raise NotImplementedError
 
     async def set_metadata(self, metadata: dict[str, str]) -> None:

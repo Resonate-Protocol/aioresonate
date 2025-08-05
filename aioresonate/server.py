@@ -5,40 +5,79 @@ ResonateServer is the core of the music listening experience, responsible for:
 - Orchestrating synchronized grouped playback
 """
 
-from collections.abc import Awaitable, Callable
-from enum import Enum, auto
+import asyncio
+from collections.abc import Callable, Coroutine
+from dataclasses import dataclass
 
 from aiohttp import ClientWebSocketResponse, web
+from aiohttp.client import ClientSession
 
 from .group import PlayerGroup
 from .instance import PlayerInstance
 
 
-class ResonateEvent(Enum):
+class ResonateEvent:
     """Event type used by ResonateServer.add_event_callback()."""
 
-    PLAYER_CONNECTED = auto()
-    PLAYER_DISCONNECTED = auto()
-    GROUP_UPDATED = auto()
+
+@dataclass
+class PlayerAdded(ResonateEvent):
+    """A new player was added."""
+
+    player_id: str
+
+
+@dataclass
+class PlayerRemoved(ResonateEvent):
+    """A player disconnected from the server."""
+
+    player_id: str
+
+
+# TODO: add grouped events
 
 
 class ResonateServer:
     """Resonate Server implementation to connect to and manage many Resonate Players."""
 
-    def __init__(self) -> None:
+    _players: set[PlayerInstance]
+    _groups: set[PlayerGroup]
+    loop: asyncio.AbstractEventLoop
+    _event_cbs: list[Callable[[ResonateEvent], Coroutine[None, None, None]]]
+
+    def __init__(self, loop: asyncio.AbstractEventLoop) -> None:
         """Initialize a new Resonate Server."""
-        raise NotImplementedError
+        self._players = set()
+        self._groups = set()
+        self.loop = loop
+        self._event_cbs = []
 
-    async def on_player_connect(self, request: web.Request) -> web.WebSocketResponse:
+    async def on_player_connect(
+        self, request: web.Request
+    ) -> web.WebSocketResponse | ClientWebSocketResponse:
         """Handle an incoming WebSocket connection from a Resonate client."""
-        raise NotImplementedError
+        instance = PlayerInstance(self, request=request, url=None, wsock_client=None)
+        try:
+            self._players.add(instance)
+            return await instance.handle_client()
+        finally:
+            self._players.remove(instance)
 
-    async def connect_to_player(self, url: str) -> ClientWebSocketResponse:
+    async def connect_to_player(self, url: str) -> web.WebSocketResponse | ClientWebSocketResponse:
         """Connect to the Resonate player at the given URL."""
-        raise NotImplementedError
+        # TODO catch any exceptions from ws_connect
+        async with ClientSession() as session:
+            wsock = await session.ws_connect(url)
+            instance = PlayerInstance(self, request=None, url=url, wsock_client=wsock)
+            try:
+                # TODO: only add once we know its id
+                self._players.add(instance)
+                return await instance.handle_client()
+            finally:
+                self._players.remove(instance)
 
-    def add_event_callback(
-        self, callback: Callable[[ResonateEvent], Awaitable[None]]
+    def add_event_listener(
+        self, callback: Callable[[ResonateEvent], Coroutine[None, None, None]]
     ) -> Callable[[], None]:
         """Register a callback to listen for state changes of the server.
 
@@ -46,18 +85,27 @@ class ResonateServer:
         - A new player was connected
         - A player disconnected
         - Changes in Groups
+
+        Returns function to remove the listener.
         """
-        # TODO: callback should also give info about what player connected
-        raise NotImplementedError
+        self._event_cbs.append(callback)
+        return lambda: self._event_cbs.remove(callback)
+
+    def _signal_event(self, event: ResonateEvent) -> None:
+        for cb in self._event_cbs:
+            _ = self.loop.create_task(cb(event))
 
     @property
     def players(self) -> list[PlayerInstance]:
         """Get the list of all players connected to this server."""
         raise NotImplementedError
 
-    def get_player(self, player_id: str) -> PlayerInstance:
+    def get_player(self, player_id: str) -> PlayerInstance | None:
         """Get the player with the given id."""
-        raise NotImplementedError
+        for player in self.players:
+            if player.player_id == player_id:
+                return player
+        return None
 
     @property
     def groups(self) -> list[PlayerGroup]:
