@@ -102,7 +102,9 @@ class PlayerInstance:
     @property
     def player_id(self) -> str:
         """The unique identifier of this Player."""
-        raise NotImplementedError
+        # This should only be called once the player was correctly initialized
+        assert self._player_id
+        return self._player_id
 
     @property
     def name(self) -> str:

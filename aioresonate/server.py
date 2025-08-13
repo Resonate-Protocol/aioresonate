@@ -95,11 +95,14 @@ class ResonateServer:
             _ = self.loop.create_task(cb(event))
 
     def _on_player_add(self, instance: PlayerInstance) -> None:
+        """
+        Register the player to the server and notify that the player connected.
+
+        Should only be called once all data like the player id was received.
+        """
         if instance in self._players:
             return
 
-        # Should only be called once we get all data from the player
-        assert instance.player_id
         self._players.add(instance)
         self._signal_event(PlayerAdded(instance.player_id))
 
