@@ -208,6 +208,7 @@ class PlayerInstance:
             )
             self.player_info = player_info
             self._player_id = player_info.player_id
+            self._server._on_player_add(self)  # noqa: SLF001
 
         elif msg_type == "player/state":
             if not self.player_id:

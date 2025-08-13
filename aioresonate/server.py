@@ -57,6 +57,7 @@ class ResonateServer:
     ) -> web.WebSocketResponse | ClientWebSocketResponse:
         """Handle an incoming WebSocket connection from a Resonate client."""
         instance = PlayerInstance(self, request=request, url=None, wsock_client=None)
+        # TODO: only add once we know its id, see connect_to_player
         try:
             self._players.add(instance)
             return await instance.handle_client()
@@ -70,11 +71,9 @@ class ResonateServer:
             wsock = await session.ws_connect(url)
             instance = PlayerInstance(self, request=None, url=url, wsock_client=wsock)
             try:
-                # TODO: only add once we know its id
-                self._players.add(instance)
                 return await instance.handle_client()
             finally:
-                self._players.remove(instance)
+                self._on_player_remove(instance)
 
     def add_event_listener(
         self, callback: Callable[[ResonateEvent], Coroutine[None, None, None]]
@@ -94,6 +93,22 @@ class ResonateServer:
     def _signal_event(self, event: ResonateEvent) -> None:
         for cb in self._event_cbs:
             _ = self.loop.create_task(cb(event))
+
+    def _on_player_add(self, instance: PlayerInstance) -> None:
+        if instance in self._players:
+            return
+
+        # Should only be called once we get all data from the player
+        assert instance.player_id
+        self.players.append(instance)
+        self._signal_event(PlayerAdded(instance.player_id))
+
+    def _on_player_remove(self, instance: PlayerInstance) -> None:
+        if instance not in self._players:
+            return
+
+        self.players.remove(instance)
+        self._signal_event(PlayerRemoved(instance.player_id))
 
     @property
     def players(self) -> list[PlayerInstance]:
