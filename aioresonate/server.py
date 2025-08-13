@@ -100,14 +100,14 @@ class ResonateServer:
 
         # Should only be called once we get all data from the player
         assert instance.player_id
-        self.players.append(instance)
+        self._players.add(instance)
         self._signal_event(PlayerAdded(instance.player_id))
 
     def _on_player_remove(self, instance: PlayerInstance) -> None:
         if instance not in self._players:
             return
 
-        self.players.remove(instance)
+        self._players.remove(instance)
         self._signal_event(PlayerRemoved(instance.player_id))
 
     @property
