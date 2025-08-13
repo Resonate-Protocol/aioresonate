@@ -114,9 +114,9 @@ class ResonateServer:
         self._signal_event(PlayerRemovedEvent(instance.player_id))
 
     @property
-    def players(self) -> list[PlayerInstance]:
+    def players(self) -> set[PlayerInstance]:
         """Get the list of all players connected to this server."""
-        raise NotImplementedError
+        return self._players
 
     def get_player(self, player_id: str) -> PlayerInstance | None:
         """Get the player with the given id."""
