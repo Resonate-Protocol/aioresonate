@@ -17,7 +17,7 @@ from .instance import PlayerInstance
 
 
 class ResonateEvent:
-    """Event type used by ResonateServer.add_event_callback()."""
+    """Event type used by ResonateServer.add_event_listener()."""
 
 
 @dataclass
