@@ -46,6 +46,7 @@ class PlayerInstance:
     stream_task: asyncio.Task[None] | None = None
     _to_write: asyncio.Queue[models.ServerMessages | str | bytes]
     session_info: models.SessionInfo | None = None
+    _group: PlayerGroup
 
     def __init__(
         self,
@@ -67,6 +68,7 @@ class PlayerInstance:
             self.url = url
             self.wsock = wsock_client
         self._to_write = asyncio.Queue(maxsize=MAX_PENDING_MSG)
+        self._group = PlayerGroup(server, self)
 
     @property
     def state(self) -> models.PlayerState:
@@ -97,7 +99,7 @@ class PlayerInstance:
     @property
     def group(self) -> PlayerGroup:
         """Get the group assigned to this player."""
-        raise NotImplementedError
+        return self._group
 
     @property
     def player_id(self) -> str:
