@@ -109,7 +109,8 @@ class PlayerInstance:
     @property
     def name(self) -> str:
         """The human-readable name of this Player."""
-        raise NotImplementedError
+        assert self.player_info  # Player should be fully initialized by now
+        return self.player_info.name
 
     @property
     def capabilities(self) -> dict[str, str]:
