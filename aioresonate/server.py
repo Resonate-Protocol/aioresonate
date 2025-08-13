@@ -21,14 +21,14 @@ class ResonateEvent:
 
 
 @dataclass
-class PlayerAdded(ResonateEvent):
+class PlayerAddedEvent(ResonateEvent):
     """A new player was added."""
 
     player_id: str
 
 
 @dataclass
-class PlayerRemoved(ResonateEvent):
+class PlayerRemovedEvent(ResonateEvent):
     """A player disconnected from the server."""
 
     player_id: str
@@ -104,14 +104,14 @@ class ResonateServer:
             return
 
         self._players.add(instance)
-        self._signal_event(PlayerAdded(instance.player_id))
+        self._signal_event(PlayerAddedEvent(instance.player_id))
 
     def _on_player_remove(self, instance: PlayerInstance) -> None:
         if instance not in self._players:
             return
 
         self._players.remove(instance)
-        self._signal_event(PlayerRemoved(instance.player_id))
+        self._signal_event(PlayerRemovedEvent(instance.player_id))
 
     @property
     def players(self) -> list[PlayerInstance]:
