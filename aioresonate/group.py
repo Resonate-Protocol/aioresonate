@@ -1,7 +1,6 @@
 """Manages and synchronizes playback for a group of one or more players."""
 
 import asyncio
-import uuid
 from asyncio import Task
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass
@@ -44,18 +43,11 @@ class PlayerGroup:
     _players: list["PlayerInstance"]
     _server: "ResonateServer"
     _stream_task: Task[None] | None = None
-    _id: uuid.UUID
 
-    def __init__(
-        self, server: "ResonateServer", *args: "PlayerInstance", group_id: uuid.UUID | None = None
-    ) -> None:
+    def __init__(self, server: "ResonateServer", *args: "PlayerInstance") -> None:
         """Do not call this constructor."""
         self._server = server
         self._players = list(args)
-        if group_id is not None:
-            self._id = group_id
-        else:
-            self._id = uuid.uuid4()
 
     async def play_media(
         self, audio_source: AsyncGenerator[bytes, None], audio_format: AudioFormat
@@ -125,11 +117,6 @@ class PlayerGroup:
                 models.SessionEndMessage(models.SessionEndPayload(player.player_id))
             )
         self._stream_task = None
-
-    @property
-    def id(self) -> uuid.UUID:
-        """Unique identifier of this group."""
-        return self._id
 
     async def _stream_audio(
         self,
