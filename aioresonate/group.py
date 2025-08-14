@@ -79,7 +79,6 @@ class PlayerGroup:
             self._stream_audio(
                 int(self._server.loop.time() * 1_000_000) + INITIAL_PLAYBACK_DELAY_US,
                 audio_source,
-                audio_format,
             )
         )
 
@@ -159,7 +158,6 @@ class PlayerGroup:
         self,
         start_time_us: int,
         audio_source: AsyncGenerator[bytes, None],
-        audio_format: AudioFormat,  # noqa: ARG002
     ) -> None:
         samples_sent = 0
 
