@@ -138,6 +138,9 @@ class PlayerGroup:
         """Remove a player from this group."""
         assert player in self._players  # TODO: better error
         self._players.remove(player)
+        if self._stream_task is not None:
+            # Notify the player that the session ended
+            self._send_session_end_msg(player)
         # Each player needs to be in a group, add it to a new one
         player._group = PlayerGroup(self._server, player)  # noqa: SLF001
 
