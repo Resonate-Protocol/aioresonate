@@ -141,6 +141,14 @@ class PlayerInstance:
         """Volume of this player."""
         raise NotImplementedError
 
+    def ungroup(self) -> None:
+        """Remove the player from the group.
+
+        If the player is already alone, this function does nothing.
+        """
+        if len(self._group.players) > 1:
+            self._group.remove_player(self)
+
     async def handle_client(self) -> web.WebSocketResponse | ClientWebSocketResponse:
         """Handle the websocket connection."""
         wsock = self.wsock

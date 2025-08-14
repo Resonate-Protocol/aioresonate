@@ -120,6 +120,26 @@ class PlayerGroup:
             )
         self._stream_task = None
 
+    @property
+    def players(self) -> list["PlayerInstance"]:
+        """List of all players that are part of this group."""
+        return self._players
+
+    def remove_player(self, player: "PlayerInstance") -> None:
+        """Remove a player from this group."""
+        assert player in self._players  # TODO: better error
+        self._players.remove(player)
+        # Each player needs to be in a group, add it to a new one
+        player._group = PlayerGroup(self._server, player)  # noqa: SLF001
+
+    def add_player(self, player: "PlayerInstance") -> None:
+        """Add a player to this group."""
+        if player in self._players:
+            return
+        # Remove it from any existing group first
+        player.ungroup()
+        self._players.append(player)
+
     async def _stream_audio(
         self,
         start_time_us: int,
