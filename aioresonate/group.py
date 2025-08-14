@@ -45,6 +45,7 @@ class PlayerGroup:
     _players: list["PlayerInstance"]
     _server: "ResonateServer"
     _stream_task: Task[None] | None = None
+    _stream_audio_format: AudioFormat | None = None
 
     def __init__(self, server: "ResonateServer", *args: "PlayerInstance") -> None:
         """Do not call this constructor."""
@@ -68,6 +69,8 @@ class PlayerGroup:
         # TODO: Stop any prior stream
 
         # TODO: dynamic session info
+
+        self._stream_audio_format = audio_format
 
         for player in self._players:
             self._send_session_start_msg(player, audio_format)
@@ -143,6 +146,9 @@ class PlayerGroup:
             return
         # Remove it from any existing group first
         player.ungroup()
+        if self._stream_task is not None and self._stream_audio_format is not None:
+            # Join it to the current stream
+            self._send_session_start_msg(player, self._stream_audio_format)
         self._players.append(player)
 
     async def _stream_audio(
