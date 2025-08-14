@@ -8,6 +8,8 @@ from typing import TYPE_CHECKING
 
 from . import models
 
+# The cyclic import is not an issue during runtime, so hide it
+# pyright: reportImportCycles=none
 if TYPE_CHECKING:
     from .instance import PlayerInstance
     from .server import ResonateServer
