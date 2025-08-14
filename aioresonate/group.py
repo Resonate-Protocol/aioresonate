@@ -56,6 +56,7 @@ class PlayerGroup:
 
         The library expects uncompressed PCM audio and will handle encoding.
         """
+        self.stop()
         # TODO: open questions:
         # - how to communicate to the caller what audio_format is preferred,
         #   especially on topology changes
@@ -108,7 +109,14 @@ class PlayerGroup:
         - clears metadata
         - and clears all buffers
         """
-        raise NotImplementedError
+        if self._stream_task is None:
+            return
+        _ = self._stream_task.cancel()
+        for player in self._players:
+            player.send_message(
+                models.SessionEndMessage(models.SessionEndPayload(player.player_id))
+            )
+        self._stream_task = None
 
     async def _stream_audio(
         self,
