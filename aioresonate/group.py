@@ -95,6 +95,9 @@ class PlayerGroup:
         )
         player.send_message(models.SessionStartMessage(session_info))
 
+    def _send_session_end_msg(self, player: "PlayerInstance") -> None:
+        player.send_message(models.SessionEndMessage(models.SessionEndPayload(player.player_id)))
+
     async def set_metadata(self, metadata: dict[str, str]) -> None:
         """Send a metadata/update message to all players in the group."""
         raise NotImplementedError
@@ -123,9 +126,7 @@ class PlayerGroup:
             return
         _ = self._stream_task.cancel()
         for player in self._players:
-            player.send_message(
-                models.SessionEndMessage(models.SessionEndPayload(player.player_id))
-            )
+            self._send_session_end_msg(player)
         self._stream_task = None
 
     @property
