@@ -68,6 +68,19 @@ class PlayerGroup:
         # TODO: Stop any prior stream
 
         # TODO: dynamic session info
+
+        for player in self._players:
+            self._send_session_start_msg(player, audio_format)
+
+        self._stream_task = self._server.loop.create_task(
+            self._stream_audio(
+                int(self._server.loop.time() * 1_000_000) + INITIAL_PLAYBACK_DELAY_US,
+                audio_source,
+                audio_format,
+            )
+        )
+
+    def _send_session_start_msg(self, player: "PlayerInstance", audio_format: AudioFormat) -> None:
         session_info = models.SessionInfo(
             session_id=f"mass-session-{int(self._server.loop.time())}",
             codec="pcm",
@@ -77,15 +90,7 @@ class PlayerGroup:
             now=int(self._server.loop.time() * 1_000_000),
             codec_header=None,
         )
-
-        for player in self._players:
-            player.send_message(models.SessionStartMessage(session_info))
-
-        self._stream_task = self._server.loop.create_task(
-            self._stream_audio(
-                session_info.now + INITIAL_PLAYBACK_DELAY_US, audio_source, audio_format
-            )
-        )
+        player.send_message(models.SessionStartMessage(session_info))
 
     async def set_metadata(self, metadata: dict[str, str]) -> None:
         """Send a metadata/update message to all players in the group."""
