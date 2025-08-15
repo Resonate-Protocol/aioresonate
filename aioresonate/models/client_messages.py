@@ -3,18 +3,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from enum import Enum
 from typing import Literal
 
 from mashumaro.mixins.orjson import DataClassORJSONMixin
 
-from . import MediaCommand, PlayerStateType, RepeatMode
-
-
-class BinaryMessageType(Enum):
-    """Enum for Binary Message Types."""
-
-    PlayAudioChunk = 1
+from .types import MediaCommand, PlayerStateType, RepeatMode
 
 
 @dataclass

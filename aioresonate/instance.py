@@ -331,7 +331,7 @@ class PlayerInstance:
         """Pack audio data the audio header."""
         header = struct.pack(
             models.BINARY_HEADER_FORMAT,
-            client_messages.BinaryMessageType.PlayAudioChunk.value,
+            models.BinaryMessageType.PlayAudioChunk.value,
             timestamp_us,
             sample_count,
         )

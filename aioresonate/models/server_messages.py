@@ -7,7 +7,7 @@ from typing import Literal
 
 from mashumaro.mixins.orjson import DataClassORJSONMixin
 
-from . import MediaCommand, RepeatMode
+from .types import MediaCommand, RepeatMode
 
 
 @dataclass

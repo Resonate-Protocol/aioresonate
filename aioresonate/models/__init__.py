@@ -1,39 +1,24 @@
 """Models for the resonate audio protocol."""
 
-from __future__ import annotations
+__all__ = [
+    "BinaryMessageType",
+    "MediaCommand",
+    "PlayerStateType",
+    "RepeatMode",
+    "client_messages",
+    "server_messages",
+    "types",
+]
+
 
 import struct
 from dataclasses import dataclass
-from enum import Enum
 from typing import Any
 
 from mashumaro.mixins.orjson import DataClassORJSONMixin
 
-
-class RepeatMode(Enum):
-    """Enum for Repeat Modes."""
-
-    OFF = "off"
-    ONE = "one"
-    ALL = "all"
-
-
-class PlayerStateType(Enum):
-    """Enum for Player States."""
-
-    PLAYING = "playing"
-    PAUSED = "paused"
-    IDLE = "idle"
-
-
-class MediaCommand(Enum):
-    """Enum for Media Commands."""
-
-    PLAY = "play"
-    PAUSE = "pause"
-    STOP = "stop"
-    SEEK = "seek"
-    VOLUME = "volume"
+from . import client_messages, server_messages, types
+from .types import BinaryMessageType, MediaCommand, PlayerStateType, RepeatMode
 
 
 @dataclass
