@@ -89,7 +89,7 @@ class PlayerGroup:
             sample_rate=audio_format.sample_rate,
             channels=audio_format.channels,
             bit_depth=audio_format.bit_depth,
-            now=int(self._server.loop.time() * 1_000_000),
+            now=int(self._server.loop.time() * 1_000_000),  # TODO: maybe remove from spec?
             codec_header=None,
         )
         player.send_message(models.SessionStartMessage(session_info))
