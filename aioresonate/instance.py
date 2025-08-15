@@ -8,6 +8,7 @@ from contextlib import suppress
 from typing import TYPE_CHECKING
 
 from aiohttp import ClientWebSocketResponse, WSMsgType, web
+from attr import dataclass
 
 from aioresonate import models
 
@@ -25,6 +26,15 @@ if TYPE_CHECKING:
 
 class PlayerInstanceEvent:
     """Base event type used by PlayerInstance.add_event_listener()."""
+
+
+@dataclass
+class VolumeChangedEvent(PlayerInstanceEvent):
+    """The volume or mute status of the player was changed."""
+
+    player_id: str
+    volume: int
+    muted: bool
 
 
 class PlayerInstance:
@@ -53,6 +63,8 @@ class PlayerInstance:
     session_info: models.SessionInfo | None = None
     _group: PlayerGroup
     _event_cbs: list[Callable[[PlayerInstanceEvent], Coroutine[None, None, None]]]
+    _volume: int = 100
+    _muted: bool = False
 
     def __init__(
         self,
@@ -128,25 +140,43 @@ class PlayerInstance:
 
     def set_volume(self, volume: int) -> None:
         """Set the volume of this player."""
-        raise NotImplementedError
+        if self._volume == volume:
+            return
+        self._volume = volume
+        self.send_message(models.VolumeSetMessage(models.VolumeSetPayload(volume)))
+        self._signal_event(
+            VolumeChangedEvent(self.player_id, volume=self._volume, muted=self._muted)
+        )
 
     def mute(self) -> None:
         """Mute this player."""
-        raise NotImplementedError
+        if self._muted:
+            return
+        self._muted = True
+        self.send_message(models.MuteSetMessage(models.MuteSetPayload(self._muted)))
+        self._signal_event(
+            VolumeChangedEvent(self.player_id, volume=self._volume, muted=self._muted)
+        )
 
     def unmute(self) -> None:
         """Unmute this player."""
-        raise NotImplementedError
+        if not self._muted:
+            return
+        self._muted = False
+        self.send_message(models.MuteSetMessage(models.MuteSetPayload(self._muted)))
+        self._signal_event(
+            VolumeChangedEvent(self.player_id, volume=self._volume, muted=self._muted)
+        )
 
     @property
     def muted(self) -> bool:
         """Mute state of this player."""
-        raise NotImplementedError
+        return self._muted
 
     @property
     def volume(self) -> int:
         """Volume of this player."""
-        raise NotImplementedError
+        return self._volume
 
     def ungroup(self) -> None:
         """Remove the player from the group.
