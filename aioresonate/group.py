@@ -86,7 +86,7 @@ class PlayerGroup:
         )
 
     def _send_session_start_msg(self, player: "PlayerInstance", audio_format: AudioFormat) -> None:
-        session_info = server_messages.SessionInfo(
+        session_info = server_messages.SessionStartPayload(
             session_id=f"mass-session-{int(self._server.loop.time())}",
             codec="pcm",
             sample_rate=audio_format.sample_rate,

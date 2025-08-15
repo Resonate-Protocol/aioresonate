@@ -43,7 +43,7 @@ class PlayerInstance:
     assigned group.
     """
 
-    _state: client_messages.PlayerState = client_messages.PlayerState(
+    _state: client_messages.PlayerStatePayload = client_messages.PlayerStatePayload(
         state=models.PlayerStateType.IDLE, volume=100, muted=False
     )
     _server: "ResonateServer"
@@ -51,7 +51,7 @@ class PlayerInstance:
     wsock: web.WebSocketResponse | ClientWebSocketResponse
     url: str | None
     _player_id: str | None = None
-    player_info: client_messages.PlayerInfo | None = None
+    player_info: client_messages.PlayerHelloPayload | None = None
     # Task responsible for handling messages from the player
     _handle_task: asyncio.Task[str] | None = None
     # Task responsible for sending audio and other data
@@ -59,7 +59,7 @@ class PlayerInstance:
     # Task responsible for processing the audio stream
     stream_task: asyncio.Task[None] | None = None
     _to_write: asyncio.Queue[server_messages.ServerMessages | str | bytes]
-    session_info: server_messages.SessionInfo | None = None
+    session_info: server_messages.SessionStartPayload | None = None
     _group: PlayerGroup
     _event_cbs: list[Callable[[PlayerInstanceEvent], Coroutine[None, None, None]]]
     _volume: int = 100
@@ -89,7 +89,7 @@ class PlayerInstance:
         self._event_cbs = []
 
     @property
-    def state(self) -> client_messages.PlayerState:
+    def state(self) -> client_messages.PlayerStatePayload:
         """The state of the player."""
         return self._state
 
@@ -133,7 +133,7 @@ class PlayerInstance:
         return self.player_info.name
 
     @property
-    def info(self) -> client_messages.PlayerInfo:
+    def info(self) -> client_messages.PlayerHelloPayload:
         """List of information and capabilities reported by this player."""
         assert self.player_info  # Player should be fully initialized by now
         return self.player_info
@@ -208,7 +208,7 @@ class PlayerInstance:
         # 1. Send Source Hello
         self.send_message(
             server_messages.SourceHelloMessage(
-                payload=server_messages.SourceInfo(
+                payload=server_messages.SourceHelloPayload(
                     name="Music Assistant",
                     # TODO: will this make problems with multiple MA instances?
                     source_id="ma",  # TODO: make this configurable
@@ -255,7 +255,7 @@ class PlayerInstance:
         payload = message.payload
         if msg_type == "player/hello":
             # TODO: reject if player_id is already connected
-            player_info = client_messages.PlayerInfo.from_dict(payload)
+            player_info = client_messages.PlayerHelloPayload.from_dict(payload)
             logger.info(
                 "Received player/hello from %s (%s)", player_info.player_id, player_info.name
             )
@@ -267,7 +267,7 @@ class PlayerInstance:
             if not self.player_id:
                 logger.warning("Received player/state before player/hello")
                 return
-            state_info = client_messages.PlayerState.from_dict(payload)
+            state_info = client_messages.PlayerStatePayload.from_dict(payload)
             self._state = state_info
 
         elif msg_type == "player/time":
@@ -275,7 +275,7 @@ class PlayerInstance:
             payload["source_transmitted"] = int(self._server.loop.time() * 1_000_000)
             self.send_message(
                 server_messages.SourceTimeMessage(
-                    payload=server_messages.SourceTimeInfo.from_dict(payload)
+                    payload=server_messages.SourceTimePayload.from_dict(payload)
                 )
             )
 
