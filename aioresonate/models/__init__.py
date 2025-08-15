@@ -2,9 +2,11 @@
 
 __all__ = [
     "BinaryMessageType",
+    "ClientMessages",
     "MediaCommand",
     "PlayerStateType",
     "RepeatMode",
+    "ServerMessages",
     "client_messages",
     "server_messages",
     "types",
@@ -18,6 +20,8 @@ from typing import Any
 from mashumaro.mixins.orjson import DataClassORJSONMixin
 
 from . import client_messages, server_messages, types
+from .client_messages import ClientMessages
+from .server_messages import ServerMessages
 from .types import BinaryMessageType, MediaCommand, PlayerStateType, RepeatMode
 
 
