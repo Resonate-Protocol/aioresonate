@@ -3,6 +3,7 @@
 import asyncio
 import logging
 import struct
+from collections.abc import Callable, Coroutine
 from contextlib import suppress
 from typing import TYPE_CHECKING
 
@@ -20,6 +21,10 @@ logger = logging.getLogger(__name__)
 # pyright: reportImportCycles=none
 if TYPE_CHECKING:
     from .server import ResonateServer
+
+
+class PlayerInstanceEvent:
+    """Base event type used by PlayerInstance.add_event_listener()."""
 
 
 class PlayerInstance:
@@ -47,6 +52,7 @@ class PlayerInstance:
     _to_write: asyncio.Queue[models.ServerMessages | str | bytes]
     session_info: models.SessionInfo | None = None
     _group: PlayerGroup
+    _event_cbs: list[Callable[[PlayerInstanceEvent], Coroutine[None, None, None]]]
 
     def __init__(
         self,
@@ -69,6 +75,7 @@ class PlayerInstance:
             self.wsock = wsock_client
         self._to_write = asyncio.Queue(maxsize=MAX_PENDING_MSG)
         self._group = PlayerGroup(server, self)
+        self._event_cbs = []
 
     @property
     def state(self) -> models.PlayerState:
@@ -297,3 +304,21 @@ class PlayerInstance:
             sample_count,
         )
         return header + audio_data
+
+    def add_event_listener(
+        self, callback: Callable[[PlayerInstanceEvent], Coroutine[None, None, None]]
+    ) -> Callable[[], None]:
+        """Register a callback to listen for state changes of this player.
+
+        State changes include:
+        - A new player was connected
+        - A player disconnected
+
+        Returns function to remove the listener.
+        """
+        self._event_cbs.append(callback)
+        return lambda: self._event_cbs.remove(callback)
+
+    def _signal_event(self, event: PlayerInstanceEvent) -> None:
+        for cb in self._event_cbs:
+            _ = self._server.loop.create_task(cb(event))
