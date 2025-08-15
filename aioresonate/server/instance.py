@@ -318,25 +318,16 @@ class PlayerInstance:
         # TODO: handle full queue
         self._to_write.put_nowait(message)
 
-    def send_binary(self, data: bytes) -> None:
-        """Enqueue a binary message to be sent to the client."""
-        self._to_write.put_nowait(data)
-
     def send_audio_chunk(self, timestamp_us: int, sample_count: int, audio_data: bytes) -> None:
         """Pack audio data the audio header."""
         # TODO: do any encoding here if needed
-        binary_chunk = self.pack_audio_chunk(timestamp_us, sample_count, audio_data)
-        self.send_binary(binary_chunk)
-
-    def pack_audio_chunk(self, timestamp_us: int, sample_count: int, audio_data: bytes) -> bytes:
-        """Pack audio data the audio header."""
         header = struct.pack(
             models.BINARY_HEADER_FORMAT,
             models.BinaryMessageType.PlayAudioChunk.value,
             timestamp_us,
             sample_count,
         )
-        return header + audio_data
+        self._to_write.put_nowait(header + audio_data)
 
     def add_event_listener(
         self, callback: Callable[[PlayerInstanceEvent], Coroutine[None, None, None]]
