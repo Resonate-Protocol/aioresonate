@@ -1,6 +1,7 @@
 """Manages and synchronizes playback for a group of one or more players."""
 
 import asyncio
+import logging
 from asyncio import Task
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass
@@ -25,6 +26,8 @@ STREAM_BIT_DEPTH = 16
 STREAM_SAMPLE_SIZE = STREAM_CHANNELS * (STREAM_BIT_DEPTH // 8)
 TARGET_CHUNK_BYTES = STREAM_SAMPLE_SIZE * STREAM_SAMPLE_RATE // 1000 * TARGET_CHUNK_DURATION_MS
 TARGET_CHUNK_SAMPLES = STREAM_SAMPLE_RATE // 1000 * TARGET_CHUNK_DURATION_MS
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -95,6 +98,7 @@ class PlayerGroup:
         player.send_message(models.SessionStartMessage(session_info))
 
     def _send_session_end_msg(self, player: "PlayerInstance") -> None:
+        logger.debug("ending session for %s", player.name)
         player.send_message(models.SessionEndMessage(models.SessionEndPayload(player.player_id)))
 
     async def set_metadata(self, metadata: dict[str, str]) -> None:
@@ -136,6 +140,7 @@ class PlayerGroup:
     def remove_player(self, player: "PlayerInstance") -> None:
         """Remove a player from this group."""
         assert player in self._players  # TODO: better error
+        logger.debug("removing %s from group with members: %s", player.player_id, self._players)
         self._players.remove(player)
         if self._stream_task is not None:
             # Notify the player that the session ended
@@ -145,6 +150,7 @@ class PlayerGroup:
 
     def add_player(self, player: "PlayerInstance") -> None:
         """Add a player to this group."""
+        logger.debug("adding %s to group with members: %s", player.player_id, self._players)
         if player in self._players:
             return
         # Remove it from any existing group first
