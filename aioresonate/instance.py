@@ -10,9 +10,9 @@ from typing import TYPE_CHECKING
 from aiohttp import ClientWebSocketResponse, WSMsgType, web
 from attr import dataclass
 
-from aioresonate import models
-
+from . import models
 from .group import PlayerGroup
+from .models import client_messages, server_messages
 
 MAX_PENDING_MSG = 512
 
@@ -43,7 +43,7 @@ class PlayerInstance:
     assigned group.
     """
 
-    _state: models.PlayerState = models.PlayerState(
+    _state: client_messages.PlayerState = client_messages.PlayerState(
         state=models.PlayerStateType.IDLE, volume=100, muted=False
     )
     _server: "ResonateServer"
@@ -51,15 +51,15 @@ class PlayerInstance:
     wsock: web.WebSocketResponse | ClientWebSocketResponse
     url: str | None
     _player_id: str | None = None
-    player_info: models.PlayerInfo | None = None
+    player_info: client_messages.PlayerInfo | None = None
     # Task responsible for handling messages from the player
     _handle_task: asyncio.Task[str] | None = None
     # Task responsible for sending audio and other data
     _writer_task: asyncio.Task[None] | None = None
     # Task responsible for processing the audio stream
     stream_task: asyncio.Task[None] | None = None
-    _to_write: asyncio.Queue[models.ServerMessages | str | bytes]
-    session_info: models.SessionInfo | None = None
+    _to_write: asyncio.Queue[server_messages.ServerMessages | str | bytes]
+    session_info: server_messages.SessionInfo | None = None
     _group: PlayerGroup
     _event_cbs: list[Callable[[PlayerInstanceEvent], Coroutine[None, None, None]]]
     _volume: int = 100
@@ -89,7 +89,7 @@ class PlayerInstance:
         self._event_cbs = []
 
     @property
-    def state(self) -> models.PlayerState:
+    def state(self) -> client_messages.PlayerState:
         """The state of the player."""
         return self._state
 
@@ -133,7 +133,7 @@ class PlayerInstance:
         return self.player_info.name
 
     @property
-    def info(self) -> models.PlayerInfo:
+    def info(self) -> client_messages.PlayerInfo:
         """List of information and capabilities reported by this player."""
         assert self.player_info  # Player should be fully initialized by now
         return self.player_info
@@ -143,7 +143,9 @@ class PlayerInstance:
         if self._volume == volume:
             return
         self._volume = volume
-        self.send_message(models.VolumeSetMessage(models.VolumeSetPayload(volume)))
+        self.send_message(
+            server_messages.VolumeSetMessage(server_messages.VolumeSetPayload(volume))
+        )
         self._signal_event(VolumeChangedEvent(volume=self._volume, muted=self._muted))
 
     def mute(self) -> None:
@@ -151,7 +153,9 @@ class PlayerInstance:
         if self._muted:
             return
         self._muted = True
-        self.send_message(models.MuteSetMessage(models.MuteSetPayload(self._muted)))
+        self.send_message(
+            server_messages.MuteSetMessage(server_messages.MuteSetPayload(self._muted))
+        )
         self._signal_event(VolumeChangedEvent(volume=self._volume, muted=self._muted))
 
     def unmute(self) -> None:
@@ -159,7 +163,9 @@ class PlayerInstance:
         if not self._muted:
             return
         self._muted = False
-        self.send_message(models.MuteSetMessage(models.MuteSetPayload(self._muted)))
+        self.send_message(
+            server_messages.MuteSetMessage(server_messages.MuteSetPayload(self._muted))
+        )
         self._signal_event(VolumeChangedEvent(volume=self._volume, muted=self._muted))
 
     @property
@@ -201,8 +207,8 @@ class PlayerInstance:
 
         # 1. Send Source Hello
         self.send_message(
-            models.SourceHelloMessage(
-                payload=models.SourceInfo(
+            server_messages.SourceHelloMessage(
+                payload=server_messages.SourceInfo(
                     name="Music Assistant",
                     # TODO: will this make problems with multiple MA instances?
                     source_id="ma",  # TODO: make this configurable
@@ -249,7 +255,7 @@ class PlayerInstance:
         payload = message.payload
         if msg_type == "player/hello":
             # TODO: reject if player_id is already connected
-            player_info = models.PlayerInfo.from_dict(payload)
+            player_info = client_messages.PlayerInfo.from_dict(payload)
             logger.info(
                 "Received player/hello from %s (%s)", player_info.player_id, player_info.name
             )
@@ -261,14 +267,16 @@ class PlayerInstance:
             if not self.player_id:
                 logger.warning("Received player/state before player/hello")
                 return
-            state_info = models.PlayerState.from_dict(payload)
+            state_info = client_messages.PlayerState.from_dict(payload)
             self._state = state_info
 
         elif msg_type == "player/time":
             payload["source_received"] = timestamp
             payload["source_transmitted"] = int(self._server.loop.time() * 1_000_000)
             self.send_message(
-                models.SourceTimeMessage(payload=models.SourceTimeInfo.from_dict(payload))
+                server_messages.SourceTimeMessage(
+                    payload=server_messages.SourceTimeInfo.from_dict(payload)
+                )
             )
 
         else:
@@ -297,14 +305,14 @@ class PlayerInstance:
                             (timestamp_us - now),
                         )
                     await self.wsock.send_bytes(item)
-                elif isinstance(item, models.ServerMessages):
-                    if isinstance(item, models.SourceTimeMessage):
+                elif isinstance(item, server_messages.ServerMessages):
+                    if isinstance(item, server_messages.SourceTimeMessage):
                         item.payload.source_transmitted = int(self._server.loop.time() * 1_000_000)
                     await self.wsock.send_str(item.to_json())
                 else:
                     await self.wsock.send_str(item)
 
-    def send_message(self, message: models.ServerMessages) -> None:
+    def send_message(self, message: server_messages.ServerMessages) -> None:
         """Enqueue a JSON message to be sent to the client."""
         # TODO: handle full queue
         self._to_write.put_nowait(message)
@@ -323,7 +331,7 @@ class PlayerInstance:
         """Pack audio data the audio header."""
         header = struct.pack(
             models.BINARY_HEADER_FORMAT,
-            models.BinaryMessageType.PlayAudioChunk.value,
+            client_messages.BinaryMessageType.PlayAudioChunk.value,
             timestamp_us,
             sample_count,
         )

@@ -7,7 +7,7 @@ from collections.abc import AsyncGenerator
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from . import models
+from .models import server_messages
 
 # The cyclic import is not an issue during runtime, so hide it
 # pyright: reportImportCycles=none
@@ -86,7 +86,7 @@ class PlayerGroup:
         )
 
     def _send_session_start_msg(self, player: "PlayerInstance", audio_format: AudioFormat) -> None:
-        session_info = models.SessionInfo(
+        session_info = server_messages.SessionInfo(
             session_id=f"mass-session-{int(self._server.loop.time())}",
             codec="pcm",
             sample_rate=audio_format.sample_rate,
@@ -95,11 +95,13 @@ class PlayerGroup:
             now=int(self._server.loop.time() * 1_000_000),  # TODO: maybe remove from spec?
             codec_header=None,
         )
-        player.send_message(models.SessionStartMessage(session_info))
+        player.send_message(server_messages.SessionStartMessage(session_info))
 
     def _send_session_end_msg(self, player: "PlayerInstance") -> None:
         logger.debug("ending session for %s", player.name)
-        player.send_message(models.SessionEndMessage(models.SessionEndPayload(player.player_id)))
+        player.send_message(
+            server_messages.SessionEndMessage(server_messages.SessionEndPayload(player.player_id))
+        )
 
     async def set_metadata(self, metadata: dict[str, str]) -> None:
         """Send a metadata/update message to all players in the group."""
