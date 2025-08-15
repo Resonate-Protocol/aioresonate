@@ -1,9 +1,4 @@
-"""Resonate Server implementation to connect to and manage many Resonate Players.
-
-ResonateServer is the core of the music listening experience, responsible for:
-- Managing connected players
-- Orchestrating synchronized grouped playback
-"""
+"""Resonate Server implementation to connect to and manage many Resonate Players."""
 
 import asyncio
 from collections.abc import Callable, Coroutine

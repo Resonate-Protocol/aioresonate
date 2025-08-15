@@ -7,7 +7,7 @@ from collections.abc import AsyncGenerator
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from .models import server_messages
+from aioresonate.models import server_messages
 
 # The cyclic import is not an issue during runtime, so hide it
 # pyright: reportImportCycles=none

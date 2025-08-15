@@ -10,9 +10,10 @@ from typing import TYPE_CHECKING
 from aiohttp import ClientWebSocketResponse, WSMsgType, web
 from attr import dataclass
 
-from . import models
+from aioresonate import models
+from aioresonate.models import client_messages, server_messages
+
 from .group import PlayerGroup
-from .models import client_messages, server_messages
 
 MAX_PENDING_MSG = 512
 
