@@ -334,10 +334,10 @@ class PlayerInstance:
         """Register a callback to listen for state changes of this player.
 
         State changes include:
-        - A new player was connected
-        - A player disconnected
+        - The volume was changed
+        - The player joined a group
 
-        Returns function to remove the listener.
+        Returns a function to remove the listener.
         """
         self._event_cbs.append(callback)
         return lambda: self._event_cbs.remove(callback)

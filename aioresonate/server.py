@@ -17,7 +17,7 @@ from .instance import PlayerInstance
 
 
 class ResonateEvent:
-    """Event type used by ResonateServer.add_event_listener()."""
+    """Base event type used by ResonateServer.add_event_listener()."""
 
 
 @dataclass
@@ -32,9 +32,6 @@ class PlayerRemovedEvent(ResonateEvent):
     """A player disconnected from the server."""
 
     player_id: str
-
-
-# TODO: add grouped events
 
 
 class ResonateServer:
@@ -83,9 +80,8 @@ class ResonateServer:
         State changes include:
         - A new player was connected
         - A player disconnected
-        - Changes in Groups
 
-        Returns function to remove the listener.
+        Returns a function to remove the listener.
         """
         self._event_cbs.append(callback)
         return lambda: self._event_cbs.remove(callback)
@@ -115,7 +111,7 @@ class ResonateServer:
 
     @property
     def players(self) -> set[PlayerInstance]:
-        """Get the list of all players connected to this server."""
+        """Get the set of all players connected to this server."""
         return self._players
 
     def get_player(self, player_id: str) -> PlayerInstance | None:
