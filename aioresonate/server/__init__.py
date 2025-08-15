@@ -6,11 +6,17 @@ ResonateServer is the core of the music listening experience, responsible for:
 """
 
 __all__ = [
+    "AudioFormat",
+    "PlayerAddedEvent",
     "PlayerGroup",
     "PlayerInstance",
+    "PlayerInstanceEvent",
+    "PlayerRemovedEvent",
+    "ResonateEvent",
     "ResonateServer",
+    "VolumeChangedEvent",
 ]
 
-from .group import PlayerGroup
-from .instance import PlayerInstance
-from .server import ResonateServer
+from .group import AudioFormat, PlayerGroup
+from .instance import PlayerInstance, PlayerInstanceEvent, VolumeChangedEvent
+from .server import PlayerAddedEvent, PlayerRemovedEvent, ResonateEvent, ResonateServer
