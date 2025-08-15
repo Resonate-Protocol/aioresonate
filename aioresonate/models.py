@@ -157,6 +157,20 @@ class PlayerState(DataClassORJSONMixin):
     muted: bool
 
 
+@dataclass
+class VolumeSetPayload(DataClassORJSONMixin):
+    """Payload for the set volume command."""
+
+    volume: int
+
+
+@dataclass
+class MuteSetPayload(DataClassORJSONMixin):
+    """Payload for the set mute command."""
+
+    mute: bool
+
+
 # Server -> Client Messages
 @dataclass
 class SessionStartMessage(DataClassORJSONMixin):
@@ -196,6 +210,22 @@ class SourceTimeMessage(DataClassORJSONMixin):
 
     payload: SourceTimeInfo
     type: Literal["source/time"] = "source/time"
+
+
+@dataclass
+class VolumeSetMessage(DataClassORJSONMixin):
+    """Message sent by the source to set the volume."""
+
+    payload: VolumeSetPayload
+    type: Literal["volume/set"] = "volume/set"
+
+
+@dataclass
+class MuteSetMessage(DataClassORJSONMixin):
+    """Message sent by the source to set the mute mode."""
+
+    payload: MuteSetPayload
+    type: Literal["mute/set"] = "mute/set"
 
 
 # Client -> Server Messages
@@ -239,6 +269,8 @@ ServerMessages = (
     | SourceHelloMessage
     | MetadataUpdateMessage
     | SourceTimeMessage
+    | VolumeSetMessage
+    | MuteSetMessage
 )
 
 # TODO: check this
