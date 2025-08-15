@@ -32,7 +32,6 @@ class PlayerInstanceEvent:
 class VolumeChangedEvent(PlayerInstanceEvent):
     """The volume or mute status of the player was changed."""
 
-    player_id: str
     volume: int
     muted: bool
 
@@ -144,9 +143,7 @@ class PlayerInstance:
             return
         self._volume = volume
         self.send_message(models.VolumeSetMessage(models.VolumeSetPayload(volume)))
-        self._signal_event(
-            VolumeChangedEvent(self.player_id, volume=self._volume, muted=self._muted)
-        )
+        self._signal_event(VolumeChangedEvent(volume=self._volume, muted=self._muted))
 
     def mute(self) -> None:
         """Mute this player."""
@@ -154,9 +151,7 @@ class PlayerInstance:
             return
         self._muted = True
         self.send_message(models.MuteSetMessage(models.MuteSetPayload(self._muted)))
-        self._signal_event(
-            VolumeChangedEvent(self.player_id, volume=self._volume, muted=self._muted)
-        )
+        self._signal_event(VolumeChangedEvent(volume=self._volume, muted=self._muted))
 
     def unmute(self) -> None:
         """Unmute this player."""
@@ -164,9 +159,7 @@ class PlayerInstance:
             return
         self._muted = False
         self.send_message(models.MuteSetMessage(models.MuteSetPayload(self._muted)))
-        self._signal_event(
-            VolumeChangedEvent(self.player_id, volume=self._volume, muted=self._muted)
-        )
+        self._signal_event(VolumeChangedEvent(volume=self._volume, muted=self._muted))
 
     @property
     def muted(self) -> bool:
