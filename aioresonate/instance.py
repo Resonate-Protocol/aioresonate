@@ -190,8 +190,11 @@ class PlayerInstance:
                 if msg.type != WSMsgType.TEXT:
                     continue
 
-                # TODO: re-add error handling?
-                await self._handle_message(models.Message.from_json(msg.data), timestamp)
+                try:
+                    await self._handle_message(models.Message.from_json(msg.data), timestamp)
+                except Exception:
+                    logger.exception("error parsing message")
+            logger.debug("wsock was closed for %s", remote_addr)
 
         except asyncio.CancelledError:
             logger.debug("Connection closed by client")
