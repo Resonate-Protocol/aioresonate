@@ -122,6 +122,6 @@ class ResonateServer:
         return None
 
     @property
-    def groups(self) -> list[PlayerGroup]:
-        """Get the list of all groups."""
-        raise NotImplementedError
+    def groups(self) -> set[PlayerGroup]:
+        """Get the set of all groups."""
+        return self._groups
