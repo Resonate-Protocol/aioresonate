@@ -133,9 +133,10 @@ class PlayerInstance:
         return self.player_info.name
 
     @property
-    def capabilities(self) -> dict[str, str]:
-        """List of capabilities supported by this player."""
-        raise NotImplementedError
+    def info(self) -> models.PlayerInfo:
+        """List of information and capabilities reported by this player."""
+        assert self.player_info  # Player should be fully initialized by now
+        return self.player_info
 
     def set_volume(self, volume: int) -> None:
         """Set the volume of this player."""
