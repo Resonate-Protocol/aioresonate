@@ -59,7 +59,7 @@ class PlayerInstance:
     _writer_task: asyncio.Task[None] | None = None
     # Task responsible for processing the audio stream
     stream_task: asyncio.Task[None] | None = None
-    _to_write: asyncio.Queue[server_messages.ServerMessages | str | bytes]
+    _to_write: asyncio.Queue[server_messages.ServerMessage | bytes]
     session_info: server_messages.SessionStartPayload | None = None
     _group: PlayerGroup
     _event_cbs: list[Callable[[PlayerInstanceEvent], Coroutine[None, None, None]]]
@@ -230,7 +230,9 @@ class PlayerInstance:
                     continue
 
                 try:
-                    await self._handle_message(models.Message.from_json(msg.data), timestamp)
+                    await self._handle_message(
+                        client_messages.ClientMessage.from_json(msg.data), timestamp
+                    )
                 except Exception:
                     logger.exception("error parsing message")
             logger.debug("wsock was closed for %s", remote_addr)
@@ -242,7 +244,6 @@ class PlayerInstance:
         finally:
             # TODO: run disconnect here?
             try:
-                self._to_write.put_nowait("")
                 # Make sure all error messages are written before closing
                 await self._writer_task
                 _ = await wsock.close()
@@ -251,38 +252,35 @@ class PlayerInstance:
 
         return self.wsock
 
-    async def _handle_message(self, message: models.Message, timestamp: int) -> None:
+    async def _handle_message(self, message: client_messages.ClientMessage, timestamp: int) -> None:
         """Handle incoming commands from the client."""
-        msg_type = message.type
-        payload = message.payload
-        if msg_type == "player/hello":
-            # TODO: reject if player_id is already connected
-            player_info = client_messages.PlayerHelloPayload.from_dict(payload)
-            logger.info(
-                "Received player/hello from %s (%s)", player_info.player_id, player_info.name
-            )
-            self.player_info = player_info
-            self._player_id = player_info.player_id
-            self._server._on_player_add(self)  # noqa: SLF001
-
-        elif msg_type == "player/state":
-            if not self.player_id:
-                logger.warning("Received player/state before player/hello")
-                return
-            state_info = client_messages.PlayerStatePayload.from_dict(payload)
-            self._state = state_info
-
-        elif msg_type == "player/time":
-            payload["server_received"] = timestamp
-            payload["server_transmitted"] = int(self._server.loop.time() * 1_000_000)
-            self.send_message(
-                server_messages.ServerTimeMessage(
-                    payload=server_messages.ServerTimePayload.from_dict(payload)
+        match message:
+            case client_messages.PlayerHelloMessage(player_info):
+                logger.info(
+                    "Received player/hello from %s (%s)", player_info.player_id, player_info.name
                 )
-            )
-
-        else:
-            logger.debug("%s received unhandled command type: %", self.player_id, msg_type)
+                self.player_info = player_info
+                self._player_id = player_info.player_id
+                self._server._on_player_add(self)  # noqa: SLF001
+            case client_messages.PlayerStateMessage(state_info):
+                if not self.player_id:
+                    logger.warning("Received player/state before player/hello")
+                    return
+                self._state = state_info
+            case client_messages.PlayerTimeMessage(player_time):
+                self.send_message(
+                    server_messages.ServerTimeMessage(
+                        server_messages.ServerTimePayload(
+                            player_transmitted=player_time.player_transmitted,
+                            server_received=timestamp,
+                            server_transmitted=int(self._server.loop.time() * 1_000_000),
+                        )
+                    )
+                )
+            case client_messages.StreamCommandMessage():
+                raise NotImplementedError
+            case client_messages.ClientMessage:
+                pass  # unused base type
 
     async def _writer(self) -> None:
         """Write outgoing messages from the queue."""
@@ -307,14 +305,11 @@ class PlayerInstance:
                             (timestamp_us - now),
                         )
                     await self.wsock.send_bytes(item)
-                elif isinstance(item, server_messages.ServerMessages):
-                    if isinstance(item, server_messages.ServerTimeMessage):
-                        item.payload.server_transmitted = int(self._server.loop.time() * 1_000_000)
+                elif isinstance(item, server_messages.ServerTimeMessage):
+                    item.payload.server_transmitted = int(self._server.loop.time() * 1_000_000)
                     await self.wsock.send_str(item.to_json())
-                else:
-                    await self.wsock.send_str(item)
 
-    def send_message(self, message: server_messages.ServerMessages) -> None:
+    def send_message(self, message: server_messages.ServerMessage) -> None:
         """Enqueue a JSON message to be sent to the client."""
         # TODO: handle full queue
         self._to_write.put_nowait(message)

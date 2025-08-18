@@ -5,9 +5,21 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal
 
+from mashumaro.config import BaseConfig
 from mashumaro.mixins.orjson import DataClassORJSONMixin
+from mashumaro.types import Discriminator
 
 from .types import MediaCommand, PlayerStateType
+
+
+@dataclass
+class ClientMessage(DataClassORJSONMixin):
+    """Client Message type used by resonate."""
+
+    class Config(BaseConfig):
+        """Config for parsing client messages."""
+
+        discriminator = Discriminator(field="type", include_subtypes=True)
 
 
 @dataclass
@@ -28,7 +40,7 @@ class PlayerHelloPayload(DataClassORJSONMixin):
 
 
 @dataclass
-class PlayerHelloMessage(DataClassORJSONMixin):
+class PlayerHelloMessage(ClientMessage):
     """Message sent by the player to identify itself."""
 
     payload: PlayerHelloPayload
@@ -43,7 +55,7 @@ class StreamCommandPayload(DataClassORJSONMixin):
 
 
 @dataclass
-class StreamCommandMessage(DataClassORJSONMixin):
+class StreamCommandMessage(ClientMessage):
     """Message sent by the client to issue a stream command (e.g., play/pause)."""
 
     payload: StreamCommandPayload
@@ -60,7 +72,7 @@ class PlayerStatePayload(DataClassORJSONMixin):
 
 
 @dataclass
-class PlayerStateMessage(DataClassORJSONMixin):
+class PlayerStateMessage(ClientMessage):
     """Message sent by the player to report its state."""
 
     payload: PlayerStatePayload
@@ -75,11 +87,8 @@ class PlayerTimePayload(DataClassORJSONMixin):
 
 
 @dataclass
-class PlayerTimeMessage(DataClassORJSONMixin):
+class PlayerTimeMessage(ClientMessage):
     """Message sent by the player for time synchronization."""
 
     payload: PlayerTimePayload
     type: Literal["player/time"] = "player/time"
-
-
-ClientMessages = PlayerHelloMessage | StreamCommandMessage | PlayerStateMessage | PlayerTimeMessage

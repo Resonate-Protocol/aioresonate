@@ -5,9 +5,21 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal
 
+from mashumaro.config import BaseConfig
 from mashumaro.mixins.orjson import DataClassORJSONMixin
+from mashumaro.types import Discriminator
 
 from .types import MediaCommand, RepeatMode
+
+
+@dataclass
+class ServerMessage(DataClassORJSONMixin):
+    """Server Message type used by resonate."""
+
+    class Config(BaseConfig):
+        """Config for parsing server messages."""
+
+        discriminator = Discriminator(field="type", include_subtypes=True)
 
 
 @dataclass
@@ -24,7 +36,7 @@ class SessionStartPayload(DataClassORJSONMixin):
 
 
 @dataclass
-class SessionStartMessage(DataClassORJSONMixin):
+class SessionStartMessage(ServerMessage):
     """Message sent by the server to start a session."""
 
     payload: SessionStartPayload
@@ -40,7 +52,7 @@ class ServerHelloPayload(DataClassORJSONMixin):
 
 
 @dataclass
-class ServerHelloMessage(DataClassORJSONMixin):
+class ServerHelloMessage(ServerMessage):
     """Message sent by the server to identify itself."""
 
     payload: ServerHelloPayload
@@ -55,7 +67,7 @@ class SessionEndPayload(DataClassORJSONMixin):
 
 
 @dataclass
-class SessionEndMessage(DataClassORJSONMixin):
+class SessionEndMessage(ServerMessage):
     """Message sent by the server to end a session."""
 
     payload: SessionEndPayload
@@ -78,7 +90,7 @@ class MetadataUpdatePayload(DataClassORJSONMixin):
 
 
 @dataclass
-class MetadataUpdateMessage(DataClassORJSONMixin):
+class MetadataUpdateMessage(ServerMessage):
     """Message sent by the server to update metadata."""
 
     payload: MetadataUpdatePayload
@@ -95,7 +107,7 @@ class ServerTimePayload(DataClassORJSONMixin):
 
 
 @dataclass
-class ServerTimeMessage(DataClassORJSONMixin):
+class ServerTimeMessage(ServerMessage):
     """Message sent by the server for time synchronization."""
 
     payload: ServerTimePayload
@@ -110,7 +122,7 @@ class VolumeSetPayload(DataClassORJSONMixin):
 
 
 @dataclass
-class VolumeSetMessage(DataClassORJSONMixin):
+class VolumeSetMessage(ServerMessage):
     """Message sent by the server to set the volume."""
 
     payload: VolumeSetPayload
@@ -125,19 +137,8 @@ class MuteSetPayload(DataClassORJSONMixin):
 
 
 @dataclass
-class MuteSetMessage(DataClassORJSONMixin):
+class MuteSetMessage(ServerMessage):
     """Message sent by the server to set the mute mode."""
 
     payload: MuteSetPayload
     type: Literal["mute/set"] = "mute/set"
-
-
-ServerMessages = (
-    SessionStartMessage
-    | ServerHelloMessage
-    | SessionEndMessage
-    | MetadataUpdateMessage
-    | ServerTimeMessage
-    | VolumeSetMessage
-    | MuteSetMessage
-)
