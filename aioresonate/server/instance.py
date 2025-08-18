@@ -189,6 +189,7 @@ class PlayerInstance:
 
     async def handle_client(self) -> web.WebSocketResponse | ClientWebSocketResponse:
         """Handle the websocket connection."""
+        # Establish a WebSocket connection to the player
         wsock = self.wsock
         if self.url is None:
             assert isinstance(wsock, web.WebSocketResponse)
@@ -206,7 +207,7 @@ class PlayerInstance:
 
         self._writer_task = self._server.loop.create_task(self._writer())
 
-        # 1. Send Server Hello
+        # Send Server Hello
         self.send_message(
             server_messages.ServerHelloMessage(
                 payload=server_messages.ServerHelloPayload(
@@ -216,6 +217,7 @@ class PlayerInstance:
             )
         )
 
+        # Listen for all incoming messages
         try:
             while not wsock.closed:
                 msg = await wsock.receive()
