@@ -206,13 +206,13 @@ class PlayerInstance:
 
         self._writer_task = self._server.loop.create_task(self._writer())
 
-        # 1. Send Source Hello
+        # 1. Send Server Hello
         self.send_message(
-            server_messages.SourceHelloMessage(
-                payload=server_messages.SourceHelloPayload(
+            server_messages.ServerHelloMessage(
+                payload=server_messages.ServerHelloPayload(
                     name="Music Assistant",
                     # TODO: will this make problems with multiple MA instances?
-                    source_id="ma",  # TODO: make this configurable
+                    server_id="ma",  # TODO: make this configurable
                 )
             )
         )
@@ -272,11 +272,11 @@ class PlayerInstance:
             self._state = state_info
 
         elif msg_type == "player/time":
-            payload["source_received"] = timestamp
-            payload["source_transmitted"] = int(self._server.loop.time() * 1_000_000)
+            payload["server_received"] = timestamp
+            payload["server_transmitted"] = int(self._server.loop.time() * 1_000_000)
             self.send_message(
-                server_messages.SourceTimeMessage(
-                    payload=server_messages.SourceTimePayload.from_dict(payload)
+                server_messages.ServerTimeMessage(
+                    payload=server_messages.ServerTimePayload.from_dict(payload)
                 )
             )
 
@@ -307,8 +307,8 @@ class PlayerInstance:
                         )
                     await self.wsock.send_bytes(item)
                 elif isinstance(item, server_messages.ServerMessages):
-                    if isinstance(item, server_messages.SourceTimeMessage):
-                        item.payload.source_transmitted = int(self._server.loop.time() * 1_000_000)
+                    if isinstance(item, server_messages.ServerTimeMessage):
+                        item.payload.server_transmitted = int(self._server.loop.time() * 1_000_000)
                     await self.wsock.send_str(item.to_json())
                 else:
                     await self.wsock.send_str(item)

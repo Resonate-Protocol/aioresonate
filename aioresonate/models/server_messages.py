@@ -32,19 +32,19 @@ class SessionStartMessage(DataClassORJSONMixin):
 
 
 @dataclass
-class SourceHelloPayload(DataClassORJSONMixin):
-    """Information about the source (e.g., Music Assistant)."""
+class ServerHelloPayload(DataClassORJSONMixin):
+    """Information about the server (e.g., Music Assistant)."""
 
-    source_id: str
+    server_id: str
     name: str
 
 
 @dataclass
-class SourceHelloMessage(DataClassORJSONMixin):
+class ServerHelloMessage(DataClassORJSONMixin):
     """Message sent by the server to identify itself."""
 
-    payload: SourceHelloPayload
-    type: Literal["source/hello"] = "source/hello"
+    payload: ServerHelloPayload
+    type: Literal["server/hello"] = "server/hello"
 
 
 @dataclass
@@ -86,20 +86,20 @@ class MetadataUpdateMessage(DataClassORJSONMixin):
 
 
 @dataclass
-class SourceTimePayload(DataClassORJSONMixin):
-    """Timing information from the source."""
+class ServerTimePayload(DataClassORJSONMixin):
+    """Timing information from the server."""
 
     player_transmitted: int
-    source_received: int
-    source_transmitted: int
+    server_received: int
+    server_transmitted: int
 
 
 @dataclass
-class SourceTimeMessage(DataClassORJSONMixin):
+class ServerTimeMessage(DataClassORJSONMixin):
     """Message sent by the server for time synchronization."""
 
-    payload: SourceTimePayload
-    type: Literal["source/time"] = "source/time"
+    payload: ServerTimePayload
+    type: Literal["server/time"] = "server/time"
 
 
 @dataclass
@@ -111,7 +111,7 @@ class VolumeSetPayload(DataClassORJSONMixin):
 
 @dataclass
 class VolumeSetMessage(DataClassORJSONMixin):
-    """Message sent by the source to set the volume."""
+    """Message sent by the server to set the volume."""
 
     payload: VolumeSetPayload
     type: Literal["volume/set"] = "volume/set"
@@ -126,7 +126,7 @@ class MuteSetPayload(DataClassORJSONMixin):
 
 @dataclass
 class MuteSetMessage(DataClassORJSONMixin):
-    """Message sent by the source to set the mute mode."""
+    """Message sent by the server to set the mute mode."""
 
     payload: MuteSetPayload
     type: Literal["mute/set"] = "mute/set"
@@ -134,10 +134,10 @@ class MuteSetMessage(DataClassORJSONMixin):
 
 ServerMessages = (
     SessionStartMessage
-    | SourceHelloMessage
+    | ServerHelloMessage
     | SessionEndMessage
     | MetadataUpdateMessage
-    | SourceTimeMessage
+    | ServerTimeMessage
     | VolumeSetMessage
     | MuteSetMessage
 )
