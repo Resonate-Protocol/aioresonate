@@ -170,56 +170,48 @@ class PlayerGroup:
         start_time_us: int,
         audio_source: AsyncGenerator[bytes, None],
     ) -> None:
-        samples_sent = 0
-
         chunk_timestamp_us = start_time_us
         resampler = av.AudioResampler(
             format="s16",
             layout="stereo",
-            rate=48000,
+            rate=STREAM_SAMPLE_RATE,  # output rate
         )
 
         async for chunk in audio_source:
-            logger.info("received chunk from MA")
             chunk_pos = 0
-            if chunk_pos >= len(chunk):
-                break
-            c = chunk[
-                chunk_pos : chunk_pos + TARGET_CHUNK_BYTES
-            ]  # TODO: maybe that's not so efficient?
+            while chunk_pos < len(chunk):
+                c = chunk[chunk_pos : chunk_pos + TARGET_CHUNK_BYTES]
+                chunk_pos += len(c)
 
-            chunk_pos += len(c)
-            samples_in_chunk = len(c) // STREAM_SAMPLE_SIZE
-            samples_sent += samples_in_chunk
+                samples_in_slice = len(c) // STREAM_SAMPLE_SIZE
+                if samples_in_slice == 0:
+                    continue
 
-            in_frame = av.AudioFrame(format="s16", layout="stereo", samples=samples_in_chunk)
-            in_frame.sample_rate = 48000
-            in_frame.planes[0].update(chunk)
+                in_frame = av.AudioFrame(format="s16", layout="stereo", samples=samples_in_slice)
+                in_frame.sample_rate = STREAM_SAMPLE_RATE  # Input rate
+                in_frame.planes[0].update(c)
 
-            logger.info("resampled!")
+                for out_frame in resampler.resample(in_frame):
+                    resampled_chunk = bytes(out_frame.planes[0])
+                    samples_in_resampled_chunk = out_frame.samples
 
-            for out_frame in resampler.resample(in_frame):
-                logger.info("received frame from av")
-                resampled_chunk = bytes(out_frame.planes[0])
-                assert in_frame.samples == out_frame.samples
+                    for player in self._players:
+                        player.send_audio_chunk(
+                            timestamp_us=chunk_timestamp_us,
+                            sample_count=samples_in_resampled_chunk,
+                            audio_data=resampled_chunk,
+                        )
 
-                for player in self._players:
-                    player.send_audio_chunk(
-                        timestamp_us=chunk_timestamp_us,
-                        sample_count=samples_in_chunk,
-                        audio_data=resampled_chunk,
+                    duration_of_samples_in_chunk = int(
+                        samples_in_resampled_chunk / STREAM_SAMPLE_RATE * 1_000_000
+                    )
+                    chunk_timestamp_us += duration_of_samples_in_chunk
+
+                    time_until_next_chunk = chunk_timestamp_us - int(
+                        self._server.loop.time() * 1_000_000
                     )
 
-                duration_of_samples_in_chunk = int(
-                    samples_in_chunk / STREAM_SAMPLE_RATE * 1_000_000
-                )
-                chunk_timestamp_us += duration_of_samples_in_chunk
-
-                time_until_next_chunk = chunk_timestamp_us - int(
-                    self._server.loop.time() * 1_000_000
-                )
-                logger.info("next chunk in %ss", time_until_next_chunk)
-
-                if time_until_next_chunk > BUFFER_DURATION_US:
-                    logger.info("sleeping...")
-                    await asyncio.sleep((time_until_next_chunk - BUFFER_DURATION_US) / 1_000_000)
+                    if time_until_next_chunk > BUFFER_DURATION_US:
+                        await asyncio.sleep(
+                            (time_until_next_chunk - BUFFER_DURATION_US) / 1_000_000
+                        )
