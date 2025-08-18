@@ -305,8 +305,9 @@ class PlayerInstance:
                             (timestamp_us - now),
                         )
                     await self.wsock.send_bytes(item)
-                elif isinstance(item, server_messages.ServerTimeMessage):
-                    item.payload.server_transmitted = int(self._server.loop.time() * 1_000_000)
+                else:
+                    if isinstance(item, server_messages.ServerTimeMessage):
+                        item.payload.server_transmitted = int(self._server.loop.time() * 1_000_000)
                     await self.wsock.send_str(item.to_json())
 
     def send_message(self, message: server_messages.ServerMessage) -> None:
