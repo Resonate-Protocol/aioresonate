@@ -6,6 +6,7 @@ from asyncio import Task
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
+from uuid import uuid4
 
 from aioresonate.models import server_messages
 
@@ -87,7 +88,7 @@ class PlayerGroup:
 
     def _send_session_start_msg(self, player: "PlayerInstance", audio_format: AudioFormat) -> None:
         session_info = server_messages.SessionStartPayload(
-            session_id=f"mass-session-{int(self._server.loop.time())}",
+            session_id=str(uuid4()),
             codec="pcm",
             sample_rate=audio_format.sample_rate,
             channels=audio_format.channels,
