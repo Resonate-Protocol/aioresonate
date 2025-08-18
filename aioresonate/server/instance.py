@@ -210,9 +210,8 @@ class PlayerInstance:
         self.send_message(
             server_messages.ServerHelloMessage(
                 payload=server_messages.ServerHelloPayload(
-                    name="Music Assistant",
-                    # TODO: will this make problems with multiple MA instances?
-                    server_id="ma",  # TODO: make this configurable
+                    name=self._server.name,
+                    server_id=self._server.id,
                 )
             )
         )

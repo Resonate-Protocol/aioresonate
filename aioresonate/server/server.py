@@ -36,13 +36,17 @@ class ResonateServer:
     _groups: set[PlayerGroup]
     loop: asyncio.AbstractEventLoop
     _event_cbs: list[Callable[[ResonateEvent], Coroutine[None, None, None]]]
+    _id: str
+    _name: str
 
-    def __init__(self, loop: asyncio.AbstractEventLoop) -> None:
+    def __init__(self, loop: asyncio.AbstractEventLoop, server_id: str, server_name: str) -> None:
         """Initialize a new Resonate Server."""
         self._players = set()
         self._groups = set()
         self.loop = loop
         self._event_cbs = []
+        self._id = server_id
+        self._name = server_name
 
     async def on_player_connect(
         self, request: web.Request
@@ -120,3 +124,13 @@ class ResonateServer:
     def groups(self) -> set[PlayerGroup]:
         """Get the set of all groups."""
         return self._groups
+
+    @property
+    def id(self) -> str:
+        """Get the unique identifier of this server."""
+        return self._id
+
+    @property
+    def name(self) -> str:
+        """Get the name of this server."""
+        return self._name
