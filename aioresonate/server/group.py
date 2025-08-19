@@ -34,7 +34,7 @@ TARGET_CHUNK_SAMPLES = STREAM_SAMPLE_RATE // 1000 * TARGET_CHUNK_DURATION_MS
 logger = logging.getLogger(__name__)
 
 
-@dataclass
+@dataclass(frozen=True)
 class AudioFormat:
     """LPCM audio format."""
 
@@ -205,7 +205,7 @@ class PlayerGroup:
             # Join it to the current stream
             player_format = self.select_player_format(player, self._stream_audio_format)
             self._player_formats[player.player_id] = player_format
-            self._send_session_start_msg(player, self._stream_audio_format)
+            self._send_session_start_msg(player, player_format)
         self._players.append(player)
 
     async def _stream_audio(
@@ -215,20 +215,15 @@ class PlayerGroup:
         audio_format: AudioFormat,
     ) -> None:
         # TODO: Complete resampling
-        # - Send the correct rate, not just 48kHz
-        # - Convert per device, but deduplicate effort when
-        #   multiple players use the same rate
-        # - Send only compatible formats to the player
-        # - Do not resample unless we need to
+        # -  deduplicate conversion when multiple players use the same rate
         # - Maybe notify the library user that play_media should be restarted with
         #   a better format?
-        # - Don't assume 16bit, but assume 2 channels for now
         # - Support other formats than pcm
         # - Optimize this
-        if audio_format.sample_rate == 16:
+        if audio_format.bit_depth == 16:
             input_bytes_per_sample = 2
             input_audio_format = "s16"
-        elif audio_format.sample_rate == 24:
+        elif audio_format.bit_depth == 24:
             input_bytes_per_sample = 3
             input_audio_format = "s24"
         else:
@@ -244,19 +239,15 @@ class PlayerGroup:
         input_sample_rate = audio_format.sample_rate
         chunk_length = 0.100
 
-        output_sample_rate = 48000
-
         input_samples_per_chunk = int(input_sample_rate * chunk_length)
 
         chunk_timestamp_us = start_time_us
-        resampler = av.AudioResampler(
-            format="s16",
-            layout="stereo",
-            rate=output_sample_rate,
-        )
+        resamplers: dict[AudioFormat, av.AudioResampler] = {}
 
         in_frame = av.AudioFrame(
-            format=input_audio_format, layout=input_audio_layout, samples=input_samples_per_chunk
+            format=input_audio_format,
+            layout=input_audio_layout,
+            samples=input_samples_per_chunk,
         )
         in_frame.sample_rate = input_sample_rate
         input_buffer = bytearray()
@@ -269,16 +260,32 @@ class PlayerGroup:
 
                 in_frame.planes[0].update(bytes(chunk_to_encode))
 
-                out_frames = resampler.resample(in_frame)
-                if len(out_frames) != 1:
-                    logger.warning("resampling resulted in %s frames", len(out_frames))
+                sample_count = None
 
-                sample_count = out_frames[0].samples
-                # TODO: ESPHome should probably be cutting the audio_data, this only works with pcm
-                audio_data = bytes(out_frames[0].planes[0])[: (sample_count * 4)]
-                if len(out_frames[0].planes) != 1:
-                    logger.warning("resampling resulted in %s planes", len(out_frames[0].planes))
+                duration_of_samples_in_chunk: list[int] = []
                 for player in self._players:
+                    player_format = self._player_formats[player.player_id]
+                    resampler = resamplers.get(player_format)
+                    if resampler is None:
+                        resampler = av.AudioResampler(
+                            format="s16" if player_format.bit_depth == 16 else "s24",
+                            layout="stereo" if player_format.channels == 2 else "mono",
+                            rate=player_format.sample_rate,
+                        )
+                        resamplers[player_format] = resampler
+
+                    out_frames = resampler.resample(in_frame)
+                    if len(out_frames) != 1:
+                        logger.warning("resampling resulted in %s frames", len(out_frames))
+
+                    sample_count = out_frames[0].samples
+                    # TODO: ESPHome should probably be cutting the audio_data,
+                    # this only works with pcm
+                    audio_data = bytes(out_frames[0].planes[0])[: (sample_count * 4)]
+                    if len(out_frames[0].planes) != 1:
+                        logger.warning(
+                            "resampling resulted in %s planes", len(out_frames[0].planes)
+                        )
                     header = struct.pack(
                         BINARY_HEADER_FORMAT,
                         BinaryMessageType.PlayAudioChunk.value,
@@ -286,9 +293,16 @@ class PlayerGroup:
                         sample_count,
                     )
                     player.send_message(header + audio_data)
+                    duration_of_samples_in_chunk.append(
+                        int((sample_count / player_format.sample_rate) * 1_000_000)
+                    )
 
-                duration_of_samples_in_chunk = int((sample_count / output_sample_rate) * 1_000_000)
-                chunk_timestamp_us += duration_of_samples_in_chunk
+                assert sample_count is not None
+
+                # TODO: Is mean the correct approach here? Or just make it based on the input stream
+                chunk_timestamp_us += int(
+                    sum(duration_of_samples_in_chunk) / len(duration_of_samples_in_chunk)
+                )
 
                 time_until_next_chunk = chunk_timestamp_us - int(
                     self._server.loop.time() * 1_000_000
