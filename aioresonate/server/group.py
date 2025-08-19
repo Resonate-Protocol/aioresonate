@@ -170,7 +170,7 @@ class PlayerGroup:
         start_time_us: int,
         audio_source: AsyncGenerator[bytes, None],
     ) -> None:
-        input_sample_rate = 30000
+        input_sample_rate = 48000
         input_sample_size = 4
         output_sample_rate = 48000
         output_chunk_length = 0.100
