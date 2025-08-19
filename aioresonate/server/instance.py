@@ -44,9 +44,6 @@ class PlayerInstance:
     assigned group.
     """
 
-    _state: client_messages.PlayerStatePayload = client_messages.PlayerStatePayload(
-        state=models.PlayerStateType.IDLE, volume=100, muted=False
-    )
     _server: "ResonateServer"
     request: web.Request
     wsock: web.WebSocketResponse | ClientWebSocketResponse
@@ -88,11 +85,6 @@ class PlayerInstance:
         self._to_write = asyncio.Queue(maxsize=MAX_PENDING_MSG)
         self._group = PlayerGroup(server, self)
         self._event_cbs = []
-
-    @property
-    def state(self) -> client_messages.PlayerStatePayload:
-        """The state of the player."""
-        return self._state
 
     async def disconnect(self) -> None:
         """Disconnect client and cancel tasks."""
@@ -262,11 +254,15 @@ class PlayerInstance:
                 self.player_info = player_info
                 self._player_id = player_info.player_id
                 self._server._on_player_add(self)  # noqa: SLF001
-            case client_messages.PlayerStateMessage(state_info):
+            case client_messages.PlayerStateMessage(state):
                 if not self.player_id:
                     logger.warning("Received player/state before player/hello")
                     return
-                self._state = state_info
+                if self.muted != state.muted or self.volume != state.volume:
+                    self._volume = state.volume
+                    self._muted = state.muted
+                    self._signal_event(VolumeChangedEvent(volume=self._volume, muted=self._muted))
+                # TODO: handle state.state changes, but how?
             case client_messages.PlayerTimeMessage(player_time):
                 self.send_message(
                     server_messages.ServerTimeMessage(
