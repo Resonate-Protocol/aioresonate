@@ -258,6 +258,7 @@ class PlayerGroup:
 
                     sample_count = None
 
+                    # TODO: to what should we set this?
                     buffer_duration_us = 2_000_000
                     duration_of_samples_in_chunk: list[int] = []
                     for player in self._players:
@@ -319,6 +320,7 @@ class PlayerGroup:
                         self._server.loop.time() * 1_000_000
                     )
 
+                    # TODO: I think this may exclude the burst at startup?
                     if time_until_next_chunk > buffer_duration_us:
                         await asyncio.sleep(
                             (time_until_next_chunk - buffer_duration_us) / 1_000_000
