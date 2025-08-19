@@ -21,6 +21,7 @@ if TYPE_CHECKING:
 
 INITIAL_PLAYBACK_DELAY_US = 1_000_000
 BUFFER_DURATION_US = 2_000_000
+CHUNK_DURATION_US = 100_000
 
 logger = logging.getLogger(__name__)
 
@@ -229,7 +230,7 @@ class PlayerGroup:
             raise ValueError("Only 1 and 2 channel audio is supported")
         input_sample_size = audio_format.channels * input_bytes_per_sample
         input_sample_rate = audio_format.sample_rate
-        chunk_length = 0.100
+        chunk_length = CHUNK_DURATION_US / 1_000_000
 
         input_samples_per_chunk = int(input_sample_rate * chunk_length)
 
