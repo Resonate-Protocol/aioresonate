@@ -8,7 +8,7 @@ from aiohttp import ClientWebSocketResponse, web
 from aiohttp.client import ClientSession
 
 from .group import PlayerGroup
-from .instance import PlayerInstance
+from .player import Player
 
 
 class ResonateEvent:
@@ -32,7 +32,7 @@ class PlayerRemovedEvent(ResonateEvent):
 class ResonateServer:
     """Resonate Server implementation to connect to and manage many Resonate Players."""
 
-    _players: set[PlayerInstance]
+    _players: set[Player]
     _groups: set[PlayerGroup]
     loop: asyncio.AbstractEventLoop
     _event_cbs: list[Callable[[ResonateEvent], Coroutine[None, None, None]]]
@@ -52,24 +52,24 @@ class ResonateServer:
         self, request: web.Request
     ) -> web.WebSocketResponse | ClientWebSocketResponse:
         """Handle an incoming WebSocket connection from a Resonate client."""
-        instance = PlayerInstance(self, request=request, url=None, wsock_client=None)
+        player = Player(self, request=request, url=None, wsock_client=None)
         # TODO: only add once we know its id, see connect_to_player
         try:
-            self._players.add(instance)
-            return await instance.handle_client()
+            self._players.add(player)
+            return await player.handle_client()
         finally:
-            self._players.remove(instance)
+            self._players.remove(player)
 
     async def connect_to_player(self, url: str) -> web.WebSocketResponse | ClientWebSocketResponse:
         """Connect to the Resonate player at the given URL."""
         # TODO catch any exceptions from ws_connect
         async with ClientSession() as session:
             wsock = await session.ws_connect(url)
-            instance = PlayerInstance(self, request=None, url=url, wsock_client=wsock)
+            player = Player(self, request=None, url=url, wsock_client=wsock)
             try:
-                return await instance.handle_client()
+                return await player.handle_client()
             finally:
-                self._on_player_remove(instance)
+                self._on_player_remove(player)
 
     def add_event_listener(
         self, callback: Callable[[ResonateEvent], Coroutine[None, None, None]]
@@ -89,31 +89,31 @@ class ResonateServer:
         for cb in self._event_cbs:
             _ = self.loop.create_task(cb(event))
 
-    def _on_player_add(self, instance: PlayerInstance) -> None:
+    def _on_player_add(self, player: Player) -> None:
         """
         Register the player to the server and notify that the player connected.
 
         Should only be called once all data like the player id was received.
         """
-        if instance in self._players:
+        if player in self._players:
             return
 
-        self._players.add(instance)
-        self._signal_event(PlayerAddedEvent(instance.player_id))
+        self._players.add(player)
+        self._signal_event(PlayerAddedEvent(player.player_id))
 
-    def _on_player_remove(self, instance: PlayerInstance) -> None:
-        if instance not in self._players:
+    def _on_player_remove(self, player: Player) -> None:
+        if player not in self._players:
             return
 
-        self._players.remove(instance)
-        self._signal_event(PlayerRemovedEvent(instance.player_id))
+        self._players.remove(player)
+        self._signal_event(PlayerRemovedEvent(player.player_id))
 
     @property
-    def players(self) -> set[PlayerInstance]:
+    def players(self) -> set[Player]:
         """Get the set of all players connected to this server."""
         return self._players
 
-    def get_player(self, player_id: str) -> PlayerInstance | None:
+    def get_player(self, player_id: str) -> Player | None:
         """Get the player with the given id."""
         for player in self.players:
             if player.player_id == player_id:

@@ -25,22 +25,22 @@ if TYPE_CHECKING:
     from .server import ResonateServer
 
 
-class PlayerInstanceEvent:
-    """Base event type used by PlayerInstance.add_event_listener()."""
+class PlayerEvent:
+    """Base event type used by Player.add_event_listener()."""
 
 
 @dataclass
-class VolumeChangedEvent(PlayerInstanceEvent):
+class VolumeChangedEvent(PlayerEvent):
     """The volume or mute status of the player was changed."""
 
     volume: int
     muted: bool
 
 
-class PlayerInstance:
+class Player:
     """A Player that is connected to a ResonateServer.
 
-    Playback is handled through groups, use PlayerInstance.group to get the
+    Playback is handled through groups, use Player.group to get the
     assigned group.
     """
 
@@ -59,7 +59,7 @@ class PlayerInstance:
     _to_write: asyncio.Queue[server_messages.ServerMessage | bytes]
     session_info: server_messages.SessionStartPayload | None = None
     _group: PlayerGroup
-    _event_cbs: list[Callable[[PlayerInstanceEvent], Coroutine[None, None, None]]]
+    _event_cbs: list[Callable[[PlayerEvent], Coroutine[None, None, None]]]
     _volume: int = 100
     _muted: bool = False
 
@@ -312,7 +312,7 @@ class PlayerInstance:
         self._to_write.put_nowait(message)
 
     def add_event_listener(
-        self, callback: Callable[[PlayerInstanceEvent], Coroutine[None, None, None]]
+        self, callback: Callable[[PlayerEvent], Coroutine[None, None, None]]
     ) -> Callable[[], None]:
         """Register a callback to listen for state changes of this player.
 
@@ -325,6 +325,6 @@ class PlayerInstance:
         self._event_cbs.append(callback)
         return lambda: self._event_cbs.remove(callback)
 
-    def _signal_event(self, event: PlayerInstanceEvent) -> None:
+    def _signal_event(self, event: PlayerEvent) -> None:
         for cb in self._event_cbs:
             _ = self._server.loop.create_task(cb(event))

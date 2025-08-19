@@ -16,7 +16,7 @@ from aioresonate.models import BINARY_HEADER_FORMAT, BinaryMessageType, server_m
 # The cyclic import is not an issue during runtime, so hide it
 # pyright: reportImportCycles=none
 if TYPE_CHECKING:
-    from .instance import PlayerInstance
+    from .player import Player
     from .server import ResonateServer
 
 INITIAL_PLAYBACK_DELAY_US = 1_000_000
@@ -49,13 +49,13 @@ class PlayerGroup:
     # In this implementation, every player is always assigned to a group.
     # This simplifies grouping requests initiated by the player.
 
-    _players: list["PlayerInstance"]
+    _players: list["Player"]
     _player_formats: dict[str, AudioFormat]
     _server: "ResonateServer"
     _stream_task: Task[None] | None = None
     _stream_audio_format: AudioFormat | None = None
 
-    def __init__(self, server: "ResonateServer", *args: "PlayerInstance") -> None:
+    def __init__(self, server: "ResonateServer", *args: "Player") -> None:
         """Do not call this constructor."""
         self._server = server
         self._players = list(args)
@@ -94,9 +94,7 @@ class PlayerGroup:
             )
         )
 
-    def select_player_format(
-        self, player: "PlayerInstance", source_format: AudioFormat
-    ) -> AudioFormat:
+    def select_player_format(self, player: "Player", source_format: AudioFormat) -> AudioFormat:
         """Select the most optimal audio format for the given source."""
         support_sample_rates = player.info.support_sample_rates
         support_bit_depth = player.info.support_bit_depth
@@ -127,7 +125,7 @@ class PlayerGroup:
 
         return AudioFormat(sample_rate, bit_depth, channels)
 
-    def _send_session_start_msg(self, player: "PlayerInstance", audio_format: AudioFormat) -> None:
+    def _send_session_start_msg(self, player: "Player", audio_format: AudioFormat) -> None:
         session_info = server_messages.SessionStartPayload(
             session_id=str(uuid4()),
             codec="pcm",
@@ -139,7 +137,7 @@ class PlayerGroup:
         )
         player.send_message(server_messages.SessionStartMessage(session_info))
 
-    def _send_session_end_msg(self, player: "PlayerInstance") -> None:
+    def _send_session_end_msg(self, player: "Player") -> None:
         logger.debug("ending session for %s", player.name)
         player.send_message(
             server_messages.SessionEndMessage(server_messages.SessionEndPayload(player.player_id))
@@ -178,11 +176,11 @@ class PlayerGroup:
         self._stream_task = None
 
     @property
-    def players(self) -> list["PlayerInstance"]:
+    def players(self) -> list["Player"]:
         """List of all players that are part of this group."""
         return self._players
 
-    def remove_player(self, player: "PlayerInstance") -> None:
+    def remove_player(self, player: "Player") -> None:
         """Remove a player from this group."""
         assert player in self._players  # TODO: better error
         logger.debug("removing %s from group with members: %s", player.player_id, self._players)
@@ -194,7 +192,7 @@ class PlayerGroup:
         # Each player needs to be in a group, add it to a new one
         player._group = PlayerGroup(self._server, player)  # noqa: SLF001
 
-    def add_player(self, player: "PlayerInstance") -> None:
+    def add_player(self, player: "Player") -> None:
         """Add a player to this group."""
         logger.debug("adding %s to group with members: %s", player.player_id, self._players)
         if player in self._players:
