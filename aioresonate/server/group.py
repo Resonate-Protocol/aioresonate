@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import struct
 from asyncio import Task
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass
@@ -10,7 +11,7 @@ from uuid import uuid4
 
 import av
 
-from aioresonate.models import server_messages
+from aioresonate.models import BINARY_HEADER_FORMAT, BinaryMessageType, server_messages
 
 # The cyclic import is not an issue during runtime, so hide it
 # pyright: reportImportCycles=none
@@ -217,11 +218,13 @@ class PlayerGroup:
                 if len(out_frames[0].planes) != 1:
                     logger.warning("resampling resulted in %s planes", len(out_frames[0].planes))
                 for player in self._players:
-                    player.send_audio_chunk(
-                        timestamp_us=chunk_timestamp_us,
-                        sample_count=sample_count,
-                        audio_data=audio_data,
+                    header = struct.pack(
+                        BINARY_HEADER_FORMAT,
+                        BinaryMessageType.PlayAudioChunk.value,
+                        chunk_timestamp_us,
+                        sample_count,
                     )
+                    player.send_message(header + audio_data)
 
                 duration_of_samples_in_chunk = int((sample_count / output_sample_rate) * 1_000_000)
                 chunk_timestamp_us += duration_of_samples_in_chunk

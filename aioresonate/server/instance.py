@@ -306,21 +306,10 @@ class PlayerInstance:
                         item.payload.server_transmitted = int(self._server.loop.time() * 1_000_000)
                     await self.wsock.send_str(item.to_json())
 
-    def send_message(self, message: server_messages.ServerMessage) -> None:
-        """Enqueue a JSON message to be sent to the client."""
+    def send_message(self, message: server_messages.ServerMessage | bytes) -> None:
+        """Enqueue a JSON or binary message to be sent to the client."""
         # TODO: handle full queue
         self._to_write.put_nowait(message)
-
-    def send_audio_chunk(self, timestamp_us: int, sample_count: int, audio_data: bytes) -> None:
-        """Pack audio data the audio header."""
-        # TODO: do any encoding here if needed
-        header = struct.pack(
-            models.BINARY_HEADER_FORMAT,
-            models.BinaryMessageType.PlayAudioChunk.value,
-            timestamp_us,
-            sample_count,
-        )
-        self._to_write.put_nowait(header + audio_data)
 
     def add_event_listener(
         self, callback: Callable[[PlayerInstanceEvent], Coroutine[None, None, None]]
