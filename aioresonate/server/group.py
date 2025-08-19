@@ -50,6 +50,7 @@ class PlayerGroup:
     # This simplifies grouping requests initiated by the player.
 
     _players: list["PlayerInstance"]
+    _player_formats: dict[str, AudioFormat]
     _server: "ResonateServer"
     _stream_task: Task[None] | None = None
     _stream_audio_format: AudioFormat | None = None
@@ -58,6 +59,7 @@ class PlayerGroup:
         """Do not call this constructor."""
         self._server = server
         self._players = list(args)
+        self._player_formats = {}
 
     async def play_media(
         self, audio_source: AsyncGenerator[bytes, None], audio_format: AudioFormat
@@ -80,14 +82,50 @@ class PlayerGroup:
         self._stream_audio_format = audio_format
 
         for player in self._players:
-            self._send_session_start_msg(player, audio_format)
+            player_format = self.select_player_format(player, audio_format)
+            self._player_formats[player.player_id] = player_format
+            self._send_session_start_msg(player, player_format)
 
         self._stream_task = self._server.loop.create_task(
             self._stream_audio(
                 int(self._server.loop.time() * 1_000_000) + INITIAL_PLAYBACK_DELAY_US,
                 audio_source,
+                audio_format,
             )
         )
+
+    def select_player_format(
+        self, player: "PlayerInstance", source_format: AudioFormat
+    ) -> AudioFormat:
+        """Select the most optimal audio format for the given source."""
+        support_sample_rates = player.info.support_sample_rates
+        support_bit_depth = player.info.support_bit_depth
+        support_channels = player.info.support_channels
+
+        sample_rate = source_format.sample_rate
+        if sample_rate not in support_sample_rates:
+            lower_rates = [r for r in support_sample_rates if r < sample_rate]
+            sample_rate = max(lower_rates) if lower_rates else min(support_sample_rates)
+
+        bit_depth = source_format.bit_depth
+        if bit_depth not in support_bit_depth:
+            if 16 in support_bit_depth:
+                bit_depth = 16
+            elif 24 in support_bit_depth:
+                bit_depth = 24
+            else:
+                raise NotImplementedError("Only 16bit and 24bit are supported")
+
+        channels = source_format.channels
+        if channels not in support_channels:
+            if 2 in support_channels:
+                channels = 2
+            elif 1 in support_channels:
+                channels = 1
+            else:
+                raise NotImplementedError("Only mono and stereo are supported")
+
+        return AudioFormat(sample_rate, bit_depth, channels)
 
     def _send_session_start_msg(self, player: "PlayerInstance", audio_format: AudioFormat) -> None:
         session_info = server_messages.SessionStartPayload(
@@ -136,6 +174,7 @@ class PlayerGroup:
         _ = self._stream_task.cancel()
         for player in self._players:
             self._send_session_end_msg(player)
+            del self._player_formats[player.player_id]
         self._stream_task = None
 
     @property
@@ -151,6 +190,7 @@ class PlayerGroup:
         if self._stream_task is not None:
             # Notify the player that the session ended
             self._send_session_end_msg(player)
+            del self._player_formats[player.player_id]
         # Each player needs to be in a group, add it to a new one
         player._group = PlayerGroup(self._server, player)  # noqa: SLF001
 
@@ -163,6 +203,8 @@ class PlayerGroup:
         player.ungroup()
         if self._stream_task is not None and self._stream_audio_format is not None:
             # Join it to the current stream
+            player_format = self.select_player_format(player, self._stream_audio_format)
+            self._player_formats[player.player_id] = player_format
             self._send_session_start_msg(player, self._stream_audio_format)
         self._players.append(player)
 
@@ -170,6 +212,7 @@ class PlayerGroup:
         self,
         start_time_us: int,
         audio_source: AsyncGenerator[bytes, None],
+        audio_format: AudioFormat,
     ) -> None:
         # TODO: Complete resampling
         # - Send the correct rate, not just 48kHz
@@ -182,12 +225,28 @@ class PlayerGroup:
         # - Don't assume 16bit, but assume 2 channels for now
         # - Support other formats than pcm
         # - Optimize this
-        input_sample_rate = 48000
-        input_sample_size = 4
-        output_sample_rate = 48000
-        output_chunk_length = 0.100
+        if audio_format.sample_rate == 16:
+            input_bytes_per_sample = 2
+            input_audio_format = "s16"
+        elif audio_format.sample_rate == 24:
+            input_bytes_per_sample = 3
+            input_audio_format = "s24"
+        else:
+            raise ValueError("Only 16bit and 24bit audio is supported")
 
-        input_samples_per_chunk = int(input_sample_rate * output_chunk_length)
+        if audio_format.channels == 1:
+            input_audio_layout = "mono"
+        elif audio_format.channels == 2:
+            input_audio_layout = "stereo"
+        else:
+            raise ValueError("Only 1 and 2 channel audio is supported")
+        input_sample_size = audio_format.channels * input_bytes_per_sample
+        input_sample_rate = audio_format.sample_rate
+        chunk_length = 0.100
+
+        output_sample_rate = 48000
+
+        input_samples_per_chunk = int(input_sample_rate * chunk_length)
 
         chunk_timestamp_us = start_time_us
         resampler = av.AudioResampler(
@@ -196,7 +255,9 @@ class PlayerGroup:
             rate=output_sample_rate,
         )
 
-        in_frame = av.AudioFrame(format="s16", layout="stereo", samples=input_samples_per_chunk)
+        in_frame = av.AudioFrame(
+            format=input_audio_format, layout=input_audio_layout, samples=input_samples_per_chunk
+        )
         in_frame.sample_rate = input_sample_rate
         input_buffer = bytearray()
 
@@ -235,3 +296,5 @@ class PlayerGroup:
 
                 if time_until_next_chunk > BUFFER_DURATION_US:
                     await asyncio.sleep((time_until_next_chunk - BUFFER_DURATION_US) / 1_000_000)
+
+        # TODO: flush buffer
