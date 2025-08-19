@@ -185,7 +185,7 @@ class PlayerGroup:
         )
 
         in_frame = av.AudioFrame(format="s16", layout="stereo", samples=input_samples_per_chunk)
-        in_frame.sample_rate = 30000  # Input rate
+        in_frame.sample_rate = input_sample_rate
         input_buffer = bytearray()
 
         async for chunk in audio_source:
@@ -200,13 +200,11 @@ class PlayerGroup:
                 if len(out_frames) != 1:
                     logger.warning("resampling resulted in %s frames", len(out_frames))
 
-                audio_data = bytes(out_frames[0].planes[0])
+                sample_count = out_frames[0].samples
+                # TODO: ESPHome should probably be cutting the audio_data, this only works with pcm
+                audio_data = bytes(out_frames[0].planes[0])[: (sample_count * 4)]
                 if len(out_frames[0].planes) != 1:
                     logger.warning("resampling resulted in %s planes", len(out_frames[0].planes))
-                sample_count = out_frames[0].samples
-                logger.debug(
-                    "resampled into %s samples taking %s bytes", sample_count, len(audio_data)
-                )
                 for player in self._players:
                     player.send_audio_chunk(
                         timestamp_us=chunk_timestamp_us,
