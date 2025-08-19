@@ -114,6 +114,9 @@ class PlayerGroup:
             else:
                 raise NotImplementedError("Only mono and stereo are supported")
 
+        if "pcm" not in player.info.support_codecs:
+            raise NotImplementedError("Only pcm is supported for now")
+
         return AudioFormat(sample_rate, bit_depth, channels)
 
     def _send_session_start_msg(self, player: "Player", audio_format: AudioFormat) -> None:
