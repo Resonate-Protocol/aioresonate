@@ -170,6 +170,17 @@ class PlayerGroup:
         start_time_us: int,
         audio_source: AsyncGenerator[bytes, None],
     ) -> None:
+        # TODO: Complete resampling
+        # - Send the correct rate, not just 48kHz
+        # - Convert per device, but deduplicate effort when
+        #   multiple players use the same rate
+        # - Send only compatible formats to the player
+        # - Do not resample unless we need to
+        # - Maybe notify the library user that play_media should be restarted with
+        #   a better format?
+        # - Don't assume 16bit, but assume 2 channels for now
+        # - Support other formats than pcm
+        # - Optimize this
         input_sample_rate = 48000
         input_sample_size = 4
         output_sample_rate = 48000
