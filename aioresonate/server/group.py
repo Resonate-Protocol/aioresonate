@@ -20,7 +20,6 @@ if TYPE_CHECKING:
     from .server import ResonateServer
 
 INITIAL_PLAYBACK_DELAY_US = 1_000_000
-BUFFER_DURATION_US = 2_000_000
 CHUNK_DURATION_US = 100_000
 
 logger = logging.getLogger(__name__)
@@ -201,7 +200,7 @@ class PlayerGroup:
             self._send_session_start_msg(player, player_format)
         self._players.append(player)
 
-    async def _stream_audio(
+    async def _stream_audio(  # noqa: PLR0915 # TODO: split
         self,
         start_time_us: int,
         audio_source: AsyncGenerator[bytes, None],
@@ -255,6 +254,7 @@ class PlayerGroup:
 
                 sample_count = None
 
+                buffer_duration_us = 2_000_000
                 duration_of_samples_in_chunk: list[int] = []
                 for player in self._players:
                     player_format = self._player_formats[player.player_id]
@@ -290,6 +290,15 @@ class PlayerGroup:
                         int((sample_count / player_format.sample_rate) * 1_000_000)
                     )
 
+                    player_buffer_capacity_samples = player.info.buffer_capacity // (
+                        (player_format.bit_depth // 8) * player_format.channels
+                    )
+                    # For now the buffer duration is limited by the smallest player
+                    buffer_duration_us = min(
+                        buffer_duration_us,
+                        int(1_000_000 * player_buffer_capacity_samples / player_format.sample_rate),
+                    )
+
                 assert sample_count is not None
 
                 # TODO: Is mean the correct approach here? Or just make it based on the input stream
@@ -301,7 +310,7 @@ class PlayerGroup:
                     self._server.loop.time() * 1_000_000
                 )
 
-                if time_until_next_chunk > BUFFER_DURATION_US:
-                    await asyncio.sleep((time_until_next_chunk - BUFFER_DURATION_US) / 1_000_000)
+                if time_until_next_chunk > buffer_duration_us:
+                    await asyncio.sleep((time_until_next_chunk - buffer_duration_us) / 1_000_000)
 
         # TODO: flush buffer
