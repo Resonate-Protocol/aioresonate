@@ -173,7 +173,7 @@ class PlayerGroup:
         input_sample_rate = 30000
         input_sample_size = 4
         output_sample_rate = 48000
-        output_chunk_length = 0.025
+        output_chunk_length = 0.100
 
         input_samples_per_chunk = int(input_sample_rate * output_chunk_length)
 
