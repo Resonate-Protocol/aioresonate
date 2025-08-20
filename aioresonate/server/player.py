@@ -281,11 +281,7 @@ class Player:
     async def _writer(self) -> None:
         """Write outgoing messages from the queue."""
         # Exceptions if Socket disconnected or cancelled by connection handler
-        with suppress(
-            RuntimeError,
-            ConnectionResetError,
-            asyncio.CancelledError,
-        ):
+        try:
             while not self.wsock.closed:
                 item = await self._to_write.get()
 
@@ -305,6 +301,8 @@ class Player:
                     if isinstance(item, server_messages.ServerTimeMessage):
                         item.payload.server_transmitted = int(self._server.loop.time() * 1_000_000)
                     await self.wsock.send_str(item.to_json())
+        except Exception:
+            logger.exception("Error in writer task for player %s", self.player_id or "unknown")
 
     def send_message(self, message: server_messages.ServerMessage | bytes) -> None:
         """Enqueue a JSON or binary message to be sent to the client."""
