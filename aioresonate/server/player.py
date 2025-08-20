@@ -267,7 +267,7 @@ class Player:
                 self._player_id = player_info.player_id
                 self._server._on_player_add(self)  # noqa: SLF001
             case client_messages.PlayerStateMessage(state):
-                if not self.player_id:
+                if not self._player_id:
                     logger.warning("Received player/state before player/hello")
                     return
                 logger.debug(
