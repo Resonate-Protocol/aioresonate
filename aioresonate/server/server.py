@@ -1,6 +1,7 @@
 """Resonate Server implementation to connect to and manage many Resonate Players."""
 
 import asyncio
+import logging
 from collections.abc import Callable, Coroutine
 from dataclasses import dataclass
 
@@ -9,6 +10,8 @@ from aiohttp.client import ClientSession
 
 from .group import PlayerGroup
 from .player import Player
+
+logger = logging.getLogger(__name__)
 
 
 class ResonateEvent:
@@ -47,11 +50,13 @@ class ResonateServer:
         self._event_cbs = []
         self._id = server_id
         self._name = server_name
+        logger.debug("ResonateServer initialized: id=%s, name=%s", server_id, server_name)
 
     async def on_player_connect(
         self, request: web.Request
     ) -> web.WebSocketResponse | ClientWebSocketResponse:
         """Handle an incoming WebSocket connection from a Resonate client."""
+        logger.debug("Incoming player connection from %s", request.remote)
         player = Player(self, request=request, url=None, wsock_client=None)
         # TODO: only add once we know its id, see connect_to_player
         try:
@@ -62,6 +67,7 @@ class ResonateServer:
 
     async def connect_to_player(self, url: str) -> web.WebSocketResponse | ClientWebSocketResponse:
         """Connect to the Resonate player at the given URL."""
+        logger.debug("Connecting to player at URL: %s", url)
         # TODO catch any exceptions from ws_connect
         async with ClientSession() as session:
             wsock = await session.ws_connect(url)
@@ -98,6 +104,7 @@ class ResonateServer:
         if player in self._players:
             return
 
+        logger.debug("Adding player %s (%s) to server", player.player_id, player.name)
         self._players.add(player)
         self._signal_event(PlayerAddedEvent(player.player_id))
 
@@ -105,6 +112,7 @@ class ResonateServer:
         if player not in self._players:
             return
 
+        logger.debug("Removing player %s from server", player.player_id)
         self._players.remove(player)
         self._signal_event(PlayerRemovedEvent(player.player_id))
 
@@ -115,9 +123,12 @@ class ResonateServer:
 
     def get_player(self, player_id: str) -> Player | None:
         """Get the player with the given id."""
+        logger.debug("Looking for player with id: %s", player_id)
         for player in self.players:
             if player.player_id == player_id:
+                logger.debug("Found player %s", player_id)
                 return player
+        logger.debug("Player %s not found", player_id)
         return None
 
     @property

@@ -78,10 +78,12 @@ class Player:
         if request is not None:
             self.request = request
             self.wsock = web.WebSocketResponse(heartbeat=55)
+            logger.debug("Player initialized from request: %s", request.remote)
         elif url is not None:
             assert wsock_client is not None
             self.url = url
             self.wsock = wsock_client
+            logger.debug("Player initialized for URL: %s", url)
         self._to_write = asyncio.Queue(maxsize=MAX_PENDING_MSG)
         self._group = PlayerGroup(server, self)
         self._event_cbs = []
@@ -92,10 +94,12 @@ class Player:
 
         # Cancel running tasks
         if self.stream_task and not self.stream_task.done():
+            logger.debug("Cancelling stream task for %s", self.player_id or "unknown")
             _ = self.stream_task.cancel()
             with suppress(asyncio.CancelledError):
                 await self.stream_task
         if self._writer_task and not self._writer_task.done():
+            logger.debug("Cancelling writer task for %s", self.player_id or "unknown")
             _ = self._writer_task.cancel()
             with suppress(asyncio.CancelledError):
                 await self._writer_task
@@ -135,6 +139,7 @@ class Player:
         """Set the volume of this player."""
         if self._volume == volume:
             return
+        logger.debug("Setting volume for %s from %d to %d", self.player_id, self._volume, volume)
         self._volume = volume
         self.send_message(
             server_messages.VolumeSetMessage(server_messages.VolumeSetPayload(volume))
@@ -145,6 +150,7 @@ class Player:
         """Mute this player."""
         if self._muted:
             return
+        logger.debug("Muting player %s", self.player_id)
         self._muted = True
         self.send_message(
             server_messages.MuteSetMessage(server_messages.MuteSetPayload(self._muted))
@@ -155,6 +161,7 @@ class Player:
         """Unmute this player."""
         if not self._muted:
             return
+        logger.debug("Unmuting player %s", self.player_id)
         self._muted = False
         self.send_message(
             server_messages.MuteSetMessage(server_messages.MuteSetPayload(self._muted))
@@ -177,7 +184,10 @@ class Player:
         If the player is already alone, this function does nothing.
         """
         if len(self._group.players) > 1:
+            logger.debug("Ungrouping player %s from group", self.player_id)
             self._group.remove_player(self)
+        else:
+            logger.debug("Player %s already alone in group, no ungrouping needed", self.player_id)
 
     async def handle_client(self) -> web.WebSocketResponse | ClientWebSocketResponse:
         """Handle the websocket connection."""
@@ -197,9 +207,11 @@ class Player:
 
         logger.info("Connection established with %s", remote_addr)
 
+        logger.debug("Creating writer task for %s", remote_addr)
         self._writer_task = self._server.loop.create_task(self._writer())
 
         # Send Server Hello
+        logger.debug("Sending server hello to %s", remote_addr)
         self.send_message(
             server_messages.ServerHelloMessage(
                 payload=server_messages.ServerHelloPayload(
@@ -226,7 +238,7 @@ class Player:
                         client_messages.ClientMessage.from_json(msg.data), timestamp
                     )
                 except Exception:
-                    logger.exception("error parsing message")
+                    logger.exception("error parsing message from %s", remote_addr)
             logger.debug("wsock was closed for %s", remote_addr)
 
         except asyncio.CancelledError:
@@ -258,6 +270,9 @@ class Player:
                 if not self.player_id:
                     logger.warning("Received player/state before player/hello")
                     return
+                logger.debug(
+                    "Received player state: volume=%d, muted=%s", state.volume, state.muted
+                )
                 if self.muted != state.muted or self.volume != state.volume:
                     self._volume = state.volume
                     self._muted = state.muted
@@ -301,12 +316,19 @@ class Player:
                     if isinstance(item, server_messages.ServerTimeMessage):
                         item.payload.server_transmitted = int(self._server.loop.time() * 1_000_000)
                     await self.wsock.send_str(item.to_json())
+            logger.debug("wsock was closed for player %s", self._player_id or "unknown")
         except Exception:
-            logger.exception("Error in writer task for player %s", self.player_id or "unknown")
+            logger.exception("Error in writer task for player %s", self._player_id or "unknown")
 
     def send_message(self, message: server_messages.ServerMessage | bytes) -> None:
         """Enqueue a JSON or binary message to be sent to the client."""
         # TODO: handle full queue
+        if isinstance(message, bytes):
+            # Only log binary messages occasionally to reduce spam
+            pass
+        elif not isinstance(message, server_messages.ServerTimeMessage):
+            # Only log important non-time messages
+            logger.debug("Enqueueing message: %s", type(message).__name__)
         self._to_write.put_nowait(message)
 
     def add_event_listener(

@@ -51,6 +51,11 @@ class PlayerGroup:
         self._server = server
         self._players = list(args)
         self._player_formats = {}
+        logger.debug(
+            "PlayerGroup initialized with %d player(s): %s",
+            len(self._players),
+            [type(p).__name__ for p in self._players],
+        )
 
     async def play_media(
         self, audio_source: AsyncGenerator[bytes, None], audio_format: AudioFormat
@@ -59,6 +64,7 @@ class PlayerGroup:
 
         The library expects uncompressed PCM audio and will handle encoding.
         """
+        logger.debug("Starting play_media with audio_format: %s", audio_format)
         self.stop()
         # TODO: open questions:
         # - how to communicate to the caller what audio_format is preferred,
@@ -73,8 +79,14 @@ class PlayerGroup:
         self._stream_audio_format = audio_format
 
         for player in self._players:
+            logger.debug("Selecting format for player %s", player.player_id)
             player_format = self.select_player_format(player, audio_format)
             self._player_formats[player.player_id] = player_format
+            logger.debug(
+                "Sending session start to player %s with format %s",
+                player.player_id,
+                player_format,
+            )
             self._send_session_start_msg(player, player_format)
 
         self._stream_task = self._server.loop.create_task(
@@ -95,6 +107,7 @@ class PlayerGroup:
         if sample_rate not in support_sample_rates:
             lower_rates = [r for r in support_sample_rates if r < sample_rate]
             sample_rate = max(lower_rates) if lower_rates else min(support_sample_rates)
+            logger.debug("Adjusted sample_rate for player %s: %s", player.player_id, sample_rate)
 
         bit_depth = source_format.bit_depth
         if bit_depth not in support_bit_depth:
@@ -104,6 +117,7 @@ class PlayerGroup:
                 bit_depth = 24
             else:
                 raise NotImplementedError("Only 16bit and 24bit are supported")
+            logger.debug("Adjusted bit_depth for player %s: %s", player.player_id, bit_depth)
 
         channels = source_format.channels
         if channels not in support_channels:
@@ -113,6 +127,7 @@ class PlayerGroup:
                 channels = 1
             else:
                 raise NotImplementedError("Only mono and stereo are supported")
+            logger.debug("Adjusted channels for player %s: %s", player.player_id, channels)
 
         if "pcm" not in player.info.support_codecs:
             raise NotImplementedError("Only pcm is supported for now")
@@ -120,6 +135,11 @@ class PlayerGroup:
         return AudioFormat(sample_rate, bit_depth, channels)
 
     def _send_session_start_msg(self, player: "Player", audio_format: AudioFormat) -> None:
+        logger.debug(
+            "_send_session_start_msg: player=%s, format=%s",
+            player.player_id,
+            audio_format,
+        )
         session_info = server_messages.SessionStartPayload(
             session_id=str(uuid4()),
             codec="pcm",
@@ -132,7 +152,7 @@ class PlayerGroup:
         player.send_message(server_messages.SessionStartMessage(session_info))
 
     def _send_session_end_msg(self, player: "Player") -> None:
-        logger.debug("ending session for %s", player.name)
+        logger.debug("ending session for %s (%s)", player.name, player.player_id)
         player.send_message(
             server_messages.SessionEndMessage(server_messages.SessionEndPayload(player.player_id))
         )
@@ -162,7 +182,12 @@ class PlayerGroup:
         - and clears all buffers
         """
         if self._stream_task is None:
+            logger.debug("stop called but no active stream task")
             return
+        logger.debug(
+            "Stopping playback for group with players: %s",
+            [p.player_id for p in self._players],
+        )
         _ = self._stream_task.cancel()
         for player in self._players:
             self._send_session_end_msg(player)
@@ -194,6 +219,7 @@ class PlayerGroup:
         # Remove it from any existing group first
         player.ungroup()
         if self._stream_task is not None and self._stream_audio_format is not None:
+            logger.debug("Joining player %s to current stream", player.player_id)
             # Join it to the current stream
             player_format = self.select_player_format(player, self._stream_audio_format)
             self._player_formats[player.player_id] = player_format
@@ -214,6 +240,11 @@ class PlayerGroup:
         # - Optimize this
 
         try:
+            logger.debug(
+                "_stream_audio started: start_time_us=%d, audio_format=%s",
+                start_time_us,
+                audio_format,
+            )
             if audio_format.bit_depth == 16:
                 input_bytes_per_sample = 2
                 input_audio_format = "s16"
@@ -248,6 +279,7 @@ class PlayerGroup:
             in_frame.sample_rate = input_sample_rate
             input_buffer = bytearray()
 
+            logger.debug("Entering audio streaming loop")
             async for chunk in audio_source:
                 input_buffer += bytes(chunk)
                 while len(input_buffer) >= (input_samples_per_chunk * input_sample_size):
@@ -326,5 +358,6 @@ class PlayerGroup:
                             (time_until_next_chunk - buffer_duration_us) / 1_000_000
                         )
             # TODO: flush buffer
+            logger.debug("Audio streaming loop ended")
         except Exception:
             logger.exception("failed to stream audio")
