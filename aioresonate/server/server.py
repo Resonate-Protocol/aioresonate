@@ -71,14 +71,13 @@ class ResonateServer:
         """
         Connect to the Resonate player at the given URL.
 
-        If a connection was already established at this URL, it will be restarted.
+        Calling this will start a new connection with the player.
+        In case a connection already exists for this URL, nothing will happen.
         """
         logger.debug("Connecting to player at URL: %s", url)
         prev_task = self._connection_tasks.get(url)
         if prev_task is not None and not prev_task.done():
-            # We have a connection active, restart it since it may not be valid anymore
-            _ = self._connection_tasks[url].cancel()
-            logger.debug("Cancelled previous connection task for %s", url)
+            logger.debug("Connection is already active for URL: %s", url)
         self._connection_tasks[url] = self.loop.create_task(self._handle_player_connection(url))
 
     def disconnect_from_player(self, url: str) -> None:
