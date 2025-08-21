@@ -58,6 +58,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
+          name: dist
           path: ./dist
 
   publish:
@@ -70,8 +71,11 @@ jobs:
       id-token: write
     steps:
       - uses: actions/download-artifact@v5
+        with:
+          name: dist
+          path: dist
 
       - name: Publish release to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
-          packages_dir: artifact/
+          packages-dir: dist/
