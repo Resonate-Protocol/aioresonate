@@ -96,17 +96,21 @@ class ResonateServer:
 
     async def _handle_player_connection(self, url: str) -> None:
         """Handle the actual connection to a player."""
+        player: Player | None = None
         try:
-            # TODO catch any exceptions from ws_connect
             async with ClientSession() as session:
                 wsock = await session.ws_connect(url, heartbeat=55)
                 player = Player(self, request=None, url=url, wsock_client=wsock)
-                try:
-                    _ = await player.handle_client()
-                finally:
-                    self._on_player_remove(player)
+                _ = await player.handle_client()
+        except asyncio.CancelledError:
+            logger.debug("Connection task for %s was cancelled", url)
+        except TimeoutError:
+            logger.debug("Connection task for %s timed out", url)
         except Exception:
             logger.exception("Failed to connect to player at %s", url)
+        finally:
+            if player is not None:
+                self._on_player_remove(player)
 
     def add_event_listener(
         self, callback: Callable[[ResonateEvent], Coroutine[None, None, None]]
