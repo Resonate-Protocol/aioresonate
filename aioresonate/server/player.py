@@ -303,7 +303,10 @@ class Player:
                     if isinstance(item, server_messages.ServerTimeMessage):
                         item.payload.server_transmitted = int(self._server.loop.time() * 1_000_000)
                     await self.wsock.send_str(item.to_json())
-            logger.debug("wsock was closed for player %s", self._player_id or "unknown")
+            logger.debug(
+                "WebSocket Connection was closed for the player %s, ending writer task",
+                self._player_id or "unknown",
+            )
         except Exception:
             logger.exception("Error in writer task for player %s", self._player_id or "unknown")
 
