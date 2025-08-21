@@ -12,6 +12,8 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.vars.outputs.tag }}
+    permissions:
+      id-token: write # Required for PyPI publishing
     steps:
       - uses: actions/checkout@v4.2.2
       - name: Get tag
@@ -54,7 +56,6 @@ jobs:
         run: >-
           python3 -m build
       - name: Publish release to PyPI
-        uses: pypa/gh-action-pypi-publish@v1.12.4
+        uses: pypa/gh-action-pypi-publish@release/v1
         with:
-          user: __token__
-          password: ${{ secrets.PYPI_TOKEN }}
+          packages-dir: dist/
