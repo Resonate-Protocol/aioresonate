@@ -39,6 +39,7 @@ class ResonateServer:
     _groups: set[PlayerGroup]
     loop: asyncio.AbstractEventLoop
     _event_cbs: list[Callable[[ResonateEvent], Coroutine[None, None, None]]]
+    _connection_tasks: dict[str, asyncio.Task[None]]
     _id: str
     _name: str
 
@@ -50,6 +51,7 @@ class ResonateServer:
         self._event_cbs = []
         self._id = server_id
         self._name = server_name
+        self._connection_tasks = {}
         logger.debug("ResonateServer initialized: id=%s, name=%s", server_id, server_name)
 
     async def on_player_connect(
@@ -66,9 +68,18 @@ class ResonateServer:
             self._players.remove(player)
 
     def connect_to_player(self, url: str) -> None:
-        """Connect to the Resonate player at the given URL."""
+        """
+        Connect to the Resonate player at the given URL.
+
+        If a connection was already established at this URL, it will be restarted.
+        """
         logger.debug("Connecting to player at URL: %s", url)
-        _ = self.loop.create_task(self._handle_player_connection(url))
+        prev_task = self._connection_tasks.get(url)
+        if prev_task is not None and not prev_task.done():
+            # We have a connection active, restart it since it may not be valid anymore
+            _ = self._connection_tasks[url].cancel()
+            logger.debug("Cancelled previous connection task for %s", url)
+        self._connection_tasks[url] = self.loop.create_task(self._handle_player_connection(url))
 
     async def _handle_player_connection(self, url: str) -> None:
         """Handle the actual connection to a player."""
