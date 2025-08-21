@@ -99,7 +99,7 @@ class ResonateServer:
         try:
             # TODO catch any exceptions from ws_connect
             async with ClientSession() as session:
-                wsock = await session.ws_connect(url)
+                wsock = await session.ws_connect(url, heartbeat=55)
                 player = Player(self, request=None, url=url, wsock_client=wsock)
                 try:
                     _ = await player.handle_client()
