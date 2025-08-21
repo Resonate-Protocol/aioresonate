@@ -81,6 +81,20 @@ class ResonateServer:
             logger.debug("Cancelled previous connection task for %s", url)
         self._connection_tasks[url] = self.loop.create_task(self._handle_player_connection(url))
 
+    def disconnect_from_player(self, url: str) -> None:
+        """
+        Disconnect from the Resonate player that was previously connected at the given URL.
+
+        If no connection was established at this URL, or the connection is already closed,
+        this will do nothing.
+
+        NOTE: this will only disconnect connections that were established via connect_to_player.
+        """
+        connection_task = self._connection_tasks.pop(url, None)
+        if connection_task is not None and not connection_task.done():
+            logger.debug("Disconnecting from player at URL: %s", url)
+            _ = connection_task.cancel()
+
     async def _handle_player_connection(self, url: str) -> None:
         """Handle the actual connection to a player."""
         try:
