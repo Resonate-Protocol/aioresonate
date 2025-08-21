@@ -7,7 +7,7 @@ from collections.abc import Callable, Coroutine
 from contextlib import suppress
 from typing import TYPE_CHECKING
 
-from aiohttp import ClientWebSocketResponse, WSMsgType, web
+from aiohttp import ClientWebSocketResponse, WSMessage, WSMsgType, web
 from attr import dataclass
 
 from aioresonate import models
@@ -208,6 +208,7 @@ class Player:
             )
         )
 
+        receive_task: asyncio.Task[WSMessage] | None = None
         # Listen for all incoming messages
         try:
             while not wsock.closed:
@@ -259,13 +260,12 @@ class Player:
         except Exception:
             logger.exception("Unexpected error inside websocket API")
         finally:
-            # TODO: run disconnect here?
             try:
-                # Make sure all error messages are written before closing
-                await self._writer_task
-                _ = await wsock.close()
-            except asyncio.QueueFull:  # can be raised by put_nowait
-                _ = self._writer_task.cancel()
+                if receive_task and not receive_task.done():
+                    _ = receive_task.cancel()
+            except Exception:
+                logger.exception("Error cancelling receive task for %s", remote_addr)
+            await self.disconnect()
 
         return self.wsock
 
