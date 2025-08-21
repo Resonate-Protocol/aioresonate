@@ -176,7 +176,7 @@ class Player:
         else:
             logger.debug("Player %s already alone in group, no ungrouping needed", self.player_id)
 
-    async def handle_client(self) -> web.WebSocketResponse | ClientWebSocketResponse:
+    async def handle_client(self) -> web.WebSocketResponse | ClientWebSocketResponse:  # noqa: PLR0915
         """Handle the websocket connection."""
         # Establish a WebSocket connection to the player
         wsock = self.wsock
@@ -211,7 +211,33 @@ class Player:
         # Listen for all incoming messages
         try:
             while not wsock.closed:
-                msg = await wsock.receive()
+                # Wait for either a message or the writer task to complete (meaning the player
+                # disconnected or errored)
+                receive_task = self._server.loop.create_task(wsock.receive())
+                done, pending = await asyncio.wait(
+                    [receive_task, self._writer_task],
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+
+                if self._writer_task in done:
+                    logger.warning(
+                        "Writer task ended for player %s at %s, closing connection",
+                        self._player_id or "unknown",
+                        remote_addr,
+                    )
+                    # Cancel the receive task if it's still pending
+                    if receive_task in pending:
+                        _ = receive_task.cancel()
+                    await self.disconnect()
+                    break
+
+                # Get the message from the completed receive task
+                try:
+                    msg = await receive_task
+                except (ConnectionError, asyncio.CancelledError) as e:
+                    logger.error("Error receiving message from %s: %s", remote_addr, e)
+                    break
+
                 timestamp = int(self._server.loop.time() * 1_000_000)
 
                 if msg.type in (WSMsgType.CLOSE, WSMsgType.CLOSING, WSMsgType.CLOSED):
