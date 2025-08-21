@@ -140,22 +140,18 @@ class Player:
         if self._volume == volume:
             return
         logger.debug("Setting volume for %s from %d to %d", self.player_id, self._volume, volume)
-        self._volume = volume
         self.send_message(
             server_messages.VolumeSetMessage(server_messages.VolumeSetPayload(volume))
         )
-        self._signal_event(VolumeChangedEvent(volume=self._volume, muted=self._muted))
 
     def mute(self) -> None:
         """Mute this player."""
         if self._muted:
             return
         logger.debug("Muting player %s", self.player_id)
-        self._muted = True
         self.send_message(
             server_messages.MuteSetMessage(server_messages.MuteSetPayload(self._muted))
         )
-        self._signal_event(VolumeChangedEvent(volume=self._volume, muted=self._muted))
 
     def unmute(self) -> None:
         """Unmute this player."""
