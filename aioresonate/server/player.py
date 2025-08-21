@@ -50,12 +50,8 @@ class Player:
     url: str | None
     _player_id: str | None = None
     player_info: client_messages.PlayerHelloPayload | None = None
-    # Task responsible for handling messages from the player
-    _handle_task: asyncio.Task[str] | None = None
     # Task responsible for sending audio and other data
     _writer_task: asyncio.Task[None] | None = None
-    # Task responsible for processing the audio stream
-    stream_task: asyncio.Task[None] | None = None
     _to_write: asyncio.Queue[server_messages.ServerMessage | bytes]
     session_info: server_messages.SessionStartPayload | None = None
     _group: PlayerGroup
@@ -93,11 +89,6 @@ class Player:
         logger.debug("Disconnecting client %s", self.player_id or self.request.remote)
 
         # Cancel running tasks
-        if self.stream_task and not self.stream_task.done():
-            logger.debug("Cancelling stream task for %s", self.player_id or "unknown")
-            _ = self.stream_task.cancel()
-            with suppress(asyncio.CancelledError):
-                await self.stream_task
         if self._writer_task and not self._writer_task.done():
             logger.debug("Cancelling writer task for %s", self.player_id or "unknown")
             _ = self._writer_task.cancel()
