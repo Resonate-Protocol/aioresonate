@@ -65,17 +65,24 @@ class ResonateServer:
         finally:
             self._players.remove(player)
 
-    async def connect_to_player(self, url: str) -> web.WebSocketResponse | ClientWebSocketResponse:
+    def connect_to_player(self, url: str) -> None:
         """Connect to the Resonate player at the given URL."""
         logger.debug("Connecting to player at URL: %s", url)
-        # TODO catch any exceptions from ws_connect
-        async with ClientSession() as session:
-            wsock = await session.ws_connect(url)
-            player = Player(self, request=None, url=url, wsock_client=wsock)
-            try:
-                return await player.handle_client()
-            finally:
-                self._on_player_remove(player)
+        _ = self.loop.create_task(self._handle_player_connection(url))
+
+    async def _handle_player_connection(self, url: str) -> None:
+        """Handle the actual connection to a player."""
+        try:
+            # TODO catch any exceptions from ws_connect
+            async with ClientSession() as session:
+                wsock = await session.ws_connect(url)
+                player = Player(self, request=None, url=url, wsock_client=wsock)
+                try:
+                    _ = await player.handle_client()
+                finally:
+                    self._on_player_remove(player)
+        except Exception:
+            logger.exception("Failed to connect to player at %s", url)
 
     def add_event_listener(
         self, callback: Callable[[ResonateEvent], Coroutine[None, None, None]]
