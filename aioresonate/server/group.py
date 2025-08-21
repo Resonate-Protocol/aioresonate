@@ -20,7 +20,7 @@ if TYPE_CHECKING:
     from .server import ResonateServer
 
 INITIAL_PLAYBACK_DELAY_US = 1_000_000
-CHUNK_DURATION_US = 100_000
+CHUNK_DURATION_US = 25_000
 
 logger = logging.getLogger(__name__)
 
