@@ -232,7 +232,6 @@ class Player:
                     # Cancel the receive task if it's still pending
                     if receive_task in pending:
                         _ = receive_task.cancel()
-                    await self.disconnect()
                     break
 
                 # Get the message from the completed receive task
