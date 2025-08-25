@@ -135,17 +135,15 @@ class ResonateServer:
                     # NOTE: Intentional catch-all to log unexpected exceptions so they are visible.
                     logger.exception("Unexpected error connecting to player at %s", url)
 
-                sleep_time = min(backoff, max_backoff)
-
-                if sleep_time >= max_backoff:
+                if backoff >= max_backoff:
                     break
 
-                logger.debug("Trying to reconnect to player at %s in %.1fs", url, sleep_time)
+                logger.debug("Trying to reconnect to player at %s in %.1fs", url, backoff)
 
                 # Use asyncio.wait_for with the retry event to allow immediate retry
                 if retry_event is not None:
                     try:
-                        await asyncio.wait_for(retry_event.wait(), timeout=sleep_time)
+                        await asyncio.wait_for(retry_event.wait(), timeout=backoff)
                         logger.debug("Immediate retry requested for %s", url)
                         # Clear the event for next time
                         retry_event.clear()
@@ -153,10 +151,10 @@ class ResonateServer:
                         # Normal timeout, continue with exponential backoff
                         pass
                 else:
-                    await asyncio.sleep(sleep_time)
+                    await asyncio.sleep(backoff)
 
                 # Increase backoff for next retry (exponential)
-                backoff = backoff * 2
+                backoff *= 2
         except asyncio.CancelledError:
             pass
         finally:
