@@ -5,7 +5,7 @@ import logging
 from collections.abc import Callable, Coroutine
 from dataclasses import dataclass
 
-from aiohttp import ClientWebSocketResponse, ClientWSTimeout, web
+from aiohttp import ClientConnectionError, ClientWebSocketResponse, ClientWSTimeout, web
 from aiohttp.client import ClientSession
 
 from .group import PlayerGroup
@@ -97,20 +97,25 @@ class ResonateServer:
 
     async def _handle_player_connection(self, url: str) -> None:
         """Handle the actual connection to a player."""
-        player: Player | None = None
-        try:
-            async with ClientSession() as session:
-                wsock = await session.ws_connect(
-                    url, heartbeat=5, timeout=ClientWSTimeout(ws_close=10, ws_receive=10)
-                )
-                player = Player(self, request=None, url=url, wsock_client=wsock)
-                _ = await player.handle_client()
-        except asyncio.CancelledError:
-            logger.debug("Connection task for %s was cancelled", url)
-        except TimeoutError:
-            logger.debug("Connection task for %s timed out", url)
-        except Exception:
-            logger.exception("Failed to connect to player at %s", url)
+        while True:
+            player: Player | None = None
+            try:
+                async with ClientSession() as session:
+                    wsock = await session.ws_connect(
+                        url, heartbeat=25, timeout=ClientWSTimeout(ws_close=30, ws_receive=30)
+                    )
+                    player = Player(self, request=None, url=url, wsock_client=wsock)
+                    _ = await player.handle_client()
+            except asyncio.CancelledError:
+                logger.debug("Connection task for %s was cancelled", url)
+            except TimeoutError:
+                logger.debug("Connection task for %s timed out", url)
+            except ClientConnectionError:
+                logger.debug("Connection task for %s failed", url)
+            except Exception:
+                logger.exception("Failed to connect to player at %s", url)
+            await asyncio.sleep(5)
+            logger.debug("Reconnecting to player at %s", url)
 
     def add_event_listener(
         self, callback: Callable[[ResonateEvent], Coroutine[None, None, None]]
