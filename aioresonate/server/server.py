@@ -94,7 +94,6 @@ class ResonateServer:
         if connection_task is not None:
             logger.debug("Disconnecting from player at URL: %s", url)
             _ = connection_task.cancel()
-            self._connection_tasks.pop(url, None)
 
     async def _handle_player_connection(self, url: str) -> None:
         """Handle the actual connection to a player."""
@@ -102,42 +101,44 @@ class ResonateServer:
         backoff = 1.0
         max_backoff = 300.0  # 5 minutes
 
-        while True:
-            player: Player | None = None
-            try:
-                async with ClientSession() as session:
-                    wsock = await session.ws_connect(
-                        url,
-                        heartbeat=30,
-                        timeout=ClientWSTimeout(ws_close=10, ws_receive=60),  # pyright: ignore[reportCallIssue]
-                    )
-                    # Reset backoff on successful connect
-                    backoff = 1.0
-                    player = Player(self, request=None, url=url, wsock_client=wsock)
-                    _ = await player.handle_client()
-            except asyncio.CancelledError:
-                logger.debug("Connection task for %s was cancelled", url)
-                break  # Propagate the cancellation
-            except TimeoutError:
-                logger.debug("Connection task for %s timed out", url)
-            except ClientConnectionError:
-                logger.debug("Connection task for %s failed", url)
-            except Exception:
-                # NOTE: Intentional catch-all to log unexpected exceptions so they are visible.
-                logger.exception("Unexpected error connecting to player at %s", url)
+        try:
+            while True:
+                player: Player | None = None
+                try:
+                    async with ClientSession() as session:
+                        wsock = await session.ws_connect(
+                            url,
+                            heartbeat=30,
+                            timeout=ClientWSTimeout(ws_close=10, ws_receive=60),  # pyright: ignore[reportCallIssue]
+                        )
+                        # Reset backoff on successful connect
+                        backoff = 1.0
+                        player = Player(self, request=None, url=url, wsock_client=wsock)
+                        _ = await player.handle_client()
+                except asyncio.CancelledError:
+                    break
+                except TimeoutError:
+                    logger.debug("Connection task for %s timed out", url)
+                except ClientConnectionError:
+                    logger.debug("Connection task for %s failed", url)
+                except Exception:
+                    # NOTE: Intentional catch-all to log unexpected exceptions so they are visible.
+                    logger.exception("Unexpected error connecting to player at %s", url)
 
-            sleep_time = min(backoff, max_backoff)
+                sleep_time = min(backoff, max_backoff)
 
-            if sleep_time >= max_backoff:
-                break
+                if sleep_time >= 8:
+                    break
 
-            logger.debug("Trying to reconnect to player at %s in %.1fs", url, sleep_time)
-            await asyncio.sleep(sleep_time)
+                logger.debug("Trying to reconnect to player at %s in %.1fs", url, sleep_time)
+                await asyncio.sleep(sleep_time)
 
-            # Increase backoff for next retry (exponential)
-            backoff = backoff * 2
-
-        self._connection_tasks.pop(url, None)
+                # Increase backoff for next retry (exponential)
+                backoff = backoff * 2
+        except asyncio.CancelledError:
+            pass
+        finally:
+            self._connection_tasks.pop(url, None)
 
     def add_event_listener(
         self, callback: Callable[[ResonateEvent], Coroutine[None, None, None]]
