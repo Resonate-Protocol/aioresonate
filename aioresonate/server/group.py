@@ -65,7 +65,10 @@ class PlayerGroup:
         The library expects uncompressed PCM audio and will handle encoding.
         """
         logger.debug("Starting play_media with audio_format: %s", audio_format)
-        self.stop()
+        stopped = self.stop()
+        if stopped:
+            # Wait a bit to allow players to process the session end
+            await asyncio.sleep(0.5)
         # TODO: open questions:
         # - how to communicate to the caller what audio_format is preferred,
         #   especially on topology changes
@@ -173,17 +176,19 @@ class PlayerGroup:
         """Resume playback after a pause."""
         raise NotImplementedError
 
-    def stop(self) -> None:
+    def stop(self) -> bool:
         """Stop playback of the group.
 
         Compared to pause, this also:
         - clears the audio source stream
         - clears metadata
         - and clears all buffers
+
+        Returns false if there was no active stream to stop.
         """
         if self._stream_task is None:
             logger.debug("stop called but no active stream task")
-            return
+            return False
         logger.debug(
             "Stopping playback for group with players: %s",
             [p.player_id for p in self._players],
@@ -193,6 +198,7 @@ class PlayerGroup:
             self._send_session_end_msg(player)
             del self._player_formats[player.player_id]
         self._stream_task = None
+        return True
 
     @property
     def players(self) -> list["Player"]:
