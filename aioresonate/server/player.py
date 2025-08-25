@@ -261,6 +261,10 @@ class Player:
             logger.exception("Unexpected error inside websocket API")
         finally:
             try:
+                _ = await wsock.close()
+            except Exception:
+                logger.exception("Failed to close websocket for %s", remote_addr)
+            try:
                 if receive_task and not receive_task.done():
                     _ = receive_task.cancel()
             except Exception:
