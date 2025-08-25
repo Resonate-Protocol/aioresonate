@@ -364,8 +364,9 @@ class Player:
                         self._signal_event(StreamStopEvent())
                     case MediaCommand.PAUSE:
                         self._signal_event(StreamPauseEvent())
-                    case _:
-                        raise NotImplementedError
+                        raise NotImplementedError(
+                            f"MediaCommand {stream_command.command} is not supported"
+                        )
             case client_messages.ClientMessage():
                 pass  # unused base type
 
