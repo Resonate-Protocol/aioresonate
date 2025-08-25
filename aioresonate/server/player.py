@@ -156,7 +156,6 @@ class Player:
         self.send_message(
             server_messages.MuteSetMessage(server_messages.MuteSetPayload(self._muted))
         )
-        self._signal_event(VolumeChangedEvent(volume=self._volume, muted=self._muted))
 
     @property
     def muted(self) -> bool:
