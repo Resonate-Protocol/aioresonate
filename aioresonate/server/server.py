@@ -107,8 +107,8 @@ class ResonateServer:
                 async with ClientSession() as session:
                     wsock = await session.ws_connect(
                         url,
-                        heartbeat=25,
-                        timeout=ClientWSTimeout(ws_close=30, ws_receive=30),  # pyright: ignore[reportCallIssue]
+                        heartbeat=30,
+                        timeout=ClientWSTimeout(ws_close=10, ws_receive=60),  # pyright: ignore[reportCallIssue]
                     )
                     # Reset backoff on successful connect
                     backoff = 1.0
