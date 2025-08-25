@@ -5,7 +5,7 @@ import logging
 from collections.abc import Callable, Coroutine
 from dataclasses import dataclass
 
-from aiohttp import ClientWebSocketResponse, web
+from aiohttp import ClientConnectionError, ClientWebSocketResponse, ClientWSTimeout, web
 from aiohttp.client import ClientSession
 
 from .group import PlayerGroup
@@ -39,6 +39,8 @@ class ResonateServer:
     _groups: set[PlayerGroup]
     loop: asyncio.AbstractEventLoop
     _event_cbs: list[Callable[[ResonateEvent], Coroutine[None, None, None]]]
+    _connection_tasks: dict[str, asyncio.Task[None]]
+    _retry_events: dict[str, asyncio.Event]
     _id: str
     _name: str
 
@@ -50,6 +52,8 @@ class ResonateServer:
         self._event_cbs = []
         self._id = server_id
         self._name = server_name
+        self._connection_tasks = {}
+        self._retry_events = {}
         logger.debug("ResonateServer initialized: id=%s, name=%s", server_id, server_name)
 
     async def on_player_connect(
@@ -65,17 +69,97 @@ class ResonateServer:
         finally:
             self._players.remove(player)
 
-    async def connect_to_player(self, url: str) -> web.WebSocketResponse | ClientWebSocketResponse:
-        """Connect to the Resonate player at the given URL."""
+    def connect_to_player(self, url: str) -> None:
+        """
+        Connect to the Resonate player at the given URL.
+
+        Calling this will start a new connection with the player.
+        In case a connection already exists for this URL, nothing will happen.
+        """
         logger.debug("Connecting to player at URL: %s", url)
-        # TODO catch any exceptions from ws_connect
-        async with ClientSession() as session:
-            wsock = await session.ws_connect(url)
-            player = Player(self, request=None, url=url, wsock_client=wsock)
-            try:
-                return await player.handle_client()
-            finally:
-                self._on_player_remove(player)
+        prev_task = self._connection_tasks.get(url)
+        if prev_task is not None:
+            logger.debug("Connection is already active for URL: %s", url)
+            # Signal immediate retry if we have a retry event (connection is in backoff)
+            if retry_event := self._retry_events.get(url):
+                logger.debug("Signaling immediate retry for URL: %s", url)
+                retry_event.set()
+        else:
+            # Create retry event for this connection
+            self._retry_events[url] = asyncio.Event()
+            self._connection_tasks[url] = self.loop.create_task(self._handle_player_connection(url))
+
+    def disconnect_from_player(self, url: str) -> None:
+        """
+        Disconnect from the Resonate player that was previously connected at the given URL.
+
+        If no connection was established at this URL, or the connection is already closed,
+        this will do nothing.
+
+        NOTE: this will only disconnect connections that were established via connect_to_player.
+        """
+        connection_task = self._connection_tasks.pop(url, None)
+        if connection_task is not None:
+            logger.debug("Disconnecting from player at URL: %s", url)
+            _ = connection_task.cancel()
+
+    async def _handle_player_connection(self, url: str) -> None:
+        """Handle the actual connection to a player."""
+        # Exponential backoff settings
+        backoff = 1.0
+        max_backoff = 300.0  # 5 minutes
+
+        try:
+            while True:
+                player: Player | None = None
+                retry_event = self._retry_events.get(url)
+
+                try:
+                    async with ClientSession() as session:
+                        wsock = await session.ws_connect(
+                            url,
+                            heartbeat=30,
+                            timeout=ClientWSTimeout(ws_close=10, ws_receive=60),  # pyright: ignore[reportCallIssue]
+                        )
+                        # Reset backoff on successful connect
+                        backoff = 1.0
+                        player = Player(self, request=None, url=url, wsock_client=wsock)
+                        _ = await player.handle_client()
+                except asyncio.CancelledError:
+                    break
+                except TimeoutError:
+                    logger.debug("Connection task for %s timed out", url)
+                except ClientConnectionError:
+                    logger.debug("Connection task for %s failed", url)
+                except Exception:
+                    # NOTE: Intentional catch-all to log unexpected exceptions so they are visible.
+                    logger.exception("Unexpected error connecting to player at %s", url)
+
+                if backoff >= max_backoff:
+                    break
+
+                logger.debug("Trying to reconnect to player at %s in %.1fs", url, backoff)
+
+                # Use asyncio.wait_for with the retry event to allow immediate retry
+                if retry_event is not None:
+                    try:
+                        await asyncio.wait_for(retry_event.wait(), timeout=backoff)
+                        logger.debug("Immediate retry requested for %s", url)
+                        # Clear the event for next time
+                        retry_event.clear()
+                    except TimeoutError:
+                        # Normal timeout, continue with exponential backoff
+                        pass
+                else:
+                    await asyncio.sleep(backoff)
+
+                # Increase backoff for next retry (exponential)
+                backoff *= 2
+        except asyncio.CancelledError:
+            pass
+        finally:
+            self._connection_tasks.pop(url, None)
+            self._retry_events.pop(url, None)
 
     def add_event_listener(
         self, callback: Callable[[ResonateEvent], Coroutine[None, None, None]]
