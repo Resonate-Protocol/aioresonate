@@ -159,18 +159,15 @@ class Player:
         if self._muted:
             return
         logger.debug("Muting player %s", self.player_id)
-        self.send_message(
-            server_messages.MuteSetMessage(server_messages.MuteSetPayload(self._muted))
-        )
+        self.send_message(server_messages.MuteSetMessage(server_messages.MuteSetPayload(mute=True)))
 
     def unmute(self) -> None:
         """Unmute this player."""
         if not self._muted:
             return
         logger.debug("Unmuting player %s", self.player_id)
-        self._muted = False
         self.send_message(
-            server_messages.MuteSetMessage(server_messages.MuteSetPayload(self._muted))
+            server_messages.MuteSetMessage(server_messages.MuteSetPayload(mute=False))
         )
 
     @property
