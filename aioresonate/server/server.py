@@ -97,13 +97,21 @@ class ResonateServer:
 
     async def _handle_player_connection(self, url: str) -> None:
         """Handle the actual connection to a player."""
+        # Exponential backoff settings
+        backoff = 1.0
+        max_backoff = 300.0  # 5 minutes
+
         while True:
             player: Player | None = None
             try:
                 async with ClientSession() as session:
                     wsock = await session.ws_connect(
-                        url, heartbeat=25, timeout=ClientWSTimeout(ws_close=30, ws_receive=30)
+                        url,
+                        heartbeat=25,
+                        timeout=ClientWSTimeout(ws_close=30, ws_receive=30),  # pyright: ignore[reportCallIssue]
                     )
+                    # Reset backoff on successful connect
+                    backoff = 1.0
                     player = Player(self, request=None, url=url, wsock_client=wsock)
                     _ = await player.handle_client()
             except asyncio.CancelledError:
@@ -113,9 +121,19 @@ class ResonateServer:
             except ClientConnectionError:
                 logger.debug("Connection task for %s failed", url)
             except Exception:
-                logger.exception("Failed to connect to player at %s", url)
-            await asyncio.sleep(5)
-            logger.debug("Reconnecting to player at %s", url)
+                # NOTE: Intentional catch-all to log unexpected exceptions so they are visible.
+                logger.exception("Unexpected error connecting to player at %s", url)
+
+            sleep_time = min(backoff, max_backoff)
+
+            if sleep_time >= max_backoff:
+                break
+
+            logger.debug("Trying to reconnect to player at %s in %.1fs", url, sleep_time)
+            await asyncio.sleep(sleep_time)
+
+            # Increase backoff for next retry (exponential)
+            backoff = backoff * 2
 
     def add_event_listener(
         self, callback: Callable[[ResonateEvent], Coroutine[None, None, None]]
