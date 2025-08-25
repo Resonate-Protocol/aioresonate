@@ -100,6 +100,9 @@ class Player:
         if not self.wsock.closed:
             _ = await self.wsock.close()
 
+        if self._player_id is not None:
+            self._server._on_player_remove(self)  # noqa: SLF001
+
         logger.info("Client %s disconnected", self.player_id or self.request.remote)
 
     @property

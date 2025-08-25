@@ -110,9 +110,6 @@ class ResonateServer:
             logger.debug("Connection task for %s timed out", url)
         except Exception:
             logger.exception("Failed to connect to player at %s", url)
-        finally:
-            if player is not None:
-                self._on_player_remove(player)
 
     def add_event_listener(
         self, callback: Callable[[ResonateEvent], Coroutine[None, None, None]]
