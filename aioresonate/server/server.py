@@ -5,7 +5,7 @@ import logging
 from collections.abc import Callable, Coroutine
 from dataclasses import dataclass
 
-from aiohttp import ClientWebSocketResponse, web
+from aiohttp import ClientWebSocketResponse, ClientWSTimeout, web
 from aiohttp.client import ClientSession
 
 from .group import PlayerGroup
@@ -99,7 +99,9 @@ class ResonateServer:
         player: Player | None = None
         try:
             async with ClientSession() as session:
-                wsock = await session.ws_connect(url, heartbeat=55)
+                wsock = await session.ws_connect(
+                    url, heartbeat=5, timeout=ClientWSTimeout(ws_close=10, ws_receive=10)
+                )
                 player = Player(self, request=None, url=url, wsock_client=wsock)
                 _ = await player.handle_client()
         except asyncio.CancelledError:
