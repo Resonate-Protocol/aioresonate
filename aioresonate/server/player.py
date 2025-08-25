@@ -238,7 +238,7 @@ class Player:
                 # Get the message from the completed receive task
                 try:
                     msg = await receive_task
-                except (ConnectionError, asyncio.CancelledError) as e:
+                except (ConnectionError, asyncio.CancelledError, TimeoutError) as e:
                     logger.error("Error receiving message from %s: %s", remote_addr, e)
                     break
 
