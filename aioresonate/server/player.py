@@ -12,6 +12,7 @@ from attr import dataclass
 
 from aioresonate import models
 from aioresonate.models import client_messages, server_messages
+from aioresonate.models.types import MediaCommand
 
 from .group import PlayerGroup
 
@@ -35,6 +36,21 @@ class VolumeChangedEvent(PlayerEvent):
 
     volume: int
     muted: bool
+
+
+@dataclass
+class StreamStartEvent(PlayerEvent):
+    """The player issued a start/play stream command event."""
+
+
+@dataclass
+class StreamStopEvent(PlayerEvent):
+    """The player issued a stop stream command event."""
+
+
+@dataclass
+class StreamPauseEvent(PlayerEvent):
+    """The player issued a pause stream command event."""
 
 
 class Player:
@@ -340,8 +356,16 @@ class Player:
                         )
                     )
                 )
-            case client_messages.StreamCommandMessage():
-                raise NotImplementedError
+            case client_messages.StreamCommandMessage(stream_command):
+                match stream_command.command:
+                    case MediaCommand.PLAY:
+                        self._signal_event(StreamStartEvent())
+                    case MediaCommand.STOP:
+                        self._signal_event(StreamStopEvent())
+                    case MediaCommand.PAUSE:
+                        self._signal_event(StreamPauseEvent())
+                    case _:
+                        raise NotImplementedError
             case client_messages.ClientMessage():
                 pass  # unused base type
 
