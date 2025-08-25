@@ -14,9 +14,19 @@ __all__ = [
     "PlayerRemovedEvent",
     "ResonateEvent",
     "ResonateServer",
+    "StreamPauseEvent",
+    "StreamStartEvent",
+    "StreamStopEvent",
     "VolumeChangedEvent",
 ]
 
 from .group import AudioFormat, PlayerGroup
-from .player import Player, PlayerEvent, VolumeChangedEvent
+from .player import (
+    Player,
+    PlayerEvent,
+    StreamPauseEvent,
+    StreamStartEvent,
+    StreamStopEvent,
+    VolumeChangedEvent,
+)
 from .server import PlayerAddedEvent, PlayerRemovedEvent, ResonateEvent, ResonateServer
