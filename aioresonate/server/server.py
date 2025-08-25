@@ -78,7 +78,8 @@ class ResonateServer:
         prev_task = self._connection_tasks.get(url)
         if prev_task is not None and not prev_task.done():
             logger.debug("Connection is already active for URL: %s", url)
-        self._connection_tasks[url] = self.loop.create_task(self._handle_player_connection(url))
+        else:
+            self._connection_tasks[url] = self.loop.create_task(self._handle_player_connection(url))
 
     def disconnect_from_player(self, url: str) -> None:
         """
