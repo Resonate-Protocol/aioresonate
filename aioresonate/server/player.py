@@ -309,7 +309,7 @@ class Player:
                 )
             case client_messages.StreamCommandMessage():
                 raise NotImplementedError
-            case client_messages.ClientMessage:
+            case client_messages.ClientMessage():
                 pass  # unused base type
 
     async def _writer(self) -> None:
