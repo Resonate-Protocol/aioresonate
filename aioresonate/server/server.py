@@ -76,7 +76,7 @@ class ResonateServer:
         """
         logger.debug("Connecting to player at URL: %s", url)
         prev_task = self._connection_tasks.get(url)
-        if prev_task is not None and not prev_task.done():
+        if prev_task is not None:
             logger.debug("Connection is already active for URL: %s", url)
         else:
             self._connection_tasks[url] = self.loop.create_task(self._handle_player_connection(url))
@@ -91,9 +91,10 @@ class ResonateServer:
         NOTE: this will only disconnect connections that were established via connect_to_player.
         """
         connection_task = self._connection_tasks.pop(url, None)
-        if connection_task is not None and not connection_task.done():
+        if connection_task is not None:
             logger.debug("Disconnecting from player at URL: %s", url)
             _ = connection_task.cancel()
+            self._connection_tasks.pop(url, None)
 
     async def _handle_player_connection(self, url: str) -> None:
         """Handle the actual connection to a player."""
@@ -116,6 +117,7 @@ class ResonateServer:
                     _ = await player.handle_client()
             except asyncio.CancelledError:
                 logger.debug("Connection task for %s was cancelled", url)
+                break  # Propagate the cancellation
             except TimeoutError:
                 logger.debug("Connection task for %s timed out", url)
             except ClientConnectionError:
@@ -134,6 +136,8 @@ class ResonateServer:
 
             # Increase backoff for next retry (exponential)
             backoff = backoff * 2
+
+        self._connection_tasks.pop(url, None)
 
     def add_event_listener(
         self, callback: Callable[[ResonateEvent], Coroutine[None, None, None]]
