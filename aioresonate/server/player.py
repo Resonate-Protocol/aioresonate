@@ -365,6 +365,7 @@ class Player:
                         )
                     await self.wsock.send_bytes(item)
                 else:
+                    assert isinstance(item, server_messages.ServerMessage)  # for type checking
                     if isinstance(item, server_messages.ServerTimeMessage):
                         item.payload.server_transmitted = int(self._server.loop.time() * 1_000_000)
                     await self.wsock.send_str(item.to_json())
