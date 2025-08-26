@@ -61,7 +61,7 @@ class ResonateServer:
         self._id = server_id
         self._name = server_name
         if client_session is None:
-            self._client_session = ClientSession()
+            self._client_session = ClientSession(loop=loop)
             self._owns_session = True
         else:
             self._client_session = client_session
