@@ -23,10 +23,10 @@ class ClientMessage(DataClassORJSONMixin):
 
 
 @dataclass
-class PlayerHelloPayload(DataClassORJSONMixin):
-    """Information about a connected player."""
+class ClientHelloPayload(DataClassORJSONMixin):
+    """Information about a connected client."""
 
-    player_id: str
+    client_id: str
     name: str
     role: str
     buffer_capacity: int
@@ -40,11 +40,11 @@ class PlayerHelloPayload(DataClassORJSONMixin):
 
 
 @dataclass
-class PlayerHelloMessage(ClientMessage):
-    """Message sent by the player to identify itself."""
+class ClientHelloMessage(ClientMessage):
+    """Message sent by the client to identify itself."""
 
-    payload: PlayerHelloPayload
-    type: Literal["player/hello"] = "player/hello"
+    payload: ClientHelloPayload
+    type: Literal["client/hello"] = "client/hello"
 
 
 @dataclass
@@ -80,15 +80,15 @@ class PlayerStateMessage(ClientMessage):
 
 
 @dataclass
-class PlayerTimePayload(DataClassORJSONMixin):
-    """Timing information from the player."""
+class ClientTimePayload(DataClassORJSONMixin):
+    """Timing information from the client."""
 
-    player_transmitted: int
+    client_transmitted: int
 
 
 @dataclass
-class PlayerTimeMessage(ClientMessage):
-    """Message sent by the player for time synchronization."""
+class ClientTimeMessage(ClientMessage):
+    """Message sent by the client for time synchronization."""
 
-    payload: PlayerTimePayload
-    type: Literal["player/time"] = "player/time"
+    payload: ClientTimePayload
+    type: Literal["client/time"] = "client/time"
