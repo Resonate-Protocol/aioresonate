@@ -43,14 +43,15 @@ class ResonateServer:
     _retry_events: dict[str, asyncio.Event]
     _id: str
     _name: str
-    client_session: ClientSession
+    _client_session: ClientSession
+    _owns_session: bool
 
     def __init__(
         self,
         loop: asyncio.AbstractEventLoop,
         server_id: str,
         server_name: str,
-        client_session: ClientSession,
+        client_session: ClientSession | None = None,
     ) -> None:
         """Initialize a new Resonate Server."""
         self._players = set()
@@ -59,7 +60,12 @@ class ResonateServer:
         self._event_cbs = []
         self._id = server_id
         self._name = server_name
-        self.client_session = client_session
+        if client_session is None:
+            self._client_session = ClientSession()
+            self._owns_session = True
+        else:
+            self._client_session = client_session
+            self._owns_session = False
         self._connection_tasks = {}
         self._retry_events = {}
         logger.debug("ResonateServer initialized: id=%s, name=%s", server_id, server_name)
@@ -123,7 +129,7 @@ class ResonateServer:
                 retry_event = self._retry_events.get(url)
 
                 try:
-                    async with self.client_session.ws_connect(
+                    async with self._client_session.ws_connect(
                         url,
                         heartbeat=30,
                         timeout=ClientWSTimeout(ws_close=10, ws_receive=60),  # pyright: ignore[reportCallIssue]
@@ -236,3 +242,9 @@ class ResonateServer:
     def name(self) -> str:
         """Get the name of this server."""
         return self._name
+
+    async def close(self) -> None:
+        """Close the server and cleanup resources."""
+        if self._owns_session and not self._client_session.closed:
+            await self._client_session.close()
+            logger.debug("Closed internal client session for server %s", self._name)
