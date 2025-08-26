@@ -4,8 +4,9 @@ import asyncio
 import logging
 from collections.abc import Callable, Coroutine
 from dataclasses import dataclass
+from typing import cast
 
-from aiohttp import ClientConnectionError, ClientWebSocketResponse, ClientWSTimeout, web
+from aiohttp import ClientConnectionError, ClientWSTimeout, web
 from aiohttp.client import ClientSession
 
 from .group import PlayerGroup
@@ -70,18 +71,12 @@ class ResonateServer:
         self._retry_events = {}
         logger.debug("ResonateServer initialized: id=%s, name=%s", server_id, server_name)
 
-    async def on_player_connect(
-        self, request: web.Request
-    ) -> web.WebSocketResponse | ClientWebSocketResponse:
+    async def on_player_connect(self, request: web.Request) -> web.StreamResponse:
         """Handle an incoming WebSocket connection from a Resonate client."""
         logger.debug("Incoming player connection from %s", request.remote)
         player = Player(self, request=request, url=None, wsock_client=None)
-        # TODO: only add once we know its id, see connect_to_player
-        try:
-            self._players.add(player)
-            return await player.handle_client()
-        finally:
-            self._players.remove(player)
+        # TODO: remove this cast
+        return cast("web.StreamResponse", await player.handle_client())
 
     def connect_to_player(self, url: str) -> None:
         """
