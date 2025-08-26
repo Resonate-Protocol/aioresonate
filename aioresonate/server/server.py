@@ -123,15 +123,15 @@ class ResonateServer:
                 retry_event = self._retry_events.get(url)
 
                 try:
-                    wsock = await self.client_session.ws_connect(
+                    async with self.client_session.ws_connect(
                         url,
                         heartbeat=30,
                         timeout=ClientWSTimeout(ws_close=10, ws_receive=60),  # pyright: ignore[reportCallIssue]
-                    )
-                    # Reset backoff on successful connect
-                    backoff = 1.0
-                    player = Player(self, request=None, url=url, wsock_client=wsock)
-                    _ = await player.handle_client()
+                    ) as wsock:
+                        # Reset backoff on successful connect
+                        backoff = 1.0
+                        player = Player(self, request=None, url=url, wsock_client=wsock)
+                        _ = await player.handle_client()
                 except asyncio.CancelledError:
                     break
                 except TimeoutError:
