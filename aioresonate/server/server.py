@@ -38,7 +38,7 @@ class ResonateServer:
 
     _players: set[Player]
     _groups: set[PlayerGroup]
-    loop: asyncio.AbstractEventLoop
+    _loop: asyncio.AbstractEventLoop
     _event_cbs: list[Callable[[ResonateEvent], Coroutine[None, None, None]]]
     _connection_tasks: dict[str, asyncio.Task[None]]
     _retry_events: dict[str, asyncio.Event]
@@ -60,12 +60,12 @@ class ResonateServer:
         """Initialize a new Resonate Server."""
         self._players = set()
         self._groups = set()
-        self.loop = loop
+        self._loop = loop
         self._event_cbs = []
         self._id = server_id
         self._name = server_name
         if client_session is None:
-            self._client_session = ClientSession(loop=loop)
+            self._client_session = ClientSession(loop=self._loop)
             self._owns_session = True
         else:
             self._client_session = client_session
@@ -76,6 +76,11 @@ class ResonateServer:
         self._app_runner = None
         self._tcp_site = None
         logger.debug("ResonateServer initialized: id=%s, name=%s", server_id, server_name)
+
+    @property
+    def loop(self) -> asyncio.AbstractEventLoop:
+        """Read-only access to the event loop used by this server."""
+        return self._loop
 
     async def on_player_connect(self, request: web.Request) -> web.StreamResponse:
         """Handle an incoming WebSocket connection from a Resonate client."""
@@ -109,7 +114,9 @@ class ResonateServer:
         else:
             # Create retry event for this connection
             self._retry_events[url] = asyncio.Event()
-            self._connection_tasks[url] = self.loop.create_task(self._handle_player_connection(url))
+            self._connection_tasks[url] = self._loop.create_task(
+                self._handle_player_connection(url)
+            )
 
     def disconnect_from_player(self, url: str) -> None:
         """
@@ -203,7 +210,7 @@ class ResonateServer:
 
     def _signal_event(self, event: ResonateEvent) -> None:
         for cb in self._event_cbs:
-            _ = self.loop.create_task(cb(event))
+            _ = self._loop.create_task(cb(event))
 
     def _on_player_add(self, player: Player) -> None:
         """
