@@ -36,18 +36,45 @@ class ResonateServer:
     """Resonate Server implementation to connect to and manage many Resonate Players."""
 
     _players: set[Player]
+    """All players currently connected to this server.
+
+    This excludes players that are technically connected, but did not complete the handshake.
+    """
     _groups: set[PlayerGroup]
+    """
+    All groups managed by this server.
+    """
     _loop: asyncio.AbstractEventLoop
     _event_cbs: list[Callable[[ResonateEvent], Coroutine[None, None, None]]]
     _connection_tasks: dict[str, asyncio.Task[None]]
+    """
+    All tasks managing player connections.
+
+    This only includes connections initiated via connect_to_player (Server -> Player).
+    """
     _retry_events: dict[str, asyncio.Event]
+    """
+    For each connection task in _connection_tasks, this holds an asyncio.Event.
+
+    This event is used to signal an immediate retry of the connection, in case the connection is
+    sleeping during a backoff period.
+    """
     _id: str
     _name: str
     _client_session: ClientSession
+    """The client session used to connect to players."""
     _owns_session: bool
+    """Whether this server instance owns the client session."""
     _app: web.Application | None
+    """
+    Web application instance for the server.
+
+    This is used to handle incoming WebSocket connections from players.
+    """
     _app_runner: web.AppRunner | None
+    """App runner for the web application."""
     _tcp_site: web.TCPSite | None
+    """TCP site for the web application."""
 
     def __init__(
         self,
@@ -56,7 +83,16 @@ class ResonateServer:
         server_name: str,
         client_session: ClientSession | None = None,
     ) -> None:
-        """Initialize a new Resonate Server."""
+        """
+        Initialize a new Resonate Server.
+
+        Args:
+            loop: The asyncio event loop to use for asynchronous operations.
+            server_id: Unique identifier for this server instance.
+            server_name: Human-readable name for this server.
+            client_session: Optional ClientSession for outgoing connections.
+                If None, a new session will be created.
+        """
         self._players = set()
         self._groups = set()
         self._loop = loop
@@ -87,20 +123,24 @@ class ResonateServer:
 
         player = Player(
             self,
-            on_player_add=self._on_player_add,
-            on_player_remove=self._on_player_remove,
+            handle_player_connect=self._handle_player_connect,
+            handle_player_disconnect=self._handle_player_disconnect,
             request=request,
         )
         await player.handle_client()
 
-        return player.wsock_server
+        websocket = player.websocket_connection
+        # This is a WebSocketResponse since we just created player
+        # as client-initiated.
+        assert isinstance(websocket, web.WebSocketResponse)
+        return websocket
 
     def connect_to_player(self, url: str) -> None:
         """
         Connect to the Resonate player at the given URL.
 
-        Calling this will start a new connection with the player.
-        In case a connection already exists for this URL, nothing will happen.
+        If an active connection already exists for this URL, nothing will happen.
+        In case a connection attempt fails, a new connection will be attempted automatically.
         """
         logger.debug("Connecting to player at URL: %s", url)
         prev_task = self._connection_tasks.get(url)
@@ -152,8 +192,8 @@ class ResonateServer:
                         backoff = 1.0
                         player = Player(
                             self,
-                            on_player_add=self._on_player_add,
-                            on_player_remove=self._on_player_remove,
+                            handle_player_connect=self._handle_player_connect,
+                            handle_player_disconnect=self._handle_player_disconnect,
                             wsock_client=wsock,
                         )
                         await player.handle_client()
@@ -208,12 +248,13 @@ class ResonateServer:
         return lambda: self._event_cbs.remove(callback)
 
     def _signal_event(self, event: ResonateEvent) -> None:
+        """Signal an event to all registered listeners."""
         for cb in self._event_cbs:
             _ = self._loop.create_task(cb(event))
 
-    def _on_player_add(self, player: Player) -> None:
+    def _handle_player_connect(self, player: Player) -> None:
         """
-        Register the player to the server and notify that the player connected.
+        Register the player to the server.
 
         Should only be called once all data like the player id was received.
         """
@@ -224,7 +265,8 @@ class ResonateServer:
         self._players.add(player)
         self._signal_event(PlayerAddedEvent(player.player_id))
 
-    def _on_player_remove(self, player: Player) -> None:
+    def _handle_player_disconnect(self, player: Player) -> None:
+        """Unregister the player from the server."""
         if player not in self._players:
             return
 
@@ -249,7 +291,7 @@ class ResonateServer:
 
     @property
     def groups(self) -> set[PlayerGroup]:
-        """Get the set of all groups."""
+        """Get the set of all groups managed by this server."""
         return self._groups
 
     @property
@@ -263,7 +305,7 @@ class ResonateServer:
         return self._name
 
     async def start_server(self, port: int = 8927, host: str = "0.0.0.0") -> None:
-        """Start the HTTP server to handle incoming resonate connections on /resonate."""
+        """Start a HTTP server to handle incoming resonate connections on /resonate."""
         if self._app is not None:
             logger.warning("Server is already running")
             return

@@ -61,43 +61,74 @@ class Player:
     """
 
     _server: "ResonateServer"
+    """Reference to the ResonateServer instance this player belongs to."""
     _wsock_client: ClientWebSocketResponse | None = None
+    """
+    WebSocket connection from the server to the client.
+
+    This is only set for server-initiated connections.
+    """
     _wsock_server: web.WebSocketResponse | None = None
+    """WebSocket connection from the client to the server.
+
+    This is only set for client-initiated connections.
+    """
     _request: web.Request | None = None
+    """Web Request used for client-initiated connections.
+
+    This is only set for client-initiated connections.
+    """
     _player_id: str | None = None
     _player_info: client_messages.ClientHelloPayload | None = None
-    # Task responsible for sending audio and other data
     _writer_task: asyncio.Task[None] | None = None
+    """
+    Task responsible for sending json and binary data.
+    """
     _to_write: asyncio.Queue[server_messages.ServerMessage | bytes]
+    """
+    Queue for messages to be sent to the player through the WebSocket.
+    """
     _group: PlayerGroup
     _event_cbs: list[Callable[[PlayerEvent], Coroutine[None, None, None]]]
     _volume: int = 100
     _muted: bool = False
-    _on_player_add: Callable[["Player"], None]
-    _on_player_remove: Callable[["Player"], None]
+    _handle_player_connect: Callable[["Player"], None]
+    _handle_player_disconnect: Callable[["Player"], None]
     _logger: logging.Logger
 
     def __init__(
         self,
         server: "ResonateServer",
-        on_player_add: Callable[["Player"], None],
-        on_player_remove: Callable[["Player"], None],
+        handle_player_connect: Callable[["Player"], None],
+        handle_player_disconnect: Callable[["Player"], None],
         request: web.Request | None = None,
         wsock_client: ClientWebSocketResponse | None = None,
     ) -> None:
-        """Do not call this constructor.
+        """
+        DO NOT CALL THIS CONSTRUCTOR. INTERNAL USE ONLY.
 
         Use ResonateServer.on_player_connect or ResonateServer.connect_to_player instead.
+
+        Args:
+            server: The ResonateServer instance this player belongs to.
+            handle_player_connect: Callback function called when the player's handshake is complete.
+            handle_player_disconnect: Callback function called when the player disconnects.
+            request: Optional web request object for client-initiated connections.
+                Only one of request or wsock_client must be provided.
+            wsock_client: Optional client WebSocket response for server-initiated connections.
+                Only one of request or wsock_client must be provided.
         """
         self._server = server
-        self._on_player_add = on_player_add
-        self._on_player_remove = on_player_remove
+        self._handle_player_connect = handle_player_connect
+        self._handle_player_disconnect = handle_player_disconnect
         if request is not None:
+            assert wsock_client is None
             self._request = request
             self._wsock_server = web.WebSocketResponse(heartbeat=55)
             self._logger = logger.getChild(f"unknown-{self._request.remote}")
             self._logger.debug("Player initialized")
         elif wsock_client is not None:
+            assert request is None
             self._logger = logger.getChild("unknown-client")
             self._wsock_client = wsock_client
         else:
@@ -107,7 +138,7 @@ class Player:
         self._event_cbs = []
 
     async def disconnect(self) -> None:
-        """Disconnect client and cancel tasks."""
+        """Disconnect this player from the server."""
         self._logger.debug("Disconnecting client")
 
         # Cancel running tasks
@@ -125,7 +156,7 @@ class Player:
             _ = await self._wsock_server.close()
 
         if self._player_id is not None:
-            self._on_player_remove(self)
+            self._handle_player_disconnect(self)
 
         self._logger.info("Client disconnected")
 
@@ -154,15 +185,19 @@ class Player:
         return self._player_info
 
     @property
-    def wsock_server(self) -> web.WebSocketResponse:
-        """Server-side WebSocket response."""
-        assert self._wsock_server is not None, "Player was not created from server request"
-        return self._wsock_server
+    def websocket_connection(self) -> web.WebSocketResponse | ClientWebSocketResponse:
+        """Returns the active WebSocket connection for this player.
+
+        This provides access to the underlying WebSocket connection, which can be
+        either a server-side WebSocketResponse (for client-initiated connections)
+        or a ClientWebSocketResponse (for server-initiated connections).
+        """
+        wsock = self._wsock_server or self._wsock_client
+        assert wsock is not None
+        return wsock
 
     def set_volume(self, volume: int) -> None:
         """Set the volume of this player."""
-        if self._volume == volume:
-            return
         self._logger.debug("Setting volume from %d to %d", self._volume, volume)
         self.send_message(
             server_messages.VolumeSetMessage(server_messages.VolumeSetPayload(volume))
@@ -170,15 +205,11 @@ class Player:
 
     def mute(self) -> None:
         """Mute this player."""
-        if self._muted:
-            return
         self._logger.debug("Muting player")
         self.send_message(server_messages.MuteSetMessage(server_messages.MuteSetPayload(mute=True)))
 
     def unmute(self) -> None:
         """Unmute this player."""
-        if not self._muted:
-            return
         self._logger.debug("Unmuting player")
         self.send_message(
             server_messages.MuteSetMessage(server_messages.MuteSetPayload(mute=False))
@@ -195,7 +226,8 @@ class Player:
         return self._volume
 
     def ungroup(self) -> None:
-        """Remove the player from the group.
+        """
+        Remove the player from the group.
 
         If the player is already alone, this function does nothing.
         """
@@ -206,7 +238,7 @@ class Player:
             self._logger.debug("Player already alone in group, no ungrouping needed")
 
     async def _setup_connection(self) -> None:
-        """Establish WebSocket connection and return remote address."""
+        """Establish WebSocket connection."""
         if self._wsock_server is not None:
             assert self._request is not None
             try:
@@ -299,6 +331,7 @@ class Player:
 
     async def handle_client(self) -> None:
         """Handle the websocket connection."""
+        # TODO: make this private
         try:
             # Establish connection and setup
             await self._setup_connection()
@@ -318,7 +351,7 @@ class Player:
                 self._player_id = player_info.client_id
                 self._logger.info("Player ID set to %s", self._player_id)
                 self._logger = logger.getChild(self._player_id)
-                self._on_player_add(self)
+                self._handle_player_connect(self)
             case client_messages.PlayerStateMessage(state):
                 if not self._player_id:
                     self._logger.warning("Received player/state before session/hello")
@@ -389,6 +422,7 @@ class Player:
 
     def send_message(self, message: server_messages.ServerMessage | bytes) -> None:
         """Enqueue a JSON or binary message to be sent to the client."""
+        # TODO: make this private
         # TODO: handle full queue
         if isinstance(message, bytes):
             # Only log binary messages occasionally to reduce spam
