@@ -4,7 +4,6 @@ import asyncio
 import logging
 from collections.abc import Callable, Coroutine
 from dataclasses import dataclass
-from typing import cast
 
 from aiohttp import ClientConnectionError, ClientWSTimeout, web
 from aiohttp.client import ClientSession
@@ -93,8 +92,8 @@ class ResonateServer:
             request=request,
         )
         await player.handle_client()
-        # TODO: remove this cast
-        return cast("web.StreamResponse", player._wsock_server)  # noqa: SLF001
+
+        return player.wsock_server
 
     def connect_to_player(self, url: str) -> None:
         """

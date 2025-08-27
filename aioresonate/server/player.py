@@ -153,6 +153,12 @@ class Player:
         assert self._player_info  # Player should be fully initialized by now
         return self._player_info
 
+    @property
+    def wsock_server(self) -> web.WebSocketResponse:
+        """Server-side WebSocket response."""
+        assert self._wsock_server is not None, "Player was not created from server request"
+        return self._wsock_server
+
     def set_volume(self, volume: int) -> None:
         """Set the volume of this player."""
         if self._volume == volume:
