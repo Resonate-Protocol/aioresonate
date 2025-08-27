@@ -5,7 +5,7 @@ import logging
 import struct
 from collections.abc import Callable, Coroutine
 from contextlib import suppress
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from aiohttp import ClientWebSocketResponse, WSMessage, WSMsgType, web
 from attr import dataclass
@@ -298,7 +298,7 @@ class Player:
 
                 try:
                     await self._handle_message(
-                        client_messages.ClientMessage.from_json(msg.data), timestamp
+                        client_messages.ClientMessage.from_json(cast("str", msg.data)), timestamp
                     )
                 except Exception:
                     self._logger.exception("error parsing message")
