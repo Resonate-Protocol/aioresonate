@@ -4,8 +4,9 @@ import asyncio
 import logging
 from collections.abc import Callable, Coroutine
 from dataclasses import dataclass
+from typing import cast
 
-from aiohttp import ClientConnectionError, ClientWebSocketResponse, ClientWSTimeout, web
+from aiohttp import ClientConnectionError, ClientWSTimeout, web
 from aiohttp.client import ClientSession
 
 from .group import PlayerGroup
@@ -45,6 +46,9 @@ class ResonateServer:
     _name: str
     _client_session: ClientSession
     _owns_session: bool
+    _app: web.Application | None
+    _app_runner: web.AppRunner | None
+    _tcp_site: web.TCPSite | None
 
     def __init__(
         self,
@@ -68,20 +72,17 @@ class ResonateServer:
             self._owns_session = False
         self._connection_tasks = {}
         self._retry_events = {}
+        self._app = None
+        self._app_runner = None
+        self._tcp_site = None
         logger.debug("ResonateServer initialized: id=%s, name=%s", server_id, server_name)
 
-    async def on_player_connect(
-        self, request: web.Request
-    ) -> web.WebSocketResponse | ClientWebSocketResponse:
+    async def on_player_connect(self, request: web.Request) -> web.StreamResponse:
         """Handle an incoming WebSocket connection from a Resonate client."""
         logger.debug("Incoming player connection from %s", request.remote)
         player = Player(self, request=request, url=None, wsock_client=None)
-        # TODO: only add once we know its id, see connect_to_player
-        try:
-            self._players.add(player)
-            return await player.handle_client()
-        finally:
-            self._players.remove(player)
+        # TODO: remove this cast
+        return cast("web.StreamResponse", await player.handle_client())
 
     def connect_to_player(self, url: str) -> None:
         """
@@ -243,8 +244,54 @@ class ResonateServer:
         """Get the name of this server."""
         return self._name
 
+    async def start_server(self, port: int = 8927, host: str = "0.0.0.0") -> None:  # noqa: S104
+        """Start the HTTP server to handle incoming resonate connections on /resonate."""
+        if self._app is not None:
+            logger.warning("Server is already running")
+            return
+
+        logger.info("Starting Resonate server on port %d", port)
+        self._app = web.Application()
+        self._app_runner = web.AppRunner(self._app)
+        await self._app_runner.setup()
+
+        try:
+            self._tcp_site = web.TCPSite(
+                self._app_runner,
+                host=host if host != "0.0.0.0" else None,  # noqa: S104
+                port=port,
+            )
+            await self._tcp_site.start()
+            logger.info("Resonate server started successfully on %s:%d", host, port)
+        except OSError as e:
+            logger.error("Failed to start server on %s:%d: %s", host, port, e)
+            if self._app_runner:
+                await self._app_runner.cleanup()
+                self._app_runner = None
+            if self._app:
+                await self._app.shutdown()
+                self._app = None
+            raise
+
+    async def stop_server(self) -> None:
+        """Stop the HTTP server."""
+        if self._tcp_site:
+            await self._tcp_site.stop()
+            self._tcp_site = None
+            logger.debug("TCP site stopped")
+
+        if self._app_runner:
+            await self._app_runner.cleanup()
+            self._app_runner = None
+            logger.debug("App runner cleaned up")
+
+        if self._app:
+            await self._app.shutdown()
+            self._app = None
+
     async def close(self) -> None:
         """Close the server and cleanup resources."""
+        await self.stop_server()
         if self._owns_session and not self._client_session.closed:
             await self._client_session.close()
             logger.debug("Closed internal client session for server %s", self._name)
