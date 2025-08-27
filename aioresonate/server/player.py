@@ -64,7 +64,6 @@ class Player:
     wsock_client: ClientWebSocketResponse | None = None
     wsock_server: web.WebSocketResponse | None = None
     request: web.Request | None = None
-    url: str | None = None
     _player_id: str | None = None
     player_info: client_messages.ClientHelloPayload | None = None
     # Task responsible for sending audio and other data
