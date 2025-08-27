@@ -2,7 +2,6 @@
 
 import asyncio
 import logging
-import struct
 from collections.abc import Callable, Coroutine
 from contextlib import suppress
 from typing import TYPE_CHECKING, cast
@@ -391,17 +390,18 @@ class Player:
                 item = await self._to_write.get()
 
                 if isinstance(item, bytes):
-                    _, timestamp_us, _ = struct.unpack(models.BINARY_HEADER_FORMAT, item[:13])
+                    # Unpack binary header using helper function
+                    header = models.unpack_binary_header(item)
                     now = int(self._server.loop.time() * 1_000_000)
-                    if timestamp_us - now < 0:
+                    if header.timestamp_us - now < 0:
                         self._logger.error(
                             "Audio chunk after should have played already, skipping it"
                         )
                         continue
-                    if timestamp_us - now < 500_000:
+                    if header.timestamp_us - now < 500_000:
                         self._logger.warning(
                             "sending audio chunk that needs to be played very soon (in %d us)",
-                            (timestamp_us - now),
+                            (header.timestamp_us - now),
                         )
                     await wsock.send_bytes(item)
                 else:

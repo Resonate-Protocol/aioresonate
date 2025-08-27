@@ -2,7 +2,6 @@
 
 import asyncio
 import logging
-import struct
 from asyncio import Task
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass
@@ -11,7 +10,7 @@ from uuid import uuid4
 
 import av
 
-from aioresonate.models import BINARY_HEADER_FORMAT, BinaryMessageType, server_messages
+from aioresonate.models import BinaryMessageType, pack_binary_header_raw, server_messages
 
 # The cyclic import is not an issue during runtime, so hide it
 # pyright: reportImportCycles=none
@@ -372,8 +371,7 @@ class PlayerGroup:
         if len(out_frames[0].planes) != 1:
             logger.warning("resampling resulted in %s planes", len(out_frames[0].planes))
 
-        header = struct.pack(
-            BINARY_HEADER_FORMAT,
+        header = pack_binary_header_raw(
             BinaryMessageType.PlayAudioChunk.value,
             chunk_timestamp_us,
             sample_count,
