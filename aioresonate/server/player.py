@@ -65,7 +65,7 @@ class Player:
     _wsock_server: web.WebSocketResponse | None = None
     _request: web.Request | None = None
     _player_id: str | None = None
-    player_info: client_messages.ClientHelloPayload | None = None
+    _player_info: client_messages.ClientHelloPayload | None = None
     # Task responsible for sending audio and other data
     _writer_task: asyncio.Task[None] | None = None
     _to_write: asyncio.Queue[server_messages.ServerMessage | bytes]
@@ -144,14 +144,14 @@ class Player:
     @property
     def name(self) -> str:
         """The human-readable name of this Player."""
-        assert self.player_info  # Player should be fully initialized by now
-        return self.player_info.name
+        assert self._player_info  # Player should be fully initialized by now
+        return self._player_info.name
 
     @property
     def info(self) -> client_messages.ClientHelloPayload:
         """List of information and capabilities reported by this player."""
-        assert self.player_info  # Player should be fully initialized by now
-        return self.player_info
+        assert self._player_info  # Player should be fully initialized by now
+        return self._player_info
 
     def set_volume(self, volume: int) -> None:
         """Set the volume of this player."""
@@ -308,7 +308,7 @@ class Player:
         match message:
             case client_messages.ClientHelloMessage(player_info):
                 self._logger.info("Received session/hello")
-                self.player_info = player_info
+                self._player_info = player_info
                 self._player_id = player_info.client_id
                 self._logger.info("Player ID set to %s", self._player_id)
                 self._logger = logger.getChild(self._player_id)
