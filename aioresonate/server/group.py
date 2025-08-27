@@ -156,9 +156,7 @@ class PlayerGroup:
 
     def _send_session_end_msg(self, player: "Player") -> None:
         logger.debug("ending session for %s (%s)", player.name, player.player_id)
-        player.send_message(
-            server_messages.SessionEndMessage(server_messages.SessionEndPayload(player.player_id))
-        )
+        player.send_message(server_messages.SessionEndMessage(server_messages.SessionEndPayload()))
 
     async def set_metadata(self, metadata: dict[str, str]) -> None:
         """Send a metadata/update message to all players in the group."""
