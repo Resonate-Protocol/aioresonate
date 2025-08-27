@@ -288,25 +288,17 @@ class Player:
             if receive_task and not receive_task.done():
                 _ = receive_task.cancel()
 
-    async def _cleanup_connection(
-        self, remote_addr: str, receive_task: asyncio.Task[WSMessage] | None
-    ) -> None:
+    async def _cleanup_connection(self, remote_addr: str) -> None:
         """Clean up WebSocket connection and tasks."""
         wsock = self.wsock
         try:
             _ = await wsock.close()
         except Exception:
             logger.exception("Failed to close websocket for %s", remote_addr)
-        try:
-            if receive_task and not receive_task.done():
-                _ = receive_task.cancel()
-        except Exception:
-            logger.exception("Error cancelling receive task for %s", remote_addr)
         await self.disconnect()
 
     async def handle_client(self) -> web.WebSocketResponse | ClientWebSocketResponse:
         """Handle the websocket connection."""
-        receive_task: asyncio.Task[WSMessage] | None = None
         try:
             # Establish connection and setup
             remote_addr = await self._setup_connection()
@@ -322,7 +314,7 @@ class Player:
             remote_addr_for_cleanup = getattr(self, "url", None) or (
                 self.request.remote if hasattr(self, "request") else "unknown"
             )
-            await self._cleanup_connection(remote_addr_for_cleanup or "unknown", receive_task)
+            await self._cleanup_connection(remote_addr_for_cleanup or "unknown")
 
         return self.wsock
 
