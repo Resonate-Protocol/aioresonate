@@ -63,7 +63,7 @@ class Player:
     _server: "ResonateServer"
     request: web.Request
     wsock: web.WebSocketResponse | ClientWebSocketResponse
-    url: str | None
+    url: str | None = None
     _player_id: str | None = None
     player_info: client_messages.PlayerHelloPayload | None = None
     # Task responsible for sending audio and other data
