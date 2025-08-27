@@ -161,7 +161,7 @@ class ResonateServer:
         connection_task = self._connection_tasks.pop(url, None)
         if connection_task is not None:
             logger.debug("Disconnecting from player at URL: %s", url)
-            _ = connection_task.cancel()
+            _ = connection_task.cancel()  # Don't care about cancellation result
 
     async def _handle_player_connection(self, url: str) -> None:
         """Handle the actual connection to a player."""
@@ -207,7 +207,8 @@ class ResonateServer:
                 # Use asyncio.wait_for with the retry event to allow immediate retry
                 if retry_event is not None:
                     try:
-                        await asyncio.wait_for(retry_event.wait(), timeout=backoff)
+                        # Always returns True when event is set
+                        _ = await asyncio.wait_for(retry_event.wait(), timeout=backoff)
                         logger.debug("Immediate retry requested for %s", url)
                         # Clear the event for next time
                         retry_event.clear()
@@ -222,8 +223,8 @@ class ResonateServer:
         except asyncio.CancelledError:
             pass
         finally:
-            self._connection_tasks.pop(url, None)
-            self._retry_events.pop(url, None)
+            _ = self._connection_tasks.pop(url, None)  # Cleanup connection tasks dict
+            _ = self._retry_events.pop(url, None)  # Cleanup retry events dict
 
     def add_event_listener(
         self, callback: Callable[[ResonateEvent], Coroutine[None, None, None]]
@@ -242,7 +243,7 @@ class ResonateServer:
     def _signal_event(self, event: ResonateEvent) -> None:
         """Signal an event to all registered listeners."""
         for cb in self._event_cbs:
-            _ = self._loop.create_task(cb(event))
+            _ = self._loop.create_task(cb(event))  # Fire and forget event callback
 
     def _handle_player_connect(self, player: Player) -> None:
         """Register the player to the server.

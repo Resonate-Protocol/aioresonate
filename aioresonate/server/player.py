@@ -137,16 +137,16 @@ class Player:
         # Cancel running tasks
         if self._writer_task and not self._writer_task.done():
             self._logger.debug("Cancelling writer task")
-            _ = self._writer_task.cancel()
+            _ = self._writer_task.cancel()  # Don't care about cancellation result
             with suppress(asyncio.CancelledError):
                 await self._writer_task
         # Handle task is cancelled implicitly when wsock closes or externally
 
         # Close websocket
         if self._wsock_client is not None and not self._wsock_client.closed:
-            _ = await self._wsock_client.close()
+            _ = await self._wsock_client.close()  # Don't care about close result
         elif self._wsock_server is not None and not self._wsock_server.closed:
-            _ = await self._wsock_server.close()
+            _ = await self._wsock_server.close()  # Don't care about close result
 
         if self._player_id is not None:
             self._handle_player_disconnect(self)
@@ -235,6 +235,7 @@ class Player:
             assert self._request is not None
             try:
                 async with asyncio.timeout(10):
+                    # Prepare response, writer not needed
                     _ = await self._wsock_server.prepare(self._request)
             except TimeoutError:
                 self._logger.warning("Timeout preparing request")
@@ -277,7 +278,7 @@ class Player:
                     self._logger.warning("Writer task ended, closing connection")
                     # Cancel the receive task if it's still pending
                     if receive_task in pending:
-                        _ = receive_task.cancel()
+                        _ = receive_task.cancel()  # Don't care about cancellation result
                     break
 
                 # Get the message from the completed receive task
@@ -309,14 +310,14 @@ class Player:
             self._logger.exception("Unexpected error inside websocket API")
         finally:
             if receive_task and not receive_task.done():
-                _ = receive_task.cancel()
+                _ = receive_task.cancel()  # Don't care about cancellation result
 
     async def _cleanup_connection(self) -> None:
         """Clean up WebSocket connection and tasks."""
         wsock = self._wsock_client or self._wsock_server
         try:
             if wsock and not wsock.closed:
-                _ = await wsock.close()
+                _ = await wsock.close()  # Don't care about close result
         except Exception:
             self._logger.exception("Failed to close websocket")
         await self.disconnect()
@@ -442,4 +443,4 @@ class Player:
 
     def _signal_event(self, event: PlayerEvent) -> None:
         for cb in self._event_cbs:
-            _ = self._server.loop.create_task(cb(event))
+            _ = self._server.loop.create_task(cb(event))  # Fire and forget event callback

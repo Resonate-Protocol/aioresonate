@@ -247,7 +247,7 @@ class PlayerGroup:
             "Stopping playback for group with players: %s",
             [p.player_id for p in self._players],
         )
-        _ = self._stream_task.cancel()
+        _ = self._stream_task.cancel()  # Don't care about cancellation result
         for player in self._players:
             self._send_session_end_msg(player)
             del self._player_formats[player.player_id]
