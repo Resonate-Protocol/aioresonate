@@ -80,17 +80,16 @@ class ResonateServer:
     async def on_player_connect(self, request: web.Request) -> web.StreamResponse:
         """Handle an incoming WebSocket connection from a Resonate client."""
         logger.debug("Incoming player connection from %s", request.remote)
+
         player = Player(
             self,
-            request=request,
-            url=None,
-            wsock_client=None,
             on_player_add=self._on_player_add,
             on_player_remove=self._on_player_remove,
+            request=request,
         )
-        # TODO: remove this cast
         await player.handle_client()
-        return cast("web.StreamResponse", player.wsock)
+        # TODO: remove this cast
+        return cast("web.StreamResponse", player.wsock_server)
 
     def connect_to_player(self, url: str) -> None:
         """
@@ -147,11 +146,9 @@ class ResonateServer:
                         backoff = 1.0
                         player = Player(
                             self,
-                            request=None,
-                            url=url,
-                            wsock_client=wsock,
                             on_player_add=self._on_player_add,
                             on_player_remove=self._on_player_remove,
+                            wsock_client=wsock,
                         )
                         await player.handle_client()
                 except asyncio.CancelledError:

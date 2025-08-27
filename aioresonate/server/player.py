@@ -61,8 +61,9 @@ class Player:
     """
 
     _server: "ResonateServer"
-    request: web.Request
-    wsock: web.WebSocketResponse | ClientWebSocketResponse
+    wsock_client: ClientWebSocketResponse | None = None
+    wsock_server: web.WebSocketResponse | None = None
+    request: web.Request | None = None
     url: str | None = None
     _player_id: str | None = None
     player_info: client_messages.ClientHelloPayload | None = None
@@ -76,15 +77,15 @@ class Player:
     _muted: bool = False
     _on_player_add: Callable[["Player"], None]
     _on_player_remove: Callable[["Player"], None]
+    logger: logging.Logger
 
     def __init__(
         self,
         server: "ResonateServer",
-        request: web.Request | None,
-        url: str | None,
-        wsock_client: ClientWebSocketResponse | None,
         on_player_add: Callable[["Player"], None],
         on_player_remove: Callable[["Player"], None],
+        request: web.Request | None = None,
+        wsock_client: ClientWebSocketResponse | None = None,
     ) -> None:
         """Do not call this constructor.
 
@@ -95,37 +96,40 @@ class Player:
         self._on_player_remove = on_player_remove
         if request is not None:
             self.request = request
-            self.wsock = web.WebSocketResponse(heartbeat=55)
-            logger.debug("Player initialized from request: %s", request.remote)
-        elif url is not None:
-            assert wsock_client is not None
-            self.url = url
-            self.wsock = wsock_client
-            logger.debug("Player initialized for URL: %s", url)
+            self.wsock_server = web.WebSocketResponse(heartbeat=55)
+            self.logger = logger.getChild(f"unknown-{self.request.remote}")
+            self.logger.debug("Player initialized")
+        elif wsock_client is not None:
+            self.logger = logger.getChild("unknown-client")
+            self.wsock_client = wsock_client
+        else:
+            raise ValueError("Either request or wsock_client must be provided")
         self._to_write = asyncio.Queue(maxsize=MAX_PENDING_MSG)
         self._group = PlayerGroup(server, self)
         self._event_cbs = []
 
     async def disconnect(self) -> None:
         """Disconnect client and cancel tasks."""
-        logger.debug("Disconnecting client %s", self.player_id or self.request.remote)
+        self.logger.debug("Disconnecting client")
 
         # Cancel running tasks
         if self._writer_task and not self._writer_task.done():
-            logger.debug("Cancelling writer task for %s", self.player_id or "unknown")
+            self.logger.debug("Cancelling writer task")
             _ = self._writer_task.cancel()
             with suppress(asyncio.CancelledError):
                 await self._writer_task
         # Handle task is cancelled implicitly when wsock closes or externally
 
         # Close websocket
-        if not self.wsock.closed:
-            _ = await self.wsock.close()
+        if self.wsock_client is not None and not self.wsock_client.closed:
+            _ = await self.wsock_client.close()
+        elif self.wsock_server is not None and not self.wsock_server.closed:
+            _ = await self.wsock_server.close()
 
         if self._player_id is not None:
             self._on_player_remove(self)
 
-        logger.info("Client %s disconnected", self.player_id or self.request.remote)
+        self.logger.info("Client disconnected")
 
     @property
     def group(self) -> PlayerGroup:
@@ -155,7 +159,7 @@ class Player:
         """Set the volume of this player."""
         if self._volume == volume:
             return
-        logger.debug("Setting volume for %s from %d to %d", self.player_id, self._volume, volume)
+        self.logger.debug("Setting volume from %d to %d", self._volume, volume)
         self.send_message(
             server_messages.VolumeSetMessage(server_messages.VolumeSetPayload(volume))
         )
@@ -164,14 +168,14 @@ class Player:
         """Mute this player."""
         if self._muted:
             return
-        logger.debug("Muting player %s", self.player_id)
+        self.logger.debug("Muting player")
         self.send_message(server_messages.MuteSetMessage(server_messages.MuteSetPayload(mute=True)))
 
     def unmute(self) -> None:
         """Unmute this player."""
         if not self._muted:
             return
-        logger.debug("Unmuting player %s", self.player_id)
+        self.logger.debug("Unmuting player")
         self.send_message(
             server_messages.MuteSetMessage(server_messages.MuteSetPayload(mute=False))
         )
@@ -192,33 +196,29 @@ class Player:
         If the player is already alone, this function does nothing.
         """
         if len(self._group.players) > 1:
-            logger.debug("Ungrouping player %s from group", self.player_id)
+            self.logger.debug("Ungrouping player from group")
             self._group.remove_player(self)
         else:
-            logger.debug("Player %s already alone in group, no ungrouping needed", self.player_id)
+            self.logger.debug("Player already alone in group, no ungrouping needed")
 
-    async def _setup_connection(self) -> str:
+    async def _setup_connection(self) -> None:
         """Establish WebSocket connection and return remote address."""
-        wsock = self.wsock
-        if self.url is None:
-            assert isinstance(wsock, web.WebSocketResponse)
-            remote_addr = self.request.remote or "Unknown"
+        if self.wsock_server is not None:
+            assert self.request is not None
             try:
                 async with asyncio.timeout(10):
-                    _ = await wsock.prepare(self.request)
+                    _ = await self.wsock_server.prepare(self.request)
             except TimeoutError:
-                logger.warning("Timeout preparing request from %s", remote_addr)
+                self.logger.warning("Timeout preparing request")
                 raise
-        else:
-            remote_addr = self.url
 
-        logger.info("Connection established with %s", remote_addr)
+        self.logger.info("Connection established")
 
-        logger.debug("Creating writer task for %s", remote_addr)
+        self.logger.debug("Creating writer task")
         self._writer_task = self._server.loop.create_task(self._writer())
 
         # Send Server Hello
-        logger.debug("Sending server hello to %s", remote_addr)
+        self.logger.debug("Sending server hello")
         self.send_message(
             server_messages.ServerHelloMessage(
                 payload=server_messages.ServerHelloPayload(
@@ -228,11 +228,10 @@ class Player:
             )
         )
 
-        return remote_addr
-
-    async def _run_message_loop(self, remote_addr: str) -> None:
+    async def _run_message_loop(self) -> None:
         """Run the main message processing loop."""
-        wsock = self.wsock
+        wsock = self.wsock_server or self.wsock_client
+        assert wsock is not None
         receive_task: asyncio.Task[WSMessage] | None = None
         # Listen for all incoming messages
         try:
@@ -247,11 +246,7 @@ class Player:
                 )
 
                 if self._writer_task in done:
-                    logger.warning(
-                        "Writer task ended for player %s at %s, closing connection",
-                        self._player_id or "unknown",
-                        remote_addr,
-                    )
+                    self.logger.warning("Writer task ended, closing connection")
                     # Cancel the receive task if it's still pending
                     if receive_task in pending:
                         _ = receive_task.cancel()
@@ -261,7 +256,7 @@ class Player:
                 try:
                     msg = await receive_task
                 except (ConnectionError, asyncio.CancelledError, TimeoutError) as e:
-                    logger.error("Error receiving message from %s: %s", remote_addr, e)
+                    self.logger.error("Error receiving message: %s", e)
                     break
 
                 timestamp = int(self._server.loop.time() * 1_000_000)
@@ -277,59 +272,57 @@ class Player:
                         client_messages.ClientMessage.from_json(msg.data), timestamp
                     )
                 except Exception:
-                    logger.exception("error parsing message from %s", remote_addr)
-            logger.debug("wsock was closed for %s", remote_addr)
+                    self.logger.exception("error parsing message")
+            self.logger.debug("wsock was closed")
 
         except asyncio.CancelledError:
-            logger.debug("Connection closed by client")
+            self.logger.debug("Connection closed by client")
         except Exception:
-            logger.exception("Unexpected error inside websocket API")
+            self.logger.exception("Unexpected error inside websocket API")
         finally:
             if receive_task and not receive_task.done():
                 _ = receive_task.cancel()
 
-    async def _cleanup_connection(self, remote_addr: str) -> None:
+    async def _cleanup_connection(self) -> None:
         """Clean up WebSocket connection and tasks."""
-        wsock = self.wsock
+        wsock = self.wsock_client or self.wsock_server
         try:
-            _ = await wsock.close()
+            if wsock and not wsock.closed:
+                _ = await wsock.close()
         except Exception:
-            logger.exception("Failed to close websocket for %s", remote_addr)
+            self.logger.exception("Failed to close websocket")
         await self.disconnect()
 
     async def handle_client(self) -> None:
         """Handle the websocket connection."""
         try:
             # Establish connection and setup
-            remote_addr = await self._setup_connection()
+            await self._setup_connection()
 
             # Run the main message loop
-            await self._run_message_loop(remote_addr)
+            await self._run_message_loop()
         finally:
             # Clean up connection and tasks
-            remote_addr_for_cleanup = getattr(self, "url", None) or (
-                self.request.remote if hasattr(self, "request") else "unknown"
-            )
-            await self._cleanup_connection(remote_addr_for_cleanup or "unknown")
+            await self._cleanup_connection()
 
     async def _handle_message(self, message: client_messages.ClientMessage, timestamp: int) -> None:
         """Handle incoming commands from the client."""
         match message:
             case client_messages.ClientHelloMessage(player_info):
-                logger.info(
-                    "Received session/hello from %s (%s)", player_info.client_id, player_info.name
-                )
+                self.logger.info("Received session/hello")
                 self.player_info = player_info
                 self._player_id = player_info.client_id
+                self.logger.info("Player ID set to %s", self._player_id)
+                self.logger = logger.getChild(self._player_id)
                 self._on_player_add(self)
             case client_messages.PlayerStateMessage(state):
                 if not self._player_id:
-                    logger.warning("Received player/state before session/hello")
+                    self.logger.warning("Received player/state before session/hello")
                     return
-                logger.debug(
+                self.logger.debug(
                     "Received player state: volume=%d, muted=%s", state.volume, state.muted
                 )
-                if self.muted != state.muted or self.volume != state.volume:
+                if self._muted != state.muted or self._volume != state.volume:
                     self._volume = state.volume
                     self._muted = state.muted
                     self._signal_event(VolumeChangedEvent(volume=self._volume, muted=self._muted))
@@ -361,33 +354,34 @@ class Player:
     async def _writer(self) -> None:
         """Write outgoing messages from the queue."""
         # Exceptions if Socket disconnected or cancelled by connection handler
+        wsock = self.wsock_server or self.wsock_client
+        assert wsock is not None
         try:
-            while not self.wsock.closed:
+            while not wsock.closed:
                 item = await self._to_write.get()
 
                 if isinstance(item, bytes):
                     _, timestamp_us, _ = struct.unpack(models.BINARY_HEADER_FORMAT, item[:13])
                     now = int(self._server.loop.time() * 1_000_000)
                     if timestamp_us - now < 0:
-                        logger.error("Audio chunk after should have played already, skipping it")
+                        self.logger.error(
+                            "Audio chunk after should have played already, skipping it"
+                        )
                         continue
                     if timestamp_us - now < 500_000:
-                        logger.warning(
+                        self.logger.warning(
                             "sending audio chunk that needs to be played very soon (in %d us)",
                             (timestamp_us - now),
                         )
-                    await self.wsock.send_bytes(item)
+                    await wsock.send_bytes(item)
                 else:
                     assert isinstance(item, server_messages.ServerMessage)  # for type checking
                     if isinstance(item, server_messages.ServerTimeMessage):
                         item.payload.server_transmitted = int(self._server.loop.time() * 1_000_000)
-                    await self.wsock.send_str(item.to_json())
-            logger.debug(
-                "WebSocket Connection was closed for the player %s, ending writer task",
-                self._player_id or "unknown",
-            )
+                    await wsock.send_str(item.to_json())
+            self.logger.debug("WebSocket Connection was closed for the player, ending writer task")
         except Exception:
-            logger.exception("Error in writer task for player %s", self._player_id or "unknown")
+            self.logger.exception("Error in writer task for player")
 
     def send_message(self, message: server_messages.ServerMessage | bytes) -> None:
         """Enqueue a JSON or binary message to be sent to the client."""
@@ -397,7 +391,7 @@ class Player:
             pass
         elif not isinstance(message, server_messages.ServerTimeMessage):
             # Only log important non-time messages
-            logger.debug("Enqueueing message: %s", type(message).__name__)
+            self.logger.debug("Enqueueing message: %s", type(message).__name__)
         self._to_write.put_nowait(message)
 
     def add_event_listener(
