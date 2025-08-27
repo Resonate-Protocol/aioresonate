@@ -27,27 +27,49 @@ logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class AudioFormat:
-    """LPCM audio format."""
+    """LPCM audio format specification.
+
+    Represents the audio format parameters for uncompressed PCM audio.
+    """
 
     sample_rate: int
+    """Sample rate in Hz (e.g., 44100, 48000)."""
     bit_depth: int
+    """Bit depth in bits per sample (16 or 24)."""
     channels: int
+    """Number of audio channels (1 for mono, 2 for stereo)."""
 
 
 class PlayerGroup:
-    """A group of one or more players."""
+    """A group of one or more players for synchronized playback.
 
-    # In this implementation, every player is always assigned to a group.
-    # This simplifies grouping requests initiated by the player.
+    Handles synchronized audio streaming across multiple players with automatic
+    format conversion and buffer management. Every player is always assigned to
+    a group to simplify grouping requests.
+    """
 
     _players: list["Player"]
+    """List of all players in this group."""
     _player_formats: dict[str, AudioFormat]
+    """Mapping of player IDs to their selected audio formats."""
     _server: "ResonateServer"
+    """Reference to the ResonateServer instance."""
     _stream_task: Task[None] | None = None
+    """Task handling the audio streaming loop, None when not streaming."""
     _stream_audio_format: AudioFormat | None = None
+    """The source audio format for the current stream, None when not streaming."""
 
     def __init__(self, server: "ResonateServer", *args: "Player") -> None:
-        """Do not call this constructor."""
+        """DO NOT CALL THIS CONSTRUCTOR. INTERNAL USE ONLY.
+
+        Groups are managed automatically by the server.
+
+        Initialize a new PlayerGroup.
+
+        Args:
+            server: The ResonateServer instance this group belongs to.
+            *args: Players to add to this group.
+        """
         self._server = server
         self._players = list(args)
         self._player_formats = {}
@@ -62,7 +84,13 @@ class PlayerGroup:
     ) -> None:
         """Start playback of a new media stream.
 
-        The library expects uncompressed PCM audio and will handle encoding.
+        Stops any current stream and starts a new one with the given audio source.
+        The audio source should provide uncompressed PCM audio data.
+        Format conversion and synchronization for all players will be handled automatically.
+
+        Args:
+            audio_source: Async generator yielding PCM audio chunks as bytes.
+            audio_format: Format specification for the input audio data.
         """
         logger.debug("Starting play_media with audio_format: %s", audio_format)
         stopped = self.stop()
@@ -83,7 +111,7 @@ class PlayerGroup:
 
         for player in self._players:
             logger.debug("Selecting format for player %s", player.player_id)
-            player_format = self.select_player_format(player, audio_format)
+            player_format = self.determine_player_format(player, audio_format)
             self._player_formats[player.player_id] = player_format
             logger.debug(
                 "Sending session start to player %s with format %s",
@@ -100,8 +128,20 @@ class PlayerGroup:
             )
         )
 
-    def select_player_format(self, player: "Player", source_format: AudioFormat) -> AudioFormat:
-        """Select the most optimal audio format for the given source."""
+    def determine_player_format(self, player: "Player", source_format: AudioFormat) -> AudioFormat:
+        """Determine the optimal audio format for the given player and source.
+
+        Analyzes the player's capabilities and returns the best matching format,
+        preferring higher quality when available and falling back gracefully.
+
+        Args:
+            player: The player to determine a format for.
+            source_format: The source audio format to match against.
+
+        Returns:
+            AudioFormat: The optimal format for the player.
+        """
+        # TODO: move this to player instead
         support_sample_rates = player.info.support_sample_rates
         support_bit_depth = player.info.support_bit_depth
         support_channels = player.info.support_channels
@@ -138,6 +178,7 @@ class PlayerGroup:
         return AudioFormat(sample_rate, bit_depth, channels)
 
     def _send_session_start_msg(self, player: "Player", audio_format: AudioFormat) -> None:
+        """Send a session start message to a player with the specified audio format."""
         logger.debug(
             "_send_session_start_msg: player=%s, format=%s",
             player.player_id,
@@ -155,34 +196,50 @@ class PlayerGroup:
         player.send_message(server_messages.SessionStartMessage(session_info))
 
     def _send_session_end_msg(self, player: "Player") -> None:
+        """Send a session end message to a player to stop playback."""
         logger.debug("ending session for %s (%s)", player.name, player.player_id)
         player.send_message(server_messages.SessionEndMessage(server_messages.SessionEndPayload()))
 
     async def set_metadata(self, metadata: dict[str, str]) -> None:
-        """Send a metadata/update message to all players in the group."""
+        """Send a metadata update message to all players in the group.
+
+        Args:
+            metadata: Dictionary of metadata key-value pairs to send.
+        """
+        _ = metadata  # TODO: implement metadata sending
         raise NotImplementedError
 
     async def set_media_art(self, art_data: bytes, art_format: str) -> None:
-        """Send a binary media art message to all players in the group."""
+        """Send binary media art data to all players in the group.
+
+        Args:
+            art_data: The binary image data.
+            art_format: The format of the image (e.g., 'jpeg', 'png').
+        """
+        _ = art_data, art_format  # TODO: implement media art sending
         raise NotImplementedError
 
     def pause(self) -> None:
-        """Pause the playback of all players in this group."""
+        """Pause playback for all players in this group.
+
+        Unlike stop(), this preserves the stream and buffers for later resumption.
+        """
         raise NotImplementedError
 
     def resume(self) -> None:
-        """Resume playback after a pause."""
+        """Resume playback after a pause for all players in this group."""
         raise NotImplementedError
 
     def stop(self) -> bool:
-        """Stop playback of the group.
+        """Stop playback for the group and clean up resources.
 
-        Compared to pause, this also:
-        - clears the audio source stream
-        - clears metadata
-        - and clears all buffers
+        Compared to pause(), this also:
+        - Cancels the audio streaming task
+        - Sends session end messages to all players
+        - Clears all buffers and format mappings
 
-        Returns false if there was no active stream to stop.
+        Returns:
+            bool: True if an active stream was stopped, False if no stream was active.
         """
         if self._stream_task is None:
             logger.debug("stop called but no active stream task")
@@ -200,11 +257,19 @@ class PlayerGroup:
 
     @property
     def players(self) -> list["Player"]:
-        """List of all players that are part of this group."""
+        """All players that are part of this group."""
         return self._players
 
     def remove_player(self, player: "Player") -> None:
-        """Remove a player from this group."""
+        """Remove a player from this group.
+
+        If a stream is active, the player receives a session end message.
+        The player is automatically moved to its own new group since every
+        player must belong to a group.
+
+        Args:
+            player: The player to remove from this group.
+        """
         assert player in self._players  # TODO: better error
         logger.debug("removing %s from group with members: %s", player.player_id, self._players)
         self._players.remove(player)
@@ -216,7 +281,15 @@ class PlayerGroup:
         player._group = PlayerGroup(self._server, player)  # noqa: SLF001
 
     def add_player(self, player: "Player") -> None:
-        """Add a player to this group."""
+        """Add a player to this group.
+
+        The player is first removed from any existing group. If a stream is
+        currently active, the player is immediately joined to the stream with
+        an appropriate audio format.
+
+        Args:
+            player: The player to add to this group.
+        """
         logger.debug("adding %s to group with members: %s", player.player_id, self._players)
         if player in self._players:
             return
@@ -225,7 +298,7 @@ class PlayerGroup:
         if self._stream_task is not None and self._stream_audio_format is not None:
             logger.debug("Joining player %s to current stream", player.player_id)
             # Join it to the current stream
-            player_format = self.select_player_format(player, self._stream_audio_format)
+            player_format = self.determine_player_format(player, self._stream_audio_format)
             self._player_formats[player.player_id] = player_format
             self._send_session_start_msg(player, player_format)
         self._players.append(player)
@@ -236,6 +309,17 @@ class PlayerGroup:
         audio_source: AsyncGenerator[bytes, None],
         audio_format: AudioFormat,
     ) -> None:
+        """Handle the audio streaming loop for all players in the group.
+
+        This method processes the audio source, converts formats as needed for each
+        player, maintains synchronization via timestamps, and manages buffer levels
+        to prevent overflows.
+
+        Args:
+            start_time_us: Initial playback timestamp in microseconds.
+            audio_source: Generator providing PCM audio chunks.
+            audio_format: Format specification for the source audio.
+        """
         # TODO: Complete resampling
         # -  deduplicate conversion when multiple players use the same rate
         # - Maybe notify the library user that play_media should be restarted with

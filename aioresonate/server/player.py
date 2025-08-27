@@ -63,8 +63,7 @@ class Player:
     _server: "ResonateServer"
     """Reference to the ResonateServer instance this player belongs to."""
     _wsock_client: ClientWebSocketResponse | None = None
-    """
-    WebSocket connection from the server to the client.
+    """WebSocket connection from the server to the client.
 
     This is only set for server-initiated connections.
     """
@@ -81,13 +80,9 @@ class Player:
     _player_id: str | None = None
     _player_info: client_messages.ClientHelloPayload | None = None
     _writer_task: asyncio.Task[None] | None = None
-    """
-    Task responsible for sending json and binary data.
-    """
+    """Task responsible for sending json and binary data."""
     _to_write: asyncio.Queue[server_messages.ServerMessage | bytes]
-    """
-    Queue for messages to be sent to the player through the WebSocket.
-    """
+    """Queue for messages to be sent to the player through the WebSocket."""
     _group: PlayerGroup
     _event_cbs: list[Callable[[PlayerEvent], Coroutine[None, None, None]]]
     _volume: int = 100
@@ -104,8 +99,7 @@ class Player:
         request: web.Request | None = None,
         wsock_client: ClientWebSocketResponse | None = None,
     ) -> None:
-        """
-        DO NOT CALL THIS CONSTRUCTOR. INTERNAL USE ONLY.
+        """DO NOT CALL THIS CONSTRUCTOR. INTERNAL USE ONLY.
 
         Use ResonateServer.on_player_connect or ResonateServer.connect_to_player instead.
 
@@ -226,8 +220,7 @@ class Player:
         return self._volume
 
     def ungroup(self) -> None:
-        """
-        Remove the player from the group.
+        """Remove the player from the group.
 
         If the player is already alone, this function does nothing.
         """
