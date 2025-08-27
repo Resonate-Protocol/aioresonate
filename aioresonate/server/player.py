@@ -325,14 +325,14 @@ class Player:
         match message:
             case client_messages.ClientHelloMessage(player_info):
                 logger.info(
-                    "Received player/hello from %s (%s)", player_info.client_id, player_info.name
+                    "Received session/hello from %s (%s)", player_info.client_id, player_info.name
                 )
                 self.player_info = player_info
                 self._player_id = player_info.client_id
                 self._server._on_player_add(self)  # noqa: SLF001
             case client_messages.PlayerStateMessage(state):
                 if not self._player_id:
-                    logger.warning("Received player/state before player/hello")
+                    logger.warning("Received player/state before session/hello")
                     return
                 logger.debug(
                     "Received player state: volume=%d, muted=%s", state.volume, state.muted
