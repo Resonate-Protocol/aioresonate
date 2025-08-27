@@ -89,7 +89,7 @@ class ResonateServer:
         )
         await player.handle_client()
         # TODO: remove this cast
-        return cast("web.StreamResponse", player.wsock_server)
+        return cast("web.StreamResponse", player._wsock_server)  # noqa: SLF001
 
     def connect_to_player(self, url: str) -> None:
         """

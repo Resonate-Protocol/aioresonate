@@ -61,9 +61,9 @@ class Player:
     """
 
     _server: "ResonateServer"
-    wsock_client: ClientWebSocketResponse | None = None
-    wsock_server: web.WebSocketResponse | None = None
-    request: web.Request | None = None
+    _wsock_client: ClientWebSocketResponse | None = None
+    _wsock_server: web.WebSocketResponse | None = None
+    _request: web.Request | None = None
     _player_id: str | None = None
     player_info: client_messages.ClientHelloPayload | None = None
     # Task responsible for sending audio and other data
@@ -94,13 +94,13 @@ class Player:
         self._on_player_add = on_player_add
         self._on_player_remove = on_player_remove
         if request is not None:
-            self.request = request
-            self.wsock_server = web.WebSocketResponse(heartbeat=55)
-            self._logger = logger.getChild(f"unknown-{self.request.remote}")
+            self._request = request
+            self._wsock_server = web.WebSocketResponse(heartbeat=55)
+            self._logger = logger.getChild(f"unknown-{self._request.remote}")
             self._logger.debug("Player initialized")
         elif wsock_client is not None:
             self._logger = logger.getChild("unknown-client")
-            self.wsock_client = wsock_client
+            self._wsock_client = wsock_client
         else:
             raise ValueError("Either request or wsock_client must be provided")
         self._to_write = asyncio.Queue(maxsize=MAX_PENDING_MSG)
@@ -120,10 +120,10 @@ class Player:
         # Handle task is cancelled implicitly when wsock closes or externally
 
         # Close websocket
-        if self.wsock_client is not None and not self.wsock_client.closed:
-            _ = await self.wsock_client.close()
-        elif self.wsock_server is not None and not self.wsock_server.closed:
-            _ = await self.wsock_server.close()
+        if self._wsock_client is not None and not self._wsock_client.closed:
+            _ = await self._wsock_client.close()
+        elif self._wsock_server is not None and not self._wsock_server.closed:
+            _ = await self._wsock_server.close()
 
         if self._player_id is not None:
             self._on_player_remove(self)
@@ -202,11 +202,11 @@ class Player:
 
     async def _setup_connection(self) -> None:
         """Establish WebSocket connection and return remote address."""
-        if self.wsock_server is not None:
-            assert self.request is not None
+        if self._wsock_server is not None:
+            assert self._request is not None
             try:
                 async with asyncio.timeout(10):
-                    _ = await self.wsock_server.prepare(self.request)
+                    _ = await self._wsock_server.prepare(self._request)
             except TimeoutError:
                 self._logger.warning("Timeout preparing request")
                 raise
@@ -229,7 +229,7 @@ class Player:
 
     async def _run_message_loop(self) -> None:
         """Run the main message processing loop."""
-        wsock = self.wsock_server or self.wsock_client
+        wsock = self._wsock_server or self._wsock_client
         assert wsock is not None
         receive_task: asyncio.Task[WSMessage] | None = None
         # Listen for all incoming messages
@@ -284,7 +284,7 @@ class Player:
 
     async def _cleanup_connection(self) -> None:
         """Clean up WebSocket connection and tasks."""
-        wsock = self.wsock_client or self.wsock_server
+        wsock = self._wsock_client or self._wsock_server
         try:
             if wsock and not wsock.closed:
                 _ = await wsock.close()
@@ -353,7 +353,7 @@ class Player:
     async def _writer(self) -> None:
         """Write outgoing messages from the queue."""
         # Exceptions if Socket disconnected or cancelled by connection handler
-        wsock = self.wsock_server or self.wsock_client
+        wsock = self._wsock_server or self._wsock_client
         assert wsock is not None
         try:
             while not wsock.closed:
