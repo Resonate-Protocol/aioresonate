@@ -303,7 +303,104 @@ class PlayerGroup:
             self._send_session_start_msg(player, player_format)
         self._players.append(player)
 
-    async def _stream_audio(  # noqa: PLR0915 # TODO: split
+    def _validate_audio_format(self, audio_format: AudioFormat) -> tuple[int, str, str] | None:
+        """Validate audio format and return format parameters.
+
+        Args:
+            audio_format: The source audio format to validate.
+
+        Returns:
+            Tuple of (bytes_per_sample, audio_format_str, layout_str) or None if invalid.
+        """
+        if audio_format.bit_depth == 16:
+            input_bytes_per_sample = 2
+            input_audio_format = "s16"
+        elif audio_format.bit_depth == 24:
+            input_bytes_per_sample = 3
+            input_audio_format = "s24"
+        else:
+            logger.error("Only 16bit and 24bit audio is supported")
+            return None
+
+        if audio_format.channels == 1:
+            input_audio_layout = "mono"
+        elif audio_format.channels == 2:
+            input_audio_layout = "stereo"
+        else:
+            logger.error("Only 1 and 2 channel audio is supported")
+            return None
+
+        return input_bytes_per_sample, input_audio_format, input_audio_layout
+
+    def _resample_and_send_to_player(
+        self,
+        player: "Player",
+        player_format: AudioFormat,
+        in_frame: av.AudioFrame,
+        resamplers: dict[AudioFormat, av.AudioResampler],
+        chunk_timestamp_us: int,
+    ) -> tuple[int, int]:
+        """Resample audio for a specific player and send the data.
+
+        Args:
+            player: The player to send audio data to.
+            player_format: The target audio format for the player.
+            in_frame: The input audio frame to resample.
+            resamplers: Dictionary of existing resamplers for reuse.
+            chunk_timestamp_us: Timestamp for the audio chunk in microseconds.
+
+        Returns:
+            Tuple of (sample_count, duration_of_chunk_us).
+        """
+        resampler = resamplers.get(player_format)
+        if resampler is None:
+            resampler = av.AudioResampler(
+                format="s16" if player_format.bit_depth == 16 else "s24",
+                layout="stereo" if player_format.channels == 2 else "mono",
+                rate=player_format.sample_rate,
+            )
+            resamplers[player_format] = resampler
+
+        out_frames = resampler.resample(in_frame)
+        if len(out_frames) != 1:
+            logger.warning("resampling resulted in %s frames", len(out_frames))
+
+        sample_count = out_frames[0].samples
+        # TODO: ESPHome should probably be cutting the audio_data,
+        # this only works with pcm
+        audio_data = bytes(out_frames[0].planes[0])[: (sample_count * 4)]
+        if len(out_frames[0].planes) != 1:
+            logger.warning("resampling resulted in %s planes", len(out_frames[0].planes))
+
+        header = struct.pack(
+            BINARY_HEADER_FORMAT,
+            BinaryMessageType.PlayAudioChunk.value,
+            chunk_timestamp_us,
+            sample_count,
+        )
+        player.send_message(header + audio_data)
+
+        duration_of_chunk_us = int((sample_count / player_format.sample_rate) * 1_000_000)
+        return sample_count, duration_of_chunk_us
+
+    async def _calculate_timing_and_sleep(
+        self,
+        chunk_timestamp_us: int,
+        buffer_duration_us: int,
+    ) -> None:
+        """Calculate timing and sleep if needed to maintain buffer levels.
+
+        Args:
+            chunk_timestamp_us: Current chunk timestamp in microseconds.
+            buffer_duration_us: Maximum buffer duration in microseconds.
+        """
+        time_until_next_chunk = chunk_timestamp_us - int(self._server.loop.time() * 1_000_000)
+
+        # TODO: I think this may exclude the burst at startup?
+        if time_until_next_chunk > buffer_duration_us:
+            await asyncio.sleep((time_until_next_chunk - buffer_duration_us) / 1_000_000)
+
+    async def _stream_audio(
         self,
         start_time_us: int,
         audio_source: AsyncGenerator[bytes, None],
@@ -333,30 +430,20 @@ class PlayerGroup:
                 start_time_us,
                 audio_format,
             )
-            if audio_format.bit_depth == 16:
-                input_bytes_per_sample = 2
-                input_audio_format = "s16"
-            elif audio_format.bit_depth == 24:
-                input_bytes_per_sample = 3
-                input_audio_format = "s24"
-            else:
-                logger.error("Only 16bit and 24bit audio is supported")
-                return
 
-            if audio_format.channels == 1:
-                input_audio_layout = "mono"
-            elif audio_format.channels == 2:
-                input_audio_layout = "stereo"
-            else:
-                logger.error("Only 1 and 2 channel audio is supported")
+            # Validate and set up audio format
+            format_result = self._validate_audio_format(audio_format)
+            if format_result is None:
                 return
+            input_bytes_per_sample, input_audio_format, input_audio_layout = format_result
+
+            # Initialize streaming context variables
             input_sample_size = audio_format.channels * input_bytes_per_sample
             input_sample_rate = audio_format.sample_rate
             chunk_length = CHUNK_DURATION_US / 1_000_000
-
             input_samples_per_chunk = int(input_sample_rate * chunk_length)
-
             chunk_timestamp_us = start_time_us
+
             resamplers: dict[AudioFormat, av.AudioResampler] = {}
 
             in_frame = av.AudioFrame(
@@ -377,56 +464,25 @@ class PlayerGroup:
                     in_frame.planes[0].update(bytes(chunk_to_encode))
 
                     sample_count = None
-
                     # TODO: to what should we set this?
                     buffer_duration_us = 2_000_000
                     duration_of_samples_in_chunk: list[int] = []
+
                     for player in self._players:
                         player_format = self._player_formats[player.player_id]
-                        resampler = resamplers.get(player_format)
-                        if resampler is None:
-                            resampler = av.AudioResampler(
-                                format="s16" if player_format.bit_depth == 16 else "s24",
-                                layout="stereo" if player_format.channels == 2 else "mono",
-                                rate=player_format.sample_rate,
-                            )
-                            resamplers[player_format] = resampler
-
-                        out_frames = resampler.resample(in_frame)
-                        if len(out_frames) != 1:
-                            logger.warning("resampling resulted in %s frames", len(out_frames))
-
-                        sample_count = out_frames[0].samples
-                        # TODO: ESPHome should probably be cutting the audio_data,
-                        # this only works with pcm
-                        audio_data = bytes(out_frames[0].planes[0])[: (sample_count * 4)]
-                        if len(out_frames[0].planes) != 1:
-                            logger.warning(
-                                "resampling resulted in %s planes", len(out_frames[0].planes)
-                            )
-                        header = struct.pack(
-                            BINARY_HEADER_FORMAT,
-                            BinaryMessageType.PlayAudioChunk.value,
-                            chunk_timestamp_us,
-                            sample_count,
+                        sample_count, duration_us = self._resample_and_send_to_player(
+                            player, player_format, in_frame, resamplers, chunk_timestamp_us
                         )
-                        player.send_message(header + audio_data)
-                        duration_of_samples_in_chunk.append(
-                            int((sample_count / player_format.sample_rate) * 1_000_000)
-                        )
+                        duration_of_samples_in_chunk.append(duration_us)
 
+                        # Calculate buffer duration for this player
                         player_buffer_capacity_samples = player.info.buffer_capacity // (
                             (player_format.bit_depth // 8) * player_format.channels
                         )
-                        # For now the buffer duration is limited by the smallest player
-                        buffer_duration_us = min(
-                            buffer_duration_us,
-                            int(
-                                1_000_000
-                                * player_buffer_capacity_samples
-                                / player_format.sample_rate
-                            ),
+                        player_buffer_duration = int(
+                            1_000_000 * player_buffer_capacity_samples / player_format.sample_rate
                         )
+                        buffer_duration_us = min(buffer_duration_us, player_buffer_duration)
 
                     assert sample_count is not None
 
@@ -436,15 +492,8 @@ class PlayerGroup:
                         sum(duration_of_samples_in_chunk) / len(duration_of_samples_in_chunk)
                     )
 
-                    time_until_next_chunk = chunk_timestamp_us - int(
-                        self._server.loop.time() * 1_000_000
-                    )
+                    await self._calculate_timing_and_sleep(chunk_timestamp_us, buffer_duration_us)
 
-                    # TODO: I think this may exclude the burst at startup?
-                    if time_until_next_chunk > buffer_duration_us:
-                        await asyncio.sleep(
-                            (time_until_next_chunk - buffer_duration_us) / 1_000_000
-                        )
             # TODO: flush buffer
             logger.debug("Audio streaming loop ended")
         except Exception:
