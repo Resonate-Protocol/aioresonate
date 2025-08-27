@@ -305,10 +305,6 @@ class Player:
 
             # Run the main message loop
             await self._run_message_loop(remote_addr)
-
-        except TimeoutError:
-            # Already handled in _setup_connection
-            pass
         finally:
             # Clean up connection and tasks
             remote_addr_for_cleanup = getattr(self, "url", None) or (
