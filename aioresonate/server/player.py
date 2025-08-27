@@ -69,7 +69,6 @@ class Player:
     # Task responsible for sending audio and other data
     _writer_task: asyncio.Task[None] | None = None
     _to_write: asyncio.Queue[server_messages.ServerMessage | bytes]
-    session_info: server_messages.SessionStartPayload | None = None
     _group: PlayerGroup
     _event_cbs: list[Callable[[PlayerEvent], Coroutine[None, None, None]]]
     _volume: int = 100
