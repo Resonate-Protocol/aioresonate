@@ -258,7 +258,7 @@ class ResonateServer:
         """Get the name of this server."""
         return self._name
 
-    async def start_server(self, port: int = 8927, host: str = "0.0.0.0") -> None:  # noqa: S104
+    async def start_server(self, port: int = 8927, host: str = "0.0.0.0") -> None:
         """Start the HTTP server to handle incoming resonate connections on /resonate."""
         if self._app is not None:
             logger.warning("Server is already running")
@@ -272,7 +272,7 @@ class ResonateServer:
         try:
             self._tcp_site = web.TCPSite(
                 self._app_runner,
-                host=host if host != "0.0.0.0" else None,  # noqa: S104
+                host=host if host != "0.0.0.0" else None,
                 port=port,
             )
             await self._tcp_site.start()

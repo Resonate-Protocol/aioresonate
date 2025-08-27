@@ -121,6 +121,7 @@ ignore = [
   "TRY003",  # Just annoying, not really useful
   "TRY400",  # Just annoying, not really useful
   "COM812",  # Conflicts with the Ruff formatter
+  "S104",    # Allow "0.0.0.0" address
 ]
 
 select = ["ALL"]
