@@ -374,6 +374,7 @@ class Player:
                         self._signal_event(StreamStopEvent())
                     case MediaCommand.PAUSE:
                         self._signal_event(StreamPauseEvent())
+                    case MediaCommand.SEEK | MediaCommand.VOLUME:
                         raise NotImplementedError(
                             f"MediaCommand {stream_command.command} is not supported"
                         )
