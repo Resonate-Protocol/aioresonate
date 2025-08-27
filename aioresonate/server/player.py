@@ -297,7 +297,7 @@ class Player:
             logger.exception("Failed to close websocket for %s", remote_addr)
         await self.disconnect()
 
-    async def handle_client(self) -> web.WebSocketResponse | ClientWebSocketResponse:
+    async def handle_client(self) -> None:
         """Handle the websocket connection."""
         try:
             # Establish connection and setup
@@ -311,8 +311,6 @@ class Player:
                 self.request.remote if hasattr(self, "request") else "unknown"
             )
             await self._cleanup_connection(remote_addr_for_cleanup or "unknown")
-
-        return self.wsock
 
     async def _handle_message(self, message: client_messages.ClientMessage, timestamp: int) -> None:
         """Handle incoming commands from the client."""

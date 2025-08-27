@@ -89,7 +89,8 @@ class ResonateServer:
             on_player_remove=self._on_player_remove,
         )
         # TODO: remove this cast
-        return cast("web.StreamResponse", await player.handle_client())
+        await player.handle_client()
+        return cast("web.StreamResponse", player.wsock)
 
     def connect_to_player(self, url: str) -> None:
         """
@@ -152,7 +153,7 @@ class ResonateServer:
                             on_player_add=self._on_player_add,
                             on_player_remove=self._on_player_remove,
                         )
-                        _ = await player.handle_client()
+                        await player.handle_client()
                 except asyncio.CancelledError:
                     break
                 except TimeoutError:
