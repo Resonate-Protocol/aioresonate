@@ -74,6 +74,8 @@ class Player:
     _event_cbs: list[Callable[[PlayerEvent], Coroutine[None, None, None]]]
     _volume: int = 100
     _muted: bool = False
+    _on_player_add: Callable[["Player"], None]
+    _on_player_remove: Callable[["Player"], None]
 
     def __init__(
         self,
@@ -81,12 +83,16 @@ class Player:
         request: web.Request | None,
         url: str | None,
         wsock_client: ClientWebSocketResponse | None,
+        on_player_add: Callable[["Player"], None],
+        on_player_remove: Callable[["Player"], None],
     ) -> None:
         """Do not call this constructor.
 
         Use ResonateServer.on_player_connect or ResonateServer.connect_to_player instead.
         """
         self._server = server
+        self._on_player_add = on_player_add
+        self._on_player_remove = on_player_remove
         if request is not None:
             self.request = request
             self.wsock = web.WebSocketResponse(heartbeat=55)
@@ -117,7 +123,7 @@ class Player:
             _ = await self.wsock.close()
 
         if self._player_id is not None:
-            self._server._on_player_remove(self)  # noqa: SLF001
+            self._on_player_remove(self)
 
         logger.info("Client %s disconnected", self.player_id or self.request.remote)
 
@@ -329,7 +335,7 @@ class Player:
                 )
                 self.player_info = player_info
                 self._player_id = player_info.client_id
-                self._server._on_player_add(self)  # noqa: SLF001
+                self._on_player_add(self)
             case client_messages.PlayerStateMessage(state):
                 if not self._player_id:
                     logger.warning("Received player/state before session/hello")
