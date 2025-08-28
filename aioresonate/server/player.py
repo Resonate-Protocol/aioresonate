@@ -330,9 +330,8 @@ class Player:
             self._logger.exception("Failed to close websocket")
         await self.disconnect()
 
-    async def handle_client(self) -> None:
+    async def _handle_client(self) -> None:
         """Handle the websocket connection."""
-        # TODO: make this private
         try:
             # Establish connection and setup
             await self._setup_connection()

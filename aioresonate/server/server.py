@@ -121,7 +121,7 @@ class ResonateServer:
             handle_player_disconnect=self._handle_player_disconnect,
             request=request,
         )
-        await player.handle_client()
+        await player._handle_client()  # noqa: SLF001
 
         websocket = player.websocket_connection
         # This is a WebSocketResponse since we just created player
@@ -188,7 +188,7 @@ class ResonateServer:
                             handle_player_disconnect=self._handle_player_disconnect,
                             wsock_client=wsock,
                         )
-                        await player.handle_client()
+                        await player._handle_client()  # noqa: SLF001
                 except asyncio.CancelledError:
                     break
                 except TimeoutError:
