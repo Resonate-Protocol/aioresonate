@@ -121,7 +121,7 @@ class ResonateServer:
             handle_player_disconnect=self._handle_player_disconnect,
             request=request,
         )
-        await player._handle_client()  # noqa: SLF001
+        await player._handle_client()  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
 
         websocket = player.websocket_connection
         # This is a WebSocketResponse since we just created player
@@ -178,6 +178,7 @@ class ResonateServer:
                     async with self._client_session.ws_connect(
                         url,
                         heartbeat=30,
+                        # Pyright doesn't recognise the signature
                         timeout=ClientWSTimeout(ws_close=10, ws_receive=60),  # pyright: ignore[reportCallIssue]
                     ) as wsock:
                         # Reset backoff on successful connect
@@ -188,7 +189,7 @@ class ResonateServer:
                             handle_player_disconnect=self._handle_player_disconnect,
                             wsock_client=wsock,
                         )
-                        await player._handle_client()  # noqa: SLF001
+                        await player._handle_client()  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
                 except asyncio.CancelledError:
                     break
                 except TimeoutError:

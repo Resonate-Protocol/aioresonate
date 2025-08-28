@@ -277,7 +277,7 @@ class PlayerGroup:
             self._send_session_end_msg(player)
             del self._player_formats[player.player_id]
         # Each player needs to be in a group, add it to a new one
-        player._set_group(PlayerGroup(self._server, player))  # noqa: SLF001
+        player._set_group(PlayerGroup(self._server, player))  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
 
     def add_player(self, player: "Player") -> None:
         """Add a player to this group.
@@ -294,7 +294,7 @@ class PlayerGroup:
             return
         # Remove it from any existing group first
         player.ungroup()
-        player._set_group(self)  # noqa: SLF001
+        player._set_group(self)  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
         if self._stream_task is not None and self._stream_audio_format is not None:
             logger.debug("Joining player %s to current stream", player.player_id)
             # Join it to the current stream
