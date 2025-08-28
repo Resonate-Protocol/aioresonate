@@ -260,11 +260,14 @@ class PlayerGroup:
         If a stream is active, the player receives a session end message.
         The player is automatically moved to its own new group since every
         player must belong to a group.
+        If the player is not part of this group, this will have no effect.
 
         Args:
             player: The player to remove from this group.
         """
-        assert player in self._players  # TODO: better error
+        if player not in self._players:
+            logger.debug("player %s not in group, skipping removal", player.player_id)
+            return
         logger.debug("removing %s from group with members: %s", player.player_id, self._players)
         self._players.remove(player)
         if self._stream_task is not None:
