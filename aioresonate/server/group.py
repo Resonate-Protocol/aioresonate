@@ -294,6 +294,7 @@ class PlayerGroup:
             return
         # Remove it from any existing group first
         player.ungroup()
+        player._group = self  # noqa: SLF001
         if self._stream_task is not None and self._stream_audio_format is not None:
             logger.debug("Joining player %s to current stream", player.player_id)
             # Join it to the current stream
