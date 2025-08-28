@@ -333,7 +333,11 @@ class Player:
         await self.disconnect()
 
     async def _handle_client(self) -> None:
-        """Handle the websocket connection."""
+        """Handle the complete websocket connection lifecycle.
+
+        This method is private and should only be called by ResonateServer
+        during player connection handling.
+        """
         try:
             # Establish connection and setup
             await self._setup_connection()
