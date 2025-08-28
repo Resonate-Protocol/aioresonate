@@ -481,6 +481,7 @@ class PlayerGroup:
                         )
                         buffer_duration_us = min(buffer_duration_us, player_buffer_duration)
 
+                    # We have at least one player playing
                     assert sample_count is not None
 
                     # TODO: Is mean the correct approach here?
