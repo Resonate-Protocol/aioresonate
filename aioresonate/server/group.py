@@ -194,36 +194,6 @@ class PlayerGroup:
         logger.debug("ending session for %s (%s)", player.name, player.player_id)
         player.send_message(server_messages.SessionEndMessage(server_messages.SessionEndPayload()))
 
-    async def set_metadata(self, metadata: dict[str, str]) -> None:
-        """Send a metadata update message to all players in the group.
-
-        Args:
-            metadata: Dictionary of metadata key-value pairs to send.
-        """
-        _ = metadata  # TODO: implement metadata sending
-        raise NotImplementedError
-
-    async def set_media_art(self, art_data: bytes, art_format: str) -> None:
-        """Send binary media art data to all players in the group.
-
-        Args:
-            art_data: The binary image data.
-            art_format: The format of the image (e.g., 'jpeg', 'png').
-        """
-        _ = art_data, art_format  # TODO: implement media art sending
-        raise NotImplementedError
-
-    def pause(self) -> None:
-        """Pause playback for all players in this group.
-
-        Unlike stop(), this preserves the stream and buffers for later resumption.
-        """
-        raise NotImplementedError
-
-    def resume(self) -> None:
-        """Resume playback after a pause for all players in this group."""
-        raise NotImplementedError
-
     def stop(self) -> bool:
         """Stop playback for the group and clean up resources.
 
