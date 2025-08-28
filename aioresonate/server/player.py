@@ -221,6 +221,8 @@ class Player:
     def _set_group(self, group: "PlayerGroup") -> None:
         """Set the group for this player. For internal use by PlayerGroup only.
 
+        NOTE: this does not update the group's player list
+
         Args:
             group: The PlayerGroup to assign this player to.
         """
