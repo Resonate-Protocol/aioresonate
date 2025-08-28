@@ -101,7 +101,7 @@ class MetadataUpdateMessage(ServerMessage):
 class ServerTimePayload(DataClassORJSONMixin):
     """Timing information from the server."""
 
-    player_transmitted: int
+    client_transmitted: int
     server_received: int
     server_transmitted: int
 

@@ -65,7 +65,7 @@ class Player:
     wsock: web.WebSocketResponse | ClientWebSocketResponse
     url: str | None = None
     _player_id: str | None = None
-    player_info: client_messages.PlayerHelloPayload | None = None
+    player_info: client_messages.ClientHelloPayload | None = None
     # Task responsible for sending audio and other data
     _writer_task: asyncio.Task[None] | None = None
     _to_write: asyncio.Queue[server_messages.ServerMessage | bytes]
@@ -140,7 +140,7 @@ class Player:
         return self.player_info.name
 
     @property
-    def info(self) -> client_messages.PlayerHelloPayload:
+    def info(self) -> client_messages.ClientHelloPayload:
         """List of information and capabilities reported by this player."""
         assert self.player_info  # Player should be fully initialized by now
         return self.player_info
@@ -323,16 +323,16 @@ class Player:
     async def _handle_message(self, message: client_messages.ClientMessage, timestamp: int) -> None:
         """Handle incoming commands from the client."""
         match message:
-            case client_messages.PlayerHelloMessage(player_info):
+            case client_messages.ClientHelloMessage(player_info):
                 logger.info(
-                    "Received player/hello from %s (%s)", player_info.player_id, player_info.name
+                    "Received session/hello from %s (%s)", player_info.client_id, player_info.name
                 )
                 self.player_info = player_info
-                self._player_id = player_info.player_id
+                self._player_id = player_info.client_id
                 self._server._on_player_add(self)  # noqa: SLF001
             case client_messages.PlayerStateMessage(state):
                 if not self._player_id:
-                    logger.warning("Received player/state before player/hello")
+                    logger.warning("Received player/state before session/hello")
                     return
                 logger.debug(
                     "Received player state: volume=%d, muted=%s", state.volume, state.muted
@@ -342,11 +342,11 @@ class Player:
                     self._muted = state.muted
                     self._signal_event(VolumeChangedEvent(volume=self._volume, muted=self._muted))
                 # TODO: handle state.state changes, but how?
-            case client_messages.PlayerTimeMessage(player_time):
+            case client_messages.ClientTimeMessage(player_time):
                 self.send_message(
                     server_messages.ServerTimeMessage(
                         server_messages.ServerTimePayload(
-                            player_transmitted=player_time.player_transmitted,
+                            client_transmitted=player_time.client_transmitted,
                             server_received=timestamp,
                             server_transmitted=int(self._server.loop.time() * 1_000_000),
                         )
