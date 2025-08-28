@@ -100,11 +100,6 @@ class PlayerGroup:
         # - how to communicate to the caller what audio_format is preferred,
         #   especially on topology changes
         # - how to sync metadata/media_art with this audio stream?
-        # TODO: port _stream_audio
-
-        # TODO: Stop any prior stream
-
-        # TODO: dynamic session info
 
         self._stream_audio_format = audio_format
 
@@ -189,7 +184,7 @@ class PlayerGroup:
             sample_rate=audio_format.sample_rate,
             channels=audio_format.channels,
             bit_depth=audio_format.bit_depth,
-            now=int(self._server.loop.time() * 1_000_000),  # TODO: maybe remove from spec?
+            now=int(self._server.loop.time() * 1_000_000),
             codec_header=None,
         )
         player.send_message(server_messages.SessionStartMessage(session_info))
