@@ -305,6 +305,8 @@ class ResonateServer:
 
         logger.info("Starting Resonate server on port %d", port)
         self._app = web.Application()
+        # Create perpetual WebSocket route for player connections
+        _ = self._app.router.add_get("/resonate", self.on_player_connect)
         self._app_runner = web.AppRunner(self._app)
         await self._app_runner.setup()
 
