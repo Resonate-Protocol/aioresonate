@@ -218,6 +218,14 @@ class Player:
         """Volume of this player."""
         return self._volume
 
+    def _set_group(self, group: "PlayerGroup") -> None:
+        """Set the group for this player. For internal use by PlayerGroup only.
+
+        Args:
+            group: The PlayerGroup to assign this player to.
+        """
+        self._group = group
+
     def ungroup(self) -> None:
         """Remove the player from the group.
 
