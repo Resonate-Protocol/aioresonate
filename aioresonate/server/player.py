@@ -424,8 +424,14 @@ class Player:
             self._logger.exception("Error in writer task for player")
 
     def send_message(self, message: server_messages.ServerMessage | bytes) -> None:
-        """Enqueue a JSON or binary message to be sent to the client."""
-        # TODO: make this private
+        """Enqueue a JSON or binary message to be sent directly to the client.
+
+        It is recommended to not use this method, but to use the higher-level
+        API of this library instead.
+
+        NOTE: Binary messages are directly sent to the player, you need to add the
+        header yourself using models.pack_binary_header().
+        """
         # TODO: handle full queue
         if isinstance(message, bytes):
             # Only log binary messages occasionally to reduce spam
