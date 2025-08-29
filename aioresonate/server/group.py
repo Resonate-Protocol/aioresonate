@@ -249,7 +249,6 @@ class PlayerGroup:
         """Set metadata for the group and send to all players.
 
         Only sends updates for fields that have changed since the last call.
-        Also includes group_members and support_commands in the update.
 
         Args:
             metadata: The new metadata to send to players.
@@ -288,8 +287,7 @@ class PlayerGroup:
             if self._current_metadata.shuffle != metadata.shuffle:
                 update_payload.shuffle = metadata.shuffle
 
-        # TODO: finish this once the spec is finalized
-        update_payload.group_members = [player.player_id for player in self._players]
+        # TODO: finish this once the spec is finalized, include group_members and support_commands
 
         # Send to all players in the group
         message = server_messages.MetadataUpdateMessage(update_payload)
@@ -365,9 +363,7 @@ class PlayerGroup:
                 track=self._current_metadata.track,
                 repeat=self._current_metadata.repeat,
                 shuffle=self._current_metadata.shuffle,
-                group_members=[p.player_id for p in self._players] + [player.player_id],
             )
-            # TODO: send update to other players, since group_members changed
             message = server_messages.MetadataUpdateMessage(update_payload)
 
             logger.debug(
