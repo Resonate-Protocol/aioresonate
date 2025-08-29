@@ -264,25 +264,25 @@ class PlayerGroup:
 
         if self._current_metadata is None:
             # First time setting metadata, send all fields
-            update_payload.title = metadata.title or None
-            update_payload.artist = metadata.artist or None
-            update_payload.album = metadata.album or None
-            update_payload.year = metadata.year if metadata.year != 0 else None
-            update_payload.track = metadata.track if metadata.track != 0 else None
+            update_payload.title = metadata.title
+            update_payload.artist = metadata.artist
+            update_payload.album = metadata.album
+            update_payload.year = metadata.year
+            update_payload.track = metadata.track
             update_payload.repeat = metadata.repeat
             update_payload.shuffle = metadata.shuffle
         else:
             # Only send changed fields
             if self._current_metadata.title != metadata.title:
-                update_payload.title = metadata.title or None
+                update_payload.title = metadata.title
             if self._current_metadata.artist != metadata.artist:
-                update_payload.artist = metadata.artist or None
+                update_payload.artist = metadata.artist
             if self._current_metadata.album != metadata.album:
-                update_payload.album = metadata.album or None
+                update_payload.album = metadata.album
             if self._current_metadata.year != metadata.year:
-                update_payload.year = metadata.year if metadata.year != 0 else None
+                update_payload.year = metadata.year
             if self._current_metadata.track != metadata.track:
-                update_payload.track = metadata.track if metadata.track != 0 else None
+                update_payload.track = metadata.track
             if self._current_metadata.repeat != metadata.repeat:
                 update_payload.repeat = metadata.repeat
             if self._current_metadata.shuffle != metadata.shuffle:
