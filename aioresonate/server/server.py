@@ -196,9 +196,6 @@ class ResonateServer:
                     logger.debug("Connection task for %s timed out", url)
                 except ClientConnectionError:
                     logger.debug("Connection task for %s failed", url)
-                except Exception:
-                    # NOTE: Intentional catch-all to log unexpected exceptions so they are visible.
-                    logger.exception("Unexpected error connecting to player at %s", url)
 
                 if backoff >= max_backoff:
                     break
@@ -223,6 +220,9 @@ class ResonateServer:
                 backoff *= 2
         except asyncio.CancelledError:
             pass
+        except Exception:
+            # NOTE: Intentional catch-all to log unexpected exceptions so they are visible.
+            logger.exception("Unexpected error occurred")
         finally:
             _ = self._connection_tasks.pop(url, None)  # Cleanup connection tasks dict
             _ = self._retry_events.pop(url, None)  # Cleanup retry events dict
