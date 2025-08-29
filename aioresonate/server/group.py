@@ -2,7 +2,6 @@
 
 import asyncio
 import logging
-import struct
 from asyncio import Task
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass
@@ -11,7 +10,7 @@ from uuid import uuid4
 
 import av
 
-from aioresonate.models import BINARY_HEADER_FORMAT, BinaryMessageType, server_messages
+from aioresonate.models import BinaryMessageType, pack_binary_header_raw, server_messages
 
 # The cyclic import is not an issue during runtime, so hide it
 # pyright: reportImportCycles=none
@@ -27,27 +26,49 @@ logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class AudioFormat:
-    """LPCM audio format."""
+    """LPCM audio format specification.
+
+    Represents the audio format parameters for uncompressed PCM audio.
+    """
 
     sample_rate: int
+    """Sample rate in Hz (e.g., 44100, 48000)."""
     bit_depth: int
+    """Bit depth in bits per sample (16 or 24)."""
     channels: int
+    """Number of audio channels (1 for mono, 2 for stereo)."""
 
 
 class PlayerGroup:
-    """A group of one or more players."""
+    """A group of one or more players for synchronized playback.
 
-    # In this implementation, every player is always assigned to a group.
-    # This simplifies grouping requests initiated by the player.
+    Handles synchronized audio streaming across multiple players with automatic
+    format conversion and buffer management. Every player is always assigned to
+    a group to simplify grouping requests.
+    """
 
     _players: list["Player"]
+    """List of all players in this group."""
     _player_formats: dict[str, AudioFormat]
+    """Mapping of player IDs to their selected audio formats."""
     _server: "ResonateServer"
+    """Reference to the ResonateServer instance."""
     _stream_task: Task[None] | None = None
+    """Task handling the audio streaming loop, None when not streaming."""
     _stream_audio_format: AudioFormat | None = None
+    """The source audio format for the current stream, None when not streaming."""
 
     def __init__(self, server: "ResonateServer", *args: "Player") -> None:
-        """Do not call this constructor."""
+        """DO NOT CALL THIS CONSTRUCTOR. INTERNAL USE ONLY.
+
+        Groups are managed automatically by the server.
+
+        Initialize a new PlayerGroup.
+
+        Args:
+            server: The ResonateServer instance this group belongs to.
+            *args: Players to add to this group.
+        """
         self._server = server
         self._players = list(args)
         self._player_formats = {}
@@ -62,7 +83,13 @@ class PlayerGroup:
     ) -> None:
         """Start playback of a new media stream.
 
-        The library expects uncompressed PCM audio and will handle encoding.
+        Stops any current stream and starts a new one with the given audio source.
+        The audio source should provide uncompressed PCM audio data.
+        Format conversion and synchronization for all players will be handled automatically.
+
+        Args:
+            audio_source: Async generator yielding PCM audio chunks as bytes.
+            audio_format: Format specification for the input audio data.
         """
         logger.debug("Starting play_media with audio_format: %s", audio_format)
         stopped = self.stop()
@@ -73,17 +100,12 @@ class PlayerGroup:
         # - how to communicate to the caller what audio_format is preferred,
         #   especially on topology changes
         # - how to sync metadata/media_art with this audio stream?
-        # TODO: port _stream_audio
-
-        # TODO: Stop any prior stream
-
-        # TODO: dynamic session info
 
         self._stream_audio_format = audio_format
 
         for player in self._players:
             logger.debug("Selecting format for player %s", player.player_id)
-            player_format = self.select_player_format(player, audio_format)
+            player_format = self.determine_player_format(player, audio_format)
             self._player_formats[player.player_id] = player_format
             logger.debug(
                 "Sending session start to player %s with format %s",
@@ -100,8 +122,20 @@ class PlayerGroup:
             )
         )
 
-    def select_player_format(self, player: "Player", source_format: AudioFormat) -> AudioFormat:
-        """Select the most optimal audio format for the given source."""
+    def determine_player_format(self, player: "Player", source_format: AudioFormat) -> AudioFormat:
+        """Determine the optimal audio format for the given player and source.
+
+        Analyzes the player's capabilities and returns the best matching format,
+        preferring higher quality when available and falling back gracefully.
+
+        Args:
+            player: The player to determine a format for.
+            source_format: The source audio format to match against.
+
+        Returns:
+            AudioFormat: The optimal format for the player.
+        """
+        # TODO: move this to player instead
         support_sample_rates = player.info.support_sample_rates
         support_bit_depth = player.info.support_bit_depth
         support_channels = player.info.support_channels
@@ -138,6 +172,7 @@ class PlayerGroup:
         return AudioFormat(sample_rate, bit_depth, channels)
 
     def _send_session_start_msg(self, player: "Player", audio_format: AudioFormat) -> None:
+        """Send a session start message to a player with the specified audio format."""
         logger.debug(
             "_send_session_start_msg: player=%s, format=%s",
             player.player_id,
@@ -149,42 +184,26 @@ class PlayerGroup:
             sample_rate=audio_format.sample_rate,
             channels=audio_format.channels,
             bit_depth=audio_format.bit_depth,
-            now=int(self._server.loop.time() * 1_000_000),  # TODO: maybe remove from spec?
+            now=int(self._server.loop.time() * 1_000_000),
             codec_header=None,
         )
         player.send_message(server_messages.SessionStartMessage(session_info))
 
     def _send_session_end_msg(self, player: "Player") -> None:
+        """Send a session end message to a player to stop playback."""
         logger.debug("ending session for %s (%s)", player.name, player.player_id)
-        player.send_message(
-            server_messages.SessionEndMessage(server_messages.SessionEndPayload(player.player_id))
-        )
-
-    async def set_metadata(self, metadata: dict[str, str]) -> None:
-        """Send a metadata/update message to all players in the group."""
-        raise NotImplementedError
-
-    async def set_media_art(self, art_data: bytes, art_format: str) -> None:
-        """Send a binary media art message to all players in the group."""
-        raise NotImplementedError
-
-    def pause(self) -> None:
-        """Pause the playback of all players in this group."""
-        raise NotImplementedError
-
-    def resume(self) -> None:
-        """Resume playback after a pause."""
-        raise NotImplementedError
+        player.send_message(server_messages.SessionEndMessage(server_messages.SessionEndPayload()))
 
     def stop(self) -> bool:
-        """Stop playback of the group.
+        """Stop playback for the group and clean up resources.
 
-        Compared to pause, this also:
-        - clears the audio source stream
-        - clears metadata
-        - and clears all buffers
+        Compared to pause(), this also:
+        - Cancels the audio streaming task
+        - Sends session end messages to all players
+        - Clears all buffers and format mappings
 
-        Returns false if there was no active stream to stop.
+        Returns:
+            bool: True if an active stream was stopped, False if no stream was active.
         """
         if self._stream_task is None:
             logger.debug("stop called but no active stream task")
@@ -193,7 +212,7 @@ class PlayerGroup:
             "Stopping playback for group with players: %s",
             [p.player_id for p in self._players],
         )
-        _ = self._stream_task.cancel()
+        _ = self._stream_task.cancel()  # Don't care about cancellation result
         for player in self._players:
             self._send_session_end_msg(player)
             del self._player_formats[player.player_id]
@@ -202,12 +221,23 @@ class PlayerGroup:
 
     @property
     def players(self) -> list["Player"]:
-        """List of all players that are part of this group."""
+        """All players that are part of this group."""
         return self._players
 
     def remove_player(self, player: "Player") -> None:
-        """Remove a player from this group."""
-        assert player in self._players  # TODO: better error
+        """Remove a player from this group.
+
+        If a stream is active, the player receives a session end message.
+        The player is automatically moved to its own new group since every
+        player must belong to a group.
+        If the player is not part of this group, this will have no effect.
+
+        Args:
+            player: The player to remove from this group.
+        """
+        if player not in self._players:
+            logger.debug("player %s not in group, skipping removal", player.player_id)
+            return
         logger.debug("removing %s from group with members: %s", player.player_id, self._players)
         self._players.remove(player)
         if self._stream_task is not None:
@@ -215,29 +245,145 @@ class PlayerGroup:
             self._send_session_end_msg(player)
             del self._player_formats[player.player_id]
         # Each player needs to be in a group, add it to a new one
-        player._group = PlayerGroup(self._server, player)  # noqa: SLF001
+        player._set_group(PlayerGroup(self._server, player))  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
 
     def add_player(self, player: "Player") -> None:
-        """Add a player to this group."""
+        """Add a player to this group.
+
+        The player is first removed from any existing group. If a stream is
+        currently active, the player is immediately joined to the stream with
+        an appropriate audio format.
+
+        Args:
+            player: The player to add to this group.
+        """
         logger.debug("adding %s to group with members: %s", player.player_id, self._players)
         if player in self._players:
             return
         # Remove it from any existing group first
         player.ungroup()
+        player._set_group(self)  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
         if self._stream_task is not None and self._stream_audio_format is not None:
             logger.debug("Joining player %s to current stream", player.player_id)
             # Join it to the current stream
-            player_format = self.select_player_format(player, self._stream_audio_format)
+            player_format = self.determine_player_format(player, self._stream_audio_format)
             self._player_formats[player.player_id] = player_format
             self._send_session_start_msg(player, player_format)
         self._players.append(player)
 
-    async def _stream_audio(  # noqa: PLR0915 # TODO: split
+    def _validate_audio_format(self, audio_format: AudioFormat) -> tuple[int, str, str] | None:
+        """Validate audio format and return format parameters.
+
+        Args:
+            audio_format: The source audio format to validate.
+
+        Returns:
+            Tuple of (bytes_per_sample, audio_format_str, layout_str) or None if invalid.
+        """
+        if audio_format.bit_depth == 16:
+            input_bytes_per_sample = 2
+            input_audio_format = "s16"
+        elif audio_format.bit_depth == 24:
+            input_bytes_per_sample = 3
+            input_audio_format = "s24"
+        else:
+            logger.error("Only 16bit and 24bit audio is supported")
+            return None
+
+        if audio_format.channels == 1:
+            input_audio_layout = "mono"
+        elif audio_format.channels == 2:
+            input_audio_layout = "stereo"
+        else:
+            logger.error("Only 1 and 2 channel audio is supported")
+            return None
+
+        return input_bytes_per_sample, input_audio_format, input_audio_layout
+
+    def _resample_and_send_to_player(
+        self,
+        player: "Player",
+        player_format: AudioFormat,
+        in_frame: av.AudioFrame,
+        resamplers: dict[AudioFormat, av.AudioResampler],
+        chunk_timestamp_us: int,
+    ) -> tuple[int, int]:
+        """Resample audio for a specific player and send the data.
+
+        Args:
+            player: The player to send audio data to.
+            player_format: The target audio format for the player.
+            in_frame: The input audio frame to resample.
+            resamplers: Dictionary of existing resamplers for reuse.
+            chunk_timestamp_us: Timestamp for the audio chunk in microseconds.
+
+        Returns:
+            Tuple of (sample_count, duration_of_chunk_us).
+        """
+        resampler = resamplers.get(player_format)
+        if resampler is None:
+            resampler = av.AudioResampler(
+                format="s16" if player_format.bit_depth == 16 else "s24",
+                layout="stereo" if player_format.channels == 2 else "mono",
+                rate=player_format.sample_rate,
+            )
+            resamplers[player_format] = resampler
+
+        out_frames = resampler.resample(in_frame)
+        if len(out_frames) != 1:
+            logger.warning("resampling resulted in %s frames", len(out_frames))
+
+        sample_count = out_frames[0].samples
+        # TODO: ESPHome should probably be cutting the audio_data,
+        # this only works with pcm
+        audio_data = bytes(out_frames[0].planes[0])[: (sample_count * 4)]
+        if len(out_frames[0].planes) != 1:
+            logger.warning("resampling resulted in %s planes", len(out_frames[0].planes))
+
+        header = pack_binary_header_raw(
+            BinaryMessageType.PlayAudioChunk.value,
+            chunk_timestamp_us,
+            sample_count,
+        )
+        player.send_message(header + audio_data)
+
+        duration_of_chunk_us = int((sample_count / player_format.sample_rate) * 1_000_000)
+        return sample_count, duration_of_chunk_us
+
+    async def _calculate_timing_and_sleep(
+        self,
+        chunk_timestamp_us: int,
+        buffer_duration_us: int,
+    ) -> None:
+        """Calculate timing and sleep if needed to maintain buffer levels.
+
+        Args:
+            chunk_timestamp_us: Current chunk timestamp in microseconds.
+            buffer_duration_us: Maximum buffer duration in microseconds.
+        """
+        time_until_next_chunk = chunk_timestamp_us - int(self._server.loop.time() * 1_000_000)
+
+        # TODO: I think this may exclude the burst at startup?
+        if time_until_next_chunk > buffer_duration_us:
+            await asyncio.sleep((time_until_next_chunk - buffer_duration_us) / 1_000_000)
+
+    async def _stream_audio(
         self,
         start_time_us: int,
         audio_source: AsyncGenerator[bytes, None],
         audio_format: AudioFormat,
     ) -> None:
+        """Handle the audio streaming loop for all players in the group.
+
+        This method processes the audio source, converts formats as needed for each
+        player, maintains synchronization via timestamps, and manages buffer levels
+        to prevent overflows.
+
+        Args:
+            start_time_us: Initial playback timestamp in microseconds.
+            audio_source: Generator providing PCM audio chunks.
+            audio_format: Format specification for the source audio.
+        """
         # TODO: Complete resampling
         # -  deduplicate conversion when multiple players use the same rate
         # - Maybe notify the library user that play_media should be restarted with
@@ -251,30 +397,20 @@ class PlayerGroup:
                 start_time_us,
                 audio_format,
             )
-            if audio_format.bit_depth == 16:
-                input_bytes_per_sample = 2
-                input_audio_format = "s16"
-            elif audio_format.bit_depth == 24:
-                input_bytes_per_sample = 3
-                input_audio_format = "s24"
-            else:
-                logger.error("Only 16bit and 24bit audio is supported")
-                return
 
-            if audio_format.channels == 1:
-                input_audio_layout = "mono"
-            elif audio_format.channels == 2:
-                input_audio_layout = "stereo"
-            else:
-                logger.error("Only 1 and 2 channel audio is supported")
+            # Validate and set up audio format
+            format_result = self._validate_audio_format(audio_format)
+            if format_result is None:
                 return
+            input_bytes_per_sample, input_audio_format, input_audio_layout = format_result
+
+            # Initialize streaming context variables
             input_sample_size = audio_format.channels * input_bytes_per_sample
             input_sample_rate = audio_format.sample_rate
             chunk_length = CHUNK_DURATION_US / 1_000_000
-
             input_samples_per_chunk = int(input_sample_rate * chunk_length)
-
             chunk_timestamp_us = start_time_us
+
             resamplers: dict[AudioFormat, av.AudioResampler] = {}
 
             in_frame = av.AudioFrame(
@@ -295,57 +431,27 @@ class PlayerGroup:
                     in_frame.planes[0].update(bytes(chunk_to_encode))
 
                     sample_count = None
-
                     # TODO: to what should we set this?
                     buffer_duration_us = 2_000_000
                     duration_of_samples_in_chunk: list[int] = []
+
                     for player in self._players:
                         player_format = self._player_formats[player.player_id]
-                        resampler = resamplers.get(player_format)
-                        if resampler is None:
-                            resampler = av.AudioResampler(
-                                format="s16" if player_format.bit_depth == 16 else "s24",
-                                layout="stereo" if player_format.channels == 2 else "mono",
-                                rate=player_format.sample_rate,
-                            )
-                            resamplers[player_format] = resampler
-
-                        out_frames = resampler.resample(in_frame)
-                        if len(out_frames) != 1:
-                            logger.warning("resampling resulted in %s frames", len(out_frames))
-
-                        sample_count = out_frames[0].samples
-                        # TODO: ESPHome should probably be cutting the audio_data,
-                        # this only works with pcm
-                        audio_data = bytes(out_frames[0].planes[0])[: (sample_count * 4)]
-                        if len(out_frames[0].planes) != 1:
-                            logger.warning(
-                                "resampling resulted in %s planes", len(out_frames[0].planes)
-                            )
-                        header = struct.pack(
-                            BINARY_HEADER_FORMAT,
-                            BinaryMessageType.PlayAudioChunk.value,
-                            chunk_timestamp_us,
-                            sample_count,
+                        sample_count, duration_us = self._resample_and_send_to_player(
+                            player, player_format, in_frame, resamplers, chunk_timestamp_us
                         )
-                        player.send_message(header + audio_data)
-                        duration_of_samples_in_chunk.append(
-                            int((sample_count / player_format.sample_rate) * 1_000_000)
-                        )
+                        duration_of_samples_in_chunk.append(duration_us)
 
+                        # Calculate buffer duration for this player
                         player_buffer_capacity_samples = player.info.buffer_capacity // (
                             (player_format.bit_depth // 8) * player_format.channels
                         )
-                        # For now the buffer duration is limited by the smallest player
-                        buffer_duration_us = min(
-                            buffer_duration_us,
-                            int(
-                                1_000_000
-                                * player_buffer_capacity_samples
-                                / player_format.sample_rate
-                            ),
+                        player_buffer_duration = int(
+                            1_000_000 * player_buffer_capacity_samples / player_format.sample_rate
                         )
+                        buffer_duration_us = min(buffer_duration_us, player_buffer_duration)
 
+                    # We have at least one player playing
                     assert sample_count is not None
 
                     # TODO: Is mean the correct approach here?
@@ -354,15 +460,8 @@ class PlayerGroup:
                         sum(duration_of_samples_in_chunk) / len(duration_of_samples_in_chunk)
                     )
 
-                    time_until_next_chunk = chunk_timestamp_us - int(
-                        self._server.loop.time() * 1_000_000
-                    )
+                    await self._calculate_timing_and_sleep(chunk_timestamp_us, buffer_duration_us)
 
-                    # TODO: I think this may exclude the burst at startup?
-                    if time_until_next_chunk > buffer_duration_us:
-                        await asyncio.sleep(
-                            (time_until_next_chunk - buffer_duration_us) / 1_000_000
-                        )
             # TODO: flush buffer
             logger.debug("Audio streaming loop ended")
         except Exception:

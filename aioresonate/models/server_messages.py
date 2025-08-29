@@ -63,8 +63,6 @@ class ServerHelloMessage(ServerMessage):
 class SessionEndPayload(DataClassORJSONMixin):
     """Payload for the session/end message."""
 
-    sessionId: str  # noqa: N815
-
 
 @dataclass
 class SessionEndMessage(ServerMessage):

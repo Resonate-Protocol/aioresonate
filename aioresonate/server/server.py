@@ -4,7 +4,6 @@ import asyncio
 import logging
 from collections.abc import Callable, Coroutine
 from dataclasses import dataclass
-from typing import cast
 
 from aiohttp import ClientConnectionError, ClientWSTimeout, web
 from aiohttp.client import ClientSession
@@ -37,18 +36,40 @@ class ResonateServer:
     """Resonate Server implementation to connect to and manage many Resonate Players."""
 
     _players: set[Player]
+    """All players currently connected to this server.
+
+    This excludes players that are technically connected, but did not complete the handshake.
+    """
     _groups: set[PlayerGroup]
-    loop: asyncio.AbstractEventLoop
+    """All groups managed by this server."""
+    _loop: asyncio.AbstractEventLoop
     _event_cbs: list[Callable[[ResonateEvent], Coroutine[None, None, None]]]
     _connection_tasks: dict[str, asyncio.Task[None]]
+    """All tasks managing player connections.
+
+    This only includes connections initiated via connect_to_player (Server -> Player).
+    """
     _retry_events: dict[str, asyncio.Event]
+    """For each connection task in _connection_tasks, this holds an asyncio.Event.
+
+    This event is used to signal an immediate retry of the connection, in case the connection is
+    sleeping during a backoff period.
+    """
     _id: str
     _name: str
     _client_session: ClientSession
+    """The client session used to connect to players."""
     _owns_session: bool
+    """Whether this server instance owns the client session."""
     _app: web.Application | None
+    """Web application instance for the server.
+
+    This is used to handle incoming WebSocket connections from players.
+    """
     _app_runner: web.AppRunner | None
+    """App runner for the web application."""
     _tcp_site: web.TCPSite | None
+    """TCP site for the web application."""
 
     def __init__(
         self,
@@ -57,15 +78,23 @@ class ResonateServer:
         server_name: str,
         client_session: ClientSession | None = None,
     ) -> None:
-        """Initialize a new Resonate Server."""
+        """Initialize a new Resonate Server.
+
+        Args:
+            loop: The asyncio event loop to use for asynchronous operations.
+            server_id: Unique identifier for this server instance.
+            server_name: Human-readable name for this server.
+            client_session: Optional ClientSession for outgoing connections.
+                If None, a new session will be created.
+        """
         self._players = set()
         self._groups = set()
-        self.loop = loop
+        self._loop = loop
         self._event_cbs = []
         self._id = server_id
         self._name = server_name
         if client_session is None:
-            self._client_session = ClientSession(loop=loop)
+            self._client_session = ClientSession(loop=self._loop)
             self._owns_session = True
         else:
             self._client_session = client_session
@@ -77,19 +106,34 @@ class ResonateServer:
         self._tcp_site = None
         logger.debug("ResonateServer initialized: id=%s, name=%s", server_id, server_name)
 
+    @property
+    def loop(self) -> asyncio.AbstractEventLoop:
+        """Read-only access to the event loop used by this server."""
+        return self._loop
+
     async def on_player_connect(self, request: web.Request) -> web.StreamResponse:
         """Handle an incoming WebSocket connection from a Resonate client."""
         logger.debug("Incoming player connection from %s", request.remote)
-        player = Player(self, request=request, url=None, wsock_client=None)
-        # TODO: remove this cast
-        return cast("web.StreamResponse", await player.handle_client())
+
+        player = Player(
+            self,
+            handle_player_connect=self._handle_player_connect,
+            handle_player_disconnect=self._handle_player_disconnect,
+            request=request,
+        )
+        await player._handle_client()  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+
+        websocket = player.websocket_connection
+        # This is a WebSocketResponse since we just created player
+        # as client-initiated.
+        assert isinstance(websocket, web.WebSocketResponse)
+        return websocket
 
     def connect_to_player(self, url: str) -> None:
-        """
-        Connect to the Resonate player at the given URL.
+        """Connect to the Resonate player at the given URL.
 
-        Calling this will start a new connection with the player.
-        In case a connection already exists for this URL, nothing will happen.
+        If an active connection already exists for this URL, nothing will happen.
+        In case a connection attempt fails, a new connection will be attempted automatically.
         """
         logger.debug("Connecting to player at URL: %s", url)
         prev_task = self._connection_tasks.get(url)
@@ -102,11 +146,12 @@ class ResonateServer:
         else:
             # Create retry event for this connection
             self._retry_events[url] = asyncio.Event()
-            self._connection_tasks[url] = self.loop.create_task(self._handle_player_connection(url))
+            self._connection_tasks[url] = self._loop.create_task(
+                self._handle_player_connection(url)
+            )
 
     def disconnect_from_player(self, url: str) -> None:
-        """
-        Disconnect from the Resonate player that was previously connected at the given URL.
+        """Disconnect from the Resonate player that was previously connected at the given URL.
 
         If no connection was established at this URL, or the connection is already closed,
         this will do nothing.
@@ -116,7 +161,7 @@ class ResonateServer:
         connection_task = self._connection_tasks.pop(url, None)
         if connection_task is not None:
             logger.debug("Disconnecting from player at URL: %s", url)
-            _ = connection_task.cancel()
+            _ = connection_task.cancel()  # Don't care about cancellation result
 
     async def _handle_player_connection(self, url: str) -> None:
         """Handle the actual connection to a player."""
@@ -133,12 +178,18 @@ class ResonateServer:
                     async with self._client_session.ws_connect(
                         url,
                         heartbeat=30,
+                        # Pyright doesn't recognise the signature
                         timeout=ClientWSTimeout(ws_close=10, ws_receive=60),  # pyright: ignore[reportCallIssue]
                     ) as wsock:
                         # Reset backoff on successful connect
                         backoff = 1.0
-                        player = Player(self, request=None, url=url, wsock_client=wsock)
-                        _ = await player.handle_client()
+                        player = Player(
+                            self,
+                            handle_player_connect=self._handle_player_connect,
+                            handle_player_disconnect=self._handle_player_disconnect,
+                            wsock_client=wsock,
+                        )
+                        await player._handle_client()  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
                 except asyncio.CancelledError:
                     break
                 except TimeoutError:
@@ -157,7 +208,8 @@ class ResonateServer:
                 # Use asyncio.wait_for with the retry event to allow immediate retry
                 if retry_event is not None:
                     try:
-                        await asyncio.wait_for(retry_event.wait(), timeout=backoff)
+                        # Always returns True when event is set
+                        _ = await asyncio.wait_for(retry_event.wait(), timeout=backoff)
                         logger.debug("Immediate retry requested for %s", url)
                         # Clear the event for next time
                         retry_event.clear()
@@ -172,8 +224,8 @@ class ResonateServer:
         except asyncio.CancelledError:
             pass
         finally:
-            self._connection_tasks.pop(url, None)
-            self._retry_events.pop(url, None)
+            _ = self._connection_tasks.pop(url, None)  # Cleanup connection tasks dict
+            _ = self._retry_events.pop(url, None)  # Cleanup retry events dict
 
     def add_event_listener(
         self, callback: Callable[[ResonateEvent], Coroutine[None, None, None]]
@@ -190,12 +242,12 @@ class ResonateServer:
         return lambda: self._event_cbs.remove(callback)
 
     def _signal_event(self, event: ResonateEvent) -> None:
+        """Signal an event to all registered listeners."""
         for cb in self._event_cbs:
-            _ = self.loop.create_task(cb(event))
+            _ = self._loop.create_task(cb(event))  # Fire and forget event callback
 
-    def _on_player_add(self, player: Player) -> None:
-        """
-        Register the player to the server and notify that the player connected.
+    def _handle_player_connect(self, player: Player) -> None:
+        """Register the player to the server.
 
         Should only be called once all data like the player id was received.
         """
@@ -206,7 +258,8 @@ class ResonateServer:
         self._players.add(player)
         self._signal_event(PlayerAddedEvent(player.player_id))
 
-    def _on_player_remove(self, player: Player) -> None:
+    def _handle_player_disconnect(self, player: Player) -> None:
+        """Unregister the player from the server."""
         if player not in self._players:
             return
 
@@ -231,7 +284,7 @@ class ResonateServer:
 
     @property
     def groups(self) -> set[PlayerGroup]:
-        """Get the set of all groups."""
+        """Get the set of all groups managed by this server."""
         return self._groups
 
     @property
@@ -244,21 +297,23 @@ class ResonateServer:
         """Get the name of this server."""
         return self._name
 
-    async def start_server(self, port: int = 8927, host: str = "0.0.0.0") -> None:  # noqa: S104
-        """Start the HTTP server to handle incoming resonate connections on /resonate."""
+    async def start_server(self, port: int = 8927, host: str = "0.0.0.0") -> None:
+        """Start a HTTP server to handle incoming resonate connections on /resonate."""
         if self._app is not None:
             logger.warning("Server is already running")
             return
 
         logger.info("Starting Resonate server on port %d", port)
         self._app = web.Application()
+        # Create perpetual WebSocket route for player connections
+        _ = self._app.router.add_get("/resonate", self.on_player_connect)
         self._app_runner = web.AppRunner(self._app)
         await self._app_runner.setup()
 
         try:
             self._tcp_site = web.TCPSite(
                 self._app_runner,
-                host=host if host != "0.0.0.0" else None,  # noqa: S104
+                host=host if host != "0.0.0.0" else None,
                 port=port,
             )
             await self._tcp_site.start()
