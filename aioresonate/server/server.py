@@ -190,6 +190,9 @@ class ResonateServer:
                             wsock_client=wsock,
                         )
                         await player._handle_client()  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+                    if self._client_session.closed:
+                        logger.debug("Client session closed, stopping connection task for %s", url)
+                        break
                 except asyncio.CancelledError:
                     break
                 except TimeoutError:
