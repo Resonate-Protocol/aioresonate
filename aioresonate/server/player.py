@@ -285,7 +285,7 @@ class Player:
                 )
 
                 if self._writer_task in done:
-                    self._logger.warning("Writer task ended, closing connection")
+                    self._logger.debug("Writer task ended, closing connection")
                     # Cancel the receive task if it's still pending
                     if receive_task in pending:
                         _ = receive_task.cancel()  # Don't care about cancellation result
