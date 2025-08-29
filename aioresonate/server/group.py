@@ -11,6 +11,7 @@ from uuid import uuid4
 import av
 
 from aioresonate.models import BinaryMessageType, pack_binary_header_raw, server_messages
+from aioresonate.models.types import RepeatMode
 
 # The cyclic import is not an issue during runtime, so hide it
 # pyright: reportImportCycles=none
@@ -39,6 +40,28 @@ class AudioFormat:
     """Number of audio channels (1 for mono, 2 for stereo)."""
 
 
+@dataclass
+class Metadata:
+    """Metadata for media playback."""
+
+    # TODO: finish this once the spec is finalized
+
+    title: str = ""
+    """Title of the current media."""
+    artist: str = ""
+    """Artist of the current media."""
+    album: str = ""
+    """Album of the current media."""
+    year: int = 0
+    """Release year of the current media."""
+    track: int = 0
+    """Track number of the current media."""
+    repeat: RepeatMode = RepeatMode.OFF
+    """Current repeat mode."""
+    shuffle: bool = False
+    """Whether shuffle is enabled."""
+
+
 class PlayerGroup:
     """A group of one or more players for synchronized playback.
 
@@ -57,6 +80,8 @@ class PlayerGroup:
     """Task handling the audio streaming loop, None when not streaming."""
     _stream_audio_format: AudioFormat | None = None
     """The source audio format for the current stream, None when not streaming."""
+    _current_metadata: Metadata | None = None
+    """Current metadata for the group, None if no metadata set."""
 
     def __init__(self, server: "ResonateServer", *args: "Player") -> None:
         """DO NOT CALL THIS CONSTRUCTOR. INTERNAL USE ONLY.
@@ -72,6 +97,7 @@ class PlayerGroup:
         self._server = server
         self._players = list(args)
         self._player_formats = {}
+        self._current_metadata = None
         logger.debug(
             "PlayerGroup initialized with %d player(s): %s",
             len(self._players),
@@ -219,6 +245,63 @@ class PlayerGroup:
         self._stream_task = None
         return True
 
+    def set_metadata(self, metadata: Metadata) -> None:
+        """Set metadata for the group and send to all players.
+
+        Only sends updates for fields that have changed since the last call.
+
+        Args:
+            metadata: The new metadata to send to players.
+        """
+        # TODO: integrate this more closely with play_media?
+        # Check if metadata has actually changed
+        if self._current_metadata == metadata:
+            return
+
+        # Create partial update payload with only changed fields
+        update_payload = server_messages.MetadataUpdatePayload()
+
+        if self._current_metadata is None:
+            # First time setting metadata, send all fields
+            update_payload.title = metadata.title
+            update_payload.artist = metadata.artist
+            update_payload.album = metadata.album
+            update_payload.year = metadata.year
+            update_payload.track = metadata.track
+            update_payload.repeat = metadata.repeat
+            update_payload.shuffle = metadata.shuffle
+        else:
+            # Only send changed fields
+            if self._current_metadata.title != metadata.title:
+                update_payload.title = metadata.title
+            if self._current_metadata.artist != metadata.artist:
+                update_payload.artist = metadata.artist
+            if self._current_metadata.album != metadata.album:
+                update_payload.album = metadata.album
+            if self._current_metadata.year != metadata.year:
+                update_payload.year = metadata.year
+            if self._current_metadata.track != metadata.track:
+                update_payload.track = metadata.track
+            if self._current_metadata.repeat != metadata.repeat:
+                update_payload.repeat = metadata.repeat
+            if self._current_metadata.shuffle != metadata.shuffle:
+                update_payload.shuffle = metadata.shuffle
+
+        # TODO: finish this once the spec is finalized, include group_members and support_commands
+
+        # Send to all players in the group
+        message = server_messages.MetadataUpdateMessage(update_payload)
+        for player in self._players:
+            logger.debug(
+                "Sending metadata update message to player %s: %s",
+                player.player_id,
+                message.to_json(),
+            )
+            player.send_message(message)
+
+        # Update current metadata
+        self._current_metadata = metadata
+
     @property
     def players(self) -> list["Player"]:
         """All players that are part of this group."""
@@ -269,6 +352,25 @@ class PlayerGroup:
             player_format = self.determine_player_format(player, self._stream_audio_format)
             self._player_formats[player.player_id] = player_format
             self._send_session_start_msg(player, player_format)
+
+        # Send current metadata to the new player if available
+        if self._current_metadata is not None:
+            update_payload = server_messages.MetadataUpdatePayload(
+                title=self._current_metadata.title,
+                artist=self._current_metadata.artist,
+                album=self._current_metadata.album,
+                year=self._current_metadata.year,
+                track=self._current_metadata.track,
+                repeat=self._current_metadata.repeat,
+                shuffle=self._current_metadata.shuffle,
+            )
+            message = server_messages.MetadataUpdateMessage(update_payload)
+
+            logger.debug(
+                "Sending current metadata to new player %s: %s", player.player_id, message.to_json()
+            )
+            player.send_message(message)
+
         self._players.append(player)
 
     def _validate_audio_format(self, audio_format: AudioFormat) -> tuple[int, str, str] | None:

@@ -86,6 +86,11 @@ class MetadataUpdatePayload(DataClassORJSONMixin):
     repeat: RepeatMode | None = None
     shuffle: bool | None = None
 
+    class Config(BaseConfig):
+        """Configuration for MetadataUpdatePayload serialization."""
+
+        omit_none = True
+
 
 @dataclass
 class MetadataUpdateMessage(ServerMessage):
