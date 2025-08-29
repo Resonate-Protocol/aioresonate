@@ -357,7 +357,6 @@ class PlayerGroup:
 
         # Send current metadata to the new player if available
         if self._current_metadata is not None:
-            logger.debug("Sending current metadata to new player %s", player.player_id)
             update_payload = server_messages.MetadataUpdatePayload(
                 title=self._current_metadata.title,
                 artist=self._current_metadata.artist,
@@ -370,6 +369,10 @@ class PlayerGroup:
             )
             # TODO: send update to other players, since group_members changed
             message = server_messages.MetadataUpdateMessage(update_payload)
+
+            logger.debug(
+                "Sending current metadata to new player %s: %s", player.player_id, message.to_json()
+            )
             player.send_message(message)
 
         self._players.append(player)
