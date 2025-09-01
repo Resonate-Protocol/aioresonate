@@ -86,6 +86,7 @@ class Player:
     _event_cbs: list[Callable[[PlayerEvent], Coroutine[None, None, None]]]
     _volume: int = 100
     _muted: bool = False
+    _closing: bool = False
     _handle_player_connect: Callable[["Player"], None]
     _handle_player_disconnect: Callable[["Player"], None]
     _logger: logging.Logger
@@ -129,9 +130,11 @@ class Player:
         self._to_write = asyncio.Queue(maxsize=MAX_PENDING_MSG)
         self._group = PlayerGroup(server, self)
         self._event_cbs = []
+        self._closing = False
 
     async def disconnect(self) -> None:
         """Disconnect this player from the server."""
+        self._closing = True
         self._logger.debug("Disconnecting client")
 
         # Cancel running tasks
@@ -217,6 +220,11 @@ class Player:
     def volume(self) -> int:
         """Volume of this player."""
         return self._volume
+
+    @property
+    def closing(self) -> bool:
+        """Whether this player is in the process of closing/disconnecting."""
+        return self._closing
 
     def _set_group(self, group: "PlayerGroup") -> None:
         """Set the group for this player. For internal use by PlayerGroup only.

@@ -193,6 +193,8 @@ class ResonateServer:
                     if self._client_session.closed:
                         logger.debug("Client session closed, stopping connection task for %s", url)
                         break
+                    if player.closing:
+                        break
                 except asyncio.CancelledError:
                     break
                 except TimeoutError:
