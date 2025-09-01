@@ -8,7 +8,6 @@ from dataclasses import dataclass
 from aiohttp import ClientConnectionError, ClientWSTimeout, web
 from aiohttp.client import ClientSession
 
-from .group import PlayerGroup
 from .player import Player
 
 logger = logging.getLogger(__name__)
@@ -36,11 +35,6 @@ class ResonateServer:
     """Resonate Server implementation to connect to and manage many Resonate Players."""
 
     _players: set[Player]
-    """All players currently connected to this server.
-
-    This excludes players that are technically connected, but did not complete the handshake.
-    """
-    _groups: set[PlayerGroup]
     """All groups managed by this server."""
     _loop: asyncio.AbstractEventLoop
     _event_cbs: list[Callable[[ResonateEvent], Coroutine[None, None, None]]]
@@ -88,7 +82,6 @@ class ResonateServer:
                 If None, a new session will be created.
         """
         self._players = set()
-        self._groups = set()
         self._loop = loop
         self._event_cbs = []
         self._id = server_id
@@ -286,11 +279,6 @@ class ResonateServer:
                 return player
         logger.debug("Player %s not found", player_id)
         return None
-
-    @property
-    def groups(self) -> set[PlayerGroup]:
-        """Get the set of all groups managed by this server."""
-        return self._groups
 
     @property
     def id(self) -> str:
