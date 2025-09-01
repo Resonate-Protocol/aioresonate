@@ -426,7 +426,13 @@ class Player:
                             "sending audio chunk that needs to be played very soon (in %d us)",
                             (header.timestamp_us - now),
                         )
-                    await wsock.send_bytes(item)
+                    try:
+                        await wsock.send_bytes(item)
+                    except ConnectionError:
+                        self._logger.warning(
+                            "Connection error sending binary data, ending writer task"
+                        )
+                        break
                 else:
                     assert isinstance(item, server_messages.ServerMessage)  # for type checking
                     if isinstance(item, server_messages.ServerTimeMessage):
