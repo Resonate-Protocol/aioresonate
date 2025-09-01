@@ -322,14 +322,19 @@ class PlayerGroup:
             logger.debug("player %s not in group, skipping removal", player.player_id)
             return
         logger.debug("removing %s from group with members: %s", player.player_id, self._players)
-        self._players.remove(player)
-        if self._stream_task is not None:
-            # Notify the player that the session ended
-            try:
-                self._send_session_end_msg(player)
-            except QueueFull:
-                logger.warning("Failed to send session end message to %s", player.player_id)
-            del self._player_formats[player.player_id]
+        if len(self._players) == 1:
+            # Delete this group if that was the last player
+            _ = self.stop()
+            self._players = []
+        else:
+            self._players.remove(player)
+            if self._stream_task is not None:
+                # Notify the player that the session ended
+                try:
+                    self._send_session_end_msg(player)
+                except QueueFull:
+                    logger.warning("Failed to send session end message to %s", player.player_id)
+                del self._player_formats[player.player_id]
         # Each player needs to be in a group, add it to a new one
         player._set_group(PlayerGroup(self._server, player))  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
 
@@ -563,8 +568,9 @@ class PlayerGroup:
                         )
                         buffer_duration_us = min(buffer_duration_us, player_buffer_duration)
 
-                    # We have at least one player playing
-                    assert sample_count is not None
+                    if sample_count is None:
+                        logger.error("No players in group, stopping stream")
+                        return
 
                     # TODO: Is mean the correct approach here?
                     # Or just make it based on the input stream
