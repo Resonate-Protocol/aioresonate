@@ -303,7 +303,7 @@ class ResonateServer:
         return self._name
 
     async def start_server(self, port: int = 8927, host: str = "0.0.0.0") -> None:
-        """Start a HTTP server to handle incoming resonate connections on /resonate."""
+        """Start an HTTP server to handle incoming Resonate connections on /resonate."""
         if self._app is not None:
             logger.warning("Server is already running")
             return

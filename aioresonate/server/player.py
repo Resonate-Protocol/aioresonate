@@ -79,7 +79,7 @@ class Player:
     _player_id: str | None = None
     _player_info: client_messages.ClientHelloPayload | None = None
     _writer_task: asyncio.Task[None] | None = None
-    """Task responsible for sending json and binary data."""
+    """Task responsible for sending JSON and binary data."""
     _to_write: asyncio.Queue[server_messages.ServerMessage | bytes]
     """Queue for messages to be sent to the player through the WebSocket."""
     _group: PlayerGroup
@@ -150,7 +150,7 @@ class Player:
                 await self._writer_task
         # Handle task is cancelled implicitly when wsock closes or externally
 
-        # Close websocket
+        # Close WebSocket
         if self._wsock_client is not None and not self._wsock_client.closed:
             _ = await self._wsock_client.close()  # Don't care about close result
         elif self._wsock_server is not None and not self._wsock_server.closed:
@@ -410,7 +410,7 @@ class Player:
 
     async def _writer(self) -> None:
         """Write outgoing messages from the queue."""
-        # Exceptions if Socket disconnected or cancelled by connection handler
+        # Exceptions if socket disconnected or cancelled by connection handler
         wsock = self._wsock_server or self._wsock_client
         assert wsock is not None
         try:
@@ -422,9 +422,7 @@ class Player:
                     header = models.unpack_binary_header(item)
                     now = int(self._server.loop.time() * 1_000_000)
                     if header.timestamp_us - now < 0:
-                        self._logger.error(
-                            "Audio chunk after should have played already, skipping it"
-                        )
+                        self._logger.error("Audio chunk should have played already, skipping it")
                         continue
                     if header.timestamp_us - now < 500_000:
                         self._logger.warning(
