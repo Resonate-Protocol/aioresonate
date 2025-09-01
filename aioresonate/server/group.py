@@ -552,7 +552,7 @@ class PlayerGroup:
                                 "Error sending audio chunk to %s, disconnecting player",
                                 player.player_id,
                             )
-                            await player.disconnect(retry_connection=True)
+                            await player.disconnect()
 
                         # Calculate buffer duration for this player
                         player_buffer_capacity_samples = player.info.buffer_capacity // (
