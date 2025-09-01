@@ -2,7 +2,7 @@
 
 import asyncio
 import logging
-from asyncio import Task
+from asyncio import QueueFull, Task
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
@@ -325,7 +325,10 @@ class PlayerGroup:
         self._players.remove(player)
         if self._stream_task is not None:
             # Notify the player that the session ended
-            self._send_session_end_msg(player)
+            try:
+                self._send_session_end_msg(player)
+            except QueueFull:
+                logger.warning("Failed to send session end message to %s", player.player_id)
             del self._player_formats[player.player_id]
         # Each player needs to be in a group, add it to a new one
         player._set_group(PlayerGroup(self._server, player))  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
@@ -539,10 +542,17 @@ class PlayerGroup:
 
                     for player in self._players:
                         player_format = self._player_formats[player.player_id]
-                        sample_count, duration_us = self._resample_and_send_to_player(
-                            player, player_format, in_frame, resamplers, chunk_timestamp_us
-                        )
-                        duration_of_samples_in_chunk.append(duration_us)
+                        try:
+                            sample_count, duration_us = self._resample_and_send_to_player(
+                                player, player_format, in_frame, resamplers, chunk_timestamp_us
+                            )
+                            duration_of_samples_in_chunk.append(duration_us)
+                        except QueueFull:
+                            logger.warning(
+                                "Error sending audio chunk to %s, disconnecting player",
+                                player.player_id,
+                            )
+                            await player.disconnect(retry_connection=True)
 
                         # Calculate buffer duration for this player
                         player_buffer_capacity_samples = player.info.buffer_capacity // (
