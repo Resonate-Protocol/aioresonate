@@ -138,6 +138,10 @@ class Player:
             self._closing = True
         self._logger.debug("Disconnecting client")
 
+        self.ungroup()
+        # Try to stop playback if we were playing alone before disconnecting
+        _ = self.group.stop()
+
         # Cancel running tasks
         if self._writer_task and not self._writer_task.done():
             self._logger.debug("Cancelling writer task")
