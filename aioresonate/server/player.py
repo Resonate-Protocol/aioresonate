@@ -132,9 +132,10 @@ class Player:
         self._event_cbs = []
         self._closing = False
 
-    async def disconnect(self) -> None:
+    async def disconnect(self, *, retry_connection: bool = True) -> None:
         """Disconnect this player from the server."""
-        self._closing = True
+        if not retry_connection:
+            self._closing = True
         self._logger.debug("Disconnecting client")
 
         # Cancel running tasks
@@ -338,7 +339,7 @@ class Player:
                 _ = await wsock.close()  # Don't care about close result
         except Exception:
             self._logger.exception("Failed to close websocket")
-        await self.disconnect()
+        await self.disconnect(retry_connection=False)
 
     async def _handle_client(self) -> None:
         """Handle the complete websocket connection lifecycle.
