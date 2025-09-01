@@ -414,7 +414,7 @@ class Player:
         wsock = self._wsock_server or self._wsock_client
         assert wsock is not None
         try:
-            while not wsock.closed:
+            while not wsock.closed and not self._closing:
                 item = await self._to_write.get()
 
                 if isinstance(item, bytes):
