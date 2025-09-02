@@ -4,6 +4,7 @@ import asyncio
 import logging
 from collections.abc import Callable, Coroutine
 from contextlib import suppress
+from enum import Enum
 from typing import TYPE_CHECKING, cast
 
 from aiohttp import ClientWebSocketResponse, WSMessage, WSMsgType, web
@@ -23,6 +24,18 @@ logger = logging.getLogger(__name__)
 # pyright: reportImportCycles=none
 if TYPE_CHECKING:
     from .server import ResonateServer
+
+
+class DisconnectBehaviour(Enum):
+    """Enum for disconnect behaviour options."""
+
+    UNGROUP = "ungroup"
+    """The player will ungroup itself from its current group when it gets disconnected.
+
+    Playback will continue on the remaining group members.
+    """
+    STOP = "stop"
+    """The player will stop playback of the whole group when it gets disconnected."""
 
 
 class PlayerEvent:
@@ -87,6 +100,13 @@ class Player:
     _volume: int = 100
     _muted: bool = False
     _closing: bool = False
+    disconnect_behaviour: DisconnectBehaviour
+    """Controls the disconnect behavior for this player.
+
+    UNGROUP (default): Player leaves its current group but playback continues
+        on remaining group members.
+    STOP: Player stops playback for the entire group when disconnecting.
+    """
     _handle_player_connect: Callable[["Player"], None]
     _handle_player_disconnect: Callable[["Player"], None]
     _logger: logging.Logger
@@ -131,6 +151,7 @@ class Player:
         self._group = PlayerGroup(server, self)
         self._event_cbs = []
         self._closing = False
+        self.disconnect_behaviour = DisconnectBehaviour.UNGROUP
 
     async def disconnect(self, *, retry_connection: bool = True) -> None:
         """Disconnect this player from the server."""
@@ -138,9 +159,13 @@ class Player:
             self._closing = True
         self._logger.debug("Disconnecting client")
 
-        self.ungroup()
-        # Try to stop playback if we were playing alone before disconnecting
-        _ = self.group.stop()
+        if self.disconnect_behaviour == DisconnectBehaviour.UNGROUP:
+            self.ungroup()
+            # Try to stop playback if we were playing alone before disconnecting
+            _ = self.group.stop()
+        elif self.disconnect_behaviour == DisconnectBehaviour.STOP:
+            _ = self.group.stop()
+            self.ungroup()
 
         # Cancel running tasks
         if self._writer_task and not self._writer_task.done():
