@@ -478,7 +478,13 @@ class Player:
                     assert isinstance(item, server_messages.ServerMessage)  # for type checking
                     if isinstance(item, server_messages.ServerTimeMessage):
                         item.payload.server_transmitted = int(self._server.loop.time() * 1_000_000)
-                    await wsock.send_str(item.to_json())
+                    try:
+                        await wsock.send_str(item.to_json())
+                    except ConnectionError:
+                        self._logger.warning(
+                            "Connection error sending JSON data, ending writer task"
+                        )
+                        break
             self._logger.debug("WebSocket Connection was closed for the player, ending writer task")
         except Exception:
             self._logger.exception("Error in writer task for player")
