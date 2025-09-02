@@ -4,6 +4,7 @@ import asyncio
 import logging
 from collections.abc import Callable, Coroutine
 from contextlib import suppress
+from enum import Enum
 from typing import TYPE_CHECKING, cast
 
 from aiohttp import ClientWebSocketResponse, WSMessage, WSMsgType, web
@@ -23,6 +24,21 @@ logger = logging.getLogger(__name__)
 # pyright: reportImportCycles=none
 if TYPE_CHECKING:
     from .server import ResonateServer
+
+
+class DisconnectBehaviour(Enum):
+    """Enum for disconnect behaviour options."""
+
+    UNGROUP = "ungroup"
+    """
+    The player will ungroup itself from its current group when it gets disconnected.
+
+    Playback will continue on the remaining group members.
+    """
+    STOP = "stop"
+    """
+    The player will stop playback of the whole group when it gets disconnected.
+    """
 
 
 class PlayerEvent:
@@ -53,7 +69,8 @@ class StreamPauseEvent(PlayerEvent):
 
 
 class Player:
-    """A Player that is connected to a ResonateServer.
+    """
+    A Player that is connected to a ResonateServer.
 
     Playback is handled through groups, use Player.group to get the
     assigned group.
@@ -62,30 +79,42 @@ class Player:
     _server: "ResonateServer"
     """Reference to the ResonateServer instance this player belongs to."""
     _wsock_client: ClientWebSocketResponse | None = None
-    """WebSocket connection from the server to the client.
+    """
+    WebSocket connection from the server to the client.
 
     This is only set for server-initiated connections.
     """
     _wsock_server: web.WebSocketResponse | None = None
-    """WebSocket connection from the client to the server.
+    """
+    WebSocket connection from the client to the server.
 
     This is only set for client-initiated connections.
     """
     _request: web.Request | None = None
-    """Web Request used for client-initiated connections.
+    """
+    Web Request used for client-initiated connections.
 
     This is only set for client-initiated connections.
     """
     _player_id: str | None = None
     _player_info: client_messages.ClientHelloPayload | None = None
     _writer_task: asyncio.Task[None] | None = None
-    """Task responsible for sending json and binary data."""
+    """Task responsible for sending JSON and binary data."""
     _to_write: asyncio.Queue[server_messages.ServerMessage | bytes]
     """Queue for messages to be sent to the player through the WebSocket."""
     _group: PlayerGroup
     _event_cbs: list[Callable[[PlayerEvent], Coroutine[None, None, None]]]
     _volume: int = 100
     _muted: bool = False
+    _closing: bool = False
+    disconnect_behaviour: DisconnectBehaviour
+    """
+    Controls the disconnect behavior for this player.
+
+    UNGROUP (default): Player leaves its current group but playback continues
+        on remaining group members.
+    STOP: Player stops playback for the entire group when disconnecting.
+    """
     _handle_player_connect: Callable[["Player"], None]
     _handle_player_disconnect: Callable[["Player"], None]
     _logger: logging.Logger
@@ -98,7 +127,8 @@ class Player:
         request: web.Request | None = None,
         wsock_client: ClientWebSocketResponse | None = None,
     ) -> None:
-        """DO NOT CALL THIS CONSTRUCTOR. INTERNAL USE ONLY.
+        """
+        DO NOT CALL THIS CONSTRUCTOR. INTERNAL USE ONLY.
 
         Use ResonateServer.on_player_connect or ResonateServer.connect_to_player instead.
 
@@ -129,10 +159,22 @@ class Player:
         self._to_write = asyncio.Queue(maxsize=MAX_PENDING_MSG)
         self._group = PlayerGroup(server, self)
         self._event_cbs = []
+        self._closing = False
+        self.disconnect_behaviour = DisconnectBehaviour.UNGROUP
 
-    async def disconnect(self) -> None:
+    async def disconnect(self, *, retry_connection: bool = True) -> None:
         """Disconnect this player from the server."""
+        if not retry_connection:
+            self._closing = True
         self._logger.debug("Disconnecting client")
+
+        if self.disconnect_behaviour == DisconnectBehaviour.UNGROUP:
+            self.ungroup()
+            # Try to stop playback if we were playing alone before disconnecting
+            _ = self.group.stop()
+        elif self.disconnect_behaviour == DisconnectBehaviour.STOP:
+            _ = self.group.stop()
+            self.ungroup()
 
         # Cancel running tasks
         if self._writer_task and not self._writer_task.done():
@@ -142,7 +184,7 @@ class Player:
                 await self._writer_task
         # Handle task is cancelled implicitly when wsock closes or externally
 
-        # Close websocket
+        # Close WebSocket
         if self._wsock_client is not None and not self._wsock_client.closed:
             _ = await self._wsock_client.close()  # Don't care about close result
         elif self._wsock_server is not None and not self._wsock_server.closed:
@@ -179,7 +221,8 @@ class Player:
 
     @property
     def websocket_connection(self) -> web.WebSocketResponse | ClientWebSocketResponse:
-        """Returns the active WebSocket connection for this player.
+        """
+        Returns the active WebSocket connection for this player.
 
         This provides access to the underlying WebSocket connection, which can be
         either a server-side WebSocketResponse (for client-initiated connections)
@@ -218,8 +261,14 @@ class Player:
         """Volume of this player."""
         return self._volume
 
+    @property
+    def closing(self) -> bool:
+        """Whether this player is in the process of closing/disconnecting."""
+        return self._closing
+
     def _set_group(self, group: "PlayerGroup") -> None:
-        """Set the group for this player. For internal use by PlayerGroup only.
+        """
+        Set the group for this player. For internal use by PlayerGroup only.
 
         NOTE: this does not update the group's player list
 
@@ -229,7 +278,8 @@ class Player:
         self._group = group
 
     def ungroup(self) -> None:
-        """Remove the player from the group.
+        """
+        Remove the player from the group.
 
         If the player is already alone, this function does nothing.
         """
@@ -285,7 +335,7 @@ class Player:
                 )
 
                 if self._writer_task in done:
-                    self._logger.warning("Writer task ended, closing connection")
+                    self._logger.debug("Writer task ended, closing connection")
                     # Cancel the receive task if it's still pending
                     if receive_task in pending:
                         _ = receive_task.cancel()  # Don't care about cancellation result
@@ -333,7 +383,8 @@ class Player:
         await self.disconnect()
 
     async def _handle_client(self) -> None:
-        """Handle the complete websocket connection lifecycle.
+        """
+        Handle the complete websocket connection lifecycle.
 
         This method is private and should only be called by ResonateServer
         during player connection handling.
@@ -397,11 +448,11 @@ class Player:
 
     async def _writer(self) -> None:
         """Write outgoing messages from the queue."""
-        # Exceptions if Socket disconnected or cancelled by connection handler
+        # Exceptions if socket disconnected or cancelled by connection handler
         wsock = self._wsock_server or self._wsock_client
         assert wsock is not None
         try:
-            while not wsock.closed:
+            while not wsock.closed and not self._closing:
                 item = await self._to_write.get()
 
                 if isinstance(item, bytes):
@@ -409,27 +460,38 @@ class Player:
                     header = models.unpack_binary_header(item)
                     now = int(self._server.loop.time() * 1_000_000)
                     if header.timestamp_us - now < 0:
-                        self._logger.error(
-                            "Audio chunk after should have played already, skipping it"
-                        )
+                        self._logger.error("Audio chunk should have played already, skipping it")
                         continue
                     if header.timestamp_us - now < 500_000:
                         self._logger.warning(
                             "sending audio chunk that needs to be played very soon (in %d us)",
                             (header.timestamp_us - now),
                         )
-                    await wsock.send_bytes(item)
+                    try:
+                        await wsock.send_bytes(item)
+                    except ConnectionError:
+                        self._logger.warning(
+                            "Connection error sending binary data, ending writer task"
+                        )
+                        break
                 else:
                     assert isinstance(item, server_messages.ServerMessage)  # for type checking
                     if isinstance(item, server_messages.ServerTimeMessage):
                         item.payload.server_transmitted = int(self._server.loop.time() * 1_000_000)
-                    await wsock.send_str(item.to_json())
+                    try:
+                        await wsock.send_str(item.to_json())
+                    except ConnectionError:
+                        self._logger.warning(
+                            "Connection error sending JSON data, ending writer task"
+                        )
+                        break
             self._logger.debug("WebSocket Connection was closed for the player, ending writer task")
         except Exception:
             self._logger.exception("Error in writer task for player")
 
     def send_message(self, message: server_messages.ServerMessage | bytes) -> None:
-        """Enqueue a JSON or binary message to be sent directly to the client.
+        """
+        Enqueue a JSON or binary message to be sent directly to the client.
 
         It is recommended to not use this method, but to use the higher-level
         API of this library instead.
@@ -449,7 +511,8 @@ class Player:
     def add_event_listener(
         self, callback: Callable[[PlayerEvent], Coroutine[None, None, None]]
     ) -> Callable[[], None]:
-        """Register a callback to listen for state changes of this player.
+        """
+        Register a callback to listen for state changes of this player.
 
         State changes include:
         - The volume was changed

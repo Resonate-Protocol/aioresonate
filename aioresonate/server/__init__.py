@@ -1,4 +1,5 @@
-"""Resonate Server implementation to connect to and manage many Resonate Players.
+"""
+Resonate Server implementation to connect to and manage many Resonate Players.
 
 ResonateServer is the core of the music listening experience, responsible for:
 - Managing connected players
