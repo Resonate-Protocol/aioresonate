@@ -30,12 +30,15 @@ class DisconnectBehaviour(Enum):
     """Enum for disconnect behaviour options."""
 
     UNGROUP = "ungroup"
-    """The player will ungroup itself from its current group when it gets disconnected.
+    """
+    The player will ungroup itself from its current group when it gets disconnected.
 
     Playback will continue on the remaining group members.
     """
     STOP = "stop"
-    """The player will stop playback of the whole group when it gets disconnected."""
+    """
+    The player will stop playback of the whole group when it gets disconnected.
+    """
 
 
 class PlayerEvent:
@@ -66,7 +69,8 @@ class StreamPauseEvent(PlayerEvent):
 
 
 class Player:
-    """A Player that is connected to a ResonateServer.
+    """
+    A Player that is connected to a ResonateServer.
 
     Playback is handled through groups, use Player.group to get the
     assigned group.
@@ -75,17 +79,20 @@ class Player:
     _server: "ResonateServer"
     """Reference to the ResonateServer instance this player belongs to."""
     _wsock_client: ClientWebSocketResponse | None = None
-    """WebSocket connection from the server to the client.
+    """
+    WebSocket connection from the server to the client.
 
     This is only set for server-initiated connections.
     """
     _wsock_server: web.WebSocketResponse | None = None
-    """WebSocket connection from the client to the server.
+    """
+    WebSocket connection from the client to the server.
 
     This is only set for client-initiated connections.
     """
     _request: web.Request | None = None
-    """Web Request used for client-initiated connections.
+    """
+    Web Request used for client-initiated connections.
 
     This is only set for client-initiated connections.
     """
@@ -101,7 +108,8 @@ class Player:
     _muted: bool = False
     _closing: bool = False
     disconnect_behaviour: DisconnectBehaviour
-    """Controls the disconnect behavior for this player.
+    """
+    Controls the disconnect behavior for this player.
 
     UNGROUP (default): Player leaves its current group but playback continues
         on remaining group members.
@@ -119,7 +127,8 @@ class Player:
         request: web.Request | None = None,
         wsock_client: ClientWebSocketResponse | None = None,
     ) -> None:
-        """DO NOT CALL THIS CONSTRUCTOR. INTERNAL USE ONLY.
+        """
+        DO NOT CALL THIS CONSTRUCTOR. INTERNAL USE ONLY.
 
         Use ResonateServer.on_player_connect or ResonateServer.connect_to_player instead.
 
@@ -212,7 +221,8 @@ class Player:
 
     @property
     def websocket_connection(self) -> web.WebSocketResponse | ClientWebSocketResponse:
-        """Returns the active WebSocket connection for this player.
+        """
+        Returns the active WebSocket connection for this player.
 
         This provides access to the underlying WebSocket connection, which can be
         either a server-side WebSocketResponse (for client-initiated connections)
@@ -257,7 +267,8 @@ class Player:
         return self._closing
 
     def _set_group(self, group: "PlayerGroup") -> None:
-        """Set the group for this player. For internal use by PlayerGroup only.
+        """
+        Set the group for this player. For internal use by PlayerGroup only.
 
         NOTE: this does not update the group's player list
 
@@ -267,7 +278,8 @@ class Player:
         self._group = group
 
     def ungroup(self) -> None:
-        """Remove the player from the group.
+        """
+        Remove the player from the group.
 
         If the player is already alone, this function does nothing.
         """
@@ -371,7 +383,8 @@ class Player:
         await self.disconnect()
 
     async def _handle_client(self) -> None:
-        """Handle the complete websocket connection lifecycle.
+        """
+        Handle the complete websocket connection lifecycle.
 
         This method is private and should only be called by ResonateServer
         during player connection handling.
@@ -471,7 +484,8 @@ class Player:
             self._logger.exception("Error in writer task for player")
 
     def send_message(self, message: server_messages.ServerMessage | bytes) -> None:
-        """Enqueue a JSON or binary message to be sent directly to the client.
+        """
+        Enqueue a JSON or binary message to be sent directly to the client.
 
         It is recommended to not use this method, but to use the higher-level
         API of this library instead.
@@ -491,7 +505,8 @@ class Player:
     def add_event_listener(
         self, callback: Callable[[PlayerEvent], Coroutine[None, None, None]]
     ) -> Callable[[], None]:
-        """Register a callback to listen for state changes of this player.
+        """
+        Register a callback to listen for state changes of this player.
 
         State changes include:
         - The volume was changed

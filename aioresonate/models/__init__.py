@@ -37,7 +37,8 @@ class BinaryHeader(NamedTuple):
 
 
 def unpack_binary_header(data: bytes) -> BinaryHeader:
-    """Unpack binary header from bytes.
+    """
+    Unpack binary header from bytes.
 
     Args:
         data: First 13 bytes containing the binary header
@@ -56,7 +57,8 @@ def unpack_binary_header(data: bytes) -> BinaryHeader:
 
 
 def pack_binary_header(header: BinaryHeader) -> bytes:
-    """Pack binary header into bytes.
+    """
+    Pack binary header into bytes.
 
     Args:
         header: BinaryHeader to pack
@@ -68,7 +70,8 @@ def pack_binary_header(header: BinaryHeader) -> bytes:
 
 
 def pack_binary_header_raw(message_type: int, timestamp_us: int, size: int) -> bytes:
-    """Pack binary header from raw values into bytes.
+    """
+    Pack binary header from raw values into bytes.
 
     Args:
         message_type: BinaryMessageType value

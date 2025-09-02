@@ -27,7 +27,8 @@ logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class AudioFormat:
-    """LPCM audio format specification.
+    """
+    LPCM audio format specification.
 
     Represents the audio format parameters for uncompressed PCM audio.
     """
@@ -63,7 +64,8 @@ class Metadata:
 
 
 class PlayerGroup:
-    """A group of one or more players for synchronized playback.
+    """
+    A group of one or more players for synchronized playback.
 
     Handles synchronized audio streaming across multiple players with automatic
     format conversion and buffer management. Every player is always assigned to
@@ -84,7 +86,8 @@ class PlayerGroup:
     """Current metadata for the group, None if no metadata set."""
 
     def __init__(self, server: "ResonateServer", *args: "Player") -> None:
-        """DO NOT CALL THIS CONSTRUCTOR. INTERNAL USE ONLY.
+        """
+        DO NOT CALL THIS CONSTRUCTOR. INTERNAL USE ONLY.
 
         Groups are managed automatically by the server.
 
@@ -107,7 +110,8 @@ class PlayerGroup:
     async def play_media(
         self, audio_source: AsyncGenerator[bytes, None], audio_format: AudioFormat
     ) -> None:
-        """Start playback of a new media stream.
+        """
+        Start playback of a new media stream.
 
         Stops any current stream and starts a new one with the given audio source.
         The audio source should provide uncompressed PCM audio data.
@@ -149,7 +153,8 @@ class PlayerGroup:
         )
 
     def determine_player_format(self, player: "Player", source_format: AudioFormat) -> AudioFormat:
-        """Determine the optimal audio format for the given player and source.
+        """
+        Determine the optimal audio format for the given player and source.
 
         Analyzes the player's capabilities and returns the best matching format,
         preferring higher quality when available and falling back gracefully.
@@ -221,7 +226,8 @@ class PlayerGroup:
         player.send_message(server_messages.SessionEndMessage(server_messages.SessionEndPayload()))
 
     def stop(self) -> bool:
-        """Stop playback for the group and clean up resources.
+        """
+        Stop playback for the group and clean up resources.
 
         Compared to pause(), this also:
         - Cancels the audio streaming task
@@ -246,7 +252,8 @@ class PlayerGroup:
         return True
 
     def set_metadata(self, metadata: Metadata) -> None:
-        """Set metadata for the group and send to all players.
+        """
+        Set metadata for the group and send to all players.
 
         Only sends updates for fields that have changed since the last call.
 
@@ -308,7 +315,8 @@ class PlayerGroup:
         return self._players
 
     def remove_player(self, player: "Player") -> None:
-        """Remove a player from this group.
+        """
+        Remove a player from this group.
 
         If a stream is active, the player receives a session end message.
         The player is automatically moved to its own new group since every
@@ -339,7 +347,8 @@ class PlayerGroup:
         player._set_group(PlayerGroup(self._server, player))  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
 
     def add_player(self, player: "Player") -> None:
-        """Add a player to this group.
+        """
+        Add a player to this group.
 
         The player is first removed from any existing group. If a stream is
         currently active, the player is immediately joined to the stream with
@@ -382,7 +391,8 @@ class PlayerGroup:
         self._players.append(player)
 
     def _validate_audio_format(self, audio_format: AudioFormat) -> tuple[int, str, str] | None:
-        """Validate audio format and return format parameters.
+        """
+        Validate audio format and return format parameters.
 
         Args:
             audio_format: The source audio format to validate.
@@ -418,7 +428,8 @@ class PlayerGroup:
         resamplers: dict[AudioFormat, av.AudioResampler],
         chunk_timestamp_us: int,
     ) -> tuple[int, int]:
-        """Resample audio for a specific player and send the data.
+        """
+        Resample audio for a specific player and send the data.
 
         Args:
             player: The player to send audio data to.
@@ -465,7 +476,8 @@ class PlayerGroup:
         chunk_timestamp_us: int,
         buffer_duration_us: int,
     ) -> None:
-        """Calculate timing and sleep if needed to maintain buffer levels.
+        """
+        Calculate timing and sleep if needed to maintain buffer levels.
 
         Args:
             chunk_timestamp_us: Current chunk timestamp in microseconds.
@@ -483,7 +495,8 @@ class PlayerGroup:
         audio_source: AsyncGenerator[bytes, None],
         audio_format: AudioFormat,
     ) -> None:
-        """Handle the audio streaming loop for all players in the group.
+        """
+        Handle the audio streaming loop for all players in the group.
 
         This method processes the audio source, converts formats as needed for each
         player, maintains synchronization via timestamps, and manages buffer levels
