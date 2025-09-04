@@ -357,7 +357,7 @@ class PlayerGroup:
             channels=audio_format.channels,
             bit_depth=audio_format.bit_depth,
             now=int(self._server.loop.time() * 1_000_000),
-            codec_header=None,
+            codec_header=self._get_audio_header(audio_format),
         )
         player.send_message(server_messages.SessionStartMessage(session_info))
 
