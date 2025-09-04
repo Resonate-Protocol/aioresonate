@@ -1,14 +1,17 @@
 """Manages and synchronizes playback for a group of one or more players."""
 
 import asyncio
+import base64
 import logging
 from asyncio import QueueFull, Task
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from enum import Enum
+from typing import TYPE_CHECKING, cast
 from uuid import uuid4
 
 import av
+from av import logging as av_logging
 
 from aioresonate.models import BinaryMessageType, pack_binary_header_raw, server_messages
 from aioresonate.models.types import RepeatMode
@@ -20,17 +23,24 @@ if TYPE_CHECKING:
     from .server import ResonateServer
 
 INITIAL_PLAYBACK_DELAY_US = 1_000_000
-CHUNK_DURATION_US = 25_000
 
 logger = logging.getLogger(__name__)
+
+
+class AudioCodec(Enum):
+    """Supported audio codecs."""
+
+    PCM = "pcm"
+    FLAC = "flac"
+    OPUS = "opus"
 
 
 @dataclass(frozen=True)
 class AudioFormat:
     """
-    LPCM audio format specification.
+    Audio format specification.
 
-    Represents the audio format parameters for uncompressed PCM audio.
+    Represents the audio format parameters for both compressed and uncompressed audio.
     """
 
     sample_rate: int
@@ -39,6 +49,8 @@ class AudioFormat:
     """Bit depth in bits per sample (16 or 24)."""
     channels: int
     """Number of audio channels (1 for mono, 2 for stereo)."""
+    codec: AudioCodec = AudioCodec.PCM
+    """Audio codec to use."""
 
 
 @dataclass
@@ -84,6 +96,12 @@ class PlayerGroup:
     """The source audio format for the current stream, None when not streaming."""
     _current_metadata: Metadata | None = None
     """Current metadata for the group, None if no metadata set."""
+    _audio_encoders: dict[AudioFormat, av.AudioCodecContext]
+    """Mapping of audio formats to their av encoder contexts."""
+    _audio_headers: dict[AudioFormat, str]
+    """Mapping of audio formats to their base64 encoded headers."""
+    _preferred_stream_codec: AudioCodec = AudioCodec.OPUS
+    """Preferred codec used by the current stream."""
 
     def __init__(self, server: "ResonateServer", *args: "Player") -> None:
         """
@@ -101,6 +119,8 @@ class PlayerGroup:
         self._players = list(args)
         self._player_formats = {}
         self._current_metadata = None
+        self._audio_encoders = {}
+        self._audio_headers = {}
         logger.debug(
             "PlayerGroup initialized with %d player(s): %s",
             len(self._players),
@@ -108,7 +128,10 @@ class PlayerGroup:
         )
 
     async def play_media(
-        self, audio_source: AsyncGenerator[bytes, None], audio_format: AudioFormat
+        self,
+        audio_stream: AsyncGenerator[bytes, None],
+        audio_stream_format: AudioFormat,
+        preferred_stream_codec: AudioCodec = AudioCodec.OPUS,
     ) -> None:
         """
         Start playback of a new media stream.
@@ -118,10 +141,10 @@ class PlayerGroup:
         Format conversion and synchronization for all players will be handled automatically.
 
         Args:
-            audio_source: Async generator yielding PCM audio chunks as bytes.
-            audio_format: Format specification for the input audio data.
+            audio_stream: Async generator yielding PCM audio chunks as bytes.
+            audio_stream_format: Format specification for the input audio data.
         """
-        logger.debug("Starting play_media with audio_format: %s", audio_format)
+        logger.debug("Starting play_media with audio_stream_format: %s", audio_stream_format)
         stopped = self.stop()
         if stopped:
             # Wait a bit to allow players to process the session end
@@ -131,11 +154,14 @@ class PlayerGroup:
         #   especially on topology changes
         # - how to sync metadata/media_art with this audio stream?
 
-        self._stream_audio_format = audio_format
+        self._stream_audio_format = audio_stream_format
+        self._preferred_stream_codec = preferred_stream_codec
 
         for player in self._players:
             logger.debug("Selecting format for player %s", player.player_id)
-            player_format = self.determine_player_format(player, audio_format)
+            player_format = self.determine_player_format(
+                player, audio_stream_format, preferred_stream_codec
+            )
             self._player_formats[player.player_id] = player_format
             logger.debug(
                 "Sending session start to player %s with format %s",
@@ -147,12 +173,17 @@ class PlayerGroup:
         self._stream_task = self._server.loop.create_task(
             self._stream_audio(
                 int(self._server.loop.time() * 1_000_000) + INITIAL_PLAYBACK_DELAY_US,
-                audio_source,
-                audio_format,
+                audio_stream,
+                audio_stream_format,
             )
         )
 
-    def determine_player_format(self, player: "Player", source_format: AudioFormat) -> AudioFormat:
+    def determine_player_format(
+        self,
+        player: "Player",
+        source_format: AudioFormat,
+        preferred_codec: AudioCodec = AudioCodec.OPUS,
+    ) -> AudioFormat:
         """
         Determine the optimal audio format for the given player and source.
 
@@ -162,45 +193,202 @@ class PlayerGroup:
         Args:
             player: The player to determine a format for.
             source_format: The source audio format to match against.
+            preferred_codec: Preferred audio codec (e.g., Opus).
+                In case the player doesn't support it, falls back to another codec.
 
         Returns:
             AudioFormat: The optimal format for the player.
         """
         # TODO: move this to player instead
-        support_sample_rates = player.info.support_sample_rates
-        support_bit_depth = player.info.support_bit_depth
-        support_channels = player.info.support_channels
+        player_info = player.info
 
+        # Determine optimal sample rate
         sample_rate = source_format.sample_rate
-        if sample_rate not in support_sample_rates:
-            lower_rates = [r for r in support_sample_rates if r < sample_rate]
-            sample_rate = max(lower_rates) if lower_rates else min(support_sample_rates)
+        if sample_rate not in player_info.support_sample_rates:
+            # Prefer lower rates that are closest to source, fallback to minimum
+            lower_rates = [r for r in player_info.support_sample_rates if r < sample_rate]
+            sample_rate = max(lower_rates) if lower_rates else min(player_info.support_sample_rates)
             logger.debug("Adjusted sample_rate for player %s: %s", player.player_id, sample_rate)
 
+        # Determine optimal bit depth
         bit_depth = source_format.bit_depth
-        if bit_depth not in support_bit_depth:
-            if 16 in support_bit_depth:
+        if bit_depth not in player_info.support_bit_depth:
+            # Prefer 16-bit, then 24-bit
+            if 16 in player_info.support_bit_depth:
                 bit_depth = 16
-            elif 24 in support_bit_depth:
+            elif 24 in player_info.support_bit_depth:
                 bit_depth = 24
             else:
                 raise NotImplementedError("Only 16bit and 24bit are supported")
             logger.debug("Adjusted bit_depth for player %s: %s", player.player_id, bit_depth)
 
+        # Determine optimal channel count
         channels = source_format.channels
-        if channels not in support_channels:
-            if 2 in support_channels:
+        if channels not in player_info.support_channels:
+            # Prefer stereo, then mono
+            if 2 in player_info.support_channels:
                 channels = 2
-            elif 1 in support_channels:
+            elif 1 in player_info.support_channels:
                 channels = 1
             else:
                 raise NotImplementedError("Only mono and stereo are supported")
             logger.debug("Adjusted channels for player %s: %s", player.player_id, channels)
 
-        if "pcm" not in player.info.support_codecs:
-            raise NotImplementedError("Only pcm is supported for now")
+        # Determine optimal codec with fallback chain
+        codec_fallbacks = [preferred_codec, AudioCodec.FLAC, AudioCodec.OPUS, AudioCodec.PCM]
+        codec = None
+        for candidate_codec in codec_fallbacks:
+            if candidate_codec.value in player_info.support_codecs:
+                # Special handling for Opus - check if sample rates are compatible
+                if candidate_codec == AudioCodec.OPUS:
+                    opus_rate_candidates = [
+                        (8000, sample_rate <= 8000),
+                        (12000, sample_rate <= 12000),
+                        (16000, sample_rate <= 16000),
+                        (24000, sample_rate <= 24000),
+                        (48000, True),  # Default fallback
+                    ]
 
-        return AudioFormat(sample_rate, bit_depth, channels)
+                    opus_sample_rate = None
+                    for candidate_rate, condition in opus_rate_candidates:
+                        if condition and candidate_rate in player_info.support_sample_rates:
+                            opus_sample_rate = candidate_rate
+                            break
+
+                    if opus_sample_rate is None:
+                        logger.error(
+                            "Player %s does not support any Opus sample rates, trying next codec",
+                            player.player_id,
+                        )
+                        continue  # Try next codec in fallback chain
+
+                    # Opus is viable, adjust sample rate and use it
+                    if sample_rate != opus_sample_rate:
+                        logger.debug(
+                            "Adjusted sample_rate for Opus on player %s: %s -> %s",
+                            player.player_id,
+                            sample_rate,
+                            opus_sample_rate,
+                        )
+                    sample_rate = opus_sample_rate
+
+                codec = candidate_codec
+                break
+
+        if codec is None:
+            raise ValueError(f"Player {player.player_id} does not support any known codec")
+
+        if codec != preferred_codec:
+            logger.info(
+                "Falling back from preferred codec %s to %s for player %s",
+                preferred_codec,
+                codec,
+                player.player_id,
+            )
+
+        # FLAC and PCM support any sample rate, no adjustment needed
+        return AudioFormat(sample_rate, bit_depth, channels, codec)
+
+    def _get_or_create_audio_encoder(self, audio_format: AudioFormat) -> av.AudioCodecContext:
+        """
+        Get or create an audio encoder for the given audio format.
+
+        Args:
+            audio_format: The audio format to create an encoder for.
+
+        Returns:
+            av.AudioCodecContext: The audio encoder context.
+        """
+        if audio_format in self._audio_encoders:
+            return self._audio_encoders[audio_format]
+
+        # Create audio encoder context
+        ctx = cast(
+            "av.AudioCodecContext", av.AudioCodecContext.create(audio_format.codec.value, "w")
+        )
+        ctx.sample_rate = audio_format.sample_rate
+        ctx.layout = "stereo" if audio_format.channels == 2 else "mono"
+        ctx.format = "s16"  # TODO: can we also use s24 here?
+
+        if audio_format.codec == AudioCodec.FLAC:
+            # Default compression level for now
+            ctx.options = {"compression_level": "5"}
+
+        with av_logging.Capture() as logs:
+            ctx.open()
+        for log in logs:
+            logger.debug("Opening AudioCodecContext log from av: %s", log)
+
+        # Store the encoder and extract the header
+        self._audio_encoders[audio_format] = ctx
+        header = bytes(ctx.extradata) if ctx.extradata else b""
+
+        # For FLAC, we need to construct a proper FLAC stream header ourselves
+        # since ffmpeg only provides the StreamInfo metadata block in extradata:
+        # See https://datatracker.ietf.org/doc/rfc9639/ Section 8.1
+        if audio_format.codec == AudioCodec.FLAC and header:
+            # FLAC stream signature (4 bytes): "fLaC"
+            # Metadata block header (4 bytes):
+            # - Bit 0: last metadata block (1 since we only have one)
+            # - Bits 1-7: block type (0 for StreamInfo)
+            # - Next 3 bytes: block length of the next metadata block in bytes
+            # StreamInfo block (34 bytes): as provided by ffmpeg
+            header = b"fLaC\x80" + (len(header)).to_bytes(3, "big") + header
+
+        self._audio_headers[audio_format] = base64.b64encode(header).decode()
+
+        logger.debug(
+            "Created audio encoder: frame_size=%d, header_length=%d",
+            ctx.frame_size,
+            len(header),
+        )
+
+        return ctx
+
+    def _get_audio_header(self, audio_format: AudioFormat) -> str | None:
+        """
+        Get the codec header for the given audio format.
+
+        Args:
+            audio_format: The audio format to get the header for.
+
+        Returns:
+            str: Base64 encoded codec header.
+        """
+        if audio_format.codec == AudioCodec.PCM:
+            return None
+        if audio_format not in self._audio_headers:
+            # Create encoder to generate header
+            self._get_or_create_audio_encoder(audio_format)
+
+        return self._audio_headers[audio_format]
+
+    def _calculate_optimal_chunk_samples(self, source_format: AudioFormat) -> int:
+        compressed_players = [
+            player
+            for player in self._players
+            if self._player_formats.get(player.player_id, AudioFormat(0, 0, 0)).codec
+            != AudioCodec.PCM
+        ]
+
+        if not compressed_players:
+            # All players use PCM, use 25ms chunks
+            return int(source_format.sample_rate * 0.025)
+
+        # TODO: replace this logic by allowing each device to have their own preferred chunk size,
+        # does this even work in cases with different codecs?
+        max_frame_size = 0
+        for player in compressed_players:
+            player_format = self._player_formats[player.player_id]
+            encoder = self._get_or_create_audio_encoder(player_format)
+
+            # Scale frame size to source sample rate
+            scaled_frame_size = int(
+                encoder.frame_size * source_format.sample_rate / player_format.sample_rate
+            )
+            max_frame_size = max(max_frame_size, scaled_frame_size)
+
+        return max_frame_size if max_frame_size > 0 else int(source_format.sample_rate * 0.025)
 
     def _send_session_start_msg(self, player: "Player", audio_format: AudioFormat) -> None:
         """Send a session start message to a player with the specified audio format."""
@@ -211,12 +399,15 @@ class PlayerGroup:
         )
         session_info = server_messages.SessionStartPayload(
             session_id=str(uuid4()),
-            codec="pcm",
+            codec=audio_format.codec.value,
             sample_rate=audio_format.sample_rate,
             channels=audio_format.channels,
             bit_depth=audio_format.bit_depth,
             now=int(self._server.loop.time() * 1_000_000),
-            codec_header=None,
+            codec_header=self._get_audio_header(audio_format),
+        )
+        logger.debug(
+            "Sending session start message to player %s: %s", player.player_id, session_info
         )
         player.send_message(server_messages.SessionStartMessage(session_info))
 
@@ -233,6 +424,7 @@ class PlayerGroup:
         - Cancels the audio streaming task
         - Sends session end messages to all players
         - Clears all buffers and format mappings
+        - Cleans up all audio encoders
 
         Returns:
             bool: True if an active stream was stopped, False if no stream was active.
@@ -248,6 +440,9 @@ class PlayerGroup:
         for player in self._players:
             self._send_session_end_msg(player)
             del self._player_formats[player.player_id]
+
+        self._audio_encoders.clear()
+        self._audio_headers.clear()
         self._stream_task = None
         return True
 
@@ -366,7 +561,9 @@ class PlayerGroup:
         if self._stream_task is not None and self._stream_audio_format is not None:
             logger.debug("Joining player %s to current stream", player.player_id)
             # Join it to the current stream
-            player_format = self.determine_player_format(player, self._stream_audio_format)
+            player_format = self.determine_player_format(
+                player, self._stream_audio_format, self._preferred_stream_codec
+            )
             self._player_formats[player.player_id] = player_format
             self._send_session_start_msg(player, player_format)
 
@@ -420,7 +617,7 @@ class PlayerGroup:
 
         return input_bytes_per_sample, input_audio_format, input_audio_layout
 
-    def _resample_and_send_to_player(
+    def _resample_and_encode_to_player(
         self,
         player: "Player",
         player_format: AudioFormat,
@@ -429,7 +626,7 @@ class PlayerGroup:
         chunk_timestamp_us: int,
     ) -> tuple[int, int]:
         """
-        Resample audio for a specific player and send the data.
+        Resample audio for a specific player and encode/send the data.
 
         Args:
             player: The player to send audio data to.
@@ -455,18 +652,36 @@ class PlayerGroup:
             logger.warning("resampling resulted in %s frames", len(out_frames))
 
         sample_count = out_frames[0].samples
-        # TODO: ESPHome should probably be cutting the audio_data,
-        # this only works with pcm
-        audio_data = bytes(out_frames[0].planes[0])[: (sample_count * 4)]
-        if len(out_frames[0].planes) != 1:
-            logger.warning("resampling resulted in %s planes", len(out_frames[0].planes))
+        if player_format.codec in (AudioCodec.OPUS, AudioCodec.FLAC):
+            encoder = self._get_or_create_audio_encoder(player_format)
+            packets = encoder.encode(out_frames[0])
+            logger.debug("Encoded %s packets: %s", player_format.codec, packets)
 
-        header = pack_binary_header_raw(
-            BinaryMessageType.PlayAudioChunk.value,
-            chunk_timestamp_us,
-            sample_count,
-        )
-        player.send_message(header + audio_data)
+            for packet in packets:
+                header = pack_binary_header_raw(
+                    BinaryMessageType.PlayAudioChunk.value,
+                    chunk_timestamp_us,
+                    encoder.frame_size,
+                )
+                # TODO: is cutting required here?
+                player.send_message(header + bytes(packet)[: packet.size])
+        elif player_format.codec == AudioCodec.PCM:
+            # Send as raw PCM
+            audio_data = bytes(out_frames[0].planes[0])[
+                : (sample_count * 2 if player_format.bit_depth == 16 else 3)
+                * player_format.channels
+            ]
+            if len(out_frames[0].planes) != 1:
+                logger.warning("resampling resulted in %s planes", len(out_frames[0].planes))
+
+            header = pack_binary_header_raw(
+                BinaryMessageType.PlayAudioChunk.value,
+                chunk_timestamp_us,
+                sample_count,
+            )
+            player.send_message(header + audio_data)
+        else:
+            raise NotImplementedError(f"Codec {player_format.codec} is not supported yet")
 
         duration_of_chunk_us = int((sample_count / player_format.sample_rate) * 1_000_000)
         return sample_count, duration_of_chunk_us
@@ -530,8 +745,7 @@ class PlayerGroup:
             # Initialize streaming context variables
             input_sample_size = audio_format.channels * input_bytes_per_sample
             input_sample_rate = audio_format.sample_rate
-            chunk_length = CHUNK_DURATION_US / 1_000_000
-            input_samples_per_chunk = int(input_sample_rate * chunk_length)
+            input_samples_per_chunk = self._calculate_optimal_chunk_samples(audio_format)
             chunk_timestamp_us = start_time_us
 
             resamplers: dict[AudioFormat, av.AudioResampler] = {}
@@ -561,7 +775,7 @@ class PlayerGroup:
                     for player in self._players:
                         player_format = self._player_formats[player.player_id]
                         try:
-                            sample_count, duration_us = self._resample_and_send_to_player(
+                            sample_count, duration_us = self._resample_and_encode_to_player(
                                 player, player_format, in_frame, resamplers, chunk_timestamp_us
                             )
                             duration_of_samples_in_chunk.append(duration_us)
