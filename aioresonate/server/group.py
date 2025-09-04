@@ -359,6 +359,9 @@ class PlayerGroup:
             now=int(self._server.loop.time() * 1_000_000),
             codec_header=self._get_audio_header(audio_format),
         )
+        logger.debug(
+            "Sending session start message to player %s: %s", player.player_id, session_info
+        )
         player.send_message(server_messages.SessionStartMessage(session_info))
 
     def _send_session_end_msg(self, player: "Player") -> None:
