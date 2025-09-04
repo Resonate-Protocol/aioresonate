@@ -126,7 +126,7 @@ class PlayerGroup:
         )
 
     async def play_media(
-        self, audio_source: AsyncGenerator[bytes, None], audio_format: AudioFormat
+        self, audio_stream: AsyncGenerator[bytes, None], audio_stream_format: AudioFormat
     ) -> None:
         """
         Start playback of a new media stream.
@@ -136,10 +136,10 @@ class PlayerGroup:
         Format conversion and synchronization for all players will be handled automatically.
 
         Args:
-            audio_source: Async generator yielding PCM audio chunks as bytes.
-            audio_format: Format specification for the input audio data.
+            audio_stream: Async generator yielding PCM audio chunks as bytes.
+            audio_stream_format: Format specification for the input audio data.
         """
-        logger.debug("Starting play_media with audio_format: %s", audio_format)
+        logger.debug("Starting play_media with audio_stream_format: %s", audio_stream_format)
         stopped = self.stop()
         if stopped:
             # Wait a bit to allow players to process the session end
@@ -149,11 +149,11 @@ class PlayerGroup:
         #   especially on topology changes
         # - how to sync metadata/media_art with this audio stream?
 
-        self._stream_audio_format = audio_format
+        self._stream_audio_format = audio_stream_format
 
         for player in self._players:
             logger.debug("Selecting format for player %s", player.player_id)
-            player_format = self.determine_player_format(player, audio_format)
+            player_format = self.determine_player_format(player, audio_stream_format)
             self._player_formats[player.player_id] = player_format
             logger.debug(
                 "Sending session start to player %s with format %s",
@@ -165,8 +165,8 @@ class PlayerGroup:
         self._stream_task = self._server.loop.create_task(
             self._stream_audio(
                 int(self._server.loop.time() * 1_000_000) + INITIAL_PLAYBACK_DELAY_US,
-                audio_source,
-                audio_format,
+                audio_stream,
+                audio_stream_format,
             )
         )
 
