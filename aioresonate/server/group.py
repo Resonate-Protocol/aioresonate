@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, cast
 from uuid import uuid4
 
 import av
+from av import logging as av_logging
 
 from aioresonate.models import BinaryMessageType, pack_binary_header_raw, server_messages
 from aioresonate.models.types import RepeatMode
@@ -283,12 +284,31 @@ class PlayerGroup:
         ctx.layout = "stereo" if audio_format.channels == 2 else "mono"
         ctx.format = "s16"  # TODO: can we also use s24 here?
 
-        # Open the encoder
-        ctx.open()
+        if audio_format.codec == AudioCodec.FLAC:
+            # Default compression level for now
+            ctx.options = {"compression_level": "5"}
+
+        with av_logging.Capture() as logs:
+            ctx.open()
+        for log in logs:
+            logger.debug("Opening AudioCodecContext log from av: %s", log)
 
         # Store the encoder and extract the header
         self._audio_encoders[audio_format] = ctx
         header = bytes(ctx.extradata) if ctx.extradata else b""
+
+        # For FLAC, we need to construct a proper FLAC stream header ourselves
+        # since ffmpeg only provides the StreamInfo metadata block in extradata:
+        # See https://datatracker.ietf.org/doc/rfc9639/ Section 8.1
+        if audio_format.codec == AudioCodec.FLAC and header:
+            # FLAC stream signature (4 bytes): "fLaC"
+            # Metadata block header (4 bytes):
+            # - Bit 0: last metadata block (1 since we only have one)
+            # - Bits 1-7: block type (0 for StreamInfo)
+            # - Next 3 bytes: block length of the next metadata block in bytes
+            # StreamInfo block (34 bytes): as provided by ffmpeg
+            header = b"fLaC\x80" + (len(header)).to_bytes(3, "big") + header
+
         self._audio_headers[audio_format] = base64.b64encode(header).decode()
 
         logger.debug(
@@ -318,22 +338,21 @@ class PlayerGroup:
         return self._audio_headers[audio_format]
 
     def _calculate_optimal_chunk_samples(self, source_format: AudioFormat) -> int:
-        # Check if any players use Opus
-        opus_players = [
+        compressed_players = [
             player
             for player in self._players
             if self._player_formats.get(player.player_id, AudioFormat(0, 0, 0)).codec
-            == AudioCodec.OPUS
+            != AudioCodec.PCM
         ]
 
-        if not opus_players:
+        if not compressed_players:
             # All players use PCM, use 25ms chunks
             return int(source_format.sample_rate * 0.025)
 
         # TODO: replace this logic by allowing each device to have their own preferred chunk size,
-        # does this even work in all cases?
+        # does this even work in cases with different codecs?
         max_frame_size = 0
-        for player in opus_players:
+        for player in compressed_players:
             player_format = self._player_formats[player.player_id]
             encoder = self._get_or_create_audio_encoder(player_format)
 
