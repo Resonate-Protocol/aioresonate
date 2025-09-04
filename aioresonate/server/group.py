@@ -1,12 +1,13 @@
 """Manages and synchronizes playback for a group of one or more players."""
 
 import asyncio
+import base64
 import logging
 from asyncio import QueueFull, Task
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass
 from enum import Enum
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 from uuid import uuid4
 
 import av
@@ -95,6 +96,10 @@ class PlayerGroup:
     """The source audio format for the current stream, None when not streaming."""
     _current_metadata: Metadata | None = None
     """Current metadata for the group, None if no metadata set."""
+    _audio_encoders: dict[AudioFormat, av.AudioCodecContext]
+    """Mapping of audio formats to their av encoder contexts."""
+    _audio_headers: dict[AudioFormat, str]
+    """Mapping of audio formats to their base64 encoded headers."""
 
     def __init__(self, server: "ResonateServer", *args: "Player") -> None:
         """
@@ -112,6 +117,8 @@ class PlayerGroup:
         self._players = list(args)
         self._player_formats = {}
         self._current_metadata = None
+        self._audio_encoders = {}
+        self._audio_headers = {}
         logger.debug(
             "PlayerGroup initialized with %d player(s): %s",
             len(self._players),
@@ -255,6 +262,59 @@ class PlayerGroup:
         # FLAC and PCM support any sample rate, no adjustment needed
 
         return AudioFormat(sample_rate, bit_depth, channels, codec)
+
+    def _get_or_create_audio_encoder(self, audio_format: AudioFormat) -> av.AudioCodecContext:
+        """
+        Get or create an audio encoder for the given audio format.
+
+        Args:
+            audio_format: The audio format to create an encoder for.
+
+        Returns:
+            av.AudioCodecContext: The audio encoder context.
+        """
+        if audio_format in self._audio_encoders:
+            return self._audio_encoders[audio_format]
+
+        # Create audio encoder context
+        ctx = cast(
+            "av.AudioCodecContext", av.AudioCodecContext.create(audio_format.codec.value, "w")
+        )
+        ctx.sample_rate = audio_format.sample_rate
+        ctx.layout = "stereo" if audio_format.channels == 2 else "mono"
+        ctx.format = "s16"  # TODO: can we also use s24 here?
+
+        # Open the encoder
+        ctx.open()
+
+        # Store the encoder and extract the header
+        self._audio_encoders[audio_format] = ctx
+        header = bytes(ctx.extradata) if ctx.extradata else b""
+        self._audio_headers[audio_format] = base64.b64encode(header).decode()
+
+        logger.debug(
+            "Created audio encoder: frame_size=%d, header_length=%d",
+            ctx.frame_size,
+            len(header),
+        )
+
+        return ctx
+
+    def _get_audio_header(self, audio_format: AudioFormat) -> str:
+        """
+        Get the codec header for the given audio format.
+
+        Args:
+            audio_format: The audio format to get the header for.
+
+        Returns:
+            str: Base64 encoded codec header.
+        """
+        if audio_format not in self._audio_headers:
+            # Create encoder to generate header
+            self._get_or_create_audio_encoder(audio_format)
+
+        return self._audio_headers[audio_format]
 
     def _send_session_start_msg(self, player: "Player", audio_format: AudioFormat) -> None:
         """Send a session start message to a player with the specified audio format."""
