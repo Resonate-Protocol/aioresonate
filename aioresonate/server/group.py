@@ -565,7 +565,7 @@ class PlayerGroup:
 
         return input_bytes_per_sample, input_audio_format, input_audio_layout
 
-    def _resample_and_send_to_player(
+    def _resample_and_encode_to_player(
         self,
         player: "Player",
         player_format: AudioFormat,
@@ -574,7 +574,7 @@ class PlayerGroup:
         chunk_timestamp_us: int,
     ) -> tuple[int, int]:
         """
-        Resample audio for a specific player and send the data.
+        Resample audio for a specific player and encode/send the data.
 
         Args:
             player: The player to send audio data to.
@@ -600,18 +600,33 @@ class PlayerGroup:
             logger.warning("resampling resulted in %s frames", len(out_frames))
 
         sample_count = out_frames[0].samples
-        # TODO: ESPHome should probably be cutting the audio_data,
-        # this only works with pcm
-        audio_data = bytes(out_frames[0].planes[0])[: (sample_count * 4)]
-        if len(out_frames[0].planes) != 1:
-            logger.warning("resampling resulted in %s planes", len(out_frames[0].planes))
+        if player_format.codec in (AudioCodec.OPUS, AudioCodec.FLAC):
+            encoder = self._get_or_create_audio_encoder(player_format)
+            packets = encoder.encode(out_frames[0])
+            logger.debug("Encoded %s packets: %s", player_format.codec, packets)
 
-        header = pack_binary_header_raw(
-            BinaryMessageType.PlayAudioChunk.value,
-            chunk_timestamp_us,
-            sample_count,
-        )
-        player.send_message(header + audio_data)
+            for packet in packets:
+                header = pack_binary_header_raw(
+                    BinaryMessageType.PlayAudioChunk.value,
+                    chunk_timestamp_us,
+                    encoder.frame_size,
+                )
+                # TODO: is cutting required here?
+                player.send_message(header + bytes(packet)[: packet.size])
+        elif player_format.codec == AudioCodec.PCM:
+            # Send as raw PCM
+            audio_data = bytes(out_frames[0].planes[0])[: (sample_count * 4)]
+            if len(out_frames[0].planes) != 1:
+                logger.warning("resampling resulted in %s planes", len(out_frames[0].planes))
+
+            header = pack_binary_header_raw(
+                BinaryMessageType.PlayAudioChunk.value,
+                chunk_timestamp_us,
+                sample_count,
+            )
+            player.send_message(header + audio_data)
+        else:
+            raise NotImplementedError(f"Codec {player_format.codec} is not supported yet")
 
         duration_of_chunk_us = int((sample_count / player_format.sample_rate) * 1_000_000)
         return sample_count, duration_of_chunk_us
@@ -705,7 +720,7 @@ class PlayerGroup:
                     for player in self._players:
                         player_format = self._player_formats[player.player_id]
                         try:
-                            sample_count, duration_us = self._resample_and_send_to_player(
+                            sample_count, duration_us = self._resample_and_encode_to_player(
                                 player, player_format, in_frame, resamplers, chunk_timestamp_us
                             )
                             duration_of_samples_in_chunk.append(duration_us)
