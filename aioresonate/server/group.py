@@ -374,6 +374,7 @@ class PlayerGroup:
         - Cancels the audio streaming task
         - Sends session end messages to all players
         - Clears all buffers and format mappings
+        - Cleans up all audio encoders
 
         Returns:
             bool: True if an active stream was stopped, False if no stream was active.
@@ -389,6 +390,9 @@ class PlayerGroup:
         for player in self._players:
             self._send_session_end_msg(player)
             del self._player_formats[player.player_id]
+
+        self._audio_encoders.clear()
+        self._audio_headers.clear()
         self._stream_task = None
         return True
 
