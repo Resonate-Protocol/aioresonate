@@ -163,7 +163,12 @@ class PlayerGroup:
             )
         )
 
-    def determine_player_format(self, player: "Player", source_format: AudioFormat) -> AudioFormat:
+    def determine_player_format(  # noqa: PLR0915
+        self,
+        player: "Player",
+        source_format: AudioFormat,
+        preferred_codec: AudioCodec = AudioCodec.OPUS,
+    ) -> AudioFormat:
         """
         Determine the optimal audio format for the given player and source.
 
@@ -173,6 +178,8 @@ class PlayerGroup:
         Args:
             player: The player to determine a format for.
             source_format: The source audio format to match against.
+            preferred_codec: Preferred audio codec (e.g., Opus).
+                In case the player doesn't support it, falls back to another codec.
 
         Returns:
             AudioFormat: The optimal format for the player.
@@ -208,10 +215,46 @@ class PlayerGroup:
                 raise NotImplementedError("Only mono and stereo are supported")
             logger.debug("Adjusted channels for player %s: %s", player.player_id, channels)
 
-        if "pcm" not in player.info.support_codecs:
-            raise NotImplementedError("Only pcm is supported for now")
+        codec = preferred_codec
+        if codec.value not in player.info.support_codecs:
+            codec = AudioCodec.FLAC
+        if codec.value not in player.info.support_codecs:
+            codec = AudioCodec.OPUS
+        if codec.value not in player.info.support_codecs:
+            codec = AudioCodec.PCM
+        if codec.value not in player.info.support_codecs:
+            raise ValueError(f"Player {player.player_id} does not support any known codec")
 
-        return AudioFormat(sample_rate, bit_depth, channels)
+        if codec != preferred_codec:
+            logger.info(
+                "Falling back from preferred codec %s to %s for player %s",
+                preferred_codec,
+                codec,
+                player.player_id,
+            )
+
+        if codec == AudioCodec.OPUS:
+            # Ensure sample rate is supported by Opus and the player
+            opus_supported_rates = [8000, 12000, 16000, 24000, 48000]
+            if sample_rate not in opus_supported_rates:
+                # Find the closest supported Opus sample rate
+                if sample_rate <= 8000 and 8000 in support_sample_rates:
+                    sample_rate = 8000
+                elif sample_rate <= 12000 and 12000 in support_sample_rates:
+                    sample_rate = 12000
+                elif sample_rate <= 16000 and 16000 in support_sample_rates:
+                    sample_rate = 16000
+                elif sample_rate <= 24000 and 24000 in support_sample_rates:
+                    sample_rate = 24000
+                elif 48000 in support_sample_rates:
+                    sample_rate = 48000
+                else:
+                    raise ValueError(
+                        f"Player {player.player_id} does not support any Opus sample rates"
+                    )
+        # FLAC and PCM support any sample rate, no adjustment needed
+
+        return AudioFormat(sample_rate, bit_depth, channels, codec)
 
     def _send_session_start_msg(self, player: "Player", audio_format: AudioFormat) -> None:
         """Send a session start message to a player with the specified audio format."""
@@ -222,7 +265,7 @@ class PlayerGroup:
         )
         session_info = server_messages.SessionStartPayload(
             session_id=str(uuid4()),
-            codec="pcm",
+            codec=audio_format.codec.value,
             sample_rate=audio_format.sample_rate,
             channels=audio_format.channels,
             bit_depth=audio_format.bit_depth,
