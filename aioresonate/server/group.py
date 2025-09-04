@@ -5,6 +5,7 @@ import logging
 from asyncio import QueueFull, Task
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass
+from enum import Enum
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
@@ -25,12 +26,20 @@ CHUNK_DURATION_US = 25_000
 logger = logging.getLogger(__name__)
 
 
+class AudioCodec(Enum):
+    """Supported audio codecs."""
+
+    PCM = "pcm"
+    FLAC = "flac"
+    OPUS = "opus"
+
+
 @dataclass(frozen=True)
 class AudioFormat:
     """
-    LPCM audio format specification.
+    Audio format specification.
 
-    Represents the audio format parameters for uncompressed PCM audio.
+    Represents the audio format parameters for both compressed and uncompressed audio.
     """
 
     sample_rate: int
@@ -39,6 +48,8 @@ class AudioFormat:
     """Bit depth in bits per sample (16 or 24)."""
     channels: int
     """Number of audio channels (1 for mono, 2 for stereo)."""
+    codec: AudioCodec = AudioCodec.PCM
+    """Audio codec to use."""
 
 
 @dataclass
