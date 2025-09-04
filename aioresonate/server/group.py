@@ -299,7 +299,7 @@ class PlayerGroup:
 
         return ctx
 
-    def _get_audio_header(self, audio_format: AudioFormat) -> str:
+    def _get_audio_header(self, audio_format: AudioFormat) -> str | None:
         """
         Get the codec header for the given audio format.
 
@@ -309,6 +309,8 @@ class PlayerGroup:
         Returns:
             str: Base64 encoded codec header.
         """
+        if audio_format.codec == AudioCodec.PCM:
+            return None
         if audio_format not in self._audio_headers:
             # Create encoder to generate header
             self._get_or_create_audio_encoder(audio_format)
