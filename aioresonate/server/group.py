@@ -178,7 +178,7 @@ class PlayerGroup:
             )
         )
 
-    def determine_player_format(  # noqa: PLR0915
+    def determine_player_format(
         self,
         player: "Player",
         source_format: AudioFormat,
@@ -200,44 +200,82 @@ class PlayerGroup:
             AudioFormat: The optimal format for the player.
         """
         # TODO: move this to player instead
-        support_sample_rates = player.info.support_sample_rates
-        support_bit_depth = player.info.support_bit_depth
-        support_channels = player.info.support_channels
+        player_info = player.info
 
+        # Determine optimal sample rate
         sample_rate = source_format.sample_rate
-        if sample_rate not in support_sample_rates:
-            lower_rates = [r for r in support_sample_rates if r < sample_rate]
-            sample_rate = max(lower_rates) if lower_rates else min(support_sample_rates)
+        if sample_rate not in player_info.support_sample_rates:
+            # Prefer lower rates that are closest to source, fallback to minimum
+            lower_rates = [r for r in player_info.support_sample_rates if r < sample_rate]
+            sample_rate = max(lower_rates) if lower_rates else min(player_info.support_sample_rates)
             logger.debug("Adjusted sample_rate for player %s: %s", player.player_id, sample_rate)
 
+        # Determine optimal bit depth
         bit_depth = source_format.bit_depth
-        if bit_depth not in support_bit_depth:
-            if 16 in support_bit_depth:
+        if bit_depth not in player_info.support_bit_depth:
+            # Prefer 16-bit, then 24-bit
+            if 16 in player_info.support_bit_depth:
                 bit_depth = 16
-            elif 24 in support_bit_depth:
+            elif 24 in player_info.support_bit_depth:
                 bit_depth = 24
             else:
                 raise NotImplementedError("Only 16bit and 24bit are supported")
             logger.debug("Adjusted bit_depth for player %s: %s", player.player_id, bit_depth)
 
+        # Determine optimal channel count
         channels = source_format.channels
-        if channels not in support_channels:
-            if 2 in support_channels:
+        if channels not in player_info.support_channels:
+            # Prefer stereo, then mono
+            if 2 in player_info.support_channels:
                 channels = 2
-            elif 1 in support_channels:
+            elif 1 in player_info.support_channels:
                 channels = 1
             else:
                 raise NotImplementedError("Only mono and stereo are supported")
             logger.debug("Adjusted channels for player %s: %s", player.player_id, channels)
 
-        codec = preferred_codec
-        if codec.value not in player.info.support_codecs:
-            codec = AudioCodec.FLAC
-        if codec.value not in player.info.support_codecs:
-            codec = AudioCodec.OPUS
-        if codec.value not in player.info.support_codecs:
-            codec = AudioCodec.PCM
-        if codec.value not in player.info.support_codecs:
+        # Determine optimal codec with fallback chain
+        codec_fallbacks = [preferred_codec, AudioCodec.FLAC, AudioCodec.OPUS, AudioCodec.PCM]
+        codec = None
+        for candidate_codec in codec_fallbacks:
+            if candidate_codec.value in player_info.support_codecs:
+                # Special handling for Opus - check if sample rates are compatible
+                if candidate_codec == AudioCodec.OPUS:
+                    opus_rate_candidates = [
+                        (8000, sample_rate <= 8000),
+                        (12000, sample_rate <= 12000),
+                        (16000, sample_rate <= 16000),
+                        (24000, sample_rate <= 24000),
+                        (48000, True),  # Default fallback
+                    ]
+
+                    opus_sample_rate = None
+                    for candidate_rate, condition in opus_rate_candidates:
+                        if condition and candidate_rate in player_info.support_sample_rates:
+                            opus_sample_rate = candidate_rate
+                            break
+
+                    if opus_sample_rate is None:
+                        logger.error(
+                            "Player %s does not support any Opus sample rates, trying next codec",
+                            player.player_id,
+                        )
+                        continue  # Try next codec in fallback chain
+
+                    # Opus is viable, adjust sample rate and use it
+                    if sample_rate != opus_sample_rate:
+                        logger.debug(
+                            "Adjusted sample_rate for Opus on player %s: %s -> %s",
+                            player.player_id,
+                            sample_rate,
+                            opus_sample_rate,
+                        )
+                    sample_rate = opus_sample_rate
+
+                codec = candidate_codec
+                break
+
+        if codec is None:
             raise ValueError(f"Player {player.player_id} does not support any known codec")
 
         if codec != preferred_codec:
@@ -248,27 +286,7 @@ class PlayerGroup:
                 player.player_id,
             )
 
-        if codec == AudioCodec.OPUS:
-            # Ensure sample rate is supported by Opus and the player
-            opus_supported_rates = [8000, 12000, 16000, 24000, 48000]
-            if sample_rate not in opus_supported_rates:
-                # Find the closest supported Opus sample rate
-                if sample_rate <= 8000 and 8000 in support_sample_rates:
-                    sample_rate = 8000
-                elif sample_rate <= 12000 and 12000 in support_sample_rates:
-                    sample_rate = 12000
-                elif sample_rate <= 16000 and 16000 in support_sample_rates:
-                    sample_rate = 16000
-                elif sample_rate <= 24000 and 24000 in support_sample_rates:
-                    sample_rate = 24000
-                elif 48000 in support_sample_rates:
-                    sample_rate = 48000
-                else:
-                    raise ValueError(
-                        f"Player {player.player_id} does not support any Opus sample rates"
-                    )
         # FLAC and PCM support any sample rate, no adjustment needed
-
         return AudioFormat(sample_rate, bit_depth, channels, codec)
 
     def _get_or_create_audio_encoder(self, audio_format: AudioFormat) -> av.AudioCodecContext:
