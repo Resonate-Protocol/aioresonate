@@ -100,6 +100,8 @@ class PlayerGroup:
     """Mapping of audio formats to their av encoder contexts."""
     _audio_headers: dict[AudioFormat, str]
     """Mapping of audio formats to their base64 encoded headers."""
+    _preferred_stream_codec: AudioCodec = AudioCodec.OPUS
+    """Preferred codec used by the current stream."""
 
     def __init__(self, server: "ResonateServer", *args: "Player") -> None:
         """
@@ -126,7 +128,10 @@ class PlayerGroup:
         )
 
     async def play_media(
-        self, audio_stream: AsyncGenerator[bytes, None], audio_stream_format: AudioFormat
+        self,
+        audio_stream: AsyncGenerator[bytes, None],
+        audio_stream_format: AudioFormat,
+        preferred_stream_codec: AudioCodec = AudioCodec.OPUS,
     ) -> None:
         """
         Start playback of a new media stream.
@@ -150,10 +155,13 @@ class PlayerGroup:
         # - how to sync metadata/media_art with this audio stream?
 
         self._stream_audio_format = audio_stream_format
+        self._preferred_stream_codec = preferred_stream_codec
 
         for player in self._players:
             logger.debug("Selecting format for player %s", player.player_id)
-            player_format = self.determine_player_format(player, audio_stream_format)
+            player_format = self.determine_player_format(
+                player, audio_stream_format, preferred_stream_codec
+            )
             self._player_formats[player.player_id] = player_format
             logger.debug(
                 "Sending session start to player %s with format %s",
@@ -535,7 +543,9 @@ class PlayerGroup:
         if self._stream_task is not None and self._stream_audio_format is not None:
             logger.debug("Joining player %s to current stream", player.player_id)
             # Join it to the current stream
-            player_format = self.determine_player_format(player, self._stream_audio_format)
+            player_format = self.determine_player_format(
+                player, self._stream_audio_format, self._preferred_stream_codec
+            )
             self._player_formats[player.player_id] = player_format
             self._send_session_start_msg(player, player_format)
 
