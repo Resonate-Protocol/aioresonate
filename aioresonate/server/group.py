@@ -22,7 +22,6 @@ if TYPE_CHECKING:
     from .server import ResonateServer
 
 INITIAL_PLAYBACK_DELAY_US = 1_000_000
-CHUNK_DURATION_US = 25_000
 
 logger = logging.getLogger(__name__)
 
@@ -315,6 +314,34 @@ class PlayerGroup:
             self._get_or_create_audio_encoder(audio_format)
 
         return self._audio_headers[audio_format]
+
+    def _calculate_optimal_chunk_samples(self, source_format: AudioFormat) -> int:
+        # Check if any players use Opus
+        opus_players = [
+            player
+            for player in self._players
+            if self._player_formats.get(player.player_id, AudioFormat(0, 0, 0)).codec
+            == AudioCodec.OPUS
+        ]
+
+        if not opus_players:
+            # All players use PCM, use 25ms chunks
+            return int(source_format.sample_rate * 0.025)
+
+        # TODO: replace this logic by allowing each device to have their own preferred chunk size,
+        # does this even work in all cases?
+        max_frame_size = 0
+        for player in opus_players:
+            player_format = self._player_formats[player.player_id]
+            encoder = self._get_or_create_audio_encoder(player_format)
+
+            # Scale frame size to source sample rate
+            scaled_frame_size = int(
+                encoder.frame_size * source_format.sample_rate / player_format.sample_rate
+            )
+            max_frame_size = max(max_frame_size, scaled_frame_size)
+
+        return max_frame_size if max_frame_size > 0 else int(source_format.sample_rate * 0.025)
 
     def _send_session_start_msg(self, player: "Player", audio_format: AudioFormat) -> None:
         """Send a session start message to a player with the specified audio format."""
@@ -644,8 +671,7 @@ class PlayerGroup:
             # Initialize streaming context variables
             input_sample_size = audio_format.channels * input_bytes_per_sample
             input_sample_rate = audio_format.sample_rate
-            chunk_length = CHUNK_DURATION_US / 1_000_000
-            input_samples_per_chunk = int(input_sample_rate * chunk_length)
+            input_samples_per_chunk = self._calculate_optimal_chunk_samples(audio_format)
             chunk_timestamp_us = start_time_us
 
             resamplers: dict[AudioFormat, av.AudioResampler] = {}
