@@ -667,8 +667,7 @@ class PlayerGroup:
                     chunk_timestamp_us,
                     encoder.frame_size,
                 )
-                # TODO: is cutting required here?
-                player.send_message(header + bytes(packet)[: packet.size])
+                player.send_message(header + bytes(packet))
         elif player_format.codec == AudioCodec.PCM:
             # Send as raw PCM
             audio_data = bytes(out_frames[0].planes[0])[
