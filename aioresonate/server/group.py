@@ -670,6 +670,8 @@ class PlayerGroup:
                 player.send_message(header + bytes(packet))
         elif player_format.codec == AudioCodec.PCM:
             # Send as raw PCM
+            # We need to manually slice the audio data since the buffer may be
+            # larger than than the expected size
             audio_data = bytes(out_frames[0].planes[0])[
                 : (2 if player_format.bit_depth == 16 else 3)
                 * player_format.channels
