@@ -557,6 +557,7 @@ class PlayerGroup:
             player: The player to add to this group.
         """
         logger.debug("adding %s to group with members: %s", player.player_id, self._players)
+        _ = player.group.stop()
         if player in self._players:
             return
         # Remove it from any existing group first
