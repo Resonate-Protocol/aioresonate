@@ -205,6 +205,9 @@ class PlayerGroup:
             )
         )
 
+        self._current_state = GroupState.PLAYING
+        self._signal_event(GroupStateChangedEvent(GroupState.PLAYING))
+
     def determine_player_format(
         self,
         player: "Player",
@@ -475,6 +478,10 @@ class PlayerGroup:
         self._audio_encoders.clear()
         self._audio_headers.clear()
         self._stream_task = None
+
+        if self._current_state != GroupState.IDLE:
+            self._signal_event(GroupStateChangedEvent(GroupState.IDLE))
+            self._current_state = GroupState.IDLE
         return True
 
     def set_metadata(self, metadata: Metadata) -> None:
@@ -786,8 +793,6 @@ class PlayerGroup:
         # - Support other formats than pcm
         # - Optimize this
 
-        self._signal_event(GroupStateChangedEvent(GroupState.PLAYING))
-
         try:
             logger.debug(
                 "_stream_audio started: start_time_us=%d, audio_format=%s",
@@ -870,5 +875,5 @@ class PlayerGroup:
             logger.debug("Audio streaming loop ended")
         except Exception:
             logger.exception("failed to stream audio")
-
-        self._signal_event(GroupStateChangedEvent(GroupState.IDLE))
+        finally:
+            self.stop()
