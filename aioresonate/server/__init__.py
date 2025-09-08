@@ -9,6 +9,8 @@ ResonateServer is the core of the music listening experience, responsible for:
 __all__ = [
     "AudioFormat",
     "GroupEvent",
+    "GroupState",
+    "GroupStateChangedEvent",
     "Player",
     "PlayerAddedEvent",
     "PlayerEvent",
@@ -22,7 +24,7 @@ __all__ = [
     "VolumeChangedEvent",
 ]
 
-from .group import AudioFormat, GroupEvent, PlayerGroup
+from .group import AudioFormat, GroupEvent, GroupState, GroupStateChangedEvent, PlayerGroup
 from .player import (
     Player,
     PlayerEvent,

@@ -35,8 +35,25 @@ class AudioCodec(Enum):
     OPUS = "opus"
 
 
+class GroupState(Enum):
+    """Player group playback state."""
+
+    IDLE = "idle"
+    """Group is not currently playing any media."""
+    PLAYING = "playing"
+    """Group is actively playing media."""
+
+
 class GroupEvent:
     """Base event type used by PlayerGroup.add_event_listener()."""
+
+
+@dataclass
+class GroupStateChangedEvent(GroupEvent):
+    """Group state has changed."""
+
+    state: GroupState
+    """The new group state."""
 
 
 @dataclass(frozen=True)
@@ -108,6 +125,8 @@ class PlayerGroup:
     """Preferred codec used by the current stream."""
     _event_cbs: list[Callable[[GroupEvent], Coroutine[None, None, None]]]
     """List of event callbacks for this group."""
+    _current_state: GroupState
+    """Current playback state of the group."""
 
     def __init__(self, server: "ResonateServer", *args: "Player") -> None:
         """
@@ -128,6 +147,7 @@ class PlayerGroup:
         self._audio_encoders = {}
         self._audio_headers = {}
         self._event_cbs = []
+        self._current_state = GroupState.IDLE
         logger.debug(
             "PlayerGroup initialized with %d player(s): %s",
             len(self._players),
@@ -526,6 +546,10 @@ class PlayerGroup:
         """
         Register a callback to listen for state changes of this group.
 
+        State changes include:
+        - The group started playing
+        - The group stopped/finished playing
+
         Returns a function to remove the listener.
         """
         self._event_cbs.append(callback)
@@ -534,6 +558,11 @@ class PlayerGroup:
     def _signal_event(self, event: GroupEvent) -> None:
         for cb in self._event_cbs:
             _ = self._server.loop.create_task(cb(event))  # Fire and forget event callback
+
+    @property
+    def state(self) -> GroupState:
+        """Current playback state of the group."""
+        return self._current_state
 
     def remove_player(self, player: "Player") -> None:
         """
@@ -757,6 +786,8 @@ class PlayerGroup:
         # - Support other formats than pcm
         # - Optimize this
 
+        self._signal_event(GroupStateChangedEvent(GroupState.PLAYING))
+
         try:
             logger.debug(
                 "_stream_audio started: start_time_us=%d, audio_format=%s",
@@ -839,3 +870,5 @@ class PlayerGroup:
             logger.debug("Audio streaming loop ended")
         except Exception:
             logger.exception("failed to stream audio")
+
+        self._signal_event(GroupStateChangedEvent(GroupState.IDLE))
