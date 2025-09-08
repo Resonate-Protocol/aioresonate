@@ -68,6 +68,14 @@ class StreamPauseEvent(PlayerEvent):
     """The player issued a pause stream command event."""
 
 
+@dataclass
+class PlayerGroupChangedEvent(PlayerEvent):
+    """The player was moved to a different group."""
+
+    new_group: "PlayerGroup"
+    """The new group the player is now part of."""
+
+
 class Player:
     """
     A Player that is connected to a ResonateServer.
@@ -276,6 +284,9 @@ class Player:
             group: The PlayerGroup to assign this player to.
         """
         self._group = group
+
+        # Emit event for group change
+        self._signal_event(PlayerGroupChangedEvent(group))
 
     def ungroup(self) -> None:
         """

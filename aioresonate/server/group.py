@@ -56,6 +56,22 @@ class GroupStateChangedEvent(GroupEvent):
     """The new group state."""
 
 
+@dataclass
+class GroupMemberAddedEvent(GroupEvent):
+    """A player was added to the group."""
+
+    player_id: str
+    """The ID of the player that was added."""
+
+
+@dataclass
+class GroupMemberRemovedEvent(GroupEvent):
+    """A player was removed from the group."""
+
+    player_id: str
+    """The ID of the player that was removed."""
+
+
 @dataclass(frozen=True)
 class AudioFormat:
     """
@@ -600,6 +616,7 @@ class PlayerGroup:
                 except QueueFull:
                     logger.warning("Failed to send session end message to %s", player.player_id)
                 del self._player_formats[player.player_id]
+        self._signal_event(GroupMemberRemovedEvent(player.player_id))
         # Each player needs to be in a group, add it to a new one
         player._set_group(PlayerGroup(self._server, player))  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
 
@@ -648,6 +665,9 @@ class PlayerGroup:
             player.send_message(message)
 
         self._players.append(player)
+
+        # Emit event for player addition
+        self._signal_event(GroupMemberAddedEvent(player.player_id))
 
     def _validate_audio_format(self, audio_format: AudioFormat) -> tuple[int, str, str] | None:
         """
