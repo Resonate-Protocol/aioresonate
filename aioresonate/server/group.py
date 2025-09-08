@@ -4,7 +4,7 @@ import asyncio
 import base64
 import logging
 from asyncio import QueueFull, Task
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Callable, Coroutine
 from dataclasses import dataclass
 from enum import Enum
 from typing import TYPE_CHECKING, cast
@@ -33,6 +33,10 @@ class AudioCodec(Enum):
     PCM = "pcm"
     FLAC = "flac"
     OPUS = "opus"
+
+
+class GroupEvent:
+    """Base event type used by PlayerGroup.add_event_listener()."""
 
 
 @dataclass(frozen=True)
@@ -102,6 +106,8 @@ class PlayerGroup:
     """Mapping of audio formats to their base64 encoded headers."""
     _preferred_stream_codec: AudioCodec = AudioCodec.OPUS
     """Preferred codec used by the current stream."""
+    _event_cbs: list[Callable[[GroupEvent], Coroutine[None, None, None]]]
+    """List of event callbacks for this group."""
 
     def __init__(self, server: "ResonateServer", *args: "Player") -> None:
         """
@@ -121,6 +127,7 @@ class PlayerGroup:
         self._current_metadata = None
         self._audio_encoders = {}
         self._audio_headers = {}
+        self._event_cbs = []
         logger.debug(
             "PlayerGroup initialized with %d player(s): %s",
             len(self._players),
@@ -512,6 +519,21 @@ class PlayerGroup:
     def players(self) -> list["Player"]:
         """All players that are part of this group."""
         return self._players
+
+    def add_event_listener(
+        self, callback: Callable[[GroupEvent], Coroutine[None, None, None]]
+    ) -> Callable[[], None]:
+        """
+        Register a callback to listen for state changes of this group.
+
+        Returns a function to remove the listener.
+        """
+        self._event_cbs.append(callback)
+        return lambda: self._event_cbs.remove(callback)
+
+    def _signal_event(self, event: GroupEvent) -> None:
+        for cb in self._event_cbs:
+            _ = self._server.loop.create_task(cb(event))  # Fire and forget event callback
 
     def remove_player(self, player: "Player") -> None:
         """
