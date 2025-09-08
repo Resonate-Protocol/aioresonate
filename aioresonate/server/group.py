@@ -668,8 +668,9 @@ class PlayerGroup:
         elif player_format.codec == AudioCodec.PCM:
             # Send as raw PCM
             audio_data = bytes(out_frames[0].planes[0])[
-                : (sample_count * 2 if player_format.bit_depth == 16 else 3)
+                : (2 if player_format.bit_depth == 16 else 3)
                 * player_format.channels
+                * sample_count
             ]
             if len(out_frames[0].planes) != 1:
                 logger.warning("resampling resulted in %s planes", len(out_frames[0].planes))
