@@ -4,7 +4,7 @@ import asyncio
 import base64
 import logging
 from asyncio import QueueFull, Task
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Callable, Coroutine
 from dataclasses import dataclass
 from enum import Enum
 from typing import TYPE_CHECKING, cast
@@ -33,6 +33,48 @@ class AudioCodec(Enum):
     PCM = "pcm"
     FLAC = "flac"
     OPUS = "opus"
+
+
+class GroupState(Enum):
+    """Player group playback state."""
+
+    IDLE = "idle"
+    """Group is not currently playing any media."""
+    PLAYING = "playing"
+    """Group is actively playing media."""
+
+
+class GroupEvent:
+    """Base event type used by PlayerGroup.add_event_listener()."""
+
+
+@dataclass
+class GroupStateChangedEvent(GroupEvent):
+    """Group state has changed."""
+
+    state: GroupState
+    """The new group state."""
+
+
+@dataclass
+class GroupMemberAddedEvent(GroupEvent):
+    """A player was added to the group."""
+
+    player_id: str
+    """The ID of the player that was added."""
+
+
+@dataclass
+class GroupMemberRemovedEvent(GroupEvent):
+    """A player was removed from the group."""
+
+    player_id: str
+    """The ID of the player that was removed."""
+
+
+@dataclass
+class GroupDeletedEvent(GroupEvent):
+    """This group has no more members and has been deleted."""
 
 
 @dataclass(frozen=True)
@@ -102,6 +144,10 @@ class PlayerGroup:
     """Mapping of audio formats to their base64 encoded headers."""
     _preferred_stream_codec: AudioCodec = AudioCodec.OPUS
     """Preferred codec used by the current stream."""
+    _event_cbs: list[Callable[[GroupEvent], Coroutine[None, None, None]]]
+    """List of event callbacks for this group."""
+    _current_state: GroupState = GroupState.IDLE
+    """Current playback state of the group."""
 
     def __init__(self, server: "ResonateServer", *args: "Player") -> None:
         """
@@ -121,6 +167,7 @@ class PlayerGroup:
         self._current_metadata = None
         self._audio_encoders = {}
         self._audio_headers = {}
+        self._event_cbs = []
         logger.debug(
             "PlayerGroup initialized with %d player(s): %s",
             len(self._players),
@@ -177,6 +224,9 @@ class PlayerGroup:
                 audio_stream_format,
             )
         )
+
+        self._current_state = GroupState.PLAYING
+        self._signal_event(GroupStateChangedEvent(GroupState.PLAYING))
 
     def determine_player_format(
         self,
@@ -448,6 +498,10 @@ class PlayerGroup:
         self._audio_encoders.clear()
         self._audio_headers.clear()
         self._stream_task = None
+
+        if self._current_state != GroupState.IDLE:
+            self._signal_event(GroupStateChangedEvent(GroupState.IDLE))
+            self._current_state = GroupState.IDLE
         return True
 
     def set_metadata(self, metadata: Metadata) -> None:
@@ -513,6 +567,30 @@ class PlayerGroup:
         """All players that are part of this group."""
         return self._players
 
+    def add_event_listener(
+        self, callback: Callable[[GroupEvent], Coroutine[None, None, None]]
+    ) -> Callable[[], None]:
+        """
+        Register a callback to listen for state changes of this group.
+
+        State changes include:
+        - The group started playing
+        - The group stopped/finished playing
+
+        Returns a function to remove the listener.
+        """
+        self._event_cbs.append(callback)
+        return lambda: self._event_cbs.remove(callback)
+
+    def _signal_event(self, event: GroupEvent) -> None:
+        for cb in self._event_cbs:
+            _ = self._server.loop.create_task(cb(event))  # Fire and forget event callback
+
+    @property
+    def state(self) -> GroupState:
+        """Current playback state of the group."""
+        return self._current_state
+
     def remove_player(self, player: "Player") -> None:
         """
         Remove a player from this group.
@@ -542,6 +620,12 @@ class PlayerGroup:
                 except QueueFull:
                     logger.warning("Failed to send session end message to %s", player.player_id)
                 del self._player_formats[player.player_id]
+        if not self._players:
+            # Emit event for group deletion, no players left
+            self._signal_event(GroupDeletedEvent())
+        else:
+            # Emit event for player removal
+            self._signal_event(GroupMemberRemovedEvent(player.player_id))
         # Each player needs to be in a group, add it to a new one
         player._set_group(PlayerGroup(self._server, player))  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
 
@@ -557,6 +641,7 @@ class PlayerGroup:
             player: The player to add to this group.
         """
         logger.debug("adding %s to group with members: %s", player.player_id, self._players)
+        _ = player.group.stop()
         if player in self._players:
             return
         # Remove it from any existing group first
@@ -590,6 +675,9 @@ class PlayerGroup:
             player.send_message(message)
 
         self._players.append(player)
+
+        # Emit event for player addition
+        self._signal_event(GroupMemberAddedEvent(player.player_id))
 
     def _validate_audio_format(self, audio_format: AudioFormat) -> tuple[int, str, str] | None:
         """
@@ -659,7 +747,6 @@ class PlayerGroup:
         if player_format.codec in (AudioCodec.OPUS, AudioCodec.FLAC):
             encoder = self._get_or_create_audio_encoder(player_format)
             packets = encoder.encode(out_frames[0])
-            logger.debug("Encoded %s packets: %s", player_format.codec, packets)
 
             for packet in packets:
                 header = pack_binary_header_raw(
@@ -815,3 +902,5 @@ class PlayerGroup:
             logger.debug("Audio streaming loop ended")
         except Exception:
             logger.exception("failed to stream audio")
+        finally:
+            self.stop()
