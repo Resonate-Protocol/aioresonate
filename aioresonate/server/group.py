@@ -146,7 +146,7 @@ class PlayerGroup:
     """Preferred codec used by the current stream."""
     _event_cbs: list[Callable[[GroupEvent], Coroutine[None, None, None]]]
     """List of event callbacks for this group."""
-    _current_state: GroupState
+    _current_state: GroupState = GroupState.IDLE
     """Current playback state of the group."""
 
     def __init__(self, server: "ResonateServer", *args: "Player") -> None:
@@ -168,7 +168,6 @@ class PlayerGroup:
         self._audio_encoders = {}
         self._audio_headers = {}
         self._event_cbs = []
-        self._current_state = GroupState.IDLE
         logger.debug(
             "PlayerGroup initialized with %d player(s): %s",
             len(self._players),
