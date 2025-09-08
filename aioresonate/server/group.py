@@ -752,7 +752,6 @@ class PlayerGroup:
                 header = pack_binary_header_raw(
                     BinaryMessageType.PlayAudioChunk.value,
                     chunk_timestamp_us,
-                    encoder.frame_size,
                 )
                 player.send_message(header + bytes(packet))
         elif player_format.codec == AudioCodec.PCM:
@@ -770,7 +769,6 @@ class PlayerGroup:
             header = pack_binary_header_raw(
                 BinaryMessageType.PlayAudioChunk.value,
                 chunk_timestamp_us,
-                sample_count,
             )
             player.send_message(header + audio_data)
         else:
