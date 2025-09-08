@@ -78,7 +78,7 @@ repos:
         stages: [pre-commit, pre-push, manual]
       - id: mypy
         name: mypy
-        entry: scripts/run-in-env.sh mypy -v
+        entry: scripts/run-in-env.sh mypy
         language: script
         types: [python]
         require_serial: true
