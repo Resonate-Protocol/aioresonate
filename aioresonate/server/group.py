@@ -72,6 +72,11 @@ class GroupMemberRemovedEvent(GroupEvent):
     """The ID of the player that was removed."""
 
 
+@dataclass
+class GroupDeletedEvent(GroupEvent):
+    """This group has no more members and has been deleted."""
+
+
 @dataclass(frozen=True)
 class AudioFormat:
     """
@@ -616,7 +621,12 @@ class PlayerGroup:
                 except QueueFull:
                     logger.warning("Failed to send session end message to %s", player.player_id)
                 del self._player_formats[player.player_id]
-        self._signal_event(GroupMemberRemovedEvent(player.player_id))
+        if not self._players:
+            # Emit event for group deletion, no players left
+            self._signal_event(GroupDeletedEvent())
+        else:
+            # Emit event for player removal
+            self._signal_event(GroupMemberRemovedEvent(player.player_id))
         # Each player needs to be in a group, add it to a new one
         player._set_group(PlayerGroup(self._server, player))  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
 
