@@ -659,7 +659,6 @@ class PlayerGroup:
         if player_format.codec in (AudioCodec.OPUS, AudioCodec.FLAC):
             encoder = self._get_or_create_audio_encoder(player_format)
             packets = encoder.encode(out_frames[0])
-            logger.debug("Encoded %s packets: %s", player_format.codec, packets)
 
             for packet in packets:
                 header = pack_binary_header_raw(
