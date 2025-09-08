@@ -40,13 +40,13 @@ def unpack_binary_header(data: bytes) -> BinaryHeader:
     Unpack binary header from bytes.
 
     Args:
-        data: First 13 bytes containing the binary header
+        data: First 9 bytes containing the binary header
 
     Returns:
         BinaryHeader with typed fields
 
     Raises:
-        struct.error: If data is not exactly 13 bytes or format is invalid
+        struct.error: If data is not exactly 9 bytes or format is invalid
     """
     if len(data) < BINARY_HEADER_SIZE:
         raise ValueError(f"Expected at least {BINARY_HEADER_SIZE} bytes, got {len(data)}")
@@ -63,7 +63,7 @@ def pack_binary_header(header: BinaryHeader) -> bytes:
         header: BinaryHeader to pack
 
     Returns:
-        13-byte packed binary header
+        9-byte packed binary header
     """
     return struct.pack(BINARY_HEADER_FORMAT, header.message_type, header.timestamp_us)
 
@@ -78,6 +78,6 @@ def pack_binary_header_raw(message_type: int, timestamp_us: int) -> bytes:
         size: size in bytes
 
     Returns:
-        13-byte packed binary header
+        9-byte packed binary header
     """
     return struct.pack(BINARY_HEADER_FORMAT, message_type, timestamp_us)
