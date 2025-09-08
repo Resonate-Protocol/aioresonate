@@ -295,6 +295,9 @@ class PlayerGroup:
 
         Args:
             audio_format: The audio format to create an encoder for.
+                The sample rate and bit depth will be shared for both the input and output streams.
+                The input stream must be in a s16 or s24 format. The output stream will be in the
+                specified codec.
 
         Returns:
             av.AudioCodecContext: The audio encoder context.
@@ -308,7 +311,8 @@ class PlayerGroup:
         )
         ctx.sample_rate = audio_format.sample_rate
         ctx.layout = "stereo" if audio_format.channels == 2 else "mono"
-        ctx.format = "s16"  # TODO: can we also use s24 here?
+        assert audio_format.bit_depth in (16, 24)
+        ctx.format = "s16" if audio_format.bit_depth == 16 else "s24"
 
         if audio_format.codec == AudioCodec.FLAC:
             # Default compression level for now
