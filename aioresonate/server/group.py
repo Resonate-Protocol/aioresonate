@@ -646,6 +646,14 @@ class PlayerGroup:
             return
         # Remove it from any existing group first
         player.ungroup()
+
+        # Add player to this group's player list
+        self._players.append(player)
+
+        # Emit event for player addition
+        self._signal_event(GroupMemberAddedEvent(player.player_id))
+
+        # Then set the group (which will emit PlayerGroupChangedEvent)
         player._set_group(self)  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
         if self._stream_task is not None and self._stream_audio_format is not None:
             logger.debug("Joining player %s to current stream", player.player_id)
@@ -673,11 +681,6 @@ class PlayerGroup:
                 "Sending current metadata to new player %s: %s", player.player_id, message.to_json()
             )
             player.send_message(message)
-
-        self._players.append(player)
-
-        # Emit event for player addition
-        self._signal_event(GroupMemberAddedEvent(player.player_id))
 
     def _validate_audio_format(self, audio_format: AudioFormat) -> tuple[int, str, str] | None:
         """
