@@ -14,7 +14,7 @@ from typing import Literal
 from mashumaro.config import BaseConfig
 from mashumaro.mixins.orjson import DataClassORJSONMixin
 
-from .core import ServerMessage
+from . import ServerMessage
 from .types import RepeatMode
 
 

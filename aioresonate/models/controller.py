@@ -13,7 +13,7 @@ from typing import Literal
 from mashumaro.config import BaseConfig
 from mashumaro.mixins.orjson import DataClassORJSONMixin
 
-from .core import ClientMessage, ServerMessage
+from . import ClientMessage, ServerMessage
 from .types import MediaCommand
 
 
