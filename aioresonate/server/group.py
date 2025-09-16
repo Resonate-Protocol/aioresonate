@@ -18,14 +18,14 @@ from aioresonate.models import (
     pack_binary_header_raw,
 )
 from aioresonate.models.core import (
+    SessionUpdateMessage,
+    SessionUpdatePayload,
     StreamEndMessage,
     StreamStartMessage,
     StreamStartPayload,
 )
 from aioresonate.models.metadata import (
-    SessionUpdateMessage,
     SessionUpdateMetadata,
-    SessionUpdatePayload,
 )
 from aioresonate.models.player import StreamStartPlayer
 

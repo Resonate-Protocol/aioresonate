@@ -15,6 +15,7 @@ from mashumaro.mixins.orjson import DataClassORJSONMixin
 
 from .metadata import (
     ClientHelloMetadataSupport,
+    SessionUpdateMetadata,
     StreamStartMetadata,
     StreamUpdateMetadata,
 )
@@ -199,3 +200,29 @@ class StreamEndMessage(ServerMessage):
     """Message sent by the server to end a stream."""
 
     type: Literal["stream/end"] = "stream/end"
+
+
+# Server -> Client: session/update
+@dataclass
+class SessionUpdatePayload(DataClassORJSONMixin):
+    """Delta updates for session state."""
+
+    group_id: str
+    """Group identifier."""
+    playback_state: Literal["playing", "paused", "stopped"] | None = None
+    """Only sent to clients with controller or metadata roles."""
+    metadata: SessionUpdateMetadata | None = None
+    """Only sent to clients with metadata role."""
+
+    class Config(BaseConfig):
+        """Config for parsing json messages."""
+
+        omit_none = True
+
+
+@dataclass
+class SessionUpdateMessage(ServerMessage):
+    """Message sent by the server to update session state."""
+
+    payload: SessionUpdatePayload
+    type: Literal["session/update"] = "session/update"
