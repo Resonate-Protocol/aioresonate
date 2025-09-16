@@ -44,6 +44,34 @@ class ClientHelloPayload(DataClassORJSONMixin):
     metadata_support: ClientHelloMetadataSupport | None = None
     """Metadata support configuration - only if metadata role is in supported_roles."""
 
+    def __post_init__(self) -> None:
+        """Enforce that support configs match supported roles."""
+        # Convert string roles to Roles enum for comparison
+        role_values = []
+        for role in self.supported_roles:
+            if isinstance(role, str):
+                role_values.append(role)
+            else:
+                role_values.append(role.value)
+
+        # Validate player role and support configuration
+        player_role_supported = Roles.PLAYER.value in role_values
+        if player_role_supported and self.player_support is None:
+            raise ValueError(
+                "player_support must be provided when 'player' role is in supported_roles"
+            )
+        if not player_role_supported:
+            self.player_support = None
+
+        # Validate metadata role and support configuration
+        metadata_role_supported = Roles.METADATA.value in role_values
+        if metadata_role_supported and self.metadata_support is None:
+            raise ValueError(
+                "metadata_support must be provided when 'metadata' role is in supported_roles"
+            )
+        if not metadata_role_supported:
+            self.metadata_support = None
+
     class Config(BaseConfig):
         """Config for parsing json messages."""
 
