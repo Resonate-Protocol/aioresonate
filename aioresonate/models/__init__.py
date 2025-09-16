@@ -12,17 +12,19 @@ __all__ = [
     "PlaybackStateType",
     "PlayerStateType",
     "RepeatMode",
-    "client_messages",
+    "controller",
+    "core",
+    "metadata",
     "pack_binary_header",
     "pack_binary_header_raw",
-    "server_messages",
+    "player",
     "types",
     "unpack_binary_header",
 ]
 import struct
 from typing import NamedTuple
 
-from . import client_messages, server_messages, types
+from . import controller, core, metadata, player, types
 from .types import (
     BinaryMessageType,
     GroupStateType,
