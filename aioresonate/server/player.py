@@ -7,13 +7,26 @@ from contextlib import suppress
 from enum import Enum
 from typing import TYPE_CHECKING, cast
 
-import models
-import models.controller as controller_models
-import models.core as core_models
-import models.player as player_models
-import models.types as types_models
 from aiohttp import ClientWebSocketResponse, WSMessage, WSMsgType, web
 from attr import dataclass
+
+from aioresonate.models import MediaCommand, unpack_binary_header
+from aioresonate.models.controller import (
+    GroupCommandClientMessage,
+    GroupGetListClientMessage,
+    GroupJoinClientMessage,
+)
+from aioresonate.models.core import (
+    ClientHelloMessage,
+    ClientHelloPayload,
+    ClientTimeMessage,
+    ServerHelloMessage,
+    ServerHelloPayload,
+    ServerTimeMessage,
+    ServerTimePayload,
+)
+from aioresonate.models.player import PlayerUpdateMessage, StreamRequestFormatMessage
+from aioresonate.models.types import ClientMessage, ServerMessage
 
 from .group import PlayerGroup
 
@@ -106,10 +119,10 @@ class Player:
     This is only set for client-initiated connections.
     """
     _player_id: str | None = None
-    _player_info: core_models.ClientHelloPayload | None = None
+    _player_info: ClientHelloPayload | None = None
     _writer_task: asyncio.Task[None] | None = None
     """Task responsible for sending JSON and binary data."""
-    _to_write: asyncio.Queue[types_models.ServerMessage | bytes]
+    _to_write: asyncio.Queue[ServerMessage | bytes]
     """Queue for messages to be sent to the player through the WebSocket."""
     _group: PlayerGroup
     _event_cbs: list[Callable[[PlayerEvent], Coroutine[None, None, None]]]
@@ -223,7 +236,7 @@ class Player:
         return self._player_info.name
 
     @property
-    def info(self) -> core_models.ClientHelloPayload:
+    def info(self) -> ClientHelloPayload:
         """List of information and capabilities reported by this player."""
         assert self._player_info  # Player should be fully initialized by now
         return self._player_info
@@ -317,8 +330,8 @@ class Player:
         # Send Server Hello
         self._logger.debug("Sending server hello")
         self.send_message(
-            core_models.ServerHelloMessage(
-                payload=core_models.ServerHelloPayload(
+            ServerHelloMessage(
+                payload=ServerHelloPayload(
                     server_id=self._server.id, name=self._server.name, version=1
                 )
             )
@@ -365,7 +378,7 @@ class Player:
 
                 try:
                     await self._handle_message(
-                        types_models.ClientMessage.from_json(cast("str", msg.data)), timestamp
+                        ClientMessage.from_json(cast("str", msg.data)), timestamp
                     )
                 except Exception:
                     self._logger.exception("error parsing message")
@@ -406,21 +419,21 @@ class Player:
             # Clean up connection and tasks
             await self._cleanup_connection()
 
-    async def _handle_message(self, message: types_models.ClientMessage, timestamp: int) -> None:
+    async def _handle_message(self, message: ClientMessage, timestamp: int) -> None:
         """Handle incoming commands from the client."""
         match message:
             # Core messages
-            case core_models.ClientHelloMessage(player_info):
+            case ClientHelloMessage(player_info):
                 self._logger.info("Received client/hello")
                 self._player_info = player_info
                 self._player_id = player_info.client_id
                 self._logger.info("Player ID set to %s", self._player_id)
                 self._logger = logger.getChild(self._player_id)
                 self._handle_player_connect(self)
-            case core_models.ClientTimeMessage(player_time):
+            case ClientTimeMessage(player_time):
                 self.send_message(
-                    core_models.ServerTimeMessage(
-                        core_models.ServerTimePayload(
+                    ServerTimeMessage(
+                        ServerTimePayload(
                             client_transmitted=player_time.client_transmitted,
                             server_received=timestamp,
                             server_transmitted=int(self._server.loop.time() * 1_000_000),
@@ -428,7 +441,7 @@ class Player:
                     )
                 )
             # Player messages
-            case player_models.PlayerUpdateMessage(state):
+            case PlayerUpdateMessage(state):
                 if not self._player_id:
                     self._logger.warning("Received player/state before session/hello")
                     return
@@ -440,25 +453,25 @@ class Player:
                     self._muted = state.muted
                     self._signal_event(VolumeChangedEvent(volume=self._volume, muted=self._muted))
                 # TODO: handle state.state changes, but how?
-            case player_models.StreamRequestFormatMessage(_):
+            case StreamRequestFormatMessage(_):
                 raise NotImplementedError("Stream format change requests are not supported yet")
             # Controller messages
-            case controller_models.GroupGetListClientMessage():
+            case GroupGetListClientMessage():
                 raise NotImplementedError("Group listing is not supported yet")
-            case controller_models.GroupJoinClientMessage(_):
+            case GroupJoinClientMessage(_):
                 raise NotImplementedError("Joining groups is not supported yet")
-            case controller_models.GroupCommandClientMessage(group_command):
+            case GroupCommandClientMessage(group_command):
                 # TODO: check if it was in the supported list
                 # TODO: implement remaining commands
                 match group_command.command:
-                    case types_models.MediaCommand.PLAY:
+                    case MediaCommand.PLAY:
                         self._signal_event(StreamStartEvent())
-                    case types_models.MediaCommand.STOP:
+                    case MediaCommand.STOP:
                         self._signal_event(StreamStopEvent())
-                    case types_models.MediaCommand.PAUSE:
+                    case MediaCommand.PAUSE:
                         self._signal_event(StreamPauseEvent())
             # unused base type
-            case types_models.ClientMessage():
+            case ClientMessage():
                 pass
 
     async def _writer(self) -> None:
@@ -472,7 +485,7 @@ class Player:
 
                 if isinstance(item, bytes):
                     # Unpack binary header using helper function
-                    header = models.unpack_binary_header(item)
+                    header = unpack_binary_header(item)
                     now = int(self._server.loop.time() * 1_000_000)
                     if header.timestamp_us - now < 0:
                         self._logger.error("Audio chunk should have played already, skipping it")
@@ -490,8 +503,8 @@ class Player:
                         )
                         break
                 else:
-                    assert isinstance(item, core_models.ServerMessage)  # for type checking
-                    if isinstance(item, core_models.ServerTimeMessage):
+                    assert isinstance(item, ServerMessage)  # for type checking
+                    if isinstance(item, ServerTimeMessage):
                         item.payload.server_transmitted = int(self._server.loop.time() * 1_000_000)
                     try:
                         await wsock.send_str(item.to_json())
@@ -504,7 +517,7 @@ class Player:
         except Exception:
             self._logger.exception("Error in writer task for player")
 
-    def send_message(self, message: core_models.ServerMessage | bytes) -> None:
+    def send_message(self, message: ServerMessage | bytes) -> None:
         """
         Enqueue a JSON or binary message to be sent directly to the client.
 
@@ -512,13 +525,13 @@ class Player:
         API of this library instead.
 
         NOTE: Binary messages are directly sent to the player, you need to add the
-        header yourself using models.pack_binary_header().
+        header yourself using pack_binary_header().
         """
         # TODO: handle full queue
         if isinstance(message, bytes):
             # Only log binary messages occasionally to reduce spam
             pass
-        elif not isinstance(message, core_models.ServerTimeMessage):
+        elif not isinstance(message, ServerTimeMessage):
             # Only log important non-time messages
             self._logger.debug("Enqueueing message: %s", type(message).__name__)
         self._to_write.put_nowait(message)
