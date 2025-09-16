@@ -18,33 +18,72 @@ from .core import ServerMessage
 from .types import RepeatMode
 
 
-# Server → Client metadata messages
+# Client -> Server: client/hello metadata support object
+@dataclass
+class MetadataSupportClientPayload(DataClassORJSONMixin):
+    """Metadata support configuration - only if metadata role is set."""
+
+    support_picture_formats: list[str]
+    """Supported media art image formats (empty array if no art desired)."""
+    media_width: int | None = None
+    """Max width in pixels (if only width set, scales preserving aspect ratio)."""
+    media_height: int | None = None
+    """Max height in pixels (if only height set, scales preserving aspect ratio)."""
+
+    class Config(BaseConfig):
+        """Config for parsing json messages."""
+
+        omit_none = True
+
+
+# Server -> Client: stream/start metadata object
+@dataclass
+class StreamStartMetadataServerPayload(DataClassORJSONMixin):
+    """Metadata object in stream/start message.
+
+    Sent to clients that specified supported picture formats.
+    """
+
+    art_format: Literal["bmp", "jpeg", "png"]
+    """Format of the encoded image."""
+
+
+# Server -> Client: stream/update metadata object
+@dataclass
+class StreamUpdateMetadataServerPayload(DataClassORJSONMixin):
+    """Metadata object in stream/update message with delta updates."""
+
+    art_format: Literal["bmp", "jpeg", "png"]
+    """Format of the encoded image."""
+
+
+# Server -> Client: session/update metadata object
 @dataclass
 class SessionMetadataServerPayload(DataClassORJSONMixin):
     """Metadata object in session/update message."""
 
     timestamp: int
     """Server timestamp for when this metadata is valid."""
-    title: str | None = None
-    artist: str | None = None
-    album_artist: str | None = None
-    album: str | None = None
-    artwork_url: str | None = None
-    year: int | None = None
-    track: int | None = None
-    track_progress: float | None = None
+    title: str | None | Literal["__UNDEFINED__MARKER__"] = "__UNDEFINED__MARKER__"
+    artist: str | None | Literal["__UNDEFINED__MARKER__"] = "__UNDEFINED__MARKER__"
+    album_artist: str | None | Literal["__UNDEFINED__MARKER__"] = "__UNDEFINED__MARKER__"
+    album: str | None | Literal["__UNDEFINED__MARKER__"] = "__UNDEFINED__MARKER__"
+    artwork_url: str | None | Literal["__UNDEFINED__MARKER__"] = "__UNDEFINED__MARKER__"
+    year: int | None | Literal["__UNDEFINED__MARKER__"] = "__UNDEFINED__MARKER__"
+    track: int | None | Literal["__UNDEFINED__MARKER__"] = "__UNDEFINED__MARKER__"
+    track_progress: float | None | Literal["__UNDEFINED__MARKER__"] = "__UNDEFINED__MARKER__"
     """Track progress in seconds."""
-    track_duration: float | None = None
+    track_duration: float | None | Literal["__UNDEFINED__MARKER__"] = "__UNDEFINED__MARKER__"
     """Track duration in seconds."""
-    playback_speed: float | None = None
+    playback_speed: float | None | Literal["__UNDEFINED__MARKER__"] = "__UNDEFINED__MARKER__"
     """Speed factor."""
-    repeat: RepeatMode | None = None
-    shuffle: bool | None = None
+    repeat: RepeatMode | None | Literal["__UNDEFINED__MARKER__"] = "__UNDEFINED__MARKER__"
+    shuffle: bool | None | Literal["__UNDEFINED__MARKER__"] = "__UNDEFINED__MARKER__"
 
     class Config(BaseConfig):
         """Config for parsing json messages."""
 
-        omit_none = True
+        omit_default = True
 
 
 @dataclass

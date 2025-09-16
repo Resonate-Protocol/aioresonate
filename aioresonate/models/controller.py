@@ -17,7 +17,7 @@ from .core import ClientMessage, ServerMessage
 from .types import MediaCommand
 
 
-# Client → Server controller messages
+# Client -> Server: group/get-list
 @dataclass
 class GroupGetListClientMessage(ClientMessage):
     """Message sent by the client to request all groups available to join."""
@@ -25,6 +25,7 @@ class GroupGetListClientMessage(ClientMessage):
     type: Literal["group/get-list"] = "group/get-list"
 
 
+# Client -> Server: group/join
 @dataclass
 class GroupJoinClientPayload(DataClassORJSONMixin):
     """Payload for joining a group."""
@@ -41,6 +42,7 @@ class GroupJoinClientMessage(ClientMessage):
     type: Literal["group/join"] = "group/join"
 
 
+# Client -> Server: group/unjoin
 @dataclass
 class GroupUnjoinClientMessage(ClientMessage):
     """Message sent by the client to leave current group."""
@@ -48,6 +50,7 @@ class GroupUnjoinClientMessage(ClientMessage):
     type: Literal["group/unjoin"] = "group/unjoin"
 
 
+# Client -> Server: group/command
 @dataclass
 class GroupCommandClientPayload(DataClassORJSONMixin):
     """Control the group that's playing."""
@@ -73,17 +76,7 @@ class GroupCommandClientMessage(ClientMessage):
     type: Literal["group/command"] = "group/command"
 
 
-# Server → Client controller messages
-@dataclass
-class GroupMemberServerPayload(DataClassORJSONMixin):
-    """Represents a group member."""
-
-    client_id: str
-    """Client identifier."""
-    name: str
-    """Client friendly name."""
-
-
+# Server -> Client: group/list
 @dataclass
 class GroupInfoServerPayload(DataClassORJSONMixin):
     """Information about a group."""
@@ -114,11 +107,22 @@ class GroupListServerMessage(ServerMessage):
     type: Literal["group/list"] = "group/list"
 
 
+# Server -> Client: group/update
+@dataclass
+class GroupMemberServerPayload(DataClassORJSONMixin):
+    """Represents a group member."""
+
+    client_id: str
+    """Client identifier."""
+    name: str
+    """Client friendly name."""
+
+
 @dataclass
 class GroupUpdateServerPayload(DataClassORJSONMixin):
     """Group state update."""
 
-    supported_commands: list[str]
+    supported_commands: list[MediaCommand | str]
     """Subset of: play, pause, stop, next, previous, seek, volume, mute."""
     members: list[GroupMemberServerPayload]
     """List of group members."""

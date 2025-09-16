@@ -3,6 +3,25 @@
 from enum import Enum
 
 
+class Roles(Enum):
+    """Client roles."""
+
+    PLAYER = "player"
+    """
+    Receives audio and plays it in sync.
+
+    Has its own volume and mute state and preferred format settings.
+    """
+    CONTROLLER = "controller"
+    """Controls Resonate groups."""
+    METADATA = "metadata"
+    """
+    Displays metadata.
+
+    Has preferred format for cover art.
+    """
+
+
 class BinaryMessageType(Enum):
     """Enum for Binary Message Types."""
 

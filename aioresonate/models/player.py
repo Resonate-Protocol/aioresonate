@@ -18,7 +18,24 @@ from .core import ClientMessage
 from .types import PlayerStateType
 
 
-# Client → Server player messages
+# Client -> Server client/hello player support object
+@dataclass
+class PlayerSupportClientPayload(DataClassORJSONMixin):
+    """Player support configuration - only if player role is set."""
+
+    support_codecs: list[str]
+    """Supported codecs in priority order."""
+    support_channels: list[int]
+    """Number of channels in priority order."""
+    support_sample_rates: list[int]
+    """Supported sample rates in priority order."""
+    support_bit_depth: list[int]
+    """Bit depth in priority order."""
+    buffer_capacity: int
+    """Buffer capacity size in bytes."""
+
+
+# Client -> Server player/update
 @dataclass
 class PlayerUpdateClientPayload(DataClassORJSONMixin):
     """State information of the player."""
@@ -39,6 +56,7 @@ class PlayerUpdateClientMessage(ClientMessage):
     type: Literal["player/update"] = "player/update"
 
 
+# Client -> Server stream/request-format
 @dataclass
 class StreamRequestFormatClientPayload(DataClassORJSONMixin):
     """Request different stream format (upgrade or downgrade)."""
@@ -64,3 +82,47 @@ class StreamRequestFormatClientMessage(ClientMessage):
 
     payload: StreamRequestFormatClientPayload
     type: Literal["stream/request-format"] = "stream/request-format"
+
+
+# Server -> Client stream/start player object
+@dataclass
+class StreamStartPlayerServerPayload(DataClassORJSONMixin):
+    """Player object in stream/start message."""
+
+    codec: str
+    """Codec to be used."""
+    sample_rate: int
+    """Sample rate to be used."""
+    channels: int
+    """Channels to be used."""
+    bit_depth: int
+    """Bit depth to be used."""
+    codec_header: str | None = None
+    """Base64 encoded codec header (if necessary; e.g., FLAC)."""
+
+    class Config(BaseConfig):
+        """Config for parsing json messages."""
+
+        omit_none = True
+
+
+# Server -> Client stream/update player object
+@dataclass
+class StreamUpdatePlayerServerPayload(DataClassORJSONMixin):
+    """Player object in stream/update message with delta updates."""
+
+    codec: str | None = None
+    """Codec to be used."""
+    sample_rate: int | None = None
+    """Sample rate to be used."""
+    channels: int | None = None
+    """Channels to be used."""
+    bit_depth: int | None = None
+    """Bit depth to be used."""
+    codec_header: str | None = None
+    """Base64 encoded codec header (if necessary; e.g., FLAC)."""
+
+    class Config(BaseConfig):
+        """Config for parsing json messages."""
+
+        omit_none = True

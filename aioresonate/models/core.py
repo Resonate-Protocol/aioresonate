@@ -8,88 +8,26 @@ synchronization, and stream lifecycle management.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from enum import Enum
 from typing import Literal
 
 from mashumaro.config import BaseConfig
 from mashumaro.mixins.orjson import DataClassORJSONMixin
-from mashumaro.types import Discriminator
 
-
-# Base message classes
-@dataclass
-class ClientMessage(DataClassORJSONMixin):
-    """Base class for client messages."""
-
-    class Config(BaseConfig):
-        """Config for parsing json messages."""
-
-        discriminator = Discriminator(field="type", include_subtypes=True)
-
-
-@dataclass
-class ServerMessage(DataClassORJSONMixin):
-    """Base class for server messages."""
-
-    class Config(BaseConfig):
-        """Config for parsing json messages."""
-
-        discriminator = Discriminator(field="type", include_subtypes=True)
+from . import ClientMessage, ServerMessage
+from .metadata import (
+    MetadataSupportClientPayload,
+    StreamStartMetadataServerPayload,
+    StreamUpdateMetadataServerPayload,
+)
+from .player import (
+    PlayerSupportClientPayload,
+    StreamStartPlayerServerPayload,
+    StreamUpdatePlayerServerPayload,
+)
+from .types import Roles
 
 
 # Client -> Server: client/hello
-class Roles(Enum):
-    """Client roles."""
-
-    PLAYER = "player"
-    """
-    Receives audio and plays it in sync.
-
-    Has its own volume and mute state and preferred format settings.
-    """
-    CONTROLLER = "controller"
-    """Controls Resonate groups."""
-    METADATA = "metadata"
-    """
-    Displays metadata.
-
-    Has preferred format for cover art.
-    """
-
-
-@dataclass
-class PlayerSupportClientPayload(DataClassORJSONMixin):
-    """Player support configuration - only if player role is set."""
-
-    support_codecs: list[str]
-    """Supported codecs in priority order."""
-    support_channels: list[int]
-    """Number of channels in priority order."""
-    support_sample_rates: list[int]
-    """Supported sample rates in priority order."""
-    support_bit_depth: list[int]
-    """Bit depth in priority order."""
-    buffer_capacity: int
-    """Buffer capacity size in bytes."""
-
-
-@dataclass
-class MetadataSupportClientPayload(DataClassORJSONMixin):
-    """Metadata support configuration - only if metadata role is set."""
-
-    support_picture_formats: list[str]
-    """Supported media art image formats (empty array if no art desired)."""
-    media_width: int | None = None
-    """Max width in pixels (if only width set, scales preserving aspect ratio)."""
-    media_height: int | None = None
-    """Max height in pixels (if only height set, scales preserving aspect ratio)."""
-
-    class Config(BaseConfig):
-        """Config for parsing json messages."""
-
-        omit_none = True
-
-
 @dataclass
 class ClientHelloClientPayload(DataClassORJSONMixin):
     """Information about a connected client."""
@@ -182,38 +120,6 @@ class ServerTimeServerMessage(ServerMessage):
 
 # Client -> Server: stream/start
 @dataclass
-class StreamStartPlayerServerPayload(DataClassORJSONMixin):
-    """Player object in stream/start message."""
-
-    codec: str
-    """Codec to be used."""
-    sample_rate: int
-    """Sample rate to be used."""
-    channels: int
-    """Channels to be used."""
-    bit_depth: int
-    """Bit depth to be used."""
-    codec_header: str | None = None
-    """Base64 encoded codec header (if necessary; e.g., FLAC)."""
-
-    class Config(BaseConfig):
-        """Config for parsing json messages."""
-
-        omit_none = True
-
-
-@dataclass
-class StreamStartMetadataServerPayload(DataClassORJSONMixin):
-    """Metadata object in stream/start message.
-
-    Sent to clients that specified supported picture formats.
-    """
-
-    art_format: Literal["bmp", "jpeg", "png"]
-    """Format of the encoded image."""
-
-
-@dataclass
 class StreamStartServerPayload(DataClassORJSONMixin):
     """Information about an active streaming session."""
 
@@ -237,40 +143,6 @@ class StreamStartServerMessage(ServerMessage):
 
 
 # Server -> Client: stream/update
-@dataclass
-class StreamUpdatePlayerServerPayload(DataClassORJSONMixin):
-    """Player object in stream/update message with delta updates."""
-
-    codec: str | None = None
-    """Codec to be used."""
-    sample_rate: int | None = None
-    """Sample rate to be used."""
-    channels: int | None = None
-    """Channels to be used."""
-    bit_depth: int | None = None
-    """Bit depth to be used."""
-    codec_header: str | None = None
-    """Base64 encoded codec header (if necessary; e.g., FLAC)."""
-
-    class Config(BaseConfig):
-        """Config for parsing json messages."""
-
-        omit_none = True
-
-
-@dataclass
-class StreamUpdateMetadataServerPayload(DataClassORJSONMixin):
-    """Metadata object in stream/update message with delta updates."""
-
-    art_format: Literal["bmp", "jpeg", "png"] | None = None
-    """Format of the encoded image."""
-
-    class Config(BaseConfig):
-        """Config for parsing json messages."""
-
-        omit_none = True
-
-
 @dataclass
 class StreamUpdateServerPayload(DataClassORJSONMixin):
     """Delta updates for the ongoing stream."""
