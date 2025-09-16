@@ -1,6 +1,32 @@
 """Models for enum types used by resonate."""
 
+from dataclasses import dataclass
 from enum import Enum
+
+from mashumaro.config import BaseConfig
+from mashumaro.mixins.orjson import DataClassORJSONMixin
+from mashumaro.types import Discriminator
+
+
+# Base message classes
+@dataclass
+class ClientMessage(DataClassORJSONMixin):
+    """Base class for client messages."""
+
+    class Config(BaseConfig):
+        """Config for parsing json messages."""
+
+        discriminator = Discriminator(field="type", include_subtypes=True)
+
+
+@dataclass
+class ServerMessage(DataClassORJSONMixin):
+    """Base class for server messages."""
+
+    class Config(BaseConfig):
+        """Config for parsing json messages."""
+
+        discriminator = Discriminator(field="type", include_subtypes=True)
 
 
 class Roles(Enum):

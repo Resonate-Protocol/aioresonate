@@ -14,8 +14,7 @@ from typing import Literal
 from mashumaro.config import BaseConfig
 from mashumaro.mixins.orjson import DataClassORJSONMixin
 
-from . import ServerMessage
-from .types import RepeatMode
+from .types import RepeatMode, ServerMessage
 
 
 # Client -> Server: client/hello metadata support object

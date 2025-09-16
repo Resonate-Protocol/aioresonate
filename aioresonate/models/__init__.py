@@ -24,11 +24,7 @@ __all__ = [
     "unpack_binary_header",
 ]
 import struct
-from dataclasses import dataclass
 from typing import NamedTuple
-
-from mashumaro.mixins.orjson import DataClassORJSONMixin
-from mashumaro.types import Discriminator
 
 from . import controller, core, metadata, player, types
 from .types import (
@@ -43,27 +39,6 @@ from .types import (
 # Binary header (big-endian): message_type(1) + timestamp_us(8) = 9 bytes
 BINARY_HEADER_FORMAT = ">BQ"
 BINARY_HEADER_SIZE = struct.calcsize(BINARY_HEADER_FORMAT)
-
-
-# Base message classes
-@dataclass
-class ClientMessage(DataClassORJSONMixin):
-    """Base class for client messages."""
-
-    class Config(BaseConfig):
-        """Config for parsing json messages."""
-
-        discriminator = Discriminator(field="type", include_subtypes=True)
-
-
-@dataclass
-class ServerMessage(DataClassORJSONMixin):
-    """Base class for server messages."""
-
-    class Config(BaseConfig):
-        """Config for parsing json messages."""
-
-        discriminator = Discriminator(field="type", include_subtypes=True)
 
 
 # Helpers for binary messages

@@ -14,8 +14,7 @@ from typing import Literal
 from mashumaro.config import BaseConfig
 from mashumaro.mixins.orjson import DataClassORJSONMixin
 
-from . import ClientMessage
-from .types import PlayerStateType
+from .types import ClientMessage, PlayerStateType
 
 
 # Client -> Server client/hello player support object

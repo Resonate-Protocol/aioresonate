@@ -13,7 +13,6 @@ from typing import Literal
 from mashumaro.config import BaseConfig
 from mashumaro.mixins.orjson import DataClassORJSONMixin
 
-from . import ClientMessage, ServerMessage
 from .metadata import (
     MetadataSupportClientPayload,
     StreamStartMetadataServerPayload,
@@ -24,7 +23,7 @@ from .player import (
     StreamStartPlayerServerPayload,
     StreamUpdatePlayerServerPayload,
 )
-from .types import Roles
+from .types import ClientMessage, Roles, ServerMessage
 
 
 # Client -> Server: client/hello

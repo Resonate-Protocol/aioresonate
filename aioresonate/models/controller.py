@@ -13,8 +13,7 @@ from typing import Literal
 from mashumaro.config import BaseConfig
 from mashumaro.mixins.orjson import DataClassORJSONMixin
 
-from . import ClientMessage, ServerMessage
-from .types import MediaCommand
+from .types import ClientMessage, MediaCommand, ServerMessage
 
 
 # Client -> Server: group/get-list
