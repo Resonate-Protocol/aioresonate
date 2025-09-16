@@ -13,9 +13,6 @@ from uuid import uuid4
 import av
 from av import logging as av_logging
 
-from aioresonate.models import BinaryMessageType, pack_binary_header_raw, server_messages
-from aioresonate.models.types import RepeatMode
-
 # The cyclic import is not an issue during runtime, so hide it
 # pyright: reportImportCycles=none
 if TYPE_CHECKING:

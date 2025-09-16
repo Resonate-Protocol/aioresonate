@@ -10,9 +10,11 @@ from typing import TYPE_CHECKING, cast
 from aiohttp import ClientWebSocketResponse, WSMessage, WSMsgType, web
 from attr import dataclass
 
-from aioresonate import models
-from aioresonate.models import client_messages, server_messages
-from aioresonate.models.types import MediaCommand
+import aioresonate.models.controller as controller_models
+import aioresonate.models.core as core_models
+import aioresonate.models.metadata as metadata_models
+import aioresonate.models.player as player_models
+import aioresonate.models.types as types_models
 
 from .group import PlayerGroup
 
@@ -105,10 +107,10 @@ class Player:
     This is only set for client-initiated connections.
     """
     _player_id: str | None = None
-    _player_info: client_messages.ClientHelloPayload | None = None
+    _player_info: core_models.ClientHelloClientPayload | None = None
     _writer_task: asyncio.Task[None] | None = None
     """Task responsible for sending JSON and binary data."""
-    _to_write: asyncio.Queue[server_messages.ServerMessage | bytes]
+    _to_write: asyncio.Queue[types_models.ServerMessage | bytes]
     """Queue for messages to be sent to the player through the WebSocket."""
     _group: PlayerGroup
     _event_cbs: list[Callable[[PlayerEvent], Coroutine[None, None, None]]]
@@ -222,7 +224,7 @@ class Player:
         return self._player_info.name
 
     @property
-    def info(self) -> client_messages.ClientHelloPayload:
+    def info(self) -> core_models.ClientHelloClientPayload:
         """List of information and capabilities reported by this player."""
         assert self._player_info  # Player should be fully initialized by now
         return self._player_info
@@ -243,21 +245,17 @@ class Player:
     def set_volume(self, volume: int) -> None:
         """Set the volume of this player."""
         self._logger.debug("Setting volume from %d to %d", self._volume, volume)
-        self.send_message(
-            server_messages.VolumeSetMessage(server_messages.VolumeSetPayload(volume))
-        )
+        self._logger.error("NOT SUPPORTED BY SPEC YET")
 
     def mute(self) -> None:
         """Mute this player."""
         self._logger.debug("Muting player")
-        self.send_message(server_messages.MuteSetMessage(server_messages.MuteSetPayload(mute=True)))
+        self._logger.error("NOT SUPPORTED BY SPEC YET")
 
     def unmute(self) -> None:
         """Unmute this player."""
         self._logger.debug("Unmuting player")
-        self.send_message(
-            server_messages.MuteSetMessage(server_messages.MuteSetPayload(mute=False))
-        )
+        self._logger.error("NOT SUPPORTED BY SPEC YET")
 
     @property
     def muted(self) -> bool:
@@ -320,10 +318,9 @@ class Player:
         # Send Server Hello
         self._logger.debug("Sending server hello")
         self.send_message(
-            server_messages.ServerHelloMessage(
-                payload=server_messages.ServerHelloPayload(
-                    name=self._server.name,
-                    server_id=self._server.id,
+            core_models.ServerHelloServerMessage(
+                payload=core_models.ServerHelloServerPayload(
+                    server_id=self._server.id, name=self._server.name, version=1
                 )
             )
         )
@@ -369,7 +366,7 @@ class Player:
 
                 try:
                     await self._handle_message(
-                        client_messages.ClientMessage.from_json(cast("str", msg.data)), timestamp
+                        types_models.ClientMessage.from_json(cast("str", msg.data)), timestamp
                     )
                 except Exception:
                     self._logger.exception("error parsing message")
@@ -413,7 +410,7 @@ class Player:
     async def _handle_message(self, message: client_messages.ClientMessage, timestamp: int) -> None:
         """Handle incoming commands from the client."""
         match message:
-            case client_messages.ClientHelloMessage(player_info):
+            case core_models.ClientHelloClientMessage(player_info):
                 self._logger.info("Received session/hello")
                 self._player_info = player_info
                 self._player_id = player_info.client_id
