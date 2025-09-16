@@ -29,6 +29,23 @@ class ServerMessage(DataClassORJSONMixin):
         discriminator = Discriminator(field="type", include_subtypes=True)
 
 
+# Helpers for discerning between null and undefined fields in messages
+@dataclass
+class UndefinedField(DataClassORJSONMixin):
+    """Marker type to indicate undefined fields in messages."""
+
+
+_UNDEFINED_SINGLETON = UndefinedField()
+
+
+def undefined_field() -> UndefinedField:
+    """Return the singleton UndefinedField instance."""
+    return _UNDEFINED_SINGLETON
+
+
+# Enums
+
+
 class Roles(Enum):
     """Client roles."""
 

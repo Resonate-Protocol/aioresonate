@@ -8,13 +8,13 @@ their preferred format and resolution.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal
 
 from mashumaro.config import BaseConfig
 from mashumaro.mixins.orjson import DataClassORJSONMixin
 
-from .types import RepeatMode, ServerMessage
+from .types import RepeatMode, ServerMessage, UndefinedField, undefined_field
 
 
 # Client -> Server: client/hello metadata support object
@@ -63,21 +63,21 @@ class SessionMetadataServerPayload(DataClassORJSONMixin):
 
     timestamp: int
     """Server timestamp for when this metadata is valid."""
-    title: str | None | Literal["__UNDEFINED__MARKER__"] = "__UNDEFINED__MARKER__"
-    artist: str | None | Literal["__UNDEFINED__MARKER__"] = "__UNDEFINED__MARKER__"
-    album_artist: str | None | Literal["__UNDEFINED__MARKER__"] = "__UNDEFINED__MARKER__"
-    album: str | None | Literal["__UNDEFINED__MARKER__"] = "__UNDEFINED__MARKER__"
-    artwork_url: str | None | Literal["__UNDEFINED__MARKER__"] = "__UNDEFINED__MARKER__"
-    year: int | None | Literal["__UNDEFINED__MARKER__"] = "__UNDEFINED__MARKER__"
-    track: int | None | Literal["__UNDEFINED__MARKER__"] = "__UNDEFINED__MARKER__"
-    track_progress: float | None | Literal["__UNDEFINED__MARKER__"] = "__UNDEFINED__MARKER__"
+    title: str | None | UndefinedField = field(default_factory=undefined_field)
+    artist: str | None | UndefinedField = field(default_factory=undefined_field)
+    album_artist: str | None | UndefinedField = field(default_factory=undefined_field)
+    album: str | None | UndefinedField = field(default_factory=undefined_field)
+    artwork_url: str | None | UndefinedField = field(default_factory=undefined_field)
+    year: int | None | UndefinedField = field(default_factory=undefined_field)
+    track: int | None | UndefinedField = field(default_factory=undefined_field)
+    track_progress: float | None | UndefinedField = field(default_factory=undefined_field)
     """Track progress in seconds."""
-    track_duration: float | None | Literal["__UNDEFINED__MARKER__"] = "__UNDEFINED__MARKER__"
+    track_duration: float | None | UndefinedField = field(default_factory=undefined_field)
     """Track duration in seconds."""
-    playback_speed: float | None | Literal["__UNDEFINED__MARKER__"] = "__UNDEFINED__MARKER__"
+    playback_speed: float | None | UndefinedField = field(default_factory=undefined_field)
     """Speed factor."""
-    repeat: RepeatMode | None | Literal["__UNDEFINED__MARKER__"] = "__UNDEFINED__MARKER__"
-    shuffle: bool | None | Literal["__UNDEFINED__MARKER__"] = "__UNDEFINED__MARKER__"
+    repeat: RepeatMode | None | UndefinedField = field(default_factory=undefined_field)
+    shuffle: bool | None | UndefinedField = field(default_factory=undefined_field)
 
     class Config(BaseConfig):
         """Config for parsing json messages."""
