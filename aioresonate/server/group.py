@@ -451,7 +451,7 @@ class PlayerGroup:
             player.player_id,
             audio_format,
         )
-        session_info = server_messages.SessionStartPayload(
+        session_info = server_messages.StreamStartPayload(
             session_id=str(uuid4()),
             codec=audio_format.codec.value,
             sample_rate=audio_format.sample_rate,
@@ -463,7 +463,7 @@ class PlayerGroup:
         logger.debug(
             "Sending session start message to player %s: %s", player.player_id, session_info
         )
-        player.send_message(server_messages.SessionStartMessage(session_info))
+        player.send_message(server_messages.StreamStartMessage(session_info))
 
     def _send_session_end_msg(self, player: "Player") -> None:
         """Send a session end message to a player to stop playback."""

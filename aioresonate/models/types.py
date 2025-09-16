@@ -6,7 +6,12 @@ from enum import Enum
 class BinaryMessageType(Enum):
     """Enum for Binary Message Types."""
 
-    PlayAudioChunk = 1
+    AUDIO_CHUNK = 1
+    """Audio chunks with timestamps."""
+    MEDIA_ART = 2
+    """Media art (images)."""
+    VISUALIZATION_DATA = 3
+    """Visualization data."""
 
 
 class RepeatMode(Enum):
@@ -21,8 +26,23 @@ class PlayerStateType(Enum):
     """Enum for Player States."""
 
     PLAYING = "playing"
+    IDLE = "idle"
+
+
+class GroupStateType(Enum):
+    """Enum for Group States."""
+
+    PLAYING = "playing"
     PAUSED = "paused"
     IDLE = "idle"
+
+
+class PlaybackStateType(Enum):
+    """Enum for Playback States."""
+
+    PLAYING = "playing"
+    PAUSED = "paused"
+    STOPPED = "stopped"
 
 
 class MediaCommand(Enum):
@@ -31,5 +51,8 @@ class MediaCommand(Enum):
     PLAY = "play"
     PAUSE = "pause"
     STOP = "stop"
+    NEXT = "next"
+    PREVIOUS = "previous"
     SEEK = "seek"
     VOLUME = "volume"
+    MUTE = "mute"

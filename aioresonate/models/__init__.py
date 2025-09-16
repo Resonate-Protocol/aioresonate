@@ -7,7 +7,9 @@ __all__ = [
     "BINARY_HEADER_SIZE",
     "BinaryHeader",
     "BinaryMessageType",
+    "GroupStateType",
     "MediaCommand",
+    "PlaybackStateType",
     "PlayerStateType",
     "RepeatMode",
     "client_messages",
@@ -21,7 +23,14 @@ import struct
 from typing import NamedTuple
 
 from . import client_messages, server_messages, types
-from .types import BinaryMessageType, MediaCommand, PlayerStateType, RepeatMode
+from .types import (
+    BinaryMessageType,
+    GroupStateType,
+    MediaCommand,
+    PlaybackStateType,
+    PlayerStateType,
+    RepeatMode,
+)
 
 # Binary header (big-endian): message_type(1) + timestamp_us(8) = 9 bytes
 BINARY_HEADER_FORMAT = ">BQ"
@@ -29,7 +38,7 @@ BINARY_HEADER_SIZE = struct.calcsize(BINARY_HEADER_FORMAT)
 
 
 class BinaryHeader(NamedTuple):
-    """Binary header structure for audio chunks."""
+    """Header structure for binary messages."""
 
     message_type: int  # message type identifier (B - unsigned char)
     timestamp_us: int  # timestamp in microseconds (Q - unsigned long long)

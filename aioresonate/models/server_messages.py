@@ -9,7 +9,39 @@ from mashumaro.config import BaseConfig
 from mashumaro.mixins.orjson import DataClassORJSONMixin
 from mashumaro.types import Discriminator
 
-from .types import MediaCommand, RepeatMode
+from .types import RepeatMode
+
+
+@dataclass
+class StreamStartPlayerPayload(DataClassORJSONMixin):
+    """Player object in stream/start message."""
+
+    codec: str
+    """Codec to be used."""
+    sample_rate: int
+    """Sample rate to be used."""
+    channels: int
+    """Channels to be used."""
+    bit_depth: int
+    """Bit depth to be used."""
+    codec_header: str | None = None
+    """Base64 encoded codec header (if necessary; e.g., FLAC)."""
+
+    class Config(BaseConfig):
+        """Config for parsing json messages."""
+
+        omit_none = True
+
+
+@dataclass
+class StreamStartMetadataPayload(DataClassORJSONMixin):
+    """Metadata object in stream/start message.
+
+    Sent to clients that specified supported picture formats.
+    """
+
+    art_format: Literal["bmp", "jpeg", "png"]
+    """Format of the encoded image."""
 
 
 @dataclass
@@ -17,38 +49,44 @@ class ServerMessage(DataClassORJSONMixin):
     """Server Message type used by resonate."""
 
     class Config(BaseConfig):
-        """Config for parsing server messages."""
+        """Config for parsing json messages."""
 
         discriminator = Discriminator(field="type", include_subtypes=True)
 
 
 @dataclass
-class SessionStartPayload(DataClassORJSONMixin):
+class StreamStartPayload(DataClassORJSONMixin):
     """Information about an active streaming session."""
 
-    session_id: str
-    codec: str
-    sample_rate: int
-    channels: int
-    bit_depth: int
-    now: int
-    codec_header: str | None = None
+    player: StreamStartPlayerPayload | None = None
+    """Information about the player."""
+    metadata: StreamStartMetadataPayload | None = None
+    """Metadata information (sent to clients that specified supported picture formats)."""
+
+    class Config(BaseConfig):
+        """Config for parsing json messages."""
+
+        omit_none = True
 
 
 @dataclass
-class SessionStartMessage(ServerMessage):
-    """Message sent by the server to start a session."""
+class StreamStartMessage(ServerMessage):
+    """Message sent by the server to start a stream."""
 
-    payload: SessionStartPayload
-    type: Literal["session/start"] = "session/start"
+    payload: StreamStartPayload
+    type: Literal["stream/start"] = "stream/start"
 
 
 @dataclass
 class ServerHelloPayload(DataClassORJSONMixin):
-    """Information about the server (e.g., Music Assistant)."""
+    """Information about the server."""
 
     server_id: str
+    """Identifier of the server."""
     name: str
+    """Friendly name of the server"""
+    version: int
+    """Latest supported version of Resonate."""
 
 
 @dataclass
@@ -60,44 +98,120 @@ class ServerHelloMessage(ServerMessage):
 
 
 @dataclass
-class SessionEndPayload(DataClassORJSONMixin):
-    """Payload for the session/end message."""
+class StreamEndMessage(ServerMessage):
+    """Message sent by the server to end a stream."""
+
+    type: Literal["stream/end"] = "stream/end"
 
 
 @dataclass
-class SessionEndMessage(ServerMessage):
-    """Message sent by the server to end a session."""
+class StreamUpdatePlayerPayload(DataClassORJSONMixin):
+    """Player object in stream/update message with delta updates."""
 
-    payload: SessionEndPayload
-    type: Literal["session/end"] = "session/end"
-
-
-@dataclass
-class MetadataUpdatePayload(DataClassORJSONMixin):
-    """Represents a partial update to Metadata."""
-
-    title: str | None = None
-    artist: str | None = None
-    album: str | None = None
-    year: int | None = None
-    track: int | None = None
-    group_members: list[str] | None = None
-    support_commands: list[MediaCommand] | None = None
-    repeat: RepeatMode | None = None
-    shuffle: bool | None = None
+    codec: str | None = None
+    """Codec to be used."""
+    sample_rate: int | None = None
+    """Sample rate to be used."""
+    channels: int | None = None
+    """Channels to be used."""
+    bit_depth: int | None = None
+    """Bit depth to be used."""
+    codec_header: str | None = None
+    """Base64 encoded codec header (if necessary; e.g., FLAC)."""
 
     class Config(BaseConfig):
-        """Configuration for MetadataUpdatePayload serialization."""
+        """Config for parsing json messages."""
 
         omit_none = True
 
 
 @dataclass
-class MetadataUpdateMessage(ServerMessage):
-    """Message sent by the server to update metadata."""
+class StreamUpdateMetadataPayload(DataClassORJSONMixin):
+    """Metadata object in stream/update message with delta updates."""
 
-    payload: MetadataUpdatePayload
-    type: Literal["metadata/update"] = "metadata/update"
+    art_format: Literal["bmp", "jpeg", "png"] | None = None
+    """Format of the encoded image."""
+
+    class Config(BaseConfig):
+        """Config for parsing json messages."""
+
+        omit_none = True
+
+
+@dataclass
+class StreamUpdatePayload(DataClassORJSONMixin):
+    """Delta updates for the ongoing stream."""
+
+    player: StreamUpdatePlayerPayload | None = None
+    """Player updates."""
+    metadata: StreamUpdateMetadataPayload | None = None
+    """Metadata updates."""
+
+    class Config(BaseConfig):
+        """Config for parsing json messages."""
+
+        omit_none = True
+
+
+@dataclass
+class StreamUpdateMessage(ServerMessage):
+    """Message sent by the server to update stream format."""
+
+    payload: StreamUpdatePayload
+    type: Literal["stream/update"] = "stream/update"
+
+
+@dataclass
+class SessionMetadataPayload(DataClassORJSONMixin):
+    """Metadata object in session/update message."""
+
+    timestamp: int
+    """Server timestamp for when this metadata is valid."""
+    title: str | None = None
+    artist: str | None = None
+    album_artist: str | None = None
+    album: str | None = None
+    artwork_url: str | None = None
+    year: int | None = None
+    track: int | None = None
+    track_progress: float | None = None
+    """Track progress in seconds."""
+    track_duration: float | None = None
+    """Track duration in seconds."""
+    playback_speed: float | None = None
+    """Speed factor."""
+    repeat: RepeatMode | None = None
+    shuffle: bool | None = None
+
+    class Config(BaseConfig):
+        """Config for parsing json messages."""
+
+        omit_none = True
+
+
+@dataclass
+class SessionUpdatePayload(DataClassORJSONMixin):
+    """Delta updates for session state."""
+
+    group_id: str
+    """Group identifier."""
+    playback_state: Literal["playing", "paused", "stopped"] | None = None
+    """Only sent to clients with controller or metadata roles."""
+    metadata: SessionMetadataPayload | None = None
+    """Only sent to clients with metadata role."""
+
+    class Config(BaseConfig):
+        """Config for parsing json messages."""
+
+        omit_none = True
+
+
+@dataclass
+class SessionUpdateMessage(ServerMessage):
+    """Message sent by the server to update session state."""
+
+    payload: SessionUpdatePayload
+    type: Literal["session/update"] = "session/update"
 
 
 @dataclass
@@ -105,8 +219,11 @@ class ServerTimePayload(DataClassORJSONMixin):
     """Timing information from the server."""
 
     client_transmitted: int
+    """Client's internal clock timestamp received in the client/time message"""
     server_received: int
+    """Timestamp that the server received the client/time message in microseconds"""
     server_transmitted: int
+    """Timestamp that the server transmitted this message in microseconds"""
 
 
 @dataclass
@@ -118,30 +235,64 @@ class ServerTimeMessage(ServerMessage):
 
 
 @dataclass
-class VolumeSetPayload(DataClassORJSONMixin):
-    """Payload for the set volume command."""
+class GroupMember(DataClassORJSONMixin):
+    """Represents a group member."""
 
+    client_id: str
+    """Client identifier."""
+    name: str
+    """Client friendly name."""
+
+
+@dataclass
+class GroupInfo(DataClassORJSONMixin):
+    """Information about a group."""
+
+    group_id: str
+    """Group identifier."""
+    name: str
+    """Group name."""
+    state: Literal["playing", "paused", "idle"]
+    """Group state."""
+    member_count: int
+    """Number of clients in group."""
+
+
+@dataclass
+class GroupListPayload(DataClassORJSONMixin):
+    """All groups available to join on the server."""
+
+    groups: list[GroupInfo]
+    """List of available groups."""
+
+
+@dataclass
+class GroupListMessage(ServerMessage):
+    """Message sent by the server with list of available groups."""
+
+    payload: GroupListPayload
+    type: Literal["group/list"] = "group/list"
+
+
+@dataclass
+class GroupUpdatePayload(DataClassORJSONMixin):
+    """Group state update."""
+
+    supported_commands: list[str]
+    """Subset of: play, pause, stop, next, previous, seek, volume, mute."""
+    members: list[GroupMember]
+    """List of group members."""
+    session_id: str | None
+    """Null if no active session."""
     volume: int
+    """Volume range 0-100."""
+    muted: bool
+    """Mute state."""
 
 
 @dataclass
-class VolumeSetMessage(ServerMessage):
-    """Message sent by the server to set the volume."""
+class GroupUpdateMessage(ServerMessage):
+    """Message sent by the server to update group state."""
 
-    payload: VolumeSetPayload
-    type: Literal["volume/set"] = "volume/set"
-
-
-@dataclass
-class MuteSetPayload(DataClassORJSONMixin):
-    """Payload for the set mute command."""
-
-    mute: bool
-
-
-@dataclass
-class MuteSetMessage(ServerMessage):
-    """Message sent by the server to set the mute mode."""
-
-    payload: MuteSetPayload
-    type: Literal["mute/set"] = "mute/set"
+    payload: GroupUpdatePayload
+    type: Literal["group/update"] = "group/update"
