@@ -10,8 +10,6 @@ class BinaryMessageType(Enum):
     """Audio chunks with timestamps."""
     MEDIA_ART = 2
     """Media art (images)."""
-    VISUALIZATION_DATA = 3
-    """Visualization data."""
 
 
 class RepeatMode(Enum):

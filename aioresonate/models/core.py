@@ -16,25 +16,6 @@ from mashumaro.mixins.orjson import DataClassORJSONMixin
 from mashumaro.types import Discriminator
 
 
-class Roles(Enum):
-    """Client roles."""
-
-    PLAYER = "player"
-    """
-    Receives audio and plays it in sync.
-
-    Has its own volume and mute state and preferred format settings.
-    """
-    METADATA = "metadata"
-    """
-    Displays metadata.
-
-    Has preferred format for cover art.
-    """
-    CONTROLLER = "controller"
-    """Controls Resonate groups."""
-
-
 # Base message classes
 @dataclass
 class ClientMessage(DataClassORJSONMixin):
@@ -56,7 +37,26 @@ class ServerMessage(DataClassORJSONMixin):
         discriminator = Discriminator(field="type", include_subtypes=True)
 
 
-# Support payloads for client hello
+# Client -> Server: client/hello
+class Roles(Enum):
+    """Client roles."""
+
+    PLAYER = "player"
+    """
+    Receives audio and plays it in sync.
+
+    Has its own volume and mute state and preferred format settings.
+    """
+    CONTROLLER = "controller"
+    """Controls Resonate groups."""
+    METADATA = "metadata"
+    """
+    Displays metadata.
+
+    Has preferred format for cover art.
+    """
+
+
 @dataclass
 class PlayerSupportClientPayload(DataClassORJSONMixin):
     """Player support configuration - only if player role is set."""
@@ -90,7 +90,6 @@ class MetadataSupportClientPayload(DataClassORJSONMixin):
         omit_none = True
 
 
-# Client → Server core messages
 @dataclass
 class ClientHelloClientPayload(DataClassORJSONMixin):
     """Information about a connected client."""
@@ -122,6 +121,7 @@ class ClientHelloClientMessage(ClientMessage):
     type: Literal["client/hello"] = "client/hello"
 
 
+# Client -> Server: client/time
 @dataclass
 class ClientTimeClientPayload(DataClassORJSONMixin):
     """Timing information from the client."""
@@ -138,7 +138,7 @@ class ClientTimeClientMessage(ClientMessage):
     type: Literal["client/time"] = "client/time"
 
 
-# Server → Client core messages
+# Server -> Client: server/hello
 @dataclass
 class ServerHelloServerPayload(DataClassORJSONMixin):
     """Information about the server."""
@@ -159,6 +159,7 @@ class ServerHelloServerMessage(ServerMessage):
     type: Literal["server/hello"] = "server/hello"
 
 
+# Server -> Client: server/time
 @dataclass
 class ServerTimeServerPayload(DataClassORJSONMixin):
     """Timing information from the server."""
@@ -179,7 +180,7 @@ class ServerTimeServerMessage(ServerMessage):
     type: Literal["server/time"] = "server/time"
 
 
-# Stream lifecycle messages
+# Client -> Server: stream/start
 @dataclass
 class StreamStartPlayerServerPayload(DataClassORJSONMixin):
     """Player object in stream/start message."""
@@ -235,6 +236,7 @@ class StreamStartServerMessage(ServerMessage):
     type: Literal["stream/start"] = "stream/start"
 
 
+# Server -> Client: stream/update
 @dataclass
 class StreamUpdatePlayerServerPayload(DataClassORJSONMixin):
     """Player object in stream/update message with delta updates."""
@@ -292,6 +294,7 @@ class StreamUpdateServerMessage(ServerMessage):
     type: Literal["stream/update"] = "stream/update"
 
 
+# Server -> Client: stream/end
 @dataclass
 class StreamEndServerMessage(ServerMessage):
     """Message sent by the server to end a stream."""
