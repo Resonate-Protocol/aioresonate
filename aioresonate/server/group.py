@@ -8,16 +8,26 @@ from collections.abc import AsyncGenerator, Callable, Coroutine
 from dataclasses import dataclass
 from enum import Enum
 from typing import TYPE_CHECKING, cast
-from uuid import uuid4
 
 import av
-import models
-import models.controller as controller_models
-import models.core as core_models
-import models.metadata as metadata_models
-import models.player as player_models
-import models.types as types_models
 from av import logging as av_logging
+
+from aioresonate.models import (
+    BinaryMessageType,
+    RepeatMode,
+    pack_binary_header_raw,
+)
+from aioresonate.models.core import (
+    StreamEndMessage,
+    StreamStartMessage,
+    StreamStartPayload,
+)
+from aioresonate.models.metadata import (
+    SessionUpdateMessage,
+    SessionUpdateMetadata,
+    SessionUpdatePayload,
+)
+from aioresonate.models.player import StreamStartPlayer
 
 # The cyclic import is not an issue during runtime, so hide it
 # pyright: reportImportCycles=none
@@ -120,7 +130,7 @@ class Metadata:
     """Track duration in seconds."""
     playback_speed: float | None = 1.0
     """Speed factor, 1.0 is normal speed."""
-    repeat: types_models.RepeatMode | None = None
+    repeat: RepeatMode | None = None
     """Current repeat mode."""
     shuffle: bool | None = None
     """Whether shuffle is enabled."""
@@ -265,19 +275,31 @@ class PlayerGroup:
 
         # Determine optimal sample rate
         sample_rate = source_format.sample_rate
-        if sample_rate not in player_info.support_sample_rates:
+        if (
+            player_info.player_support
+            and sample_rate not in player_info.player_support.support_sample_rates
+        ):
             # Prefer lower rates that are closest to source, fallback to minimum
-            lower_rates = [r for r in player_info.support_sample_rates if r < sample_rate]
-            sample_rate = max(lower_rates) if lower_rates else min(player_info.support_sample_rates)
+            lower_rates = [
+                r for r in player_info.player_support.support_sample_rates if r < sample_rate
+            ]
+            sample_rate = (
+                max(lower_rates)
+                if lower_rates
+                else min(player_info.player_support.support_sample_rates)
+            )
             logger.debug("Adjusted sample_rate for player %s: %s", player.player_id, sample_rate)
 
         # Determine optimal bit depth
         bit_depth = source_format.bit_depth
-        if bit_depth not in player_info.support_bit_depth:
+        if (
+            player_info.player_support
+            and bit_depth not in player_info.player_support.support_bit_depth
+        ):
             # Prefer 16-bit, then 24-bit
-            if 16 in player_info.support_bit_depth:
+            if 16 in player_info.player_support.support_bit_depth:
                 bit_depth = 16
-            elif 24 in player_info.support_bit_depth:
+            elif 24 in player_info.player_support.support_bit_depth:
                 bit_depth = 24
             else:
                 raise NotImplementedError("Only 16bit and 24bit are supported")
@@ -285,11 +307,14 @@ class PlayerGroup:
 
         # Determine optimal channel count
         channels = source_format.channels
-        if channels not in player_info.support_channels:
+        if (
+            player_info.player_support
+            and channels not in player_info.player_support.support_channels
+        ):
             # Prefer stereo, then mono
-            if 2 in player_info.support_channels:
+            if 2 in player_info.player_support.support_channels:
                 channels = 2
-            elif 1 in player_info.support_channels:
+            elif 1 in player_info.player_support.support_channels:
                 channels = 1
             else:
                 raise NotImplementedError("Only mono and stereo are supported")
@@ -299,7 +324,10 @@ class PlayerGroup:
         codec_fallbacks = [preferred_codec, AudioCodec.FLAC, AudioCodec.OPUS, AudioCodec.PCM]
         codec = None
         for candidate_codec in codec_fallbacks:
-            if candidate_codec.value in player_info.support_codecs:
+            if (
+                player_info.player_support
+                and candidate_codec.value in player_info.player_support.support_codecs
+            ):
                 # Special handling for Opus - check if sample rates are compatible
                 if candidate_codec == AudioCodec.OPUS:
                     opus_rate_candidates = [
@@ -312,7 +340,11 @@ class PlayerGroup:
 
                     opus_sample_rate = None
                     for candidate_rate, condition in opus_rate_candidates:
-                        if condition and candidate_rate in player_info.support_sample_rates:
+                        if (
+                            condition
+                            and player_info.player_support
+                            and candidate_rate in player_info.player_support.support_sample_rates
+                        ):
                             opus_sample_rate = candidate_rate
                             break
 
@@ -462,24 +494,23 @@ class PlayerGroup:
             player.player_id,
             audio_format,
         )
-        session_info = server_messages.StreamStartPayload(
-            session_id=str(uuid4()),
+        player_stream_info = StreamStartPlayer(
             codec=audio_format.codec.value,
             sample_rate=audio_format.sample_rate,
             channels=audio_format.channels,
             bit_depth=audio_format.bit_depth,
-            now=int(self._server.loop.time() * 1_000_000),
             codec_header=self._get_audio_header(audio_format),
         )
+        session_info = StreamStartPayload(player=player_stream_info)
         logger.debug(
             "Sending session start message to player %s: %s", player.player_id, session_info
         )
-        player.send_message(server_messages.StreamStartMessage(session_info))
+        player.send_message(StreamStartMessage(session_info))
 
     def _send_session_end_msg(self, player: "Player") -> None:
         """Send a session end message to a player to stop playback."""
         logger.debug("ending session for %s (%s)", player.name, player.player_id)
-        player.send_message(server_messages.SessionEndMessage(server_messages.SessionEndPayload()))
+        player.send_message(StreamEndMessage())
 
     def stop(self) -> bool:
         """
@@ -515,7 +546,7 @@ class PlayerGroup:
             self._current_state = GroupState.IDLE
         return True
 
-    def set_metadata(self, metadata: Metadata) -> None:
+    def set_metadata(self, metadata: Metadata | None) -> None:
         """
         Set metadata for the group and send to all players.
 
@@ -528,45 +559,64 @@ class PlayerGroup:
         # Check if metadata has actually changed
         if self._current_metadata == metadata:
             return
+        last_metadata = self._current_metadata
 
-        # Create partial update payload with only changed fields
-        update_payload = server_messages.MetadataUpdatePayload()
+        metadata_update = SessionUpdateMetadata(
+            # TODO: sync with audio stream
+            # TODO: use actual track progress
+            timestamp=int(self._server.loop.time() * 1_000_000)
+        )
 
-        if self._current_metadata is None:
-            # First time setting metadata, send all fields
-            update_payload.title = metadata.title
-            update_payload.artist = metadata.artist
-            update_payload.album = metadata.album
-            update_payload.year = metadata.year
-            update_payload.track = metadata.track
-            update_payload.repeat = metadata.repeat
-            update_payload.shuffle = metadata.shuffle
+        if metadata is None:
+            # Clear all metadata fields when metadata is None
+            metadata_update.title = None
+            metadata_update.artist = None
+            metadata_update.album_artist = None
+            metadata_update.album = None
+            metadata_update.artwork_url = None
+            metadata_update.year = None
+            metadata_update.track = None
+            metadata_update.track_duration = None
+            metadata_update.playback_speed = None
+            metadata_update.repeat = None
+            metadata_update.shuffle = None
         else:
-            # Only send changed fields
-            if self._current_metadata.title != metadata.title:
-                update_payload.title = metadata.title
-            if self._current_metadata.artist != metadata.artist:
-                update_payload.artist = metadata.artist
-            if self._current_metadata.album != metadata.album:
-                update_payload.album = metadata.album
-            if self._current_metadata.year != metadata.year:
-                update_payload.year = metadata.year
-            if self._current_metadata.track != metadata.track:
-                update_payload.track = metadata.track
-            if self._current_metadata.repeat != metadata.repeat:
-                update_payload.repeat = metadata.repeat
-            if self._current_metadata.shuffle != metadata.shuffle:
-                update_payload.shuffle = metadata.shuffle
+            # Only include fields that have changed since the last metadata update
+            if last_metadata is None or last_metadata.title != metadata.title:
+                metadata_update.title = metadata.title
+            if last_metadata is None or last_metadata.artist != metadata.artist:
+                metadata_update.artist = metadata.artist
+            if last_metadata is None or last_metadata.album_artist != metadata.album_artist:
+                metadata_update.album_artist = metadata.album_artist
+            if last_metadata is None or last_metadata.album != metadata.album:
+                metadata_update.album = metadata.album
+            if last_metadata is None or last_metadata.artwork_url != metadata.artwork_url:
+                metadata_update.artwork_url = metadata.artwork_url
+            if last_metadata is None or last_metadata.year != metadata.year:
+                metadata_update.year = metadata.year
+            if last_metadata is None or last_metadata.track != metadata.track:
+                metadata_update.track = metadata.track
+            if last_metadata is None or last_metadata.track_duration != metadata.track_duration:
+                metadata_update.track_duration = metadata.track_duration
+            if last_metadata is None or last_metadata.playback_speed != metadata.playback_speed:
+                metadata_update.playback_speed = metadata.playback_speed
+            if last_metadata is None or last_metadata.repeat != metadata.repeat:
+                metadata_update.repeat = metadata.repeat
+            if last_metadata is None or last_metadata.shuffle != metadata.shuffle:
+                metadata_update.shuffle = metadata.shuffle
 
-        # TODO: finish this once the spec is finalized, include group_members and support_commands
-
-        # Send to all players in the group
-        message = server_messages.MetadataUpdateMessage(update_payload)
+        # Send the update to all players in the group
+        message = SessionUpdateMessage(
+            SessionUpdatePayload(
+                # TODO: playback_state
+                group_id="default_group",  # TODO: this is a placeholder
+                metadata=metadata_update,
+            )
+        )
         for player in self._players:
             logger.debug(
-                "Sending metadata update message to player %s: %s",
+                "Sending session update to player %s",
                 player.player_id,
-                message.to_json(),
             )
             player.send_message(message)
 
@@ -677,20 +727,29 @@ class PlayerGroup:
 
         # Send current metadata to the new player if available
         if self._current_metadata is not None:
-            update_payload = server_messages.MetadataUpdatePayload(
+            metadata_update = SessionUpdateMetadata(
+                # TODO: use actual track progress
+                # TODO: sync with audio stream
+                timestamp=int(self._server.loop.time() * 1_000_000),
                 title=self._current_metadata.title,
                 artist=self._current_metadata.artist,
                 album=self._current_metadata.album,
                 year=self._current_metadata.year,
                 track=self._current_metadata.track,
+                track_duration=self._current_metadata.track_duration,
+                playback_speed=self._current_metadata.playback_speed,
                 repeat=self._current_metadata.repeat,
                 shuffle=self._current_metadata.shuffle,
             )
-            message = server_messages.MetadataUpdateMessage(update_payload)
-
-            logger.debug(
-                "Sending current metadata to new player %s: %s", player.player_id, message.to_json()
+            message = SessionUpdateMessage(
+                SessionUpdatePayload(
+                    group_id="default_group",  # TODO: this is a placeholder
+                    # TODO: playback_state
+                    metadata=metadata_update,
+                )
             )
+
+            logger.debug("Sending current metadata to new player %s", player.player_id)
             player.send_message(message)
 
     def _validate_audio_format(self, audio_format: AudioFormat) -> tuple[int, str, str] | None:
@@ -764,7 +823,7 @@ class PlayerGroup:
 
             for packet in packets:
                 header = pack_binary_header_raw(
-                    BinaryMessageType.PlayAudioChunk.value,
+                    BinaryMessageType.AUDIO_CHUNK.value,
                     chunk_timestamp_us,
                 )
                 player.send_message(header + bytes(packet))
@@ -781,7 +840,7 @@ class PlayerGroup:
                 logger.warning("resampling resulted in %s planes", len(out_frames[0].planes))
 
             header = pack_binary_header_raw(
-                BinaryMessageType.PlayAudioChunk.value,
+                BinaryMessageType.AUDIO_CHUNK.value,
                 chunk_timestamp_us,
             )
             player.send_message(header + audio_data)
@@ -892,9 +951,11 @@ class PlayerGroup:
                             await player.disconnect()
 
                         # Calculate buffer duration for this player
-                        player_buffer_capacity_samples = player.info.buffer_capacity // (
-                            (player_format.bit_depth // 8) * player_format.channels
-                        )
+                        player_buffer_capacity_samples = (
+                            player.info.player_support.buffer_capacity
+                            if player.info.player_support  # TODO: this should be always set here
+                            else 4096
+                        ) // ((player_format.bit_depth // 8) * player_format.channels)
                         player_buffer_duration = int(
                             1_000_000 * player_buffer_capacity_samples / player_format.sample_rate
                         )
