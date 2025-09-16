@@ -26,7 +26,7 @@ from aioresonate.models.core import (
     ServerTimePayload,
 )
 from aioresonate.models.player import PlayerUpdateMessage, StreamRequestFormatMessage
-from aioresonate.models.types import ClientMessage, ServerMessage
+from aioresonate.models.types import ClientMessage, Roles, ServerMessage
 
 from .group import PlayerGroup
 
@@ -140,6 +140,7 @@ class Player:
     _handle_player_connect: Callable[["Player"], None]
     _handle_player_disconnect: Callable[["Player"], None]
     _logger: logging.Logger
+    _roles: list[Roles]
 
     def __init__(
         self,
@@ -182,6 +183,7 @@ class Player:
         self._group = PlayerGroup(server, self)
         self._event_cbs = []
         self._closing = False
+        self._roles = []
         self.disconnect_behaviour = DisconnectBehaviour.UNGROUP
 
     async def disconnect(self, *, retry_connection: bool = True) -> None:
@@ -283,6 +285,16 @@ class Player:
     def closing(self) -> bool:
         """Whether this player is in the process of closing/disconnecting."""
         return self._closing
+
+    @property
+    def roles(self) -> list[Roles]:
+        """List of roles this client supports."""
+        return self._roles
+
+    def _ensure_role(self, role: Roles) -> None:
+        """Raise a ValueError if the player does not support a specific role."""
+        if role not in self._roles:
+            raise ValueError(f"Player does not support role: {role}")
 
     def _set_group(self, group: "PlayerGroup") -> None:
         """
@@ -426,6 +438,10 @@ class Player:
             case ClientHelloMessage(player_info):
                 self._logger.info("Received client/hello")
                 self._player_info = player_info
+                # Only set to the roles we recognize
+                self._roles = [
+                    role for role in player_info.supported_roles if isinstance(role, Roles)
+                ]
                 self._player_id = player_info.client_id
                 self._logger.info("Player ID set to %s", self._player_id)
                 self._logger = logger.getChild(self._player_id)
@@ -442,6 +458,7 @@ class Player:
                 )
             # Player messages
             case PlayerUpdateMessage(state):
+                self._ensure_role(Roles.PLAYER)
                 if not self._player_id:
                     self._logger.warning("Received player/state before session/hello")
                     return
@@ -454,13 +471,17 @@ class Player:
                     self._signal_event(VolumeChangedEvent(volume=self._volume, muted=self._muted))
                 # TODO: handle state.state changes, but how?
             case StreamRequestFormatMessage(_):
+                self._ensure_role(Roles.PLAYER)
                 raise NotImplementedError("Stream format change requests are not supported yet")
             # Controller messages
             case GroupGetListClientMessage():
+                self._ensure_role(Roles.CONTROLLER)
                 raise NotImplementedError("Group listing is not supported yet")
             case GroupJoinClientMessage(_):
+                self._ensure_role(Roles.CONTROLLER)
                 raise NotImplementedError("Joining groups is not supported yet")
             case GroupCommandClientMessage(group_command):
+                self._ensure_role(Roles.CONTROLLER)
                 # TODO: check if it was in the supported list
                 # TODO: implement remaining commands
                 match group_command.command:
