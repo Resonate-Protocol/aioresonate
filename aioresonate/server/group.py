@@ -11,6 +11,12 @@ from typing import TYPE_CHECKING, cast
 from uuid import uuid4
 
 import av
+import models
+import models.controller as controller_models
+import models.core as core_models
+import models.metadata as metadata_models
+import models.player as player_models
+import models.types as types_models
 from av import logging as av_logging
 
 # The cyclic import is not an issue during runtime, so hide it
@@ -96,22 +102,30 @@ class AudioFormat:
 class Metadata:
     """Metadata for media playback."""
 
-    # TODO: finish this once the spec is finalized
-
-    title: str = ""
+    title: str | None = None
     """Title of the current media."""
-    artist: str = ""
+    artist: str | None = None
     """Artist of the current media."""
-    album: str = ""
+    album_artist: str | None = None
+    """Album artist of the current media."""
+    album: str | None = None
     """Album of the current media."""
-    year: int = 0
+    artwork_url: str | None = None
+    """Artwork URL of the current media."""
+    year: int | None = None
     """Release year of the current media."""
-    track: int = 0
+    track: int | None = None
     """Track number of the current media."""
-    repeat: RepeatMode = RepeatMode.OFF
+    track_duration: float | None = None
+    """Track duration in seconds."""
+    playback_speed: float | None = 1.0
+    """Speed factor, 1.0 is normal speed."""
+    repeat: types_models.RepeatMode | None = None
     """Current repeat mode."""
-    shuffle: bool = False
+    shuffle: bool | None = None
     """Whether shuffle is enabled."""
+
+    # TODO: inject track_progress and timestamp when sending updates?
 
 
 class PlayerGroup:

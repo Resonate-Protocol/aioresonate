@@ -7,11 +7,13 @@ from contextlib import suppress
 from enum import Enum
 from typing import TYPE_CHECKING, cast
 
+import models
+import models.controller as controller_models
+import models.core as core_models
+import models.player as player_models
+import models.types as types_models
 from aiohttp import ClientWebSocketResponse, WSMessage, WSMsgType, web
 from attr import dataclass
-
-import aioresonate.models.core as core_models
-import aioresonate.models.types as types_models
 
 from .group import PlayerGroup
 
@@ -404,17 +406,29 @@ class Player:
             # Clean up connection and tasks
             await self._cleanup_connection()
 
-    async def _handle_message(self, message: client_messages.ClientMessage, timestamp: int) -> None:
+    async def _handle_message(self, message: types_models.ClientMessage, timestamp: int) -> None:
         """Handle incoming commands from the client."""
         match message:
+            # Core messages
             case core_models.ClientHelloMessage(player_info):
-                self._logger.info("Received session/hello")
+                self._logger.info("Received client/hello")
                 self._player_info = player_info
                 self._player_id = player_info.client_id
                 self._logger.info("Player ID set to %s", self._player_id)
                 self._logger = logger.getChild(self._player_id)
                 self._handle_player_connect(self)
-            case client_messages.PlayerStateMessage(state):
+            case core_models.ClientTimeMessage(player_time):
+                self.send_message(
+                    core_models.ServerTimeMessage(
+                        core_models.ServerTimePayload(
+                            client_transmitted=player_time.client_transmitted,
+                            server_received=timestamp,
+                            server_transmitted=int(self._server.loop.time() * 1_000_000),
+                        )
+                    )
+                )
+            # Player messages
+            case player_models.PlayerUpdateMessage(state):
                 if not self._player_id:
                     self._logger.warning("Received player/state before session/hello")
                     return
@@ -426,30 +440,26 @@ class Player:
                     self._muted = state.muted
                     self._signal_event(VolumeChangedEvent(volume=self._volume, muted=self._muted))
                 # TODO: handle state.state changes, but how?
-            case client_messages.ClientTimeMessage(player_time):
-                self.send_message(
-                    server_messages.ServerTimeMessage(
-                        server_messages.ServerTimePayload(
-                            client_transmitted=player_time.client_transmitted,
-                            server_received=timestamp,
-                            server_transmitted=int(self._server.loop.time() * 1_000_000),
-                        )
-                    )
-                )
-            case client_messages.StreamCommandMessage(stream_command):
-                match stream_command.command:
-                    case MediaCommand.PLAY:
+            case player_models.StreamRequestFormatMessage(_):
+                raise NotImplementedError("Stream format change requests are not supported yet")
+            # Controller messages
+            case controller_models.GroupGetListClientMessage():
+                raise NotImplementedError("Group listing is not supported yet")
+            case controller_models.GroupJoinClientMessage(_):
+                raise NotImplementedError("Joining groups is not supported yet")
+            case controller_models.GroupCommandClientMessage(group_command):
+                # TODO: check if it was in the supported list
+                # TODO: implement remaining commands
+                match group_command.command:
+                    case types_models.MediaCommand.PLAY:
                         self._signal_event(StreamStartEvent())
-                    case MediaCommand.STOP:
+                    case types_models.MediaCommand.STOP:
                         self._signal_event(StreamStopEvent())
-                    case MediaCommand.PAUSE:
+                    case types_models.MediaCommand.PAUSE:
                         self._signal_event(StreamPauseEvent())
-                    case MediaCommand.SEEK | MediaCommand.VOLUME:
-                        raise NotImplementedError(
-                            f"MediaCommand {stream_command.command} is not supported"
-                        )
-            case client_messages.ClientMessage():
-                pass  # unused base type
+            # unused base type
+            case types_models.ClientMessage():
+                pass
 
     async def _writer(self) -> None:
         """Write outgoing messages from the queue."""
@@ -480,8 +490,8 @@ class Player:
                         )
                         break
                 else:
-                    assert isinstance(item, server_messages.ServerMessage)  # for type checking
-                    if isinstance(item, server_messages.ServerTimeMessage):
+                    assert isinstance(item, core_models.ServerMessage)  # for type checking
+                    if isinstance(item, core_models.ServerTimeMessage):
                         item.payload.server_transmitted = int(self._server.loop.time() * 1_000_000)
                     try:
                         await wsock.send_str(item.to_json())
@@ -494,7 +504,7 @@ class Player:
         except Exception:
             self._logger.exception("Error in writer task for player")
 
-    def send_message(self, message: server_messages.ServerMessage | bytes) -> None:
+    def send_message(self, message: core_models.ServerMessage | bytes) -> None:
         """
         Enqueue a JSON or binary message to be sent directly to the client.
 
@@ -508,7 +518,7 @@ class Player:
         if isinstance(message, bytes):
             # Only log binary messages occasionally to reduce spam
             pass
-        elif not isinstance(message, server_messages.ServerTimeMessage):
+        elif not isinstance(message, core_models.ServerTimeMessage):
             # Only log important non-time messages
             self._logger.debug("Enqueueing message: %s", type(message).__name__)
         self._to_write.put_nowait(message)
