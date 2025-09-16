@@ -117,7 +117,7 @@ class ServerTimeMessage(ServerMessage):
     type: Literal["server/time"] = "server/time"
 
 
-# Client -> Server: stream/start
+# Server -> Client: stream/start
 @dataclass
 class StreamStartPayload(DataClassORJSONMixin):
     """Information about an active streaming session."""
