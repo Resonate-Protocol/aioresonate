@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from mashumaro.config import BaseConfig
-
 __all__ = [
     "BINARY_HEADER_FORMAT",
     "BINARY_HEADER_SIZE",
