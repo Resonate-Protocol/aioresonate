@@ -19,7 +19,7 @@ from .types import ClientMessage, PlayerStateType
 
 # Client -> Server client/hello player support object
 @dataclass
-class PlayerSupportClientPayload(DataClassORJSONMixin):
+class ClientHelloPlayerSupport(DataClassORJSONMixin):
     """Player support configuration - only if player role is set."""
 
     support_codecs: list[str]
@@ -36,7 +36,7 @@ class PlayerSupportClientPayload(DataClassORJSONMixin):
 
 # Client -> Server player/update
 @dataclass
-class PlayerUpdateClientPayload(DataClassORJSONMixin):
+class PlayerUpdatePayload(DataClassORJSONMixin):
     """State information of the player."""
 
     state: PlayerStateType
@@ -48,16 +48,16 @@ class PlayerUpdateClientPayload(DataClassORJSONMixin):
 
 
 @dataclass
-class PlayerUpdateClientMessage(ClientMessage):
+class PlayerUpdateMessage(ClientMessage):
     """Message sent by the player to report its state changes."""
 
-    payload: PlayerUpdateClientPayload
+    payload: PlayerUpdatePayload
     type: Literal["player/update"] = "player/update"
 
 
 # Client -> Server stream/request-format
 @dataclass
-class StreamRequestFormatClientPayload(DataClassORJSONMixin):
+class StreamRequestFormatPayload(DataClassORJSONMixin):
     """Request different stream format (upgrade or downgrade)."""
 
     codec: str | None = None
@@ -76,16 +76,16 @@ class StreamRequestFormatClientPayload(DataClassORJSONMixin):
 
 
 @dataclass
-class StreamRequestFormatClientMessage(ClientMessage):
+class StreamRequestFormatMessage(ClientMessage):
     """Message sent by the client to request different stream format."""
 
-    payload: StreamRequestFormatClientPayload
+    payload: StreamRequestFormatPayload
     type: Literal["stream/request-format"] = "stream/request-format"
 
 
 # Server -> Client stream/start player object
 @dataclass
-class StreamStartPlayerServerPayload(DataClassORJSONMixin):
+class StreamStartPlayer(DataClassORJSONMixin):
     """Player object in stream/start message."""
 
     codec: str
@@ -107,7 +107,7 @@ class StreamStartPlayerServerPayload(DataClassORJSONMixin):
 
 # Server -> Client stream/update player object
 @dataclass
-class StreamUpdatePlayerServerPayload(DataClassORJSONMixin):
+class StreamUpdatePlayer(DataClassORJSONMixin):
     """Player object in stream/update message with delta updates."""
 
     codec: str | None = None

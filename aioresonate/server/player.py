@@ -10,10 +10,7 @@ from typing import TYPE_CHECKING, cast
 from aiohttp import ClientWebSocketResponse, WSMessage, WSMsgType, web
 from attr import dataclass
 
-import aioresonate.models.controller as controller_models
 import aioresonate.models.core as core_models
-import aioresonate.models.metadata as metadata_models
-import aioresonate.models.player as player_models
 import aioresonate.models.types as types_models
 
 from .group import PlayerGroup
@@ -107,7 +104,7 @@ class Player:
     This is only set for client-initiated connections.
     """
     _player_id: str | None = None
-    _player_info: core_models.ClientHelloClientPayload | None = None
+    _player_info: core_models.ClientHelloPayload | None = None
     _writer_task: asyncio.Task[None] | None = None
     """Task responsible for sending JSON and binary data."""
     _to_write: asyncio.Queue[types_models.ServerMessage | bytes]
@@ -224,7 +221,7 @@ class Player:
         return self._player_info.name
 
     @property
-    def info(self) -> core_models.ClientHelloClientPayload:
+    def info(self) -> core_models.ClientHelloPayload:
         """List of information and capabilities reported by this player."""
         assert self._player_info  # Player should be fully initialized by now
         return self._player_info
@@ -318,8 +315,8 @@ class Player:
         # Send Server Hello
         self._logger.debug("Sending server hello")
         self.send_message(
-            core_models.ServerHelloServerMessage(
-                payload=core_models.ServerHelloServerPayload(
+            core_models.ServerHelloMessage(
+                payload=core_models.ServerHelloPayload(
                     server_id=self._server.id, name=self._server.name, version=1
                 )
             )
@@ -410,7 +407,7 @@ class Player:
     async def _handle_message(self, message: client_messages.ClientMessage, timestamp: int) -> None:
         """Handle incoming commands from the client."""
         match message:
-            case core_models.ClientHelloClientMessage(player_info):
+            case core_models.ClientHelloMessage(player_info):
                 self._logger.info("Received session/hello")
                 self._player_info = player_info
                 self._player_id = player_info.client_id

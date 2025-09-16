@@ -14,21 +14,21 @@ from mashumaro.config import BaseConfig
 from mashumaro.mixins.orjson import DataClassORJSONMixin
 
 from .metadata import (
-    MetadataSupportClientPayload,
-    StreamStartMetadataServerPayload,
-    StreamUpdateMetadataServerPayload,
+    ClientHelloMetadataSupport,
+    StreamStartMetadata,
+    StreamUpdateMetadata,
 )
 from .player import (
-    PlayerSupportClientPayload,
-    StreamStartPlayerServerPayload,
-    StreamUpdatePlayerServerPayload,
+    ClientHelloPlayerSupport,
+    StreamStartPlayer,
+    StreamUpdatePlayer,
 )
 from .types import ClientMessage, Roles, ServerMessage
 
 
 # Client -> Server: client/hello
 @dataclass
-class ClientHelloClientPayload(DataClassORJSONMixin):
+class ClientHelloPayload(DataClassORJSONMixin):
     """Information about a connected client."""
 
     client_id: str
@@ -39,9 +39,9 @@ class ClientHelloClientPayload(DataClassORJSONMixin):
     """Version that the Resonate client implements."""
     supported_roles: list[Roles | str]
     """List of roles the client supports."""
-    player_support: PlayerSupportClientPayload | None = None
+    player_support: ClientHelloPlayerSupport | None = None
     """Player support configuration - only if player role is in supported_roles."""
-    metadata_support: MetadataSupportClientPayload | None = None
+    metadata_support: ClientHelloMetadataSupport | None = None
     """Metadata support configuration - only if metadata role is in supported_roles."""
 
     class Config(BaseConfig):
@@ -51,16 +51,16 @@ class ClientHelloClientPayload(DataClassORJSONMixin):
 
 
 @dataclass
-class ClientHelloClientMessage(ClientMessage):
+class ClientHelloMessage(ClientMessage):
     """Message sent by the client to identify itself."""
 
-    payload: ClientHelloClientPayload
+    payload: ClientHelloPayload
     type: Literal["client/hello"] = "client/hello"
 
 
 # Client -> Server: client/time
 @dataclass
-class ClientTimeClientPayload(DataClassORJSONMixin):
+class ClientTimePayload(DataClassORJSONMixin):
     """Timing information from the client."""
 
     client_transmitted: int
@@ -68,16 +68,16 @@ class ClientTimeClientPayload(DataClassORJSONMixin):
 
 
 @dataclass
-class ClientTimeClientMessage(ClientMessage):
+class ClientTimeMessage(ClientMessage):
     """Message sent by the client for time synchronization."""
 
-    payload: ClientTimeClientPayload
+    payload: ClientTimePayload
     type: Literal["client/time"] = "client/time"
 
 
 # Server -> Client: server/hello
 @dataclass
-class ServerHelloServerPayload(DataClassORJSONMixin):
+class ServerHelloPayload(DataClassORJSONMixin):
     """Information about the server."""
 
     server_id: str
@@ -89,16 +89,16 @@ class ServerHelloServerPayload(DataClassORJSONMixin):
 
 
 @dataclass
-class ServerHelloServerMessage(ServerMessage):
+class ServerHelloMessage(ServerMessage):
     """Message sent by the server to identify itself."""
 
-    payload: ServerHelloServerPayload
+    payload: ServerHelloPayload
     type: Literal["server/hello"] = "server/hello"
 
 
 # Server -> Client: server/time
 @dataclass
-class ServerTimeServerPayload(DataClassORJSONMixin):
+class ServerTimePayload(DataClassORJSONMixin):
     """Timing information from the server."""
 
     client_transmitted: int
@@ -110,21 +110,21 @@ class ServerTimeServerPayload(DataClassORJSONMixin):
 
 
 @dataclass
-class ServerTimeServerMessage(ServerMessage):
+class ServerTimeMessage(ServerMessage):
     """Message sent by the server for time synchronization."""
 
-    payload: ServerTimeServerPayload
+    payload: ServerTimePayload
     type: Literal["server/time"] = "server/time"
 
 
 # Client -> Server: stream/start
 @dataclass
-class StreamStartServerPayload(DataClassORJSONMixin):
+class StreamStartPayload(DataClassORJSONMixin):
     """Information about an active streaming session."""
 
-    player: StreamStartPlayerServerPayload | None = None
+    player: StreamStartPlayer | None = None
     """Information about the player."""
-    metadata: StreamStartMetadataServerPayload | None = None
+    metadata: StreamStartMetadata | None = None
     """Metadata information (sent to clients that specified supported picture formats)."""
 
     class Config(BaseConfig):
@@ -134,21 +134,21 @@ class StreamStartServerPayload(DataClassORJSONMixin):
 
 
 @dataclass
-class StreamStartServerMessage(ServerMessage):
+class StreamStartMessage(ServerMessage):
     """Message sent by the server to start a stream."""
 
-    payload: StreamStartServerPayload
+    payload: StreamStartPayload
     type: Literal["stream/start"] = "stream/start"
 
 
 # Server -> Client: stream/update
 @dataclass
-class StreamUpdateServerPayload(DataClassORJSONMixin):
+class StreamUpdatePayload(DataClassORJSONMixin):
     """Delta updates for the ongoing stream."""
 
-    player: StreamUpdatePlayerServerPayload | None = None
+    player: StreamUpdatePlayer | None = None
     """Player updates."""
-    metadata: StreamUpdateMetadataServerPayload | None = None
+    metadata: StreamUpdateMetadata | None = None
     """Metadata updates."""
 
     class Config(BaseConfig):
@@ -158,16 +158,16 @@ class StreamUpdateServerPayload(DataClassORJSONMixin):
 
 
 @dataclass
-class StreamUpdateServerMessage(ServerMessage):
+class StreamUpdateMessage(ServerMessage):
     """Message sent by the server to update stream format."""
 
-    payload: StreamUpdateServerPayload
+    payload: StreamUpdatePayload
     type: Literal["stream/update"] = "stream/update"
 
 
 # Server -> Client: stream/end
 @dataclass
-class StreamEndServerMessage(ServerMessage):
+class StreamEndMessage(ServerMessage):
     """Message sent by the server to end a stream."""
 
     type: Literal["stream/end"] = "stream/end"

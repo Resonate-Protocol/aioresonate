@@ -19,7 +19,7 @@ from .types import RepeatMode, ServerMessage, UndefinedField, undefined_field
 
 # Client -> Server: client/hello metadata support object
 @dataclass
-class MetadataSupportClientPayload(DataClassORJSONMixin):
+class ClientHelloMetadataSupport(DataClassORJSONMixin):
     """Metadata support configuration - only if metadata role is set."""
 
     support_picture_formats: list[str]
@@ -37,7 +37,7 @@ class MetadataSupportClientPayload(DataClassORJSONMixin):
 
 # Server -> Client: stream/start metadata object
 @dataclass
-class StreamStartMetadataServerPayload(DataClassORJSONMixin):
+class StreamStartMetadata(DataClassORJSONMixin):
     """Metadata object in stream/start message.
 
     Sent to clients that specified supported picture formats.
@@ -49,7 +49,7 @@ class StreamStartMetadataServerPayload(DataClassORJSONMixin):
 
 # Server -> Client: stream/update metadata object
 @dataclass
-class StreamUpdateMetadataServerPayload(DataClassORJSONMixin):
+class StreamUpdateMetadata(DataClassORJSONMixin):
     """Metadata object in stream/update message with delta updates."""
 
     art_format: Literal["bmp", "jpeg", "png"]
@@ -58,7 +58,7 @@ class StreamUpdateMetadataServerPayload(DataClassORJSONMixin):
 
 # Server -> Client: session/update metadata object
 @dataclass
-class SessionMetadataServerPayload(DataClassORJSONMixin):
+class SessionUpdateMetadata(DataClassORJSONMixin):
     """Metadata object in session/update message."""
 
     timestamp: int
@@ -86,14 +86,14 @@ class SessionMetadataServerPayload(DataClassORJSONMixin):
 
 
 @dataclass
-class SessionUpdateServerPayload(DataClassORJSONMixin):
+class SessionUpdatePayload(DataClassORJSONMixin):
     """Delta updates for session state."""
 
     group_id: str
     """Group identifier."""
     playback_state: Literal["playing", "paused", "stopped"] | None = None
     """Only sent to clients with controller or metadata roles."""
-    metadata: SessionMetadataServerPayload | None = None
+    metadata: SessionUpdateMetadata | None = None
     """Only sent to clients with metadata role."""
 
     class Config(BaseConfig):
@@ -103,8 +103,8 @@ class SessionUpdateServerPayload(DataClassORJSONMixin):
 
 
 @dataclass
-class SessionUpdateServerMessage(ServerMessage):
+class SessionUpdateMessage(ServerMessage):
     """Message sent by the server to update session state."""
 
-    payload: SessionUpdateServerPayload
+    payload: SessionUpdatePayload
     type: Literal["session/update"] = "session/update"
