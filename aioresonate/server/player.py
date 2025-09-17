@@ -426,10 +426,7 @@ class Player:
             case ClientHelloMessage(player_info):
                 self._logger.info("Received client/hello")
                 self._player_info = player_info
-                # Only set to the roles we recognize
-                self._roles = [
-                    role for role in player_info.supported_roles if isinstance(role, Roles)
-                ]
+                self._roles = player_info.supported_roles
                 self._player_id = player_info.client_id
                 self._logger.info("Player ID set to %s", self._player_id)
                 self._logger = logger.getChild(self._player_id)

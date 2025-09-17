@@ -43,7 +43,7 @@ class ClientHelloPayload(DataClassORJSONMixin):
     """Friendly name of the client."""
     version: int
     """Version that the Resonate client implements."""
-    supported_roles: list[Roles | str]
+    supported_roles: list[Roles]
     """List of roles the client supports."""
     player_support: ClientHelloPlayerSupport | None = None
     """Player support configuration - only if player role is in supported_roles."""
@@ -54,16 +54,8 @@ class ClientHelloPayload(DataClassORJSONMixin):
 
     def __post_init__(self) -> None:
         """Enforce that support configs match supported roles."""
-        # Convert string roles to Roles enum for comparison
-        role_values = []
-        for role in self.supported_roles:
-            if isinstance(role, str):
-                role_values.append(role)
-            else:
-                role_values.append(role.value)
-
         # Validate player role and support configuration
-        player_role_supported = Roles.PLAYER.value in role_values
+        player_role_supported = Roles.PLAYER in self.supported_roles
         if player_role_supported and self.player_support is None:
             raise ValueError(
                 "player_support must be provided when 'player' role is in supported_roles"
@@ -72,7 +64,7 @@ class ClientHelloPayload(DataClassORJSONMixin):
             self.player_support = None
 
         # Validate metadata role and support configuration
-        metadata_role_supported = Roles.METADATA.value in role_values
+        metadata_role_supported = Roles.METADATA in self.supported_roles
         if metadata_role_supported and self.metadata_support is None:
             raise ValueError(
                 "metadata_support must be provided when 'metadata' role is in supported_roles"
@@ -81,7 +73,7 @@ class ClientHelloPayload(DataClassORJSONMixin):
             self.metadata_support = None
 
         # Validate visualizer role and support configuration
-        visualizer_role_supported = Roles.VISUALIZER.value in role_values
+        visualizer_role_supported = Roles.VISUALIZER in self.supported_roles
         if visualizer_role_supported and self.visualizer_support is None:
             raise ValueError(
                 "visualizer_support must be provided when 'visualizer' role is in supported_roles"
