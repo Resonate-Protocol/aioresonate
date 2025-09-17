@@ -419,6 +419,8 @@ class Player:
 
     async def _handle_message(self, message: ClientMessage, timestamp: int) -> None:
         """Handle incoming commands from the client."""
+        if self._player_info is None and not isinstance(message, ClientHelloMessage):
+            raise ValueError("First message must be client/hello")
         match message:
             # Core messages
             case ClientHelloMessage(player_info):
