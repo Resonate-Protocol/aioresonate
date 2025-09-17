@@ -29,7 +29,7 @@ from aioresonate.models.metadata import (
     SessionUpdateMetadata,
 )
 from aioresonate.models.player import StreamStartPlayer
-from aioresonate.models.types import MediaCommand
+from aioresonate.models.types import GroupStateType, MediaCommand, Roles
 
 # The cyclic import is not an issue during runtime, so hide it
 # pyright: reportImportCycles=none
@@ -623,12 +623,18 @@ class PlayerGroup:
         # Send the update to all players in the group
         message = SessionUpdateMessage(
             SessionUpdatePayload(
-                # TODO: playback_state
                 group_id="default_group",  # TODO: this is a placeholder
                 metadata=metadata_update,
             )
         )
         for player in self._players:
+            message.payload.playback_state = None
+            if Roles.CONTROLLER in player.roles or Roles.METADATA in player.roles:
+                message.payload.playback_state = (
+                    GroupStateType.PLAYING
+                    if self._current_state == GroupState.PLAYING
+                    else GroupStateType.PAUSED
+                )
             logger.debug(
                 "Sending session update to player %s",
                 player.player_id,
@@ -765,10 +771,17 @@ class PlayerGroup:
                 repeat=self._current_metadata.repeat,
                 shuffle=self._current_metadata.shuffle,
             )
+            playback_state = None
+            if Roles.CONTROLLER in player.roles or Roles.METADATA in player.roles:
+                playback_state = (
+                    GroupStateType.PLAYING
+                    if self._current_state == GroupState.PLAYING
+                    else GroupStateType.PAUSED
+                )
             message = SessionUpdateMessage(
                 SessionUpdatePayload(
                     group_id="default_group",  # TODO: this is a placeholder
-                    # TODO: playback_state
+                    playback_state=playback_state,
                     metadata=metadata_update,
                 )
             )

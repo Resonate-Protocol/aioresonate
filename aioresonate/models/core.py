@@ -24,7 +24,7 @@ from .player import (
     StreamStartPlayer,
     StreamUpdatePlayer,
 )
-from .types import ClientMessage, Roles, ServerMessage
+from .types import ClientMessage, GroupStateType, Roles, ServerMessage
 
 
 # Client -> Server: client/hello
@@ -209,7 +209,7 @@ class SessionUpdatePayload(DataClassORJSONMixin):
 
     group_id: str
     """Group identifier."""
-    playback_state: Literal["playing", "paused", "stopped"] | None = None
+    playback_state: GroupStateType | None = None
     """Only sent to clients with controller or metadata roles."""
     metadata: SessionUpdateMetadata | None = None
     """Only sent to clients with metadata role."""
