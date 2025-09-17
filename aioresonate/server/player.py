@@ -15,6 +15,7 @@ from aioresonate.models.controller import (
     GroupCommandClientMessage,
     GroupGetListClientMessage,
     GroupJoinClientMessage,
+    GroupUnjoinClientMessage,
 )
 from aioresonate.models.core import (
     ClientHelloMessage,
@@ -461,6 +462,9 @@ class Player:
             case GroupJoinClientMessage(_):
                 self._ensure_role(Roles.CONTROLLER)
                 raise NotImplementedError("Joining groups is not supported yet")
+            case GroupUnjoinClientMessage(_):
+                self._ensure_role(Roles.CONTROLLER)
+                raise NotImplementedError("Leaving groups is not supported yet")
             case GroupCommandClientMessage(group_command):
                 self._ensure_role(Roles.CONTROLLER)
                 self.group._handle_group_command(group_command)  # noqa: SLF001
