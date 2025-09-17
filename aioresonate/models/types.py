@@ -63,6 +63,12 @@ class Roles(Enum):
 
     Has preferred format for cover art.
     """
+    VISUALIZER = "visualizer"
+    """
+    Visualizes music.
+
+    Has preferred format for audio features.
+    """
 
 
 class BinaryMessageType(Enum):
@@ -72,6 +78,8 @@ class BinaryMessageType(Enum):
     """Audio chunks with timestamps."""
     MEDIA_ART = 2
     """Media art (images)."""
+    VISUALIZATION_DATA = 3
+    """Visualization data."""
 
 
 class RepeatMode(Enum):

@@ -61,6 +61,22 @@ class GroupCommandClientPayload(DataClassORJSONMixin):
     mute: bool | None = None
     """True to mute, false to unmute, only set if command is mute."""
 
+    def __post_init__(self) -> None:
+        """Validate field values and command consistency."""
+        if self.command == MediaCommand.VOLUME:
+            if self.volume is None:
+                raise ValueError("Volume must be provided when command is 'volume'")
+            if not 0 <= self.volume <= 100:
+                raise ValueError(f"Volume must be in range 0-100, got {self.volume}")
+        elif self.volume is not None:
+            raise ValueError(f"Volume should not be provided for command '{self.command.value}'")
+
+        if self.command == MediaCommand.MUTE:
+            if self.mute is None:
+                raise ValueError("Mute must be provided when command is 'mute'")
+        elif self.mute is not None:
+            raise ValueError(f"Mute should not be provided for command '{self.command.value}'")
+
     class Config(BaseConfig):
         """Config for parsing json messages."""
 
@@ -131,6 +147,11 @@ class GroupUpdateServerPayload(DataClassORJSONMixin):
     """Volume range 0-100."""
     muted: bool
     """Mute state."""
+
+    def __post_init__(self) -> None:
+        """Validate field values."""
+        if not 0 <= self.volume <= 100:
+            raise ValueError(f"Volume must be in range 0-100, got {self.volume}")
 
 
 @dataclass

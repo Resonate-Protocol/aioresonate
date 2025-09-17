@@ -20,11 +20,12 @@ __all__ = [
     "player",
     "types",
     "unpack_binary_header",
+    "visualizer",
 ]
 import struct
 from typing import NamedTuple
 
-from . import controller, core, metadata, player, types
+from . import controller, core, metadata, player, types, visualizer
 from .types import (
     BinaryMessageType,
     GroupStateType,

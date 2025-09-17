@@ -141,9 +141,9 @@ class Metadata:
     """Release year of the current media."""
     track: int | None = None
     """Track number of the current media."""
-    track_duration: float | None = None
+    track_duration: int | None = None
     """Track duration in seconds."""
-    playback_speed: float | None = 1.0
+    playback_speed: int | None = 1
     """Speed factor, 1.0 is normal speed."""
     repeat: RepeatMode | None = None
     """Current repeat mode."""

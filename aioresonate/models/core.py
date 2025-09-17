@@ -25,6 +25,11 @@ from .player import (
     StreamUpdatePlayer,
 )
 from .types import ClientMessage, GroupStateType, Roles, ServerMessage
+from .visualizer import (
+    ClientHelloVisualizerSupport,
+    StreamStartVisualizer,
+    StreamUpdateVisualizer,
+)
 
 
 # Client -> Server: client/hello
@@ -44,6 +49,8 @@ class ClientHelloPayload(DataClassORJSONMixin):
     """Player support configuration - only if player role is in supported_roles."""
     metadata_support: ClientHelloMetadataSupport | None = None
     """Metadata support configuration - only if metadata role is in supported_roles."""
+    visualizer_support: ClientHelloVisualizerSupport | None = None
+    """Visualizer support configuration - only if visualizer role is in supported_roles."""
 
     def __post_init__(self) -> None:
         """Enforce that support configs match supported roles."""
@@ -72,6 +79,15 @@ class ClientHelloPayload(DataClassORJSONMixin):
             )
         if not metadata_role_supported:
             self.metadata_support = None
+
+        # Validate visualizer role and support configuration
+        visualizer_role_supported = Roles.VISUALIZER.value in role_values
+        if visualizer_role_supported and self.visualizer_support is None:
+            raise ValueError(
+                "visualizer_support must be provided when 'visualizer' role is in supported_roles"
+            )
+        if not visualizer_role_supported:
+            self.visualizer_support = None
 
     class Config(BaseConfig):
         """Config for parsing json messages."""
@@ -155,6 +171,8 @@ class StreamStartPayload(DataClassORJSONMixin):
     """Information about the player."""
     metadata: StreamStartMetadata | None = None
     """Metadata information (sent to clients that specified supported picture formats)."""
+    visualizer: StreamStartVisualizer | None = None
+    """Visualizer information (sent to clients with visualizer role)."""
 
     class Config(BaseConfig):
         """Config for parsing json messages."""
@@ -179,6 +197,8 @@ class StreamUpdatePayload(DataClassORJSONMixin):
     """Player updates."""
     metadata: StreamUpdateMetadata | None = None
     """Metadata updates."""
+    visualizer: StreamUpdateVisualizer | None = None
+    """Visualizer updates."""
 
     class Config(BaseConfig):
         """Config for parsing json messages."""

@@ -33,6 +33,23 @@ class ClientHelloPlayerSupport(DataClassORJSONMixin):
     buffer_capacity: int
     """Buffer capacity size in bytes."""
 
+    def __post_init__(self) -> None:
+        """Validate field values."""
+        if self.buffer_capacity <= 0:
+            raise ValueError(f"buffer_capacity must be positive, got {self.buffer_capacity}")
+
+        if not self.support_codecs:
+            raise ValueError("support_codecs cannot be empty")
+
+        if not self.support_channels or any(ch <= 0 for ch in self.support_channels):
+            raise ValueError("support_channels must be non-empty with positive values")
+
+        if not self.support_sample_rates or any(sr <= 0 for sr in self.support_sample_rates):
+            raise ValueError("support_sample_rates must be non-empty with positive values")
+
+        if not self.support_bit_depth or any(bd <= 0 for bd in self.support_bit_depth):
+            raise ValueError("support_bit_depth must be non-empty with positive values")
+
 
 # Client -> Server player/update
 @dataclass
@@ -45,6 +62,11 @@ class PlayerUpdatePayload(DataClassORJSONMixin):
     """Volume range 0-100."""
     muted: bool
     """Mute state."""
+
+    def __post_init__(self) -> None:
+        """Validate field values."""
+        if not 0 <= self.volume <= 100:
+            raise ValueError(f"Volume must be in range 0-100, got {self.volume}")
 
 
 @dataclass
