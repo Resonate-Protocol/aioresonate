@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, cast
 from aiohttp import ClientWebSocketResponse, WSMessage, WSMsgType, web
 from attr import dataclass
 
-from aioresonate.models import MediaCommand, unpack_binary_header
+from aioresonate.models import unpack_binary_header
 from aioresonate.models.controller import (
     GroupCommandClientMessage,
     GroupGetListClientMessage,
@@ -65,21 +65,6 @@ class VolumeChangedEvent(PlayerEvent):
 
     volume: int
     muted: bool
-
-
-@dataclass
-class StreamStartEvent(PlayerEvent):
-    """The player issued a start/play stream command event."""
-
-
-@dataclass
-class StreamStopEvent(PlayerEvent):
-    """The player issued a stop stream command event."""
-
-
-@dataclass
-class StreamPauseEvent(PlayerEvent):
-    """The player issued a pause stream command event."""
 
 
 @dataclass
@@ -459,9 +444,6 @@ class Player:
             # Player messages
             case PlayerUpdateMessage(state):
                 self._ensure_role(Roles.PLAYER)
-                if not self._player_id:
-                    self._logger.warning("Received player/state before session/hello")
-                    return
                 self._logger.debug(
                     "Received player state: volume=%d, muted=%s", state.volume, state.muted
                 )
@@ -469,7 +451,6 @@ class Player:
                     self._volume = state.volume
                     self._muted = state.muted
                     self._signal_event(VolumeChangedEvent(volume=self._volume, muted=self._muted))
-                # TODO: handle state.state changes, but how?
             case StreamRequestFormatMessage(_):
                 self._ensure_role(Roles.PLAYER)
                 raise NotImplementedError("Stream format change requests are not supported yet")
@@ -482,15 +463,7 @@ class Player:
                 raise NotImplementedError("Joining groups is not supported yet")
             case GroupCommandClientMessage(group_command):
                 self._ensure_role(Roles.CONTROLLER)
-                # TODO: check if it was in the supported list
-                # TODO: implement remaining commands
-                match group_command.command:
-                    case MediaCommand.PLAY:
-                        self._signal_event(StreamStartEvent())
-                    case MediaCommand.STOP:
-                        self._signal_event(StreamStopEvent())
-                    case MediaCommand.PAUSE:
-                        self._signal_event(StreamPauseEvent())
+                self.group._handle_group_command(group_command)  # noqa: SLF001
             # unused base type
             case ClientMessage():
                 pass

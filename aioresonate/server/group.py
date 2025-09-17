@@ -17,6 +17,7 @@ from aioresonate.models import (
     RepeatMode,
     pack_binary_header_raw,
 )
+from aioresonate.models.controller import GroupCommandClientPayload
 from aioresonate.models.core import (
     SessionUpdateMessage,
     SessionUpdatePayload,
@@ -28,6 +29,7 @@ from aioresonate.models.metadata import (
     SessionUpdateMetadata,
 )
 from aioresonate.models.player import StreamStartPlayer
+from aioresonate.models.types import MediaCommand
 
 # The cyclic import is not an issue during runtime, so hide it
 # pyright: reportImportCycles=none
@@ -59,6 +61,19 @@ class GroupState(Enum):
 
 class GroupEvent:
     """Base event type used by PlayerGroup.add_event_listener()."""
+
+
+# TODO: make types more fancy
+@dataclass
+class GroupCommandEvent(GroupEvent):
+    """A command was sent to the group."""
+
+    command: MediaCommand
+    """The command that was sent."""
+    volume: int | None = None
+    """For MediaCommand.VOLUME, the target volume (0-100)."""
+    mute: bool | None = None
+    """For MediaCommand.MUTE, the target mute status."""
 
 
 @dataclass
@@ -627,6 +642,15 @@ class PlayerGroup:
     def players(self) -> list["Player"]:
         """All players that are part of this group."""
         return self._players
+
+    def _handle_group_command(self, cmd: GroupCommandClientPayload) -> None:
+        # TODO: verify that this command is actually supported for the current state
+        event = GroupCommandEvent(
+            command=cmd.command,
+            volume=cmd.volume,
+            mute=cmd.mute,
+        )
+        self._signal_event(event)
 
     def add_event_listener(
         self, callback: Callable[[GroupEvent], Coroutine[None, None, None]]
