@@ -454,9 +454,9 @@ class Client:
                     self._volume = state.volume
                     self._muted = state.muted
                     self._signal_event(VolumeChangedEvent(volume=self._volume, muted=self._muted))
-            case StreamRequestFormatMessage(_):
+            case StreamRequestFormatMessage(payload):
                 self._ensure_role(Roles.PLAYER)
-                raise NotImplementedError("Stream format change requests are not supported yet")
+                self.group.handle_stream_format_request(self, payload)
             # Controller messages
             case GroupGetListClientMessage():
                 self._ensure_role(Roles.CONTROLLER)

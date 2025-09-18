@@ -24,11 +24,17 @@ from aioresonate.models.core import (
     StreamEndMessage,
     StreamStartMessage,
     StreamStartPayload,
+    StreamUpdateMessage,
+    StreamUpdatePayload,
 )
 from aioresonate.models.metadata import (
     SessionUpdateMetadata,
 )
-from aioresonate.models.player import StreamStartPlayer
+from aioresonate.models.player import (
+    StreamRequestFormatPayload,
+    StreamStartPlayer,
+    StreamUpdatePlayer,
+)
 from aioresonate.models.types import GroupStateType, MediaCommand, Roles
 
 # The cyclic import is not an issue during runtime, so hide it
@@ -923,6 +929,100 @@ class ClientGroup:
 
         duration_of_chunk_us = int((sample_count / player_format.sample_rate) * 1_000_000)
         return sample_count, duration_of_chunk_us
+
+    def handle_stream_format_request(
+        self,
+        player: "Client",
+        request: "StreamRequestFormatPayload",
+    ) -> None:
+        """Handle stream/request-format from a player and send stream/update."""
+        # Only applicable if there is an active stream
+        if self._stream_task is None or self._stream_audio_format is None:
+            logger.debug(
+                "Ignoring stream/request-format from %s without active stream",
+                player.client_id,
+            )
+            return
+
+        # Start from the current player format or determine from source
+        current = self._player_formats.get(player.client_id)
+        assert current is not None, "Player must have a current format if streaming"
+
+        # Apply requested overrides
+        codec = current.codec
+        if request.codec is not None:
+            try:
+                codec = AudioCodec(request.codec)
+            except ValueError:
+                logger.warning(
+                    "Player %s requested switch to unsupported codec %s, ignoring",
+                    player.client_id,
+                    request.codec,
+                )
+                codec = current.codec
+            # Ensure requested codec is supported by player
+            if (
+                player.info.player_support
+                and codec.value not in player.info.player_support.support_codecs
+            ):
+                raise ValueError(
+                    f"Player {player.client_id} does not support requested codec {codec}"
+                )
+
+        sample_rate = request.sample_rate or current.sample_rate
+        if (
+            player.info.player_support
+            and sample_rate not in player.info.player_support.support_sample_rates
+        ):
+            raise ValueError(
+                f"Player {player.client_id} does not support requested sample rate {sample_rate}"
+            )
+
+        bit_depth = request.bit_depth or current.bit_depth
+        if (
+            player.info.player_support
+            and bit_depth not in player.info.player_support.support_bit_depth
+        ):
+            raise ValueError(
+                f"Player {player.client_id} does not support requested bit depth {bit_depth}"
+            )
+        if bit_depth != 16:
+            raise NotImplementedError("Only 16bit audio is supported for now")
+
+        channels = request.channels or current.channels
+        if (
+            player.info.player_support
+            and channels not in player.info.player_support.support_channels
+        ):
+            raise ValueError(
+                f"Player {player.client_id} does not support requested channel count {channels}"
+            )
+        if channels not in (1, 2):
+            raise NotImplementedError("Only mono and stereo audio is supported for now")
+
+        new_format = AudioFormat(
+            sample_rate=sample_rate,
+            bit_depth=bit_depth,
+            channels=channels,
+            codec=codec,
+        )
+
+        # TODO: there is a race condition here:
+        # From the point this message is queued for sending, all audio chunks
+        # must be format-compatible. Not earlier, nor later!
+        # Update mapping and prepare header (creates encoder if needed)
+        header = self._get_audio_header(new_format)
+
+        update = StreamUpdatePlayer(
+            codec=new_format.codec.value,
+            sample_rate=new_format.sample_rate,
+            channels=new_format.channels,
+            bit_depth=new_format.bit_depth,
+            codec_header=header,
+        )
+        message = StreamUpdateMessage(StreamUpdatePayload(player=update))
+        self._player_formats[player.client_id] = new_format
+        player.send_message(message)
 
     async def _calculate_timing_and_sleep(
         self,
