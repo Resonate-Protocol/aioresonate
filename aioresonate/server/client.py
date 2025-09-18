@@ -277,6 +277,10 @@ class Client:
         """List of roles this client supports."""
         return self._roles
 
+    def check_role(self, role: Roles) -> bool:
+        """Check if the client supports a specific role."""
+        return role in self._roles
+
     def _ensure_role(self, role: Roles) -> None:
         """Raise a ValueError if the client does not support a specific role."""
         if role not in self._roles:

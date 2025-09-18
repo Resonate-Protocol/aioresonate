@@ -1,4 +1,4 @@
-"""Manages and synchronizes playback for a group of one or more players."""
+"""Manages and synchronizes playback for a group of one or more clients."""
 
 import asyncio
 import base64
@@ -51,7 +51,7 @@ class AudioCodec(Enum):
 
 
 class GroupState(Enum):
-    """Player group playback state."""
+    """Client group playback state."""
 
     IDLE = "idle"
     """Group is not currently playing any media."""
@@ -60,7 +60,7 @@ class GroupState(Enum):
 
 
 class GroupEvent:
-    """Base event type used by PlayerGroup.add_event_listener()."""
+    """Base event type used by ClientGroup.add_event_listener()."""
 
 
 # TODO: make types more fancy
@@ -86,18 +86,18 @@ class GroupStateChangedEvent(GroupEvent):
 
 @dataclass
 class GroupMemberAddedEvent(GroupEvent):
-    """A player was added to the group."""
+    """A client was added to the group."""
 
-    player_id: str
-    """The ID of the player that was added."""
+    client_id: str
+    """The ID of the client that was added."""
 
 
 @dataclass
 class GroupMemberRemovedEvent(GroupEvent):
-    """A player was removed from the group."""
+    """A client was removed from the group."""
 
-    player_id: str
-    """The ID of the player that was removed."""
+    client_id: str
+    """The ID of the client that was removed."""
 
 
 @dataclass
@@ -155,15 +155,15 @@ class Metadata:
 
 class ClientGroup:
     """
-    A group of one or more players for synchronized playback.
+    A group of one or more clients for synchronized playback.
 
-    Handles synchronized audio streaming across multiple players with automatic
-    format conversion and buffer management. Every player is always assigned to
+    Handles synchronized audio streaming across multiple clients with automatic
+    format conversion and buffer management. Every client is always assigned to
     a group to simplify grouping requests.
     """
 
-    _players: list["Client"]
-    """List of all players in this group."""
+    _clients: list["Client"]
+    """List of all clients in this group."""
     _player_formats: dict[str, AudioFormat]
     """Mapping of player IDs to their selected audio formats."""
     _server: "ResonateServer"
@@ -191,23 +191,23 @@ class ClientGroup:
 
         Groups are managed automatically by the server.
 
-        Initialize a new PlayerGroup.
+        Initialize a new ClientGroup.
 
         Args:
             server: The ResonateServer instance this group belongs to.
-            *args: Players to add to this group.
+            *args: Clients to add to this group.
         """
         self._server = server
-        self._players = list(args)
+        self._clients = list(args)
         self._player_formats = {}
         self._current_metadata = None
         self._audio_encoders = {}
         self._audio_headers = {}
         self._event_cbs = []
         logger.debug(
-            "PlayerGroup initialized with %d player(s): %s",
-            len(self._players),
-            [type(p).__name__ for p in self._players],
+            "ClientGroup initialized with %d client(s): %s",
+            len(self._clients),
+            [type(c).__name__ for c in self._clients],
         )
 
     async def play_media(
@@ -230,7 +230,7 @@ class ClientGroup:
         logger.debug("Starting play_media with audio_stream_format: %s", audio_stream_format)
         stopped = self.stop()
         if stopped:
-            # Wait a bit to allow players to process the session end
+            # Wait a bit to allow clients to process the session end
             await asyncio.sleep(0.5)
         # TODO: open questions:
         # - how to communicate to the caller what audio_format is preferred,
@@ -240,18 +240,22 @@ class ClientGroup:
         self._stream_audio_format = audio_stream_format
         self._preferred_stream_codec = preferred_stream_codec
 
-        for player in self._players:
-            logger.debug("Selecting format for player %s", player.client_id)
-            player_format = self.determine_player_format(
-                player, audio_stream_format, preferred_stream_codec
-            )
-            self._player_formats[player.client_id] = player_format
-            logger.debug(
-                "Sending session start to player %s with format %s",
-                player.client_id,
-                player_format,
-            )
-            self._send_session_start_msg(player, player_format)
+        for client in self._clients:
+            if client.check_role(Roles.PLAYER):
+                logger.debug("Selecting format for player %s", client.client_id)
+                player_format = self.determine_player_format(
+                    client, audio_stream_format, preferred_stream_codec
+                )
+                self._player_formats[client.client_id] = player_format
+                logger.debug(
+                    "Sending session start to player %s with format %s",
+                    client.client_id,
+                    player_format,
+                )
+            else:
+                logger.debug("Sending session start to client %s", client.client_id)
+                player_format = None
+            self._send_session_start_msg(client, player_format)
 
         self._stream_task = self._server.loop.create_task(
             self._stream_audio(
@@ -285,7 +289,7 @@ class ClientGroup:
         Returns:
             AudioFormat: The optimal format for the player.
         """
-        # TODO: move this to player instead
+        # TODO: move this to client.py instead
         player_info = player.info
 
         # Determine optimal sample rate
@@ -478,7 +482,7 @@ class ClientGroup:
     def _calculate_optimal_chunk_samples(self, source_format: AudioFormat) -> int:
         compressed_players = [
             player
-            for player in self._players
+            for player in self._clients
             if self._player_formats.get(player.client_id, AudioFormat(0, 0, 0)).codec
             != AudioCodec.PCM
         ]
@@ -502,30 +506,37 @@ class ClientGroup:
 
         return max_frame_size if max_frame_size > 0 else int(source_format.sample_rate * 0.025)
 
-    def _send_session_start_msg(self, player: "Client", audio_format: AudioFormat) -> None:
-        """Send a session start message to a player with the specified audio format."""
+    def _send_session_start_msg(
+        self, client: "Client", audio_format: AudioFormat | None = None
+    ) -> None:
+        """Send a session start message to a client with the specified audio format for players."""
         logger.debug(
-            "_send_session_start_msg: player=%s, format=%s",
-            player.client_id,
+            "_send_session_start_msg: client=%s, format=%s",
+            client.client_id,
             audio_format,
         )
-        player_stream_info = StreamStartPlayer(
-            codec=audio_format.codec.value,
-            sample_rate=audio_format.sample_rate,
-            channels=audio_format.channels,
-            bit_depth=audio_format.bit_depth,
-            codec_header=self._get_audio_header(audio_format),
-        )
+        if client.check_role(Roles.PLAYER):
+            if audio_format is None:
+                raise ValueError("audio_format must be provided for player clients")
+            player_stream_info = StreamStartPlayer(
+                codec=audio_format.codec.value,
+                sample_rate=audio_format.sample_rate,
+                channels=audio_format.channels,
+                bit_depth=audio_format.bit_depth,
+                codec_header=self._get_audio_header(audio_format),
+            )
+        else:
+            player_stream_info = None
         session_info = StreamStartPayload(player=player_stream_info)
         logger.debug(
-            "Sending session start message to player %s: %s", player.client_id, session_info
+            "Sending session start message to client %s: %s", client.client_id, session_info
         )
-        player.send_message(StreamStartMessage(session_info))
+        client.send_message(StreamStartMessage(session_info))
 
-    def _send_session_end_msg(self, player: "Client") -> None:
-        """Send a session end message to a player to stop playback."""
-        logger.debug("ending session for %s (%s)", player.name, player.client_id)
-        player.send_message(StreamEndMessage())
+    def _send_session_end_msg(self, client: "Client") -> None:
+        """Send a session end message to a client to stop playback."""
+        logger.debug("ending session for %s (%s)", client.name, client.client_id)
+        client.send_message(StreamEndMessage())
 
     def stop(self) -> bool:
         """
@@ -533,7 +544,7 @@ class ClientGroup:
 
         Compared to pause(), this also:
         - Cancels the audio streaming task
-        - Sends session end messages to all players
+        - Sends session end messages to all clients
         - Clears all buffers and format mappings
         - Cleans up all audio encoders
 
@@ -544,13 +555,14 @@ class ClientGroup:
             logger.debug("stop called but no active stream task")
             return False
         logger.debug(
-            "Stopping playback for group with players: %s",
-            [p.client_id for p in self._players],
+            "Stopping playback for group with clients: %s",
+            [c.client_id for c in self._clients],
         )
         _ = self._stream_task.cancel()  # Don't care about cancellation result
-        for player in self._players:
-            self._send_session_end_msg(player)
-            del self._player_formats[player.client_id]
+        for client in self._clients:
+            self._send_session_end_msg(client)
+            if client.check_role(Roles.PLAYER):
+                del self._player_formats[client.client_id]
 
         self._audio_encoders.clear()
         self._audio_headers.clear()
@@ -561,14 +573,14 @@ class ClientGroup:
             self._current_state = GroupState.IDLE
         return True
 
-    def set_metadata(self, metadata: Metadata | None) -> None:
+    def set_metadata(self, metadata: Metadata | None) -> None:  # noqa: PLR0915
         """
-        Set metadata for the group and send to all players.
+        Set metadata for the group and send to all clients.
 
         Only sends updates for fields that have changed since the last call.
 
         Args:
-            metadata: The new metadata to send to players.
+            metadata: The new metadata to send to clients.
         """
         # TODO: integrate this more closely with play_media?
         # Check if metadata has actually changed
@@ -620,34 +632,38 @@ class ClientGroup:
             if last_metadata is None or last_metadata.shuffle != metadata.shuffle:
                 metadata_update.shuffle = metadata.shuffle
 
-        # Send the update to all players in the group
+        # Send the update to all clients in the group
         message = SessionUpdateMessage(
             SessionUpdatePayload(
                 group_id="default_group",  # TODO: this is a placeholder
-                metadata=metadata_update,
             )
         )
-        for player in self._players:
-            message.payload.playback_state = None
-            if Roles.CONTROLLER in player.roles or Roles.METADATA in player.roles:
+        for client in self._clients:
+            if client.check_role(Roles.METADATA):
+                message.payload.metadata = metadata_update
+            else:
+                message.payload.metadata = None
+            if client.check_role(Roles.CONTROLLER) or client.check_role(Roles.METADATA):
                 message.payload.playback_state = (
                     GroupStateType.PLAYING
                     if self._current_state == GroupState.PLAYING
                     else GroupStateType.PAUSED
                 )
+            else:
+                message.payload.playback_state = None
             logger.debug(
-                "Sending session update to player %s",
-                player.client_id,
+                "Sending session update to client %s",
+                client.client_id,
             )
-            player.send_message(message)
+            client.send_message(message)
 
         # Update current metadata
         self._current_metadata = metadata
 
     @property
     def clients(self) -> list["Client"]:
-        """All players that are part of this group."""
-        return self._players
+        """All clients that are part of this group."""
+        return self._clients
 
     def _handle_group_command(self, cmd: GroupCommandClientPayload) -> None:
         # TODO: verify that this command is actually supported for the current state
@@ -682,102 +698,110 @@ class ClientGroup:
         """Current playback state of the group."""
         return self._current_state
 
-    def remove_client(self, player: "Client") -> None:
+    def remove_client(self, client: "Client") -> None:
         """
-        Remove a player from this group.
+        Remove a client from this group.
 
-        If a stream is active, the player receives a session end message.
-        The player is automatically moved to its own new group since every
-        player must belong to a group.
-        If the player is not part of this group, this will have no effect.
+        If a session is active, the client receives a session end message.
+        The client is automatically moved to its own new group since every
+        client must belong to a group.
+        If the client is not part of this group, this will have no effect.
 
         Args:
-            player: The player to remove from this group.
+            client: The client to remove from this group.
         """
-        if player not in self._players:
-            logger.debug("player %s not in group, skipping removal", player.client_id)
+        if client not in self._clients:
+            logger.debug("client %s not in group, skipping removal", client.client_id)
             return
-        logger.debug("removing %s from group with members: %s", player.client_id, self._players)
-        if len(self._players) == 1:
-            # Delete this group if that was the last player
+        logger.debug("removing %s from group with members: %s", client.client_id, self._clients)
+        if len(self._clients) == 1:
+            # Delete this group if that was the last client
             _ = self.stop()
-            self._players = []
+            self._clients = []
         else:
-            self._players.remove(player)
+            self._clients.remove(client)
             if self._stream_task is not None:
-                # Notify the player that the session ended
+                # Notify the client that the session ended
                 try:
-                    self._send_session_end_msg(player)
+                    self._send_session_end_msg(client)
                 except QueueFull:
-                    logger.warning("Failed to send session end message to %s", player.client_id)
-                del self._player_formats[player.client_id]
-        if not self._players:
-            # Emit event for group deletion, no players left
+                    logger.warning("Failed to send session end message to %s", client.client_id)
+                if client.check_role(Roles.PLAYER):
+                    del self._player_formats[client.client_id]
+        if not self._clients:
+            # Emit event for group deletion, no clients left
             self._signal_event(GroupDeletedEvent())
         else:
-            # Emit event for player removal
-            self._signal_event(GroupMemberRemovedEvent(player.client_id))
-        # Each player needs to be in a group, add it to a new one
-        player._set_group(ClientGroup(self._server, player))  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+            # Emit event for client removal
+            self._signal_event(GroupMemberRemovedEvent(client.client_id))
+        # Each client needs to be in a group, add it to a new one
+        client._set_group(ClientGroup(self._server, client))  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
 
-    def add_player(self, player: "Client") -> None:
+    def add_client(self, client: "Client") -> None:
         """
-        Add a player to this group.
+        Add a client to this group.
 
-        The player is first removed from any existing group. If a stream is
-        currently active, the player is immediately joined to the stream with
+        The client is first removed from any existing group. If a session is
+        currently active, players are immediately joined to the session with
         an appropriate audio format.
 
         Args:
-            player: The player to add to this group.
+            client: The client to add to this group.
         """
-        logger.debug("adding %s to group with members: %s", player.client_id, self._players)
-        _ = player.group.stop()
-        if player in self._players:
+        logger.debug("adding %s to group with members: %s", client.client_id, self._clients)
+        _ = client.group.stop()
+        if client in self._clients:
             return
         # Remove it from any existing group first
-        player.ungroup()
+        client.ungroup()
 
-        # Add player to this group's player list
-        self._players.append(player)
+        # Add client to this group's client list
+        self._clients.append(client)
 
-        # Emit event for player addition
-        self._signal_event(GroupMemberAddedEvent(player.client_id))
+        # Emit event for client addition
+        self._signal_event(GroupMemberAddedEvent(client.client_id))
 
-        # Then set the group (which will emit PlayerGroupChangedEvent)
-        player._set_group(self)  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+        # Then set the group (which will emit ClientGroupChangedEvent)
+        client._set_group(self)  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
         if self._stream_task is not None and self._stream_audio_format is not None:
-            logger.debug("Joining player %s to current stream", player.client_id)
+            logger.debug("Joining client %s to current session", client.client_id)
             # Join it to the current stream
-            player_format = self.determine_player_format(
-                player, self._stream_audio_format, self._preferred_stream_codec
-            )
-            self._player_formats[player.client_id] = player_format
-            self._send_session_start_msg(player, player_format)
+            if client.check_role(Roles.PLAYER):
+                player_format = self.determine_player_format(
+                    client, self._stream_audio_format, self._preferred_stream_codec
+                )
+                self._player_formats[client.client_id] = player_format
+            else:
+                player_format = None
+            self._send_session_start_msg(client, player_format)
 
         # Send current metadata to the new player if available
         if self._current_metadata is not None:
-            metadata_update = SessionUpdateMetadata(
-                # TODO: use actual track progress
-                # TODO: sync with audio stream
-                timestamp=int(self._server.loop.time() * 1_000_000),
-                title=self._current_metadata.title,
-                artist=self._current_metadata.artist,
-                album=self._current_metadata.album,
-                year=self._current_metadata.year,
-                track=self._current_metadata.track,
-                track_duration=self._current_metadata.track_duration,
-                playback_speed=self._current_metadata.playback_speed,
-                repeat=self._current_metadata.repeat,
-                shuffle=self._current_metadata.shuffle,
-            )
-            playback_state = None
-            if Roles.CONTROLLER in player.roles or Roles.METADATA in player.roles:
+            if client.check_role(Roles.METADATA):
+                metadata_update = SessionUpdateMetadata(
+                    # TODO: use actual track progress
+                    # TODO: sync with audio stream
+                    timestamp=int(self._server.loop.time() * 1_000_000),
+                    title=self._current_metadata.title,
+                    artist=self._current_metadata.artist,
+                    album=self._current_metadata.album,
+                    year=self._current_metadata.year,
+                    track=self._current_metadata.track,
+                    track_duration=self._current_metadata.track_duration,
+                    playback_speed=self._current_metadata.playback_speed,
+                    repeat=self._current_metadata.repeat,
+                    shuffle=self._current_metadata.shuffle,
+                )
+            else:
+                metadata_update = None
+            if client.check_role(Roles.CONTROLLER) or client.check_role(Roles.METADATA):
                 playback_state = (
                     GroupStateType.PLAYING
                     if self._current_state == GroupState.PLAYING
                     else GroupStateType.PAUSED
                 )
+            else:
+                playback_state = None
             message = SessionUpdateMessage(
                 SessionUpdatePayload(
                     group_id="default_group",  # TODO: this is a placeholder
@@ -786,8 +810,8 @@ class ClientGroup:
                 )
             )
 
-            logger.debug("Sending current metadata to new player %s", player.client_id)
-            player.send_message(message)
+            logger.debug("Sending session update to new client %s", client.client_id)
+            client.send_message(message)
 
     def _validate_audio_format(self, audio_format: AudioFormat) -> tuple[int, str, str] | None:
         """
@@ -973,7 +997,9 @@ class ClientGroup:
                     buffer_duration_us = 2_000_000
                     duration_of_samples_in_chunk: list[int] = []
 
-                    for player in self._players:
+                    for player in self._clients:
+                        if not player.check_role(Roles.PLAYER):
+                            continue
                         player_format = self._player_formats[player.client_id]
                         try:
                             sample_count, duration_us = self._resample_and_encode_to_player(
