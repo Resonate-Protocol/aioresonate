@@ -250,6 +250,8 @@ class ClientGroup:
     """The source audio format for the current stream, None when not streaming."""
     _current_metadata: Metadata | None = None
     """Current metadata for the group, None if no metadata set."""
+    _current_media_art: Image.Image | None = None
+    """Current media art image for the group, None if no image set."""
     _audio_encoders: dict[AudioFormat, av.AudioCodecContext]
     """Mapping of audio formats to their av encoder contexts."""
     _audio_headers: dict[AudioFormat, str]
@@ -279,6 +281,7 @@ class ClientGroup:
         self._clients = list(args)
         self._player_formats = {}
         self._current_metadata = None
+        self._current_media_art = None
         self._audio_encoders = {}
         self._audio_headers = {}
         self._event_cbs = []
@@ -668,6 +671,7 @@ class ClientGroup:
         self._audio_encoders.clear()
         self._audio_headers.clear()
         self._stream_task = None
+        self._current_media_art = None
 
         if self._current_state != GroupState.IDLE:
             self._signal_event(GroupStateChangedEvent(GroupState.IDLE))
@@ -745,6 +749,9 @@ class ClientGroup:
 
     def set_media_art(self, image: Image.Image) -> None:
         """Set the artwork image for the current media."""
+        # Store the current media art for new clients that join later
+        self._current_media_art = image
+
         for client in self._clients:
             self._send_media_art_to_client(client, image)
 
@@ -976,6 +983,10 @@ class ClientGroup:
 
             logger.debug("Sending session update to new client %s", client.client_id)
             client.send_message(message)
+
+        # Send current media art to the new client if available
+        if self._current_media_art is not None:
+            self._send_media_art_to_client(client, self._current_media_art)
 
     def _validate_audio_format(self, audio_format: AudioFormat) -> tuple[int, str, str] | None:
         """
