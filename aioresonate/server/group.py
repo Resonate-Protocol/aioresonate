@@ -745,46 +745,95 @@ class ClientGroup:
 
     def set_media_art(self, image: Image.Image) -> None:
         """Set the artwork image for the current media."""
-        # TODO: also send media art for new clients when they join
         for client in self._clients:
-            if not client.check_role(Roles.METADATA) or not client.info.metadata_support:
-                continue
-            art_format = self._client_art_formats[client.client_id]
-            metadata_support = client.info.metadata_support
-            width = metadata_support.media_width
-            height = metadata_support.media_height
-            if width is None and height is None:
-                # No size constraints, use original image size
-                resized_image = image
-            elif width is not None and height is None:
-                # Only width constraint, scale height to maintain aspect ratio
-                aspect_ratio = image.height / image.width
-                height = int(width * aspect_ratio)
-                resized_image = image.resize((width, height), Image.Resampling.LANCZOS)
-            elif width is None and height is not None:
-                # Only height constraint, scale width to maintain aspect ratio
-                aspect_ratio = image.width / image.height
-                width = int(height * aspect_ratio)
-                resized_image = image.resize((width, height), Image.Resampling.LANCZOS)
+            self._send_media_art_to_client(client, image)
+
+    def _letterbox_image(
+        self, image: Image.Image, target_width: int, target_height: int
+    ) -> Image.Image:
+        """
+        Resize image to fit within target dimensions while preserving aspect ratio.
+
+        Uses letterboxing (black bars) to fill any remaining space.
+
+        Args:
+            image: Source image to resize
+            target_width: Target width in pixels
+            target_height: Target height in pixels
+
+        Returns:
+            Resized image with letterboxing if needed
+        """
+        # Calculate aspect ratios
+        image_aspect = image.width / image.height
+        target_aspect = target_width / target_height
+
+        if image_aspect > target_aspect:
+            # Image is wider than target - fit by width, letterbox on top/bottom
+            new_width = target_width
+            new_height = int(target_width / image_aspect)
+        else:
+            # Image is taller than target - fit by height, letterbox on left/right
+            new_height = target_height
+            new_width = int(target_height * image_aspect)
+
+        # Resize the image to the calculated size
+        resized = image.resize((new_width, new_height), Image.Resampling.LANCZOS)
+
+        # Create a new image with the target size and black background
+        letterboxed = Image.new("RGB", (target_width, target_height), (0, 0, 0))
+
+        # Calculate position to center the resized image
+        x_offset = (target_width - new_width) // 2
+        y_offset = (target_height - new_height) // 2
+
+        # Paste the resized image onto the letterboxed background
+        letterboxed.paste(resized, (x_offset, y_offset))
+
+        return letterboxed
+
+    def _send_media_art_to_client(self, client: "Client", image: Image.Image) -> None:
+        """Send media art to a specific client with appropriate format and sizing."""
+        if not client.check_role(Roles.METADATA) or not client.info.metadata_support:
+            return
+
+        art_format = self._client_art_formats[client.client_id]
+        metadata_support = client.info.metadata_support
+        width = metadata_support.media_width
+        height = metadata_support.media_height
+
+        if width is None and height is None:
+            # No size constraints, use original image size
+            resized_image = image
+        elif width is not None and height is None:
+            # Only width constraint, scale height to maintain aspect ratio
+            aspect_ratio = image.height / image.width
+            height = int(width * aspect_ratio)
+            resized_image = image.resize((width, height), Image.Resampling.LANCZOS)
+        elif width is None and height is not None:
+            # Only height constraint, scale width to maintain aspect ratio
+            aspect_ratio = image.width / image.height
+            width = int(height * aspect_ratio)
+            resized_image = image.resize((width, height), Image.Resampling.LANCZOS)
+        else:
+            # Both width and height constraints - use letterboxing to preserve aspect ratio
+            resized_image = self._letterbox_image(image, cast("int", width), cast("int", height))
+
+        with BytesIO() as img_bytes:
+            if art_format == PictureFormat.JPEG:
+                resized_image.save(img_bytes, format="JPEG", quality=85)
+            elif art_format == PictureFormat.PNG:
+                resized_image.save(img_bytes, format="PNG", compress_level=6)
+            elif art_format == PictureFormat.BMP:
+                resized_image.save(img_bytes, format="BMP")
             else:
-                # TODO: consider aspect ratio, maybe insert letterboxing?
-                # Both width and height constraints, resize to exact dimensions
-                resized_image = image.resize((width, height), Image.Resampling.LANCZOS)
-            with BytesIO() as img_bytes:
-                if art_format == PictureFormat.JPEG:
-                    resized_image.save(img_bytes, format="JPEG", quality=85)
-                elif art_format == PictureFormat.PNG:
-                    resized_image.save(img_bytes, format="PNG", compress_level=6)
-                elif art_format == PictureFormat.BMP:
-                    resized_image.save(img_bytes, format="BMP")
-                else:
-                    raise NotImplementedError(f"Unsupported artwork format: {art_format}")
-                img_bytes.seek(0)
-                img_data = img_bytes.read()
-                header = pack_binary_header_raw(
-                    BinaryMessageType.MEDIA_ART.value, int(self._server.loop.time() * 1_000_000)
-                )
-                client.send_message(header + img_data)
+                raise NotImplementedError(f"Unsupported artwork format: {art_format}")
+            img_bytes.seek(0)
+            img_data = img_bytes.read()
+            header = pack_binary_header_raw(
+                BinaryMessageType.MEDIA_ART.value, int(self._server.loop.time() * 1_000_000)
+            )
+            client.send_message(header + img_data)
 
     @property
     def clients(self) -> list["Client"]:
