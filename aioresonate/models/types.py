@@ -124,3 +124,11 @@ class MediaCommand(Enum):
     SEEK = "seek"
     VOLUME = "volume"
     MUTE = "mute"
+
+
+class PictureFormat(Enum):
+    """Supported image formats for artwork/media art."""
+
+    BMP = "bmp"
+    JPEG = "jpeg"
+    PNG = "png"

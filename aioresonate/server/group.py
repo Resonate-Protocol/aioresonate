@@ -37,7 +37,7 @@ from aioresonate.models.player import (
     StreamStartPlayer,
     StreamUpdatePlayer,
 )
-from aioresonate.models.types import GroupStateType, MediaCommand, Roles
+from aioresonate.models.types import GroupStateType, MediaCommand, PictureFormat, Roles
 from aioresonate.models.visualizer import StreamStartVisualizer
 
 # The cyclic import is not an issue during runtime, so hide it
@@ -602,14 +602,13 @@ class ClientGroup:
         if client.check_role(Roles.METADATA) and client.info.metadata_support:
             # Choose the first supported picture format as a simple strategy
             supported = client.info.metadata_support.support_picture_formats
-            art_format: str | None = None
-            for fmt in ("jpeg", "png", "bmp"):
-                if fmt in supported:
+            art_format: PictureFormat | None = None
+            for fmt in (PictureFormat.JPEG, PictureFormat.PNG, PictureFormat.BMP):
+                if fmt.value in supported:
                     art_format = fmt
                     break
             if art_format is not None:
-                # TODO: add format to models/types.py
-                metadata_stream_info = StreamStartMetadata(art_format=art_format)  # type: ignore[arg-type]
+                metadata_stream_info = StreamStartMetadata(art_format=art_format)
             else:
                 metadata_stream_info = None
         else:

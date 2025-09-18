@@ -9,12 +9,11 @@ their preferred format and resolution.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Literal
 
 from mashumaro.config import BaseConfig
 from mashumaro.mixins.orjson import DataClassORJSONMixin
 
-from .types import RepeatMode, UndefinedField, undefined_field
+from .types import PictureFormat, RepeatMode, UndefinedField, undefined_field
 
 
 # Client -> Server: client/hello metadata support object
@@ -51,7 +50,7 @@ class StreamStartMetadata(DataClassORJSONMixin):
     Sent to clients that specified supported picture formats.
     """
 
-    art_format: Literal["bmp", "jpeg", "png"]
+    art_format: PictureFormat
     """Format of the encoded image."""
 
 
@@ -60,7 +59,7 @@ class StreamStartMetadata(DataClassORJSONMixin):
 class StreamUpdateMetadata(DataClassORJSONMixin):
     """Metadata object in stream/update message with delta updates."""
 
-    art_format: Literal["bmp", "jpeg", "png"]
+    art_format: PictureFormat
     """Format of the encoded image."""
 
 
