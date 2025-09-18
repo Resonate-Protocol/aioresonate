@@ -24,7 +24,7 @@ from .player import (
     StreamStartPlayer,
     StreamUpdatePlayer,
 )
-from .types import ClientMessage, GroupStateType, Roles, ServerMessage
+from .types import ClientMessage, PlaybackStateType, Roles, ServerMessage
 from .visualizer import (
     ClientHelloVisualizerSupport,
     StreamStartVisualizer,
@@ -221,7 +221,7 @@ class SessionUpdatePayload(DataClassORJSONMixin):
 
     group_id: str
     """Group identifier."""
-    playback_state: GroupStateType | None = None
+    playback_state: PlaybackStateType | None = None
     """Only sent to clients with controller or metadata roles."""
     metadata: SessionUpdateMetadata | None = None
     """Only sent to clients with metadata role."""

@@ -97,14 +97,6 @@ class PlayerStateType(Enum):
     IDLE = "idle"
 
 
-class GroupStateType(Enum):
-    """Enum for Group States."""
-
-    PLAYING = "playing"
-    PAUSED = "paused"
-    IDLE = "idle"
-
-
 class PlaybackStateType(Enum):
     """Enum for Playback States."""
 

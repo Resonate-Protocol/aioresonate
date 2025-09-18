@@ -7,7 +7,6 @@ __all__ = [
     "BINARY_HEADER_SIZE",
     "BinaryHeader",
     "BinaryMessageType",
-    "GroupStateType",
     "MediaCommand",
     "PlaybackStateType",
     "PlayerStateType",
@@ -28,7 +27,6 @@ from typing import NamedTuple
 from . import controller, core, metadata, player, types, visualizer
 from .types import (
     BinaryMessageType,
-    GroupStateType,
     MediaCommand,
     PlaybackStateType,
     PlayerStateType,

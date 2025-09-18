@@ -19,7 +19,6 @@ __all__ = [
     "GroupEvent",
     "GroupMemberAddedEvent",
     "GroupMemberRemovedEvent",
-    "GroupState",
     "GroupStateChangedEvent",
     "ResonateEvent",
     "ResonateServer",
@@ -40,7 +39,6 @@ from .group import (
     GroupEvent,
     GroupMemberAddedEvent,
     GroupMemberRemovedEvent,
-    GroupState,
     GroupStateChangedEvent,
 )
 from .server import ClientAddedEvent, ClientRemovedEvent, ResonateEvent, ResonateServer

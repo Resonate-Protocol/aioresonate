@@ -39,7 +39,12 @@ from aioresonate.models.player import (
     StreamStartPlayer,
     StreamUpdatePlayer,
 )
-from aioresonate.models.types import GroupStateType, MediaCommand, PictureFormat, Roles
+from aioresonate.models.types import (
+    MediaCommand,
+    PictureFormat,
+    PlaybackStateType,
+    Roles,
+)
 from aioresonate.models.visualizer import StreamStartVisualizer
 
 # The cyclic import is not an issue during runtime, so hide it
@@ -59,15 +64,6 @@ class AudioCodec(Enum):
     PCM = "pcm"
     FLAC = "flac"
     OPUS = "opus"
-
-
-class GroupState(Enum):
-    """Client group playback state."""
-
-    IDLE = "idle"
-    """Group is not currently playing any media."""
-    PLAYING = "playing"
-    """Group is actively playing media."""
 
 
 class GroupEvent:
@@ -91,7 +87,7 @@ class GroupCommandEvent(GroupEvent):
 class GroupStateChangedEvent(GroupEvent):
     """Group state has changed."""
 
-    state: GroupState
+    state: PlaybackStateType
     """The new group state."""
 
 
@@ -260,7 +256,7 @@ class ClientGroup:
     """Preferred codec used by the current stream."""
     _event_cbs: list[Callable[[GroupEvent], Coroutine[None, None, None]]]
     """List of event callbacks for this group."""
-    _current_state: GroupState = GroupState.IDLE
+    _current_state: PlaybackStateType = PlaybackStateType.STOPPED
     """Current playback state of the group."""
     _group_id: str
     """Unique identifier for this group."""
@@ -347,8 +343,8 @@ class ClientGroup:
             )
         )
 
-        self._current_state = GroupState.PLAYING
-        self._signal_event(GroupStateChangedEvent(GroupState.PLAYING))
+        self._current_state = PlaybackStateType.PLAYING
+        self._signal_event(GroupStateChangedEvent(PlaybackStateType.PLAYING))
 
     def determine_player_format(
         self,
@@ -673,15 +669,15 @@ class ClientGroup:
         self._stream_task = None
         self._current_media_art = None
 
-        if self._current_state != GroupState.IDLE:
-            self._signal_event(GroupStateChangedEvent(GroupState.IDLE))
-            self._current_state = GroupState.IDLE
+        if self._current_state != PlaybackStateType.STOPPED:
+            self._signal_event(GroupStateChangedEvent(PlaybackStateType.STOPPED))
+            self._current_state = PlaybackStateType.STOPPED
 
         timestamp = int(self._server.loop.time() * 1_000_000)
         cleared_metadata = Metadata.cleared_update(timestamp)
         for client in self._clients:
             playback_state = (
-                GroupStateType.IDLE
+                PlaybackStateType.STOPPED
                 if (client.check_role(Roles.CONTROLLER) or client.check_role(Roles.METADATA))
                 else None
             )
@@ -732,9 +728,9 @@ class ClientGroup:
                 message.payload.metadata = None
             if client.check_role(Roles.CONTROLLER) or client.check_role(Roles.METADATA):
                 message.payload.playback_state = (
-                    GroupStateType.PLAYING
-                    if self._current_state == GroupState.PLAYING
-                    else GroupStateType.PAUSED
+                    PlaybackStateType.PLAYING
+                    if self._current_state == PlaybackStateType.PLAYING
+                    else PlaybackStateType.PAUSED
                 )
             else:
                 message.payload.playback_state = None
@@ -876,7 +872,7 @@ class ClientGroup:
             _ = self._server.loop.create_task(cb(event))  # Fire and forget event callback
 
     @property
-    def state(self) -> GroupState:
+    def state(self) -> PlaybackStateType:
         """Current playback state of the group."""
         return self._current_state
 
@@ -967,9 +963,9 @@ class ClientGroup:
                 metadata_update = None
             if client.check_role(Roles.CONTROLLER) or client.check_role(Roles.METADATA):
                 playback_state = (
-                    GroupStateType.PLAYING
-                    if self._current_state == GroupState.PLAYING
-                    else GroupStateType.PAUSED
+                    PlaybackStateType.PLAYING
+                    if self._current_state == PlaybackStateType.PLAYING
+                    else PlaybackStateType.PAUSED
                 )
             else:
                 playback_state = None
