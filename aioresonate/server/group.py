@@ -153,7 +153,7 @@ class Metadata:
     # TODO: inject track_progress and timestamp when sending updates?
 
 
-class PlayerGroup:
+class ClientGroup:
     """
     A group of one or more players for synchronized playback.
 
@@ -645,7 +645,7 @@ class PlayerGroup:
         self._current_metadata = metadata
 
     @property
-    def players(self) -> list["Client"]:
+    def clients(self) -> list["Client"]:
         """All players that are part of this group."""
         return self._players
 
@@ -682,7 +682,7 @@ class PlayerGroup:
         """Current playback state of the group."""
         return self._current_state
 
-    def remove_player(self, player: "Client") -> None:
+    def remove_client(self, player: "Client") -> None:
         """
         Remove a player from this group.
 
@@ -718,7 +718,7 @@ class PlayerGroup:
             # Emit event for player removal
             self._signal_event(GroupMemberRemovedEvent(player.client_id))
         # Each player needs to be in a group, add it to a new one
-        player._set_group(PlayerGroup(self._server, player))  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+        player._set_group(ClientGroup(self._server, player))  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
 
     def add_player(self, player: "Client") -> None:
         """

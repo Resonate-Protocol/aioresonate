@@ -11,6 +11,8 @@ __all__ = [
     "Client",
     "ClientAddedEvent",
     "ClientEvent",
+    "ClientGroup",
+    "ClientGroupChangedEvent",
     "ClientRemovedEvent",
     "GroupCommandEvent",
     "GroupDeletedEvent",
@@ -19,8 +21,6 @@ __all__ = [
     "GroupMemberRemovedEvent",
     "GroupState",
     "GroupStateChangedEvent",
-    "PlayerGroup",
-    "PlayerGroupChangedEvent",
     "ResonateEvent",
     "ResonateServer",
     "VolumeChangedEvent",
@@ -29,11 +29,12 @@ __all__ = [
 from .client import (
     Client,
     ClientEvent,
-    PlayerGroupChangedEvent,
+    ClientGroupChangedEvent,
     VolumeChangedEvent,
 )
 from .group import (
     AudioFormat,
+    ClientGroup,
     GroupCommandEvent,
     GroupDeletedEvent,
     GroupEvent,
@@ -41,6 +42,5 @@ from .group import (
     GroupMemberRemovedEvent,
     GroupState,
     GroupStateChangedEvent,
-    PlayerGroup,
 )
 from .server import ClientAddedEvent, ClientRemovedEvent, ResonateEvent, ResonateServer
