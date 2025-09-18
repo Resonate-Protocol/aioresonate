@@ -30,6 +30,7 @@ from aioresonate.models.core import (
 )
 from aioresonate.models.metadata import (
     SessionUpdateMetadata,
+    StreamStartMetadata,
 )
 from aioresonate.models.player import (
     StreamRequestFormatPayload,
@@ -37,6 +38,7 @@ from aioresonate.models.player import (
     StreamUpdatePlayer,
 )
 from aioresonate.models.types import GroupStateType, MediaCommand, Roles
+from aioresonate.models.visualizer import StreamStartVisualizer
 
 # The cyclic import is not an issue during runtime, so hide it
 # pyright: reportImportCycles=none
@@ -597,7 +599,32 @@ class ClientGroup:
             )
         else:
             player_stream_info = None
-        session_info = StreamStartPayload(player=player_stream_info)
+        if client.check_role(Roles.METADATA) and client.info.metadata_support:
+            # Choose the first supported picture format as a simple strategy
+            supported = client.info.metadata_support.support_picture_formats
+            art_format: str | None = None
+            for fmt in ("jpeg", "png", "bmp"):
+                if fmt in supported:
+                    art_format = fmt
+                    break
+            if art_format is not None:
+                # TODO: add format to models/types.py
+                metadata_stream_info = StreamStartMetadata(art_format=art_format)  # type: ignore[arg-type]
+            else:
+                metadata_stream_info = None
+        else:
+            metadata_stream_info = None
+
+        # TODO: finish once spec is finalized
+        visualizer_stream_info = (
+            StreamStartVisualizer() if client.check_role(Roles.VISUALIZER) else None
+        )
+
+        session_info = StreamStartPayload(
+            player=player_stream_info,
+            metadata=metadata_stream_info,
+            visualizer=visualizer_stream_info,
+        )
         logger.debug(
             "Sending session start message to client %s: %s", client.client_id, session_info
         )
