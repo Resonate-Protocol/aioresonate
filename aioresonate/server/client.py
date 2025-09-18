@@ -328,16 +328,7 @@ class Client:
 
         self._logger.debug("Creating writer task")
         self._writer_task = self._server.loop.create_task(self._writer())
-
-        # Send Server Hello
-        self._logger.debug("Sending server hello")
-        self.send_message(
-            ServerHelloMessage(
-                payload=ServerHelloPayload(
-                    server_id=self._server.id, name=self._server.name, version=1
-                )
-            )
-        )
+        # server/hello will be sent after receiving client/hello
 
     async def _run_message_loop(self) -> None:
         """Run the main message processing loop."""
@@ -435,6 +426,14 @@ class Client:
                 self._logger.info("Client ID set to %s", self._client_id)
                 self._logger = logger.getChild(self._client_id)
                 self._handle_client_connect(self)
+                self._logger.debug("Sending server/hello in response to client/hello")
+                self.send_message(
+                    ServerHelloMessage(
+                        payload=ServerHelloPayload(
+                            server_id=self._server.id, name=self._server.name, version=1
+                        )
+                    )
+                )
             case ClientTimeMessage(client_time):
                 self.send_message(
                     ServerTimeMessage(
