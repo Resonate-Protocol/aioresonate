@@ -152,6 +152,69 @@ class Metadata:
 
     # TODO: inject track_progress and timestamp when sending updates?
 
+    def diff_update(self, last: "Metadata | None", timestamp: int) -> SessionUpdateMetadata:
+        """Build a SessionUpdateMetadata containing only changed fields compared to last."""
+        metadata_update = SessionUpdateMetadata(timestamp=timestamp)
+
+        # Only include fields that have changed since the last metadata update
+        if last is None or last.title != self.title:
+            metadata_update.title = self.title
+        if last is None or last.artist != self.artist:
+            metadata_update.artist = self.artist
+        if last is None or last.album_artist != self.album_artist:
+            metadata_update.album_artist = self.album_artist
+        if last is None or last.album != self.album:
+            metadata_update.album = self.album
+        if last is None or last.artwork_url != self.artwork_url:
+            metadata_update.artwork_url = self.artwork_url
+        if last is None or last.year != self.year:
+            metadata_update.year = self.year
+        if last is None or last.track != self.track:
+            metadata_update.track = self.track
+        if last is None or last.track_duration != self.track_duration:
+            metadata_update.track_duration = self.track_duration
+        if last is None or last.playback_speed != self.playback_speed:
+            metadata_update.playback_speed = self.playback_speed
+        if last is None or last.repeat != self.repeat:
+            metadata_update.repeat = self.repeat
+        if last is None or last.shuffle != self.shuffle:
+            metadata_update.shuffle = self.shuffle
+
+        return metadata_update
+
+    @staticmethod
+    def cleared_update(timestamp: int) -> SessionUpdateMetadata:
+        """Build a SessionUpdateMetadata that clears all metadata fields."""
+        metadata_update = SessionUpdateMetadata(timestamp=timestamp)
+        metadata_update.title = None
+        metadata_update.artist = None
+        metadata_update.album_artist = None
+        metadata_update.album = None
+        metadata_update.artwork_url = None
+        metadata_update.year = None
+        metadata_update.track = None
+        metadata_update.track_duration = None
+        metadata_update.playback_speed = None
+        metadata_update.repeat = None
+        metadata_update.shuffle = None
+        return metadata_update
+
+    def snapshot_update(self, timestamp: int) -> SessionUpdateMetadata:
+        """Build a SessionUpdateMetadata snapshot with all current values."""
+        metadata_update = SessionUpdateMetadata(timestamp=timestamp)
+        metadata_update.title = self.title
+        metadata_update.artist = self.artist
+        metadata_update.album_artist = self.album_artist
+        metadata_update.album = self.album
+        metadata_update.artwork_url = self.artwork_url
+        metadata_update.year = self.year
+        metadata_update.track = self.track
+        metadata_update.track_duration = self.track_duration
+        metadata_update.playback_speed = self.playback_speed
+        metadata_update.repeat = self.repeat
+        metadata_update.shuffle = self.shuffle
+        return metadata_update
+
 
 class ClientGroup:
     """
@@ -573,7 +636,7 @@ class ClientGroup:
             self._current_state = GroupState.IDLE
         return True
 
-    def set_metadata(self, metadata: Metadata | None) -> None:  # noqa: PLR0915
+    def set_metadata(self, metadata: Metadata | None) -> None:
         """
         Set metadata for the group and send to all clients.
 
@@ -588,49 +651,13 @@ class ClientGroup:
             return
         last_metadata = self._current_metadata
 
-        metadata_update = SessionUpdateMetadata(
-            # TODO: sync with audio stream
-            # TODO: use actual track progress
-            timestamp=int(self._server.loop.time() * 1_000_000)
-        )
-
+        timestamp = int(self._server.loop.time() * 1_000_000)
         if metadata is None:
             # Clear all metadata fields when metadata is None
-            metadata_update.title = None
-            metadata_update.artist = None
-            metadata_update.album_artist = None
-            metadata_update.album = None
-            metadata_update.artwork_url = None
-            metadata_update.year = None
-            metadata_update.track = None
-            metadata_update.track_duration = None
-            metadata_update.playback_speed = None
-            metadata_update.repeat = None
-            metadata_update.shuffle = None
+            metadata_update = Metadata.cleared_update(timestamp)
         else:
             # Only include fields that have changed since the last metadata update
-            if last_metadata is None or last_metadata.title != metadata.title:
-                metadata_update.title = metadata.title
-            if last_metadata is None or last_metadata.artist != metadata.artist:
-                metadata_update.artist = metadata.artist
-            if last_metadata is None or last_metadata.album_artist != metadata.album_artist:
-                metadata_update.album_artist = metadata.album_artist
-            if last_metadata is None or last_metadata.album != metadata.album:
-                metadata_update.album = metadata.album
-            if last_metadata is None or last_metadata.artwork_url != metadata.artwork_url:
-                metadata_update.artwork_url = metadata.artwork_url
-            if last_metadata is None or last_metadata.year != metadata.year:
-                metadata_update.year = metadata.year
-            if last_metadata is None or last_metadata.track != metadata.track:
-                metadata_update.track = metadata.track
-            if last_metadata is None or last_metadata.track_duration != metadata.track_duration:
-                metadata_update.track_duration = metadata.track_duration
-            if last_metadata is None or last_metadata.playback_speed != metadata.playback_speed:
-                metadata_update.playback_speed = metadata.playback_speed
-            if last_metadata is None or last_metadata.repeat != metadata.repeat:
-                metadata_update.repeat = metadata.repeat
-            if last_metadata is None or last_metadata.shuffle != metadata.shuffle:
-                metadata_update.shuffle = metadata.shuffle
+            metadata_update = metadata.diff_update(last_metadata, timestamp)
 
         # Send the update to all clients in the group
         message = SessionUpdateMessage(
@@ -778,19 +805,8 @@ class ClientGroup:
         # Send current metadata to the new player if available
         if self._current_metadata is not None:
             if client.check_role(Roles.METADATA):
-                metadata_update = SessionUpdateMetadata(
-                    # TODO: use actual track progress
-                    # TODO: sync with audio stream
-                    timestamp=int(self._server.loop.time() * 1_000_000),
-                    title=self._current_metadata.title,
-                    artist=self._current_metadata.artist,
-                    album=self._current_metadata.album,
-                    year=self._current_metadata.year,
-                    track=self._current_metadata.track,
-                    track_duration=self._current_metadata.track_duration,
-                    playback_speed=self._current_metadata.playback_speed,
-                    repeat=self._current_metadata.repeat,
-                    shuffle=self._current_metadata.shuffle,
+                metadata_update = self._current_metadata.snapshot_update(
+                    int(self._server.loop.time() * 1_000_000)
                 )
             else:
                 metadata_update = None
