@@ -378,13 +378,10 @@ class ClientGroup:
             player_info.player_support
             and bit_depth not in player_info.player_support.support_bit_depth
         ):
-            # Prefer 16-bit, then 24-bit
             if 16 in player_info.player_support.support_bit_depth:
                 bit_depth = 16
-            elif 24 in player_info.player_support.support_bit_depth:
-                bit_depth = 24
             else:
-                raise NotImplementedError("Only 16bit and 24bit are supported")
+                raise NotImplementedError("Only 16bit is supported for now")
             logger.debug("Adjusted bit_depth for player %s: %s", player.client_id, bit_depth)
 
         # Determine optimal channel count
