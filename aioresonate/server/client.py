@@ -56,12 +56,12 @@ class DisconnectBehaviour(Enum):
     """
 
 
-class PlayerEvent:
+class ClientEvent:
     """Base event type used by Player.add_event_listener()."""
 
 
 @dataclass
-class VolumeChangedEvent(PlayerEvent):
+class VolumeChangedEvent(ClientEvent):
     """The volume or mute status of the player was changed."""
 
     volume: int
@@ -69,14 +69,14 @@ class VolumeChangedEvent(PlayerEvent):
 
 
 @dataclass
-class PlayerGroupChangedEvent(PlayerEvent):
+class PlayerGroupChangedEvent(ClientEvent):
     """The player was moved to a different group."""
 
     new_group: "PlayerGroup"
     """The new group the player is now part of."""
 
 
-class Player:
+class Client:
     """
     A Player that is connected to a ResonateServer.
 
@@ -111,7 +111,7 @@ class Player:
     _to_write: asyncio.Queue[ServerMessage | bytes]
     """Queue for messages to be sent to the player through the WebSocket."""
     _group: PlayerGroup
-    _event_cbs: list[Callable[[PlayerEvent], Coroutine[None, None, None]]]
+    _event_cbs: list[Callable[[ClientEvent], Coroutine[None, None, None]]]
     _volume: int = 100
     _muted: bool = False
     _closing: bool = False
@@ -123,16 +123,16 @@ class Player:
         on remaining group members.
     STOP: Player stops playback for the entire group when disconnecting.
     """
-    _handle_player_connect: Callable[["Player"], None]
-    _handle_player_disconnect: Callable[["Player"], None]
+    _handle_player_connect: Callable[["Client"], None]
+    _handle_player_disconnect: Callable[["Client"], None]
     _logger: logging.Logger
     _roles: list[Roles]
 
     def __init__(
         self,
         server: "ResonateServer",
-        handle_player_connect: Callable[["Player"], None],
-        handle_player_disconnect: Callable[["Player"], None],
+        handle_client_connect: Callable[["Client"], None],
+        handle_client_disconnect: Callable[["Client"], None],
         request: web.Request | None = None,
         wsock_client: ClientWebSocketResponse | None = None,
     ) -> None:
@@ -151,8 +151,8 @@ class Player:
                 Only one of request or wsock_client must be provided.
         """
         self._server = server
-        self._handle_player_connect = handle_player_connect
-        self._handle_player_disconnect = handle_player_disconnect
+        self._handle_player_connect = handle_client_connect
+        self._handle_player_disconnect = handle_client_disconnect
         if request is not None:
             assert wsock_client is None
             self._request = request
@@ -211,7 +211,7 @@ class Player:
         return self._group
 
     @property
-    def player_id(self) -> str:
+    def client_id(self) -> str:
         """The unique identifier of this Player."""
         # This should only be called once the player was correctly initialized
         assert self._player_id
@@ -534,7 +534,7 @@ class Player:
         self._to_write.put_nowait(message)
 
     def add_event_listener(
-        self, callback: Callable[[PlayerEvent], Coroutine[None, None, None]]
+        self, callback: Callable[[ClientEvent], Coroutine[None, None, None]]
     ) -> Callable[[], None]:
         """
         Register a callback to listen for state changes of this player.
@@ -548,6 +548,6 @@ class Player:
         self._event_cbs.append(callback)
         return lambda: self._event_cbs.remove(callback)
 
-    def _signal_event(self, event: PlayerEvent) -> None:
+    def _signal_event(self, event: ClientEvent) -> None:
         for cb in self._event_cbs:
             _ = self._server.loop.create_task(cb(event))  # Fire and forget event callback

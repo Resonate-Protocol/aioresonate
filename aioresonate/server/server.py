@@ -1,4 +1,4 @@
-"""Resonate Server implementation to connect to and manage many Resonate Players."""
+"""Resonate Server implementation to connect to and manage many Resonate Clients."""
 
 import asyncio
 import logging
@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from aiohttp import ClientConnectionError, ClientWSTimeout, web
 from aiohttp.client import ClientSession
 
-from .player import Player
+from .client import Client
 
 logger = logging.getLogger(__name__)
 
@@ -18,31 +18,31 @@ class ResonateEvent:
 
 
 @dataclass
-class PlayerAddedEvent(ResonateEvent):
-    """A new player was added."""
+class ClientAddedEvent(ResonateEvent):
+    """A new client was added."""
 
-    player_id: str
+    client_id: str
 
 
 @dataclass
-class PlayerRemovedEvent(ResonateEvent):
-    """A player disconnected from the server."""
+class ClientRemovedEvent(ResonateEvent):
+    """A client disconnected from the server."""
 
-    player_id: str
+    client_id: str
 
 
 class ResonateServer:
-    """Resonate Server implementation to connect to and manage many Resonate Players."""
+    """Resonate Server implementation to connect to and manage many Resonate Clients."""
 
-    _players: set[Player]
+    _clients: set[Client]
     """All groups managed by this server."""
     _loop: asyncio.AbstractEventLoop
     _event_cbs: list[Callable[[ResonateEvent], Coroutine[None, None, None]]]
     _connection_tasks: dict[str, asyncio.Task[None]]
     """
-    All tasks managing player connections.
+    All tasks managing client connections.
 
-    This only includes connections initiated via connect_to_player (Server -> Player).
+    This only includes connections initiated via connect_to_client (Server -> Client).
     """
     _retry_events: dict[str, asyncio.Event]
     """
@@ -54,14 +54,14 @@ class ResonateServer:
     _id: str
     _name: str
     _client_session: ClientSession
-    """The client session used to connect to players."""
+    """The client session used to connect to clients."""
     _owns_session: bool
     """Whether this server instance owns the client session."""
     _app: web.Application | None
     """
     Web application instance for the server.
 
-    This is used to handle incoming WebSocket connections from players.
+    This is used to handle incoming WebSocket connections from clients.
     """
     _app_runner: web.AppRunner | None
     """App runner for the web application."""
@@ -85,7 +85,7 @@ class ResonateServer:
             client_session: Optional ClientSession for outgoing connections.
                 If None, a new session will be created.
         """
-        self._players = set()
+        self._clients = set()
         self._loop = loop
         self._event_cbs = []
         self._id = server_id
@@ -108,32 +108,32 @@ class ResonateServer:
         """Read-only access to the event loop used by this server."""
         return self._loop
 
-    async def on_player_connect(self, request: web.Request) -> web.StreamResponse:
+    async def on_client_connect(self, request: web.Request) -> web.StreamResponse:
         """Handle an incoming WebSocket connection from a Resonate client."""
-        logger.debug("Incoming player connection from %s", request.remote)
+        logger.debug("Incoming client connection from %s", request.remote)
 
-        player = Player(
+        client = Client(
             self,
-            handle_player_connect=self._handle_player_connect,
-            handle_player_disconnect=self._handle_player_disconnect,
+            handle_client_connect=self._handle_client_connect,
+            handle_client_disconnect=self._handle_client_disconnect,
             request=request,
         )
-        await player._handle_client()  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+        await client._handle_client()  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
 
-        websocket = player.websocket_connection
-        # This is a WebSocketResponse since we just created player
+        websocket = client.websocket_connection
+        # This is a WebSocketResponse since we just created client
         # as client-initiated.
         assert isinstance(websocket, web.WebSocketResponse)
         return websocket
 
-    def connect_to_player(self, url: str) -> None:
+    def connect_to_client(self, url: str) -> None:
         """
-        Connect to the Resonate player at the given URL.
+        Connect to the Resonate client at the given URL.
 
         If an active connection already exists for this URL, nothing will happen.
         In case a connection attempt fails, a new connection will be attempted automatically.
         """
-        logger.debug("Connecting to player at URL: %s", url)
+        logger.debug("Connecting to client at URL: %s", url)
         prev_task = self._connection_tasks.get(url)
         if prev_task is not None:
             logger.debug("Connection is already active for URL: %s", url)
@@ -145,32 +145,32 @@ class ResonateServer:
             # Create retry event for this connection
             self._retry_events[url] = asyncio.Event()
             self._connection_tasks[url] = self._loop.create_task(
-                self._handle_player_connection(url)
+                self._handle_client_connection(url)
             )
 
-    def disconnect_from_player(self, url: str) -> None:
+    def disconnect_from_client(self, url: str) -> None:
         """
-        Disconnect from the Resonate player that was previously connected at the given URL.
+        Disconnect from the Resonate client that was previously connected at the given URL.
 
         If no connection was established at this URL, or the connection is already closed,
         this will do nothing.
 
-        NOTE: this will only disconnect connections that were established via connect_to_player.
+        NOTE: this will only disconnect connections that were established via connect_to_client.
         """
         connection_task = self._connection_tasks.pop(url, None)
         if connection_task is not None:
-            logger.debug("Disconnecting from player at URL: %s", url)
+            logger.debug("Disconnecting from client at URL: %s", url)
             _ = connection_task.cancel()  # Don't care about cancellation result
 
-    async def _handle_player_connection(self, url: str) -> None:
-        """Handle the actual connection to a player."""
+    async def _handle_client_connection(self, url: str) -> None:
+        """Handle the actual connection to a client."""
         # Exponential backoff settings
         backoff = 1.0
         max_backoff = 300.0  # 5 minutes
 
         try:
             while True:
-                player: Player | None = None
+                client: Client | None = None
                 retry_event = self._retry_events.get(url)
 
                 try:
@@ -182,17 +182,17 @@ class ResonateServer:
                     ) as wsock:
                         # Reset backoff on successful connect
                         backoff = 1.0
-                        player = Player(
+                        client = Client(
                             self,
-                            handle_player_connect=self._handle_player_connect,
-                            handle_player_disconnect=self._handle_player_disconnect,
+                            handle_client_connect=self._handle_client_connect,
+                            handle_client_disconnect=self._handle_client_disconnect,
                             wsock_client=wsock,
                         )
-                        await player._handle_client()  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+                        await client._handle_client()  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
                     if self._client_session.closed:
                         logger.debug("Client session closed, stopping connection task for %s", url)
                         break
-                    if player.closing:
+                    if client.closing:
                         break
                 except asyncio.CancelledError:
                     break
@@ -204,7 +204,7 @@ class ResonateServer:
                 if backoff >= max_backoff:
                     break
 
-                logger.debug("Trying to reconnect to player at %s in %.1fs", url, backoff)
+                logger.debug("Trying to reconnect to client at %s in %.1fs", url, backoff)
 
                 # Use asyncio.wait_for with the retry event to allow immediate retry
                 if retry_event is not None:
@@ -238,8 +238,8 @@ class ResonateServer:
         Register a callback to listen for state changes of the server.
 
         State changes include:
-        - A new player was connected
-        - A player disconnected
+        - A new client was connected
+        - A client disconnected
 
         Returns a function to remove the listener.
         """
@@ -251,41 +251,41 @@ class ResonateServer:
         for cb in self._event_cbs:
             _ = self._loop.create_task(cb(event))  # Fire and forget event callback
 
-    def _handle_player_connect(self, player: Player) -> None:
+    def _handle_client_connect(self, client: Client) -> None:
         """
-        Register the player to the server.
+        Register the client to the server.
 
-        Should only be called once all data like the player id was received.
+        Should only be called once all data like the client id was received.
         """
-        if player in self._players:
+        if client in self._clients:
             return
 
-        logger.debug("Adding player %s (%s) to server", player.player_id, player.name)
-        self._players.add(player)
-        self._signal_event(PlayerAddedEvent(player.player_id))
+        logger.debug("Adding client %s (%s) to server", client.client_id, client.name)
+        self._clients.add(client)
+        self._signal_event(ClientAddedEvent(client.client_id))
 
-    def _handle_player_disconnect(self, player: Player) -> None:
-        """Unregister the player from the server."""
-        if player not in self._players:
+    def _handle_client_disconnect(self, client: Client) -> None:
+        """Unregister the client from the server."""
+        if client not in self._clients:
             return
 
-        logger.debug("Removing player %s from server", player.player_id)
-        self._players.remove(player)
-        self._signal_event(PlayerRemovedEvent(player.player_id))
+        logger.debug("Removing client %s from server", client.client_id)
+        self._clients.remove(client)
+        self._signal_event(ClientRemovedEvent(client.client_id))
 
     @property
-    def players(self) -> set[Player]:
-        """Get the set of all players connected to this server."""
-        return self._players
+    def clients(self) -> set[Client]:
+        """Get the set of all clients connected to this server."""
+        return self._clients
 
-    def get_player(self, player_id: str) -> Player | None:
-        """Get the player with the given id."""
-        logger.debug("Looking for player with id: %s", player_id)
-        for player in self.players:
-            if player.player_id == player_id:
-                logger.debug("Found player %s", player_id)
-                return player
-        logger.debug("Player %s not found", player_id)
+    def get_client(self, client_id: str) -> Client | None:
+        """Get the client with the given id."""
+        logger.debug("Looking for client with id: %s", client_id)
+        for client in self.clients:
+            if client.client_id == client_id:
+                logger.debug("Found client %s", client_id)
+                return client
+        logger.debug("Client %s not found", client_id)
         return None
 
     @property
@@ -306,8 +306,8 @@ class ResonateServer:
 
         logger.info("Starting Resonate server on port %d", port)
         self._app = web.Application()
-        # Create perpetual WebSocket route for player connections
-        _ = self._app.router.add_get("/resonate", self.on_player_connect)
+        # Create perpetual WebSocket route for client connections
+        _ = self._app.router.add_get("/resonate", self.on_client_connect)
         self._app_runner = web.AppRunner(self._app)
         await self._app_runner.setup()
 

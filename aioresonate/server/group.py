@@ -34,7 +34,7 @@ from aioresonate.models.types import GroupStateType, MediaCommand, Roles
 # The cyclic import is not an issue during runtime, so hide it
 # pyright: reportImportCycles=none
 if TYPE_CHECKING:
-    from .player import Player
+    from .client import Client
     from .server import ResonateServer
 
 INITIAL_PLAYBACK_DELAY_US = 1_000_000
@@ -162,7 +162,7 @@ class PlayerGroup:
     a group to simplify grouping requests.
     """
 
-    _players: list["Player"]
+    _players: list["Client"]
     """List of all players in this group."""
     _player_formats: dict[str, AudioFormat]
     """Mapping of player IDs to their selected audio formats."""
@@ -185,7 +185,7 @@ class PlayerGroup:
     _current_state: GroupState = GroupState.IDLE
     """Current playback state of the group."""
 
-    def __init__(self, server: "ResonateServer", *args: "Player") -> None:
+    def __init__(self, server: "ResonateServer", *args: "Client") -> None:
         """
         DO NOT CALL THIS CONSTRUCTOR. INTERNAL USE ONLY.
 
@@ -241,14 +241,14 @@ class PlayerGroup:
         self._preferred_stream_codec = preferred_stream_codec
 
         for player in self._players:
-            logger.debug("Selecting format for player %s", player.player_id)
+            logger.debug("Selecting format for player %s", player.client_id)
             player_format = self.determine_player_format(
                 player, audio_stream_format, preferred_stream_codec
             )
-            self._player_formats[player.player_id] = player_format
+            self._player_formats[player.client_id] = player_format
             logger.debug(
                 "Sending session start to player %s with format %s",
-                player.player_id,
+                player.client_id,
                 player_format,
             )
             self._send_session_start_msg(player, player_format)
@@ -266,7 +266,7 @@ class PlayerGroup:
 
     def determine_player_format(
         self,
-        player: "Player",
+        player: "Client",
         source_format: AudioFormat,
         preferred_codec: AudioCodec = AudioCodec.OPUS,
     ) -> AudioFormat:
@@ -303,7 +303,7 @@ class PlayerGroup:
                 if lower_rates
                 else min(player_info.player_support.support_sample_rates)
             )
-            logger.debug("Adjusted sample_rate for player %s: %s", player.player_id, sample_rate)
+            logger.debug("Adjusted sample_rate for player %s: %s", player.client_id, sample_rate)
 
         # Determine optimal bit depth
         bit_depth = source_format.bit_depth
@@ -318,7 +318,7 @@ class PlayerGroup:
                 bit_depth = 24
             else:
                 raise NotImplementedError("Only 16bit and 24bit are supported")
-            logger.debug("Adjusted bit_depth for player %s: %s", player.player_id, bit_depth)
+            logger.debug("Adjusted bit_depth for player %s: %s", player.client_id, bit_depth)
 
         # Determine optimal channel count
         channels = source_format.channels
@@ -333,7 +333,7 @@ class PlayerGroup:
                 channels = 1
             else:
                 raise NotImplementedError("Only mono and stereo are supported")
-            logger.debug("Adjusted channels for player %s: %s", player.player_id, channels)
+            logger.debug("Adjusted channels for player %s: %s", player.client_id, channels)
 
         # Determine optimal codec with fallback chain
         codec_fallbacks = [preferred_codec, AudioCodec.FLAC, AudioCodec.OPUS, AudioCodec.PCM]
@@ -366,7 +366,7 @@ class PlayerGroup:
                     if opus_sample_rate is None:
                         logger.error(
                             "Player %s does not support any Opus sample rates, trying next codec",
-                            player.player_id,
+                            player.client_id,
                         )
                         continue  # Try next codec in fallback chain
 
@@ -374,7 +374,7 @@ class PlayerGroup:
                     if sample_rate != opus_sample_rate:
                         logger.debug(
                             "Adjusted sample_rate for Opus on player %s: %s -> %s",
-                            player.player_id,
+                            player.client_id,
                             sample_rate,
                             opus_sample_rate,
                         )
@@ -384,14 +384,14 @@ class PlayerGroup:
                 break
 
         if codec is None:
-            raise ValueError(f"Player {player.player_id} does not support any known codec")
+            raise ValueError(f"Player {player.client_id} does not support any known codec")
 
         if codec != preferred_codec:
             logger.info(
                 "Falling back from preferred codec %s to %s for player %s",
                 preferred_codec,
                 codec,
-                player.player_id,
+                player.client_id,
             )
 
         # FLAC and PCM support any sample rate, no adjustment needed
@@ -479,7 +479,7 @@ class PlayerGroup:
         compressed_players = [
             player
             for player in self._players
-            if self._player_formats.get(player.player_id, AudioFormat(0, 0, 0)).codec
+            if self._player_formats.get(player.client_id, AudioFormat(0, 0, 0)).codec
             != AudioCodec.PCM
         ]
 
@@ -491,7 +491,7 @@ class PlayerGroup:
         # does this even work in cases with different codecs?
         max_frame_size = 0
         for player in compressed_players:
-            player_format = self._player_formats[player.player_id]
+            player_format = self._player_formats[player.client_id]
             encoder = self._get_or_create_audio_encoder(player_format)
 
             # Scale frame size to source sample rate
@@ -502,11 +502,11 @@ class PlayerGroup:
 
         return max_frame_size if max_frame_size > 0 else int(source_format.sample_rate * 0.025)
 
-    def _send_session_start_msg(self, player: "Player", audio_format: AudioFormat) -> None:
+    def _send_session_start_msg(self, player: "Client", audio_format: AudioFormat) -> None:
         """Send a session start message to a player with the specified audio format."""
         logger.debug(
             "_send_session_start_msg: player=%s, format=%s",
-            player.player_id,
+            player.client_id,
             audio_format,
         )
         player_stream_info = StreamStartPlayer(
@@ -518,13 +518,13 @@ class PlayerGroup:
         )
         session_info = StreamStartPayload(player=player_stream_info)
         logger.debug(
-            "Sending session start message to player %s: %s", player.player_id, session_info
+            "Sending session start message to player %s: %s", player.client_id, session_info
         )
         player.send_message(StreamStartMessage(session_info))
 
-    def _send_session_end_msg(self, player: "Player") -> None:
+    def _send_session_end_msg(self, player: "Client") -> None:
         """Send a session end message to a player to stop playback."""
-        logger.debug("ending session for %s (%s)", player.name, player.player_id)
+        logger.debug("ending session for %s (%s)", player.name, player.client_id)
         player.send_message(StreamEndMessage())
 
     def stop(self) -> bool:
@@ -545,12 +545,12 @@ class PlayerGroup:
             return False
         logger.debug(
             "Stopping playback for group with players: %s",
-            [p.player_id for p in self._players],
+            [p.client_id for p in self._players],
         )
         _ = self._stream_task.cancel()  # Don't care about cancellation result
         for player in self._players:
             self._send_session_end_msg(player)
-            del self._player_formats[player.player_id]
+            del self._player_formats[player.client_id]
 
         self._audio_encoders.clear()
         self._audio_headers.clear()
@@ -637,7 +637,7 @@ class PlayerGroup:
                 )
             logger.debug(
                 "Sending session update to player %s",
-                player.player_id,
+                player.client_id,
             )
             player.send_message(message)
 
@@ -645,7 +645,7 @@ class PlayerGroup:
         self._current_metadata = metadata
 
     @property
-    def players(self) -> list["Player"]:
+    def players(self) -> list["Client"]:
         """All players that are part of this group."""
         return self._players
 
@@ -682,7 +682,7 @@ class PlayerGroup:
         """Current playback state of the group."""
         return self._current_state
 
-    def remove_player(self, player: "Player") -> None:
+    def remove_player(self, player: "Client") -> None:
         """
         Remove a player from this group.
 
@@ -695,9 +695,9 @@ class PlayerGroup:
             player: The player to remove from this group.
         """
         if player not in self._players:
-            logger.debug("player %s not in group, skipping removal", player.player_id)
+            logger.debug("player %s not in group, skipping removal", player.client_id)
             return
-        logger.debug("removing %s from group with members: %s", player.player_id, self._players)
+        logger.debug("removing %s from group with members: %s", player.client_id, self._players)
         if len(self._players) == 1:
             # Delete this group if that was the last player
             _ = self.stop()
@@ -709,18 +709,18 @@ class PlayerGroup:
                 try:
                     self._send_session_end_msg(player)
                 except QueueFull:
-                    logger.warning("Failed to send session end message to %s", player.player_id)
-                del self._player_formats[player.player_id]
+                    logger.warning("Failed to send session end message to %s", player.client_id)
+                del self._player_formats[player.client_id]
         if not self._players:
             # Emit event for group deletion, no players left
             self._signal_event(GroupDeletedEvent())
         else:
             # Emit event for player removal
-            self._signal_event(GroupMemberRemovedEvent(player.player_id))
+            self._signal_event(GroupMemberRemovedEvent(player.client_id))
         # Each player needs to be in a group, add it to a new one
         player._set_group(PlayerGroup(self._server, player))  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
 
-    def add_player(self, player: "Player") -> None:
+    def add_player(self, player: "Client") -> None:
         """
         Add a player to this group.
 
@@ -731,7 +731,7 @@ class PlayerGroup:
         Args:
             player: The player to add to this group.
         """
-        logger.debug("adding %s to group with members: %s", player.player_id, self._players)
+        logger.debug("adding %s to group with members: %s", player.client_id, self._players)
         _ = player.group.stop()
         if player in self._players:
             return
@@ -742,17 +742,17 @@ class PlayerGroup:
         self._players.append(player)
 
         # Emit event for player addition
-        self._signal_event(GroupMemberAddedEvent(player.player_id))
+        self._signal_event(GroupMemberAddedEvent(player.client_id))
 
         # Then set the group (which will emit PlayerGroupChangedEvent)
         player._set_group(self)  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
         if self._stream_task is not None and self._stream_audio_format is not None:
-            logger.debug("Joining player %s to current stream", player.player_id)
+            logger.debug("Joining player %s to current stream", player.client_id)
             # Join it to the current stream
             player_format = self.determine_player_format(
                 player, self._stream_audio_format, self._preferred_stream_codec
             )
-            self._player_formats[player.player_id] = player_format
+            self._player_formats[player.client_id] = player_format
             self._send_session_start_msg(player, player_format)
 
         # Send current metadata to the new player if available
@@ -786,7 +786,7 @@ class PlayerGroup:
                 )
             )
 
-            logger.debug("Sending current metadata to new player %s", player.player_id)
+            logger.debug("Sending current metadata to new player %s", player.client_id)
             player.send_message(message)
 
     def _validate_audio_format(self, audio_format: AudioFormat) -> tuple[int, str, str] | None:
@@ -821,7 +821,7 @@ class PlayerGroup:
 
     def _resample_and_encode_to_player(
         self,
-        player: "Player",
+        player: "Client",
         player_format: AudioFormat,
         in_frame: av.AudioFrame,
         resamplers: dict[AudioFormat, av.AudioResampler],
@@ -974,7 +974,7 @@ class PlayerGroup:
                     duration_of_samples_in_chunk: list[int] = []
 
                     for player in self._players:
-                        player_format = self._player_formats[player.player_id]
+                        player_format = self._player_formats[player.client_id]
                         try:
                             sample_count, duration_us = self._resample_and_encode_to_player(
                                 player, player_format, in_frame, resamplers, chunk_timestamp_us
@@ -983,7 +983,7 @@ class PlayerGroup:
                         except QueueFull:
                             logger.warning(
                                 "Error sending audio chunk to %s, disconnecting player",
-                                player.player_id,
+                                player.client_id,
                             )
                             await player.disconnect()
 
