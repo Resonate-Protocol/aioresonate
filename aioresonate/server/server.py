@@ -7,6 +7,7 @@ from dataclasses import dataclass
 
 from aiohttp import ClientConnectionError, ClientWSTimeout, web
 from aiohttp.client import ClientSession
+from zeroconf import IPVersion, ServiceBrowser, ServiceInfo, ServiceListener, Zeroconf
 
 from .client import Client
 
@@ -29,6 +30,26 @@ class ClientRemovedEvent(ResonateEvent):
     """A client disconnected from the server."""
 
     client_id: str
+
+
+class _ResonateClientServiceListener(ServiceListener):
+    def __init__(self, on_url: Callable[[str], None]) -> None:
+        self._on_url = on_url
+
+    def add_service(self, zc: Zeroconf, type_: str, name: str) -> None:
+        info = zc.get_service_info(type_, name)
+        if not info:
+            return
+        props = {
+            k.decode(): v.decode() for k, v in (info.properties or {}).items() if v is not None
+        }
+        path = props.get("path", "/resonate")
+        addrs = info.parsed_addresses()
+        if not addrs:
+            return
+        host = addrs[0]
+        url = f"http://{host}:{info.port}{path}"
+        self._on_url(url)
 
 
 class ResonateServer:
@@ -67,6 +88,12 @@ class ResonateServer:
     """App runner for the web application."""
     _tcp_site: web.TCPSite | None
     """TCP site for the web application."""
+    _zc: Zeroconf | None
+    """Zeroconf instance."""
+    _mdns_service: ServiceInfo | None
+    """Registered mDNS service."""
+    _mdns_browser: ServiceBrowser | None
+    """mDNS browser for client discovery."""
 
     def __init__(
         self,
@@ -101,6 +128,9 @@ class ResonateServer:
         self._app = None
         self._app_runner = None
         self._tcp_site = None
+        self._zc = None
+        self._mdns_service = None
+        self._mdns_browser = None
         logger.debug("ResonateServer initialized: id=%s, name=%s", server_id, server_name)
 
     @property
@@ -299,15 +329,24 @@ class ResonateServer:
         return self._name
 
     async def start_server(self, port: int = 8927, host: str = "0.0.0.0") -> None:
-        """Start an HTTP server to handle incoming Resonate connections on /resonate."""
+        """Start the Resonate Server.
+
+        This will start the Resonate server to connect to clients for both:
+        - Client initiated connections: This will advertise this server via mDNS as _resonate_server
+        - Server initiated connections: This will listen for all _resonate._tcp mDNS services and
+          automatically connect to them.
+
+        The server will be started on the given host and port.
+        """
         if self._app is not None:
             logger.warning("Server is already running")
             return
 
+        api_path = "/resonate"
         logger.info("Starting Resonate server on port %d", port)
         self._app = web.Application()
         # Create perpetual WebSocket route for client connections
-        _ = self._app.router.add_get("/resonate", self.on_client_connect)
+        _ = self._app.router.add_get(api_path, self.on_client_connect)
         self._app_runner = web.AppRunner(self._app)
         await self._app_runner.setup()
 
@@ -319,8 +358,12 @@ class ResonateServer:
             )
             await self._tcp_site.start()
             logger.info("Resonate server started successfully on %s:%d", host, port)
+            # Start mDNS advertise and discovery
+            self._start_mdns_advertising(port=port, path=api_path)
+            self._start_mdns_discovery()
         except OSError as e:
             logger.error("Failed to start server on %s:%d: %s", host, port, e)
+            self._stop_mdns()
             if self._app_runner:
                 await self._app_runner.cleanup()
                 self._app_runner = None
@@ -348,6 +391,59 @@ class ResonateServer:
     async def close(self) -> None:
         """Close the server and cleanup resources."""
         await self.stop_server()
+        # Stop mDNS if active
+        self._stop_mdns()
         if self._owns_session and not self._client_session.closed:
             await self._client_session.close()
             logger.debug("Closed internal client session for server %s", self._name)
+
+    def _start_mdns_advertising(self, port: int, path: str) -> None:
+        """Start advertising this server via mDNS."""
+        if self._zc is None:
+            self._zc = Zeroconf(ip_version=IPVersion.All)
+        if self._mdns_service is not None:
+            self._zc.unregister_service(self._mdns_service)
+
+        properties = {b"path": path.encode()}
+        service_type = "_resonate_server._tcp.local."
+        info = ServiceInfo(
+            type_=service_type,
+            name=f"{self._name}.{service_type}",
+            addresses=[],
+            port=port,
+            properties=properties,
+        )
+        self._zc.register_service(info)
+        self._mdns_service = info
+
+        logger.debug("mDNS advertising server on port %d with path %s", port, path)
+
+    def _start_mdns_discovery(self) -> None:
+        """Automatically connect to Resonate clients when discovered via mDNS."""
+        if self._zc is None:
+            self._zc = Zeroconf(ip_version=IPVersion.All)
+
+        def _on_client_url(url: str) -> None:
+            logger.debug("mDNS discovered client at %s", url)
+            # Zeroconf callbacks run in a worker thread; schedule onto the event loop thread
+            self._loop.call_soon_threadsafe(self.connect_to_client, url)
+
+        service_type = "_resonate._tcp.local."
+        listener = _ResonateClientServiceListener(_on_client_url)
+        self._mdns_browser = ServiceBrowser(self._zc, service_type, listener)
+        logger.debug("mDNS discovery started for clients")
+
+    def _stop_mdns(self) -> None:
+        """Stop mDNS advertise and discovery if active."""
+        if self._zc is None:
+            return
+        try:
+            if self._mdns_browser is not None:
+                self._mdns_browser.cancel()
+            if self._mdns_service is not None:
+                self._zc.unregister_service(self._mdns_service)
+        finally:
+            self._zc.close()
+            self._zc = None
+            self._mdns_service = None
+            self._mdns_browser = None
