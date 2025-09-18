@@ -3,6 +3,7 @@
 import asyncio
 import base64
 import logging
+import uuid
 from asyncio import QueueFull, Task
 from collections.abc import AsyncGenerator, Callable, Coroutine
 from dataclasses import dataclass
@@ -253,6 +254,8 @@ class ClientGroup:
     """List of event callbacks for this group."""
     _current_state: GroupState = GroupState.IDLE
     """Current playback state of the group."""
+    _group_id: str
+    """Unique identifier for this group."""
 
     def __init__(self, server: "ResonateServer", *args: "Client") -> None:
         """
@@ -273,6 +276,7 @@ class ClientGroup:
         self._audio_encoders = {}
         self._audio_headers = {}
         self._event_cbs = []
+        self._group_id = str(uuid.uuid4())
         logger.debug(
             "ClientGroup initialized with %d client(s): %s",
             len(self._clients),
@@ -665,7 +669,7 @@ class ClientGroup:
         # Send the update to all clients in the group
         message = SessionUpdateMessage(
             SessionUpdatePayload(
-                group_id="default_group",  # TODO: this is a placeholder
+                group_id=self._group_id,
             )
         )
         for client in self._clients:
@@ -823,7 +827,7 @@ class ClientGroup:
                 playback_state = None
             message = SessionUpdateMessage(
                 SessionUpdatePayload(
-                    group_id="default_group",  # TODO: this is a placeholder
+                    group_id=self._group_id,
                     playback_state=playback_state,
                     metadata=metadata_update,
                 )
