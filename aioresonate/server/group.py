@@ -668,6 +668,24 @@ class ClientGroup:
         if self._current_state != GroupState.IDLE:
             self._signal_event(GroupStateChangedEvent(GroupState.IDLE))
             self._current_state = GroupState.IDLE
+
+        timestamp = int(self._server.loop.time() * 1_000_000)
+        cleared_metadata = Metadata.cleared_update(timestamp)
+        for client in self._clients:
+            playback_state = (
+                GroupStateType.IDLE
+                if (client.check_role(Roles.CONTROLLER) or client.check_role(Roles.METADATA))
+                else None
+            )
+            metadata_payload = cleared_metadata if client.check_role(Roles.METADATA) else None
+            message = SessionUpdateMessage(
+                SessionUpdatePayload(
+                    group_id=self._group_id,
+                    playback_state=playback_state,
+                    metadata=metadata_payload,
+                )
+            )
+            client.send_message(message)
         return True
 
     def set_metadata(self, metadata: Metadata | None) -> None:
