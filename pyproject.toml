@@ -13,7 +13,7 @@ classifiers = [
   "Programming Language :: Python :: 3.12",
   "Programming Language :: Python :: 3.13",
 ]
-dependencies = ["aiohttp>=3.9.2", "av>=15.0.0", "zeroconf>=0.147", "mashumaro>=3.14"]
+dependencies = ["aiohttp>=3.9.2", "av>=15.0.0", "pillow>=11.0.0", "zeroconf>=0.147", "mashumaro>=3.14"]
 
 description = "Async Python implementation of the Resonate Protocol."
 license = { text = "Apache-2.0" }

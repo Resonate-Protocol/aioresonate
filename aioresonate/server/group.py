@@ -8,10 +8,12 @@ from asyncio import QueueFull, Task
 from collections.abc import AsyncGenerator, Callable, Coroutine
 from dataclasses import dataclass
 from enum import Enum
+from io import BytesIO
 from typing import TYPE_CHECKING, cast
 
 import av
 from av import logging as av_logging
+from PIL import Image
 
 from aioresonate.models import (
     BinaryMessageType,
@@ -237,7 +239,9 @@ class ClientGroup:
     _clients: list["Client"]
     """List of all clients in this group."""
     _player_formats: dict[str, AudioFormat]
-    """Mapping of player IDs to their selected audio formats."""
+    """Mapping of client IDs (with the player role) to their selected audio formats."""
+    _client_art_formats: dict[str, PictureFormat]
+    """Mapping of client IDs (with the metadata role) to their selected artwork formats."""
     _server: "ResonateServer"
     """Reference to the ResonateServer instance."""
     _stream_task: Task[None] | None = None
@@ -606,6 +610,7 @@ class ClientGroup:
             for fmt in (PictureFormat.JPEG, PictureFormat.PNG, PictureFormat.BMP):
                 if fmt.value in supported:
                     art_format = fmt
+                    self._client_art_formats[client.client_id] = art_format
                     break
             if art_format is not None:
                 metadata_stream_info = StreamStartMetadata(art_format=art_format)
@@ -737,6 +742,49 @@ class ClientGroup:
 
         # Update current metadata
         self._current_metadata = metadata
+
+    def set_media_art(self, image: Image.Image) -> None:
+        """Set the artwork image for the current media."""
+        # TODO: also send media art for new clients when they join
+        for client in self._clients:
+            if not client.check_role(Roles.METADATA) or not client.info.metadata_support:
+                continue
+            art_format = self._client_art_formats[client.client_id]
+            metadata_support = client.info.metadata_support
+            width = metadata_support.media_width
+            height = metadata_support.media_height
+            if width is None and height is None:
+                # No size constraints, use original image size
+                resized_image = image
+            elif width is not None and height is None:
+                # Only width constraint, scale height to maintain aspect ratio
+                aspect_ratio = image.height / image.width
+                height = int(width * aspect_ratio)
+                resized_image = image.resize((width, height), Image.Resampling.LANCZOS)
+            elif width is None and height is not None:
+                # Only height constraint, scale width to maintain aspect ratio
+                aspect_ratio = image.width / image.height
+                width = int(height * aspect_ratio)
+                resized_image = image.resize((width, height), Image.Resampling.LANCZOS)
+            else:
+                # TODO: consider aspect ratio, maybe insert letterboxing?
+                # Both width and height constraints, resize to exact dimensions
+                resized_image = image.resize((width, height), Image.Resampling.LANCZOS)
+            with BytesIO() as img_bytes:
+                if art_format == PictureFormat.JPEG:
+                    resized_image.save(img_bytes, format="JPEG", quality=85)
+                elif art_format == PictureFormat.PNG:
+                    resized_image.save(img_bytes, format="PNG", compress_level=6)
+                elif art_format == PictureFormat.BMP:
+                    resized_image.save(img_bytes, format="BMP")
+                else:
+                    raise NotImplementedError(f"Unsupported artwork format: {art_format}")
+                img_bytes.seek(0)
+                img_data = img_bytes.read()
+                header = pack_binary_header_raw(
+                    BinaryMessageType.MEDIA_ART.value, int(self._server.loop.time() * 1_000_000)
+                )
+                client.send_message(header + img_data)
 
     @property
     def clients(self) -> list["Client"]:
