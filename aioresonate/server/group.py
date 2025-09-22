@@ -1290,11 +1290,10 @@ class ClientGroup:
                             )
                             await player.disconnect()
 
+                        assert player.info.player_support is not None  # for type checking
                         # Calculate buffer duration for this player
                         player_buffer_capacity_samples = (
                             player.info.player_support.buffer_capacity
-                            if player.info.player_support  # TODO: this should be always set here
-                            else 4096
                         ) // ((player_format.bit_depth // 8) * player_format.channels)
                         player_buffer_duration = int(
                             1_000_000 * player_buffer_capacity_samples / player_format.sample_rate
