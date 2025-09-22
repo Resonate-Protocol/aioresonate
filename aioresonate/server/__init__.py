@@ -1,50 +1,44 @@
 """
-Resonate Server implementation to connect to and manage many Resonate Players.
+Resonate Server implementation to connect to and manage Resonate Clients.
 
 ResonateServer is the core of the music listening experience, responsible for:
-- Managing connected players
+- Managing connected clients
 - Orchestrating synchronized grouped playback
 """
 
 __all__ = [
     "AudioFormat",
+    "Client",
+    "ClientAddedEvent",
+    "ClientEvent",
+    "ClientGroup",
+    "ClientGroupChangedEvent",
+    "ClientRemovedEvent",
+    "GroupCommandEvent",
     "GroupDeletedEvent",
     "GroupEvent",
     "GroupMemberAddedEvent",
     "GroupMemberRemovedEvent",
-    "GroupState",
     "GroupStateChangedEvent",
-    "Player",
-    "PlayerAddedEvent",
-    "PlayerEvent",
-    "PlayerGroup",
-    "PlayerGroupChangedEvent",
-    "PlayerRemovedEvent",
     "ResonateEvent",
     "ResonateServer",
-    "StreamPauseEvent",
-    "StreamStartEvent",
-    "StreamStopEvent",
     "VolumeChangedEvent",
 ]
 
+from .client import (
+    Client,
+    ClientEvent,
+    ClientGroupChangedEvent,
+    VolumeChangedEvent,
+)
 from .group import (
     AudioFormat,
+    ClientGroup,
+    GroupCommandEvent,
     GroupDeletedEvent,
     GroupEvent,
     GroupMemberAddedEvent,
     GroupMemberRemovedEvent,
-    GroupState,
     GroupStateChangedEvent,
-    PlayerGroup,
 )
-from .player import (
-    Player,
-    PlayerEvent,
-    PlayerGroupChangedEvent,
-    StreamPauseEvent,
-    StreamStartEvent,
-    StreamStopEvent,
-    VolumeChangedEvent,
-)
-from .server import PlayerAddedEvent, PlayerRemovedEvent, ResonateEvent, ResonateServer
+from .server import ClientAddedEvent, ClientRemovedEvent, ResonateEvent, ResonateServer

@@ -1,4 +1,4 @@
-"""Represents a single player device connected to the server."""
+"""Represents a single client device connected to the server."""
 
 import asyncio
 import logging
@@ -10,11 +10,26 @@ from typing import TYPE_CHECKING, cast
 from aiohttp import ClientWebSocketResponse, WSMessage, WSMsgType, web
 from attr import dataclass
 
-from aioresonate import models
-from aioresonate.models import client_messages, server_messages
-from aioresonate.models.types import MediaCommand
+from aioresonate.models import unpack_binary_header
+from aioresonate.models.controller import (
+    GroupCommandClientMessage,
+    GroupGetListClientMessage,
+    GroupJoinClientMessage,
+    GroupUnjoinClientMessage,
+)
+from aioresonate.models.core import (
+    ClientHelloMessage,
+    ClientHelloPayload,
+    ClientTimeMessage,
+    ServerHelloMessage,
+    ServerHelloPayload,
+    ServerTimeMessage,
+    ServerTimePayload,
+)
+from aioresonate.models.player import PlayerUpdateMessage, StreamRequestFormatMessage
+from aioresonate.models.types import ClientMessage, Roles, ServerMessage
 
-from .group import PlayerGroup
+from .group import ClientGroup
 
 MAX_PENDING_MSG = 512
 
@@ -31,22 +46,22 @@ class DisconnectBehaviour(Enum):
 
     UNGROUP = "ungroup"
     """
-    The player will ungroup itself from its current group when it gets disconnected.
+    The client will ungroup itself from its current group when it gets disconnected.
 
     Playback will continue on the remaining group members.
     """
     STOP = "stop"
     """
-    The player will stop playback of the whole group when it gets disconnected.
+    The client will stop playback of the whole group when it gets disconnected.
     """
 
 
-class PlayerEvent:
-    """Base event type used by Player.add_event_listener()."""
+class ClientEvent:
+    """Base event type used by Client.add_event_listener()."""
 
 
 @dataclass
-class VolumeChangedEvent(PlayerEvent):
+class VolumeChangedEvent(ClientEvent):
     """The volume or mute status of the player was changed."""
 
     volume: int
@@ -54,38 +69,23 @@ class VolumeChangedEvent(PlayerEvent):
 
 
 @dataclass
-class StreamStartEvent(PlayerEvent):
-    """The player issued a start/play stream command event."""
+class ClientGroupChangedEvent(ClientEvent):
+    """The client was moved to a different group."""
+
+    new_group: "ClientGroup"
+    """The new group the client is now part of."""
 
 
-@dataclass
-class StreamStopEvent(PlayerEvent):
-    """The player issued a stop stream command event."""
-
-
-@dataclass
-class StreamPauseEvent(PlayerEvent):
-    """The player issued a pause stream command event."""
-
-
-@dataclass
-class PlayerGroupChangedEvent(PlayerEvent):
-    """The player was moved to a different group."""
-
-    new_group: "PlayerGroup"
-    """The new group the player is now part of."""
-
-
-class Player:
+class Client:
     """
-    A Player that is connected to a ResonateServer.
+    A Client that is connected to a ResonateServer.
 
-    Playback is handled through groups, use Player.group to get the
+    Playback is handled through groups, use Client.group to get the
     assigned group.
     """
 
     _server: "ResonateServer"
-    """Reference to the ResonateServer instance this player belongs to."""
+    """Reference to the ResonateServer instance this client belongs to."""
     _wsock_client: ClientWebSocketResponse | None = None
     """
     WebSocket connection from the server to the client.
@@ -104,60 +104,61 @@ class Player:
 
     This is only set for client-initiated connections.
     """
-    _player_id: str | None = None
-    _player_info: client_messages.ClientHelloPayload | None = None
+    _client_id: str | None = None
+    _client_info: ClientHelloPayload | None = None
     _writer_task: asyncio.Task[None] | None = None
     """Task responsible for sending JSON and binary data."""
-    _to_write: asyncio.Queue[server_messages.ServerMessage | bytes]
-    """Queue for messages to be sent to the player through the WebSocket."""
-    _group: PlayerGroup
-    _event_cbs: list[Callable[[PlayerEvent], Coroutine[None, None, None]]]
+    _to_write: asyncio.Queue[ServerMessage | bytes]
+    """Queue for messages to be sent to the client through the WebSocket."""
+    _group: ClientGroup
+    _event_cbs: list[Callable[[ClientEvent], Coroutine[None, None, None]]]
     _volume: int = 100
     _muted: bool = False
     _closing: bool = False
     disconnect_behaviour: DisconnectBehaviour
     """
-    Controls the disconnect behavior for this player.
+    Controls the disconnect behavior for this client.
 
-    UNGROUP (default): Player leaves its current group but playback continues
+    UNGROUP (default): Client leaves its current group but playback continues
         on remaining group members.
-    STOP: Player stops playback for the entire group when disconnecting.
+    STOP: Client stops playback for the entire group when disconnecting.
     """
-    _handle_player_connect: Callable[["Player"], None]
-    _handle_player_disconnect: Callable[["Player"], None]
+    _handle_client_connect: Callable[["Client"], None]
+    _handle_client_disconnect: Callable[["Client"], None]
     _logger: logging.Logger
+    _roles: list[Roles]
 
     def __init__(
         self,
         server: "ResonateServer",
-        handle_player_connect: Callable[["Player"], None],
-        handle_player_disconnect: Callable[["Player"], None],
+        handle_client_connect: Callable[["Client"], None],
+        handle_client_disconnect: Callable[["Client"], None],
         request: web.Request | None = None,
         wsock_client: ClientWebSocketResponse | None = None,
     ) -> None:
         """
         DO NOT CALL THIS CONSTRUCTOR. INTERNAL USE ONLY.
 
-        Use ResonateServer.on_player_connect or ResonateServer.connect_to_player instead.
+        Use ResonateServer.on_client_connect or ResonateServer.connect_to_client instead.
 
         Args:
-            server: The ResonateServer instance this player belongs to.
-            handle_player_connect: Callback function called when the player's handshake is complete.
-            handle_player_disconnect: Callback function called when the player disconnects.
+            server: The ResonateServer instance this client belongs to.
+            handle_client_connect: Callback function called when the client's handshake is complete.
+            handle_client_disconnect: Callback function called when the client disconnects.
             request: Optional web request object for client-initiated connections.
                 Only one of request or wsock_client must be provided.
             wsock_client: Optional client WebSocket response for server-initiated connections.
                 Only one of request or wsock_client must be provided.
         """
         self._server = server
-        self._handle_player_connect = handle_player_connect
-        self._handle_player_disconnect = handle_player_disconnect
+        self._handle_client_connect = handle_client_connect
+        self._handle_client_disconnect = handle_client_disconnect
         if request is not None:
             assert wsock_client is None
             self._request = request
             self._wsock_server = web.WebSocketResponse(heartbeat=55)
             self._logger = logger.getChild(f"unknown-{self._request.remote}")
-            self._logger.debug("Player initialized")
+            self._logger.debug("Client initialized")
         elif wsock_client is not None:
             assert request is None
             self._logger = logger.getChild("unknown-client")
@@ -165,13 +166,14 @@ class Player:
         else:
             raise ValueError("Either request or wsock_client must be provided")
         self._to_write = asyncio.Queue(maxsize=MAX_PENDING_MSG)
-        self._group = PlayerGroup(server, self)
+        self._group = ClientGroup(server, self)
         self._event_cbs = []
         self._closing = False
+        self._roles = []
         self.disconnect_behaviour = DisconnectBehaviour.UNGROUP
 
     async def disconnect(self, *, retry_connection: bool = True) -> None:
-        """Disconnect this player from the server."""
+        """Disconnect this client from the server."""
         if not retry_connection:
             self._closing = True
         self._logger.debug("Disconnecting client")
@@ -198,39 +200,39 @@ class Player:
         elif self._wsock_server is not None and not self._wsock_server.closed:
             _ = await self._wsock_server.close()  # Don't care about close result
 
-        if self._player_id is not None:
-            self._handle_player_disconnect(self)
+        if self._client_id is not None:
+            self._handle_client_disconnect(self)
 
         self._logger.info("Client disconnected")
 
     @property
-    def group(self) -> PlayerGroup:
-        """Get the group assigned to this player."""
+    def group(self) -> ClientGroup:
+        """Get the group assigned to this client."""
         return self._group
 
     @property
-    def player_id(self) -> str:
-        """The unique identifier of this Player."""
-        # This should only be called once the player was correctly initialized
-        assert self._player_id
-        return self._player_id
+    def client_id(self) -> str:
+        """The unique identifier of this Client."""
+        # This should only be called once the client was correctly initialized
+        assert self._client_id
+        return self._client_id
 
     @property
     def name(self) -> str:
-        """The human-readable name of this Player."""
-        assert self._player_info  # Player should be fully initialized by now
-        return self._player_info.name
+        """The human-readable name of this Client."""
+        assert self._client_info  # Client should be fully initialized by now
+        return self._client_info.name
 
     @property
-    def info(self) -> client_messages.ClientHelloPayload:
-        """List of information and capabilities reported by this player."""
-        assert self._player_info  # Player should be fully initialized by now
-        return self._player_info
+    def info(self) -> ClientHelloPayload:
+        """List of information and capabilities reported by this client."""
+        assert self._client_info  # Client should be fully initialized by now
+        return self._client_info
 
     @property
     def websocket_connection(self) -> web.WebSocketResponse | ClientWebSocketResponse:
         """
-        Returns the active WebSocket connection for this player.
+        Returns the active WebSocket connection for this client.
 
         This provides access to the underlying WebSocket connection, which can be
         either a server-side WebSocketResponse (for client-initiated connections)
@@ -243,21 +245,17 @@ class Player:
     def set_volume(self, volume: int) -> None:
         """Set the volume of this player."""
         self._logger.debug("Setting volume from %d to %d", self._volume, volume)
-        self.send_message(
-            server_messages.VolumeSetMessage(server_messages.VolumeSetPayload(volume))
-        )
+        self._logger.error("NOT SUPPORTED BY SPEC YET")
 
     def mute(self) -> None:
         """Mute this player."""
         self._logger.debug("Muting player")
-        self.send_message(server_messages.MuteSetMessage(server_messages.MuteSetPayload(mute=True)))
+        self._logger.error("NOT SUPPORTED BY SPEC YET")
 
     def unmute(self) -> None:
         """Unmute this player."""
         self._logger.debug("Unmuting player")
-        self.send_message(
-            server_messages.MuteSetMessage(server_messages.MuteSetPayload(mute=False))
-        )
+        self._logger.error("NOT SUPPORTED BY SPEC YET")
 
     @property
     def muted(self) -> bool:
@@ -274,31 +272,45 @@ class Player:
         """Whether this player is in the process of closing/disconnecting."""
         return self._closing
 
-    def _set_group(self, group: "PlayerGroup") -> None:
-        """
-        Set the group for this player. For internal use by PlayerGroup only.
+    @property
+    def roles(self) -> list[Roles]:
+        """List of roles this client supports."""
+        return self._roles
 
-        NOTE: this does not update the group's player list
+    def check_role(self, role: Roles) -> bool:
+        """Check if the client supports a specific role."""
+        return role in self._roles
+
+    def _ensure_role(self, role: Roles) -> None:
+        """Raise a ValueError if the client does not support a specific role."""
+        if role not in self._roles:
+            raise ValueError(f"Client does not support role: {role}")
+
+    def _set_group(self, group: "ClientGroup") -> None:
+        """
+        Set the group for this client. For internal use by ClientGroup only.
+
+        NOTE: this does not update the group's client list
 
         Args:
-            group: The PlayerGroup to assign this player to.
+            group: The ClientGroup to assign this client to.
         """
         self._group = group
 
         # Emit event for group change
-        self._signal_event(PlayerGroupChangedEvent(group))
+        self._signal_event(ClientGroupChangedEvent(group))
 
     def ungroup(self) -> None:
         """
-        Remove the player from the group.
+        Remove the client from the group.
 
-        If the player is already alone, this function does nothing.
+        If the client is already alone, this function does nothing.
         """
-        if len(self._group.players) > 1:
-            self._logger.debug("Ungrouping player from group")
-            self._group.remove_player(self)
+        if len(self._group.clients) > 1:
+            self._logger.debug("Ungrouping client from group")
+            self._group.remove_client(self)
         else:
-            self._logger.debug("Player already alone in group, no ungrouping needed")
+            self._logger.debug("Client already alone in group, no ungrouping needed")
 
     async def _setup_connection(self) -> None:
         """Establish WebSocket connection."""
@@ -316,17 +328,7 @@ class Player:
 
         self._logger.debug("Creating writer task")
         self._writer_task = self._server.loop.create_task(self._writer())
-
-        # Send Server Hello
-        self._logger.debug("Sending server hello")
-        self.send_message(
-            server_messages.ServerHelloMessage(
-                payload=server_messages.ServerHelloPayload(
-                    name=self._server.name,
-                    server_id=self._server.id,
-                )
-            )
-        )
+        # server/hello will be sent after receiving client/hello
 
     async def _run_message_loop(self) -> None:
         """Run the main message processing loop."""
@@ -336,7 +338,7 @@ class Player:
         # Listen for all incoming messages
         try:
             while not wsock.closed:
-                # Wait for either a message or the writer task to complete (meaning the player
+                # Wait for either a message or the writer task to complete (meaning the client
                 # disconnected or errored)
                 receive_task = self._server.loop.create_task(wsock.receive())
                 assert self._writer_task is not None  # for type checking
@@ -369,7 +371,7 @@ class Player:
 
                 try:
                     await self._handle_message(
-                        client_messages.ClientMessage.from_json(cast("str", msg.data)), timestamp
+                        ClientMessage.from_json(cast("str", msg.data)), timestamp
                     )
                 except Exception:
                     self._logger.exception("error parsing message")
@@ -398,7 +400,7 @@ class Player:
         Handle the complete websocket connection lifecycle.
 
         This method is private and should only be called by ResonateServer
-        during player connection handling.
+        during client connection handling.
         """
         try:
             # Establish connection and setup
@@ -410,20 +412,41 @@ class Player:
             # Clean up connection and tasks
             await self._cleanup_connection()
 
-    async def _handle_message(self, message: client_messages.ClientMessage, timestamp: int) -> None:
+    async def _handle_message(self, message: ClientMessage, timestamp: int) -> None:
         """Handle incoming commands from the client."""
+        if self._client_info is None and not isinstance(message, ClientHelloMessage):
+            raise ValueError("First message must be client/hello")
         match message:
-            case client_messages.ClientHelloMessage(player_info):
-                self._logger.info("Received session/hello")
-                self._player_info = player_info
-                self._player_id = player_info.client_id
-                self._logger.info("Player ID set to %s", self._player_id)
-                self._logger = logger.getChild(self._player_id)
-                self._handle_player_connect(self)
-            case client_messages.PlayerStateMessage(state):
-                if not self._player_id:
-                    self._logger.warning("Received player/state before session/hello")
-                    return
+            # Core messages
+            case ClientHelloMessage(client_info):
+                self._logger.info("Received client/hello")
+                self._client_info = client_info
+                self._roles = client_info.supported_roles
+                self._client_id = client_info.client_id
+                self._logger.info("Client ID set to %s", self._client_id)
+                self._logger = logger.getChild(self._client_id)
+                self._handle_client_connect(self)
+                self._logger.debug("Sending server/hello in response to client/hello")
+                self.send_message(
+                    ServerHelloMessage(
+                        payload=ServerHelloPayload(
+                            server_id=self._server.id, name=self._server.name, version=1
+                        )
+                    )
+                )
+            case ClientTimeMessage(client_time):
+                self.send_message(
+                    ServerTimeMessage(
+                        ServerTimePayload(
+                            client_transmitted=client_time.client_transmitted,
+                            server_received=timestamp,
+                            server_transmitted=int(self._server.loop.time() * 1_000_000),
+                        )
+                    )
+                )
+            # Player messages
+            case PlayerUpdateMessage(state):
+                self._ensure_role(Roles.PLAYER)
                 self._logger.debug(
                     "Received player state: volume=%d, muted=%s", state.volume, state.muted
                 )
@@ -431,31 +454,22 @@ class Player:
                     self._volume = state.volume
                     self._muted = state.muted
                     self._signal_event(VolumeChangedEvent(volume=self._volume, muted=self._muted))
-                # TODO: handle state.state changes, but how?
-            case client_messages.ClientTimeMessage(player_time):
-                self.send_message(
-                    server_messages.ServerTimeMessage(
-                        server_messages.ServerTimePayload(
-                            client_transmitted=player_time.client_transmitted,
-                            server_received=timestamp,
-                            server_transmitted=int(self._server.loop.time() * 1_000_000),
-                        )
-                    )
-                )
-            case client_messages.StreamCommandMessage(stream_command):
-                match stream_command.command:
-                    case MediaCommand.PLAY:
-                        self._signal_event(StreamStartEvent())
-                    case MediaCommand.STOP:
-                        self._signal_event(StreamStopEvent())
-                    case MediaCommand.PAUSE:
-                        self._signal_event(StreamPauseEvent())
-                    case MediaCommand.SEEK | MediaCommand.VOLUME:
-                        raise NotImplementedError(
-                            f"MediaCommand {stream_command.command} is not supported"
-                        )
-            case client_messages.ClientMessage():
-                pass  # unused base type
+            case StreamRequestFormatMessage(payload):
+                self._ensure_role(Roles.PLAYER)
+                self.group.handle_stream_format_request(self, payload)
+            # Controller messages
+            case GroupGetListClientMessage():
+                self._ensure_role(Roles.CONTROLLER)
+                raise NotImplementedError("Group listing is not supported yet")
+            case GroupJoinClientMessage(_):
+                self._ensure_role(Roles.CONTROLLER)
+                raise NotImplementedError("Joining groups is not supported yet")
+            case GroupUnjoinClientMessage(_):
+                self._ensure_role(Roles.CONTROLLER)
+                raise NotImplementedError("Leaving groups is not supported yet")
+            case GroupCommandClientMessage(group_command):
+                self._ensure_role(Roles.CONTROLLER)
+                self.group._handle_group_command(group_command)  # noqa: SLF001
 
     async def _writer(self) -> None:
         """Write outgoing messages from the queue."""
@@ -468,7 +482,7 @@ class Player:
 
                 if isinstance(item, bytes):
                     # Unpack binary header using helper function
-                    header = models.unpack_binary_header(item)
+                    header = unpack_binary_header(item)
                     now = int(self._server.loop.time() * 1_000_000)
                     if header.timestamp_us - now < 0:
                         self._logger.error("Audio chunk should have played already, skipping it")
@@ -486,8 +500,8 @@ class Player:
                         )
                         break
                 else:
-                    assert isinstance(item, server_messages.ServerMessage)  # for type checking
-                    if isinstance(item, server_messages.ServerTimeMessage):
+                    assert isinstance(item, ServerMessage)  # for type checking
+                    if isinstance(item, ServerTimeMessage):
                         item.payload.server_transmitted = int(self._server.loop.time() * 1_000_000)
                     try:
                         await wsock.send_str(item.to_json())
@@ -496,44 +510,44 @@ class Player:
                             "Connection error sending JSON data, ending writer task"
                         )
                         break
-            self._logger.debug("WebSocket Connection was closed for the player, ending writer task")
+            self._logger.debug("WebSocket Connection was closed for the client, ending writer task")
         except Exception:
-            self._logger.exception("Error in writer task for player")
+            self._logger.exception("Error in writer task for client")
 
-    def send_message(self, message: server_messages.ServerMessage | bytes) -> None:
+    def send_message(self, message: ServerMessage | bytes) -> None:
         """
         Enqueue a JSON or binary message to be sent directly to the client.
 
         It is recommended to not use this method, but to use the higher-level
         API of this library instead.
 
-        NOTE: Binary messages are directly sent to the player, you need to add the
-        header yourself using models.pack_binary_header().
+        NOTE: Binary messages are directly sent to the client, you need to add the
+        header yourself using pack_binary_header().
         """
         # TODO: handle full queue
         if isinstance(message, bytes):
             # Only log binary messages occasionally to reduce spam
             pass
-        elif not isinstance(message, server_messages.ServerTimeMessage):
+        elif not isinstance(message, ServerTimeMessage):
             # Only log important non-time messages
             self._logger.debug("Enqueueing message: %s", type(message).__name__)
         self._to_write.put_nowait(message)
 
     def add_event_listener(
-        self, callback: Callable[[PlayerEvent], Coroutine[None, None, None]]
+        self, callback: Callable[[ClientEvent], Coroutine[None, None, None]]
     ) -> Callable[[], None]:
         """
-        Register a callback to listen for state changes of this player.
+        Register a callback to listen for state changes of this client.
 
         State changes include:
         - The volume was changed
-        - The player joined a group
+        - The client joined a group
 
         Returns a function to remove the listener.
         """
         self._event_cbs.append(callback)
         return lambda: self._event_cbs.remove(callback)
 
-    def _signal_event(self, event: PlayerEvent) -> None:
+    def _signal_event(self, event: ClientEvent) -> None:
         for cb in self._event_cbs:
             _ = self._server.loop.create_task(cb(event))  # Fire and forget event callback
