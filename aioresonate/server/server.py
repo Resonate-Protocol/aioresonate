@@ -7,7 +7,8 @@ from dataclasses import dataclass
 
 from aiohttp import ClientConnectionError, ClientWSTimeout, web
 from aiohttp.client import ClientSession
-from zeroconf import IPVersion, ServiceBrowser, ServiceInfo, ServiceListener, Zeroconf
+from zeroconf import IPVersion, ServiceListener, Zeroconf
+from zeroconf.asyncio import AsyncServiceInfo, AsyncZeroconf
 
 from .client import Client
 
@@ -33,22 +34,43 @@ class ClientRemovedEvent(ResonateEvent):
 
 
 class _ResonateClientServiceListener(ServiceListener):
-    def __init__(self, on_url: Callable[[str], None]) -> None:
+    def __init__(
+        self,
+        loop: asyncio.AbstractEventLoop,
+        on_url: Callable[[str], None],
+    ) -> None:
+        self._loop = loop
         self._on_url = on_url
 
     def add_service(self, zc: Zeroconf, type_: str, name: str) -> None:
-        info = zc.get_service_info(type_, name)
-        if not info:
+        self._loop.create_task(self._handle_service_add(type_, name, zc))
+
+    async def _handle_service_add(self, type_: str, name: str, zc: Zeroconf) -> None:
+        info = await zc.async_get_service_info(type_, name)
+        if not info or not info.parsed_addresses():
             return
-        props = {
-            k.decode(): v.decode() for k, v in (info.properties or {}).items() if v is not None
-        }
-        path = props.get("path", "/resonate")
-        addrs = info.parsed_addresses()
-        if not addrs:
+
+        address = info.parsed_addresses()[0]
+        port = info.port
+        path = None
+        if info.properties:
+            for k, v in info.properties.items():
+                key = k.decode()
+                if key == "path" and v is not None:
+                    path = v.decode()
+                    break
+        if port is None:
+            logger.warning("resonate client discovered at %s has no port, ignoring", address)
             return
-        host = addrs[0]
-        url = f"ws://{host}:{info.port}{path}"
+        if path is None or not path.startswith("/"):
+            logger.warning(
+                "resonate client discovered at %s:%i has no or invalid path property, ignoring",
+                address,
+                port,
+            )
+            return
+
+        url = f"ws://{address}:{port}{path}"
         self._on_url(url)
 
 
@@ -88,12 +110,12 @@ class ResonateServer:
     """App runner for the web application."""
     _tcp_site: web.TCPSite | None
     """TCP site for the web application."""
-    _zc: Zeroconf | None
-    """Zeroconf instance."""
-    _mdns_service: ServiceInfo | None
+    _zc: AsyncZeroconf | None
+    """AsyncZeroconf instance."""
+    _mdns_service: AsyncServiceInfo | None
     """Registered mDNS service."""
-    _mdns_browser: ServiceBrowser | None
-    """mDNS browser for client discovery."""
+    _mdns_browser: ServiceListener | None
+    """mDNS service listener for client discovery."""
 
     def __init__(
         self,
@@ -359,11 +381,11 @@ class ResonateServer:
             await self._tcp_site.start()
             logger.info("Resonate server started successfully on %s:%d", host, port)
             # Start mDNS advertise and discovery
-            self._start_mdns_advertising(port=port, path=api_path)
-            self._start_mdns_discovery()
+            await self._start_mdns_advertising(port=port, path=api_path)
+            await self._start_mdns_discovery()
         except OSError as e:
             logger.error("Failed to start server on %s:%d: %s", host, port, e)
-            self._stop_mdns()
+            await self._stop_mdns()
             if self._app_runner:
                 await self._app_runner.cleanup()
                 self._app_runner = None
@@ -392,36 +414,36 @@ class ResonateServer:
         """Close the server and cleanup resources."""
         await self.stop_server()
         # Stop mDNS if active
-        self._stop_mdns()
+        await self._stop_mdns()
         if self._owns_session and not self._client_session.closed:
             await self._client_session.close()
             logger.debug("Closed internal client session for server %s", self._name)
 
-    def _start_mdns_advertising(self, port: int, path: str) -> None:
+    async def _start_mdns_advertising(self, port: int, path: str) -> None:
         """Start advertising this server via mDNS."""
         if self._zc is None:
-            self._zc = Zeroconf(ip_version=IPVersion.All)
+            self._zc = AsyncZeroconf(ip_version=IPVersion.All)
         if self._mdns_service is not None:
-            self._zc.unregister_service(self._mdns_service)
+            await self._zc.async_unregister_service(self._mdns_service)
 
-        properties = {b"path": path.encode()}
-        service_type = "_resonate_server._tcp.local."
-        info = ServiceInfo(
+        properties = {"path": path}
+        service_type = "_resonate-server._tcp.local."
+        info = AsyncServiceInfo(
             type_=service_type,
             name=f"{self._name}.{service_type}",
             addresses=[],
             port=port,
             properties=properties,
         )
-        self._zc.register_service(info)
+        await self._zc.async_register_service(info)
         self._mdns_service = info
 
         logger.debug("mDNS advertising server on port %d with path %s", port, path)
 
-    def _start_mdns_discovery(self) -> None:
+    async def _start_mdns_discovery(self) -> None:
         """Automatically connect to Resonate clients when discovered via mDNS."""
         if self._zc is None:
-            self._zc = Zeroconf(ip_version=IPVersion.All)
+            self._zc = AsyncZeroconf(ip_version=IPVersion.All)
 
         def _on_client_url(url: str) -> None:
             logger.debug("mDNS discovered client at %s", url)
@@ -429,21 +451,22 @@ class ResonateServer:
             self._loop.call_soon_threadsafe(self.connect_to_client, url)
 
         service_type = "_resonate._tcp.local."
-        listener = _ResonateClientServiceListener(_on_client_url)
-        self._mdns_browser = ServiceBrowser(self._zc, service_type, listener)
+        listener = _ResonateClientServiceListener(self._loop, _on_client_url)
+        await self._zc.async_add_service_listener(service_type, listener)
+        self._mdns_browser = listener  # Store the listener for cleanup
         logger.debug("mDNS discovery started for clients")
 
-    def _stop_mdns(self) -> None:
+    async def _stop_mdns(self) -> None:
         """Stop mDNS advertise and discovery if active."""
         if self._zc is None:
             return
         try:
             if self._mdns_browser is not None:
-                self._mdns_browser.cancel()
+                await self._zc.async_remove_service_listener(self._mdns_browser)
             if self._mdns_service is not None:
-                self._zc.unregister_service(self._mdns_service)
+                await self._zc.async_unregister_service(self._mdns_service)
         finally:
-            self._zc.close()
+            await self._zc.async_close()
             self._zc = None
             self._mdns_service = None
             self._mdns_browser = None
