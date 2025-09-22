@@ -470,9 +470,6 @@ class Client:
             case GroupCommandClientMessage(group_command):
                 self._ensure_role(Roles.CONTROLLER)
                 self.group._handle_group_command(group_command)  # noqa: SLF001
-            # unused base type
-            case ClientMessage():
-                pass
 
     async def _writer(self) -> None:
         """Write outgoing messages from the queue."""
