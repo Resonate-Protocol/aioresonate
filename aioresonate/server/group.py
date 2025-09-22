@@ -256,6 +256,8 @@ class ClientGroup:
     """Current playback state of the group."""
     _group_id: str
     """Unique identifier for this group."""
+    _scheduled_format_changes: dict[str, tuple[StreamUpdateMessage, AudioFormat]]
+    """Mapping of client IDs to upcoming stream updates requested by the player."""
 
     def __init__(self, server: "ResonateServer", *args: "Client") -> None:
         """
@@ -278,6 +280,7 @@ class ClientGroup:
         self._audio_headers = {}
         self._event_cbs = []
         self._group_id = str(uuid.uuid4())
+        self._scheduled_format_changes = {}
         logger.debug(
             "ClientGroup initialized with %d client(s): %s",
             len(self._clients),
@@ -1155,10 +1158,8 @@ class ClientGroup:
             codec=codec,
         )
 
-        # TODO: there is a race condition here:
-        # From the point this message is queued for sending, all audio chunks
-        # must be format-compatible. Not earlier, nor later!
-        # Update mapping and prepare header (creates encoder if needed)
+        # Do not send the update yet, so the sending of this message and the actual format
+        # change during streaming happen in the correct order
         header = self._get_audio_header(new_format)
 
         update = StreamUpdatePlayer(
@@ -1168,9 +1169,23 @@ class ClientGroup:
             bit_depth=new_format.bit_depth,
             codec_header=header,
         )
-        message = StreamUpdateMessage(StreamUpdatePayload(player=update))
-        self._player_formats[player.client_id] = new_format
-        player.send_message(message)
+        self._scheduled_format_changes[player.client_id] = (
+            StreamUpdateMessage(StreamUpdatePayload(player=update)),
+            new_format,
+        )
+
+    def _update_player_format(self, player: "Client") -> None:
+        """Apply any scheduled format changes for a player if needed."""
+        if change := self._scheduled_format_changes.pop(player.client_id, None):
+            format_change_message, new_format = change
+            logger.debug(
+                "Switching format for %s from %s to %s",
+                player.client_id,
+                self._player_formats.get(player.client_id, None),
+                new_format,
+            )
+            player.send_message(format_change_message)
+            self._player_formats[player.client_id] = new_format
 
     async def _calculate_timing_and_sleep(
         self,
@@ -1261,7 +1276,10 @@ class ClientGroup:
                     for player in self._clients:
                         if not player.check_role(Roles.PLAYER):
                             continue
+
+                        self._update_player_format(player)
                         player_format = self._player_formats[player.client_id]
+
                         try:
                             sample_count, duration_us = self._resample_and_encode_to_player(
                                 player, player_format, in_frame, resamplers, chunk_timestamp_us
