@@ -8,7 +8,7 @@ from dataclasses import dataclass
 
 from aiohttp import ClientConnectionError, ClientWSTimeout, web
 from aiohttp.client import ClientSession
-from zeroconf import IPVersion, ServiceStateChange, Zeroconf
+from zeroconf import InterfaceChoice, IPVersion, ServiceStateChange, Zeroconf
 from zeroconf.asyncio import AsyncServiceBrowser, AsyncServiceInfo, AsyncZeroconf
 
 from .client import Client
@@ -349,6 +349,9 @@ class ResonateServer:
             await self._tcp_site.start()
             logger.info("Resonate server started successfully on %s:%d", host, port)
             # Start mDNS advertise and discovery
+            self._zc = AsyncZeroconf(
+                ip_version=IPVersion.V4Only, interfaces=InterfaceChoice.Default
+            )
             await self._start_mdns_advertising(host=host, port=port, path=api_path)
             await self._start_mdns_discovery()
         except OSError as e:
@@ -364,6 +367,8 @@ class ResonateServer:
 
     async def stop_server(self) -> None:
         """Stop the HTTP server."""
+        await self._stop_mdns()
+
         if self._tcp_site:
             await self._tcp_site.stop()
             self._tcp_site = None
@@ -389,8 +394,7 @@ class ResonateServer:
 
     async def _start_mdns_advertising(self, host: str, port: int, path: str) -> None:
         """Start advertising this server via mDNS."""
-        if self._zc is None:
-            self._zc = AsyncZeroconf(ip_version=IPVersion.All)
+        assert self._zc is not None
         if self._mdns_service is not None:
             await self._zc.async_unregister_service(self._mdns_service)
 
@@ -410,8 +414,7 @@ class ResonateServer:
 
     async def _start_mdns_discovery(self) -> None:
         """Automatically connect to Resonate clients when discovered via mDNS."""
-        if self._zc is None:
-            self._zc = AsyncZeroconf(ip_version=IPVersion.All)
+        assert self._zc is not None
 
         service_type = "_resonate._tcp.local."
         self._mdns_browser = AsyncServiceBrowser(
