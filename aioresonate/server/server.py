@@ -48,7 +48,7 @@ class _ResonateClientServiceListener(ServiceListener):
         if not addrs:
             return
         host = addrs[0]
-        url = f"http://{host}:{info.port}{path}"
+        url = f"ws://{host}:{info.port}{path}"
         self._on_url(url)
 
 
