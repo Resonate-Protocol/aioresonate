@@ -1302,4 +1302,5 @@ class ClientGroup:
         except Exception:
             logger.exception("failed to stream audio")
         finally:
+            # TODO: Wait until all audio should be played, otherwise we cut off the audio
             self.stop()
