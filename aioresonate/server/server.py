@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import socket
 from collections.abc import Callable, Coroutine
 from dataclasses import dataclass
 
@@ -31,6 +32,14 @@ class ClientRemovedEvent(ResonateEvent):
     """A client disconnected from the server."""
 
     client_id: str
+
+
+async def _get_ip_pton(ip_string: str) -> bytes:
+    """Return socket pton for a local ip."""
+    try:
+        return await asyncio.to_thread(socket.inet_pton, socket.AF_INET, ip_string)
+    except OSError:
+        return await asyncio.to_thread(socket.inet_pton, socket.AF_INET6, ip_string)
 
 
 class ResonateServer:
@@ -340,7 +349,7 @@ class ResonateServer:
             await self._tcp_site.start()
             logger.info("Resonate server started successfully on %s:%d", host, port)
             # Start mDNS advertise and discovery
-            await self._start_mdns_advertising(port=port, path=api_path)
+            await self._start_mdns_advertising(host=host, port=port, path=api_path)
             await self._start_mdns_discovery()
         except OSError as e:
             logger.error("Failed to start server on %s:%d: %s", host, port, e)
@@ -378,7 +387,7 @@ class ResonateServer:
             await self._client_session.close()
             logger.debug("Closed internal client session for server %s", self._name)
 
-    async def _start_mdns_advertising(self, port: int, path: str) -> None:
+    async def _start_mdns_advertising(self, host: str, port: int, path: str) -> None:
         """Start advertising this server via mDNS."""
         if self._zc is None:
             self._zc = AsyncZeroconf(ip_version=IPVersion.All)
@@ -390,7 +399,7 @@ class ResonateServer:
         info = AsyncServiceInfo(
             type_=service_type,
             name=f"{self._name}.{service_type}",
-            addresses=[],
+            addresses=[await _get_ip_pton(host)] if host != "0.0.0.0" else None,
             port=port,
             properties=properties,
         )
