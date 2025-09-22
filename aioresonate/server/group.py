@@ -307,7 +307,7 @@ class ClientGroup:
         logger.debug("Starting play_media with audio_stream_format: %s", audio_stream_format)
         stopped = self.stop()
         if stopped:
-            # Wait a bit to allow clients to process the session end
+            # Wait a bit to allow clients to process the stream end
             await asyncio.sleep(0.5)
         # TODO: open questions:
         # - how to communicate to the caller what audio_format is preferred,
@@ -325,14 +325,14 @@ class ClientGroup:
                 )
                 self._player_formats[client.client_id] = player_format
                 logger.debug(
-                    "Sending session start to player %s with format %s",
+                    "Sending stream start to player %s with format %s",
                     client.client_id,
                     player_format,
                 )
             else:
-                logger.debug("Sending session start to client %s", client.client_id)
+                logger.debug("Sending stream start to client %s", client.client_id)
                 player_format = None
-            self._send_session_start_msg(client, player_format)
+            self._send_stream_start_msg(client, player_format)
 
         self._stream_task = self._server.loop.create_task(
             self._stream_audio(
@@ -580,12 +580,12 @@ class ClientGroup:
 
         return max_frame_size if max_frame_size > 0 else int(source_format.sample_rate * 0.025)
 
-    def _send_session_start_msg(
+    def _send_stream_start_msg(
         self, client: "Client", audio_format: AudioFormat | None = None
     ) -> None:
-        """Send a session start message to a client with the specified audio format for players."""
+        """Send a stream start message to a client with the specified audio format for players."""
         logger.debug(
-            "_send_session_start_msg: client=%s, format=%s",
+            "_send_stream_start_msg: client=%s, format=%s",
             client.client_id,
             audio_format,
         )
@@ -622,19 +622,17 @@ class ClientGroup:
             StreamStartVisualizer() if client.check_role(Roles.VISUALIZER) else None
         )
 
-        session_info = StreamStartPayload(
+        stream_info = StreamStartPayload(
             player=player_stream_info,
             metadata=metadata_stream_info,
             visualizer=visualizer_stream_info,
         )
-        logger.debug(
-            "Sending session start message to client %s: %s", client.client_id, session_info
-        )
-        client.send_message(StreamStartMessage(session_info))
+        logger.debug("Sending stream start message to client %s: %s", client.client_id, stream_info)
+        client.send_message(StreamStartMessage(stream_info))
 
-    def _send_session_end_msg(self, client: "Client") -> None:
-        """Send a session end message to a client to stop playback."""
-        logger.debug("ending session for %s (%s)", client.name, client.client_id)
+    def _send_stream_end_msg(self, client: "Client") -> None:
+        """Send a stream end message to a client to stop playback."""
+        logger.debug("ending stream for %s (%s)", client.name, client.client_id)
         client.send_message(StreamEndMessage())
 
     def stop(self) -> bool:
@@ -643,7 +641,7 @@ class ClientGroup:
 
         Compared to pause(), this also:
         - Cancels the audio streaming task
-        - Sends session end messages to all clients
+        - Sends stream end messages to all clients
         - Clears all buffers and format mappings
         - Cleans up all audio encoders
 
@@ -659,7 +657,7 @@ class ClientGroup:
         )
         _ = self._stream_task.cancel()  # Don't care about cancellation result
         for client in self._clients:
-            self._send_session_end_msg(client)
+            self._send_stream_end_msg(client)
             if client.check_role(Roles.PLAYER):
                 del self._player_formats[client.client_id]
 
@@ -879,7 +877,7 @@ class ClientGroup:
         """
         Remove a client from this group.
 
-        If a session is active, the client receives a session end message.
+        If a stream is active, the client receives a stream end message.
         The client is automatically moved to its own new group since every
         client must belong to a group.
         If the client is not part of this group, this will have no effect.
@@ -898,11 +896,11 @@ class ClientGroup:
         else:
             self._clients.remove(client)
             if self._stream_task is not None:
-                # Notify the client that the session ended
+                # Notify the client that the stream ended
                 try:
-                    self._send_session_end_msg(client)
+                    self._send_stream_end_msg(client)
                 except QueueFull:
-                    logger.warning("Failed to send session end message to %s", client.client_id)
+                    logger.warning("Failed to send stream end message to %s", client.client_id)
                 if client.check_role(Roles.PLAYER):
                     del self._player_formats[client.client_id]
         if not self._clients:
@@ -941,7 +939,7 @@ class ClientGroup:
         # Then set the group (which will emit ClientGroupChangedEvent)
         client._set_group(self)  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
         if self._stream_task is not None and self._stream_audio_format is not None:
-            logger.debug("Joining client %s to current session", client.client_id)
+            logger.debug("Joining client %s to current stream", client.client_id)
             # Join it to the current stream
             if client.check_role(Roles.PLAYER):
                 player_format = self.determine_player_format(
@@ -950,7 +948,7 @@ class ClientGroup:
                 self._player_formats[client.client_id] = player_format
             else:
                 player_format = None
-            self._send_session_start_msg(client, player_format)
+            self._send_stream_start_msg(client, player_format)
 
         # Send current metadata to the new player if available
         if self._current_metadata is not None:
