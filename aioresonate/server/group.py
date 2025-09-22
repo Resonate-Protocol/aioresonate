@@ -114,11 +114,7 @@ class GroupDeletedEvent(GroupEvent):
 
 @dataclass(frozen=True)
 class AudioFormat:
-    """
-    Audio format specification.
-
-    Represents the audio format parameters for both compressed and uncompressed audio.
-    """
+    """Audio format of a stream."""
 
     sample_rate: int
     """Sample rate in Hz (e.g., 44100, 48000)."""
@@ -127,7 +123,7 @@ class AudioFormat:
     channels: int
     """Number of audio channels (1 for mono, 2 for stereo)."""
     codec: AudioCodec = AudioCodec.PCM
-    """Audio codec to use."""
+    """Audio codec of the stream."""
 
 
 @dataclass
