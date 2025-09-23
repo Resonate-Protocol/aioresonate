@@ -39,11 +39,11 @@ from aioresonate.models.player import (
 )
 from aioresonate.models.types import ClientMessage, Roles, ServerMessage
 
+from .audio_utils import build_flac_stream_header
 from .group import AudioCodec, AudioFormat, ClientGroup
 
 MAX_PENDING_MSG = 512
 BUFFER_HIGH_WATERMARK_RATIO = 0.9
-BUFFER_SLEEP_MIN_US = 5_000
 
 
 class _BufferedChunk(NamedTuple):
@@ -61,18 +61,7 @@ def _samples_to_microseconds(sample_count: int, sample_rate: int) -> int:
 
 
 class _BufferTracker:
-    """Tracks compressed bytes queued for playback and applies backpressure."""
-
-    __slots__ = (
-        "_logger",
-        "_loop",
-        "buffered_bytes",
-        "buffered_chunks",
-        "capacity_bytes",
-        "client_id",
-        "high_water_bytes",
-        "max_usage_bytes",
-    )
+    """Track buffered compressed audio and apply backpressure when needed."""
 
     def __init__(
         self,
@@ -92,7 +81,7 @@ class _BufferTracker:
         self.max_usage_bytes = 0
 
     def prune_consumed(self, now_us: int | None = None) -> int:
-        """Drop chunks that should have finished playback by ``now_us``."""
+        """Drop finished chunks and return the timestamp used for the calculation."""
         if now_us is None:
             now_us = int(self._loop.time() * 1_000_000)
         while self.buffered_chunks and self.buffered_chunks[0].end_time_us <= now_us:
@@ -117,22 +106,17 @@ class _BufferTracker:
             now_us = self.prune_consumed()
             projected_usage = self.buffered_bytes + bytes_needed
             if projected_usage <= self.capacity_bytes:
-                if projected_usage > self.high_water_bytes and self.capacity_bytes:
-                    fill = 100 * projected_usage / self.capacity_bytes
-                    self._logger.debug(
-                        "Buffer at %.1f%% for client %s (%s/%s bytes)",
-                        fill,
-                        self.client_id,
-                        projected_usage,
-                        self.capacity_bytes,
-                    )
+                # Returning here keeps the producer running because we are below capacity.
                 return
 
             sleep_target_us = (
                 self.buffered_chunks[0].end_time_us if self.buffered_chunks else expected_end_us
             )
-            sleep_us = max(BUFFER_SLEEP_MIN_US, sleep_target_us - now_us)
-            await asyncio.sleep(sleep_us / 1_000_000)
+            sleep_us = sleep_target_us - now_us
+            if sleep_us <= 0:
+                await asyncio.sleep(0)
+            else:
+                await asyncio.sleep(sleep_us / 1_000_000)
 
     def register(self, end_time_us: int, byte_count: int) -> None:
         """Record bytes added to the buffer finishing at ``end_time_us``."""
@@ -144,24 +128,7 @@ class _BufferTracker:
 
 
 class _DirectStreamContext:
-    """Holds state while streaming audio directly to a client."""
-
-    __slots__ = (
-        "_send_pcm",
-        "audio_format",
-        "buffer_tracker",
-        "client",
-        "compressed_bytes_sent",
-        "encoder",
-        "frame_stride_bytes",
-        "input_audio_format",
-        "input_audio_layout",
-        "pcm_bytes_consumed",
-        "play_start_time_us",
-        "samples_enqueued_total",
-        "samples_per_chunk",
-        "samples_sent_total",
-    )
+    """State container used while streaming audio directly to a client."""
 
     def __init__(
         self,
@@ -197,6 +164,7 @@ class _DirectStreamContext:
         return self.audio_format.sample_rate
 
     def _timeline_us(self, samples: int) -> int:
+        """Translate ``samples`` from stream start into an absolute timestamp."""
         return self.play_start_time_us + _samples_to_microseconds(samples, self.sample_rate)
 
     async def send_pcm_chunk(self, chunk: bytes, sample_count: int) -> None:
@@ -267,6 +235,7 @@ class _DirectStreamContext:
             self.samples_sent_total += packet_samples
 
     async def drain_ready_chunks(self, input_buffer: bytearray, *, force_flush: bool) -> None:
+        """Send chunks while avoiding buffer overflows unless flushing remaining data."""
         while True:
             available_samples = len(input_buffer) // self.frame_stride_bytes
             if available_samples <= 0:
@@ -973,13 +942,7 @@ class Client:
         # since ffmpeg only provides the StreamInfo metadata block in extradata:
         # See https://datatracker.ietf.org/doc/rfc9639/ Section 8.1
         if audio_format.codec == AudioCodec.FLAC and header:
-            # FLAC stream signature (4 bytes): "fLaC"
-            # Metadata block header (4 bytes):
-            # - Bit 0: last metadata block (1 since we only have one)
-            # - Bits 1-7: block type (0 for StreamInfo)
-            # - Next 3 bytes: block length of the next metadata block in bytes
-            # StreamInfo block (34 bytes): as provided by ffmpeg
-            header = b"fLaC\x80" + (len(header)).to_bytes(3, "big") + header
+            header = build_flac_stream_header(header)
         codec_header_b64 = base64.b64encode(header).decode()
         samples_per_chunk = (
             int(encoder.frame_size) if encoder.frame_size else int(audio_format.sample_rate * 0.025)
@@ -989,7 +952,11 @@ class Client:
     async def _skip_initial_bytes(
         self, audio_stream: AsyncGenerator[bytes, None], bytes_to_skip_total: int
     ) -> bytearray:
-        """Consume from audio_stream until bytes_to_skip_total are skipped; return remainder."""
+        """Consume chunks until ``bytes_to_skip_total`` have been dropped.
+
+        Returns the first buffered bytes that should be played after the skipped
+        portion (possibly empty when the stream ended).
+        """
         pending = bytearray()
         if bytes_to_skip_total <= 0:
             return pending
@@ -1018,7 +985,7 @@ class Client:
         header = pack_binary_header_raw(BinaryMessageType.AUDIO_CHUNK.value, timestamp_us)
         self.send_message(header + chunk)
 
-    async def play_media_direct(
+    async def _play_media_direct(
         self,
         audio_stream: AsyncGenerator[bytes, None],
         audio_format: AudioFormat,
@@ -1026,32 +993,14 @@ class Client:
         play_start_time_us: int,
         stream_start_time_us: int = 0,
     ) -> int:
-        """
-        Stream pre-resampled PCM to this client with optional compression and precise timing.
-
-        Prefer the group-level method for simple cases. This low-level API targets advanced
-        scenarios like per-client DSP. It does not stop the client/group; the caller manages
-        lifecycle.
-
-        Mid-stream behavior: Skips PCM samples equal to `stream_start_time_us` before sending,
-        enabling seeking and late joins.
-
-        Args:
-            audio_stream: Async generator yielding PCM bytes already in `audio_format`.
-            audio_format: Target format for this client (rate, depth, channels, codec).
-            play_start_time_us: Absolute timestamp when playback should begin for the first chunk.
-            stream_start_time_us: Offset within the stream to start from (microseconds).
-
-        Returns:
-            Absolute timestamp (microseconds) when this stream will end.
-        """
+        """Stream pre-formatted PCM for internal coordination by groups and sessions."""
         self._ensure_role(Roles.PLAYER)
         player_info = self.info
         assert player_info.player_support is not None, "Player support info required"
 
         # Validate input format
-        if audio_format.bit_depth not in (16, 24):
-            raise ValueError("Only 16 or 24 bit PCM is supported")
+        if audio_format.bit_depth != 16:
+            raise ValueError("Only 16 bit PCM is supported")
         if audio_format.channels not in (1, 2):
             raise ValueError("Only mono or stereo are supported")
 
