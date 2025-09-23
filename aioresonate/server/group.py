@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import inspect
 import logging
 import uuid
 from asyncio import Queue, QueueFull, Task
@@ -72,6 +73,38 @@ class AudioCodec(Enum):
 
 class GroupEvent:
     """Base event type used by ClientGroup.add_event_listener()."""
+
+
+class DirectStreamSession:
+    """Interface for integrations that provide per-client PCM streams."""
+
+    supports_seek: bool = False
+
+    def handles_client(self, client: Client) -> bool:
+        """Determine whether this session streams audio for ``client``."""
+        del client
+        return True
+
+    async def get_stream(
+        self,
+        client: Client,
+        start_time_us: int,
+        offset_time_us: int,
+    ) -> AsyncGenerator[bytes, None] | None:
+        """Provide an async generator for ``client``; return ``None`` to fall back."""
+        raise NotImplementedError
+
+    async def on_start(self, group: ClientGroup, start_time_us: int) -> None:
+        """Perform setup when a direct session becomes active for ``group``."""
+
+    async def on_client_added(self, group: ClientGroup, client: Client) -> None:
+        """Handle ``client`` joining during an active direct session."""
+
+    async def on_client_removed(self, group: ClientGroup, client: Client) -> None:
+        """Handle ``client`` leaving during an active direct session."""
+
+    async def on_stop(self, group: ClientGroup) -> None:
+        """Perform cleanup when the direct session ends."""
 
 
 # TODO: make types more fancy
@@ -289,6 +322,8 @@ class ClientGroup:
         self._client_stream_tasks: dict[str, asyncio.Task[int]] = {}
         self._fanout_queues: dict[str, Queue[bytes | None]] = {}
         self._fanout_subscribers: dict[AudioFormat, list[Queue[bytes | None]]] = {}
+        self._direct_session: DirectStreamSession | None = None
+        self._direct_clients: set[str] = set()
         self._play_start_time_us: int | None = None
         logger.debug(
             "ClientGroup initialized with %d client(s): %s",
@@ -296,7 +331,7 @@ class ClientGroup:
             [type(c).__name__ for c in self._clients],
         )
 
-    async def play_media_group(
+    async def play_media_group(  # noqa: PLR0915
         self,
         audio_stream: AsyncGenerator[bytes, None],
         audio_stream_format: AudioFormat,
@@ -304,6 +339,7 @@ class ClientGroup:
         preferred_stream_codec: AudioCodec = AudioCodec.OPUS,
         play_start_time_us: int | None = None,
         stream_start_time_us: int = 0,
+        direct_session: DirectStreamSession | None = None,
     ) -> int:
         """Start synchronized playback for the current group.
 
@@ -316,6 +352,7 @@ class ClientGroup:
             stream_start_time_us: Offset within the source stream (in microseconds) that all
                 players should start from. Mid-stream joins are handled later when per-client
                 streaming is delegated.
+            direct_session: Optional integration-provided streamer for per-client audio.
 
         Returns:
             Absolute timestamp (microseconds) when the stream is expected to finish once
@@ -352,35 +389,70 @@ class ClientGroup:
         self._send_initial_stream_start(player_ids)
 
         self._fanout_queues.clear()
-        sentinel, format_subscribers = self._build_format_subscribers(format_to_clients)
-        self._fanout_subscribers = format_subscribers
-        self._play_start_time_us = start_time_us
-        self._stream_task = self._start_fanout_task(
-            sentinel=sentinel,
-            format_subscribers=format_subscribers,
-            audio_stream=audio_stream,
-            audio_stream_format=audio_stream_format,
-        )
-
+        self._fanout_subscribers.clear()
         self._client_stream_tasks.clear()
+        self._direct_clients.clear()
+        self._direct_session = direct_session
+
+        shared_clients_map: dict[AudioFormat, list[Client]] = defaultdict(list)
+        direct_candidates: list[Client] = []
+
+        if direct_session is not None:
+            await self._maybe_await(direct_session.on_start(self, start_time_us))
+
         for client in player_clients:
-            queue = self._fanout_queues[client.client_id]
-            stream_gen = self._queue_stream(queue, sentinel)
-            self._client_stream_tasks[client.client_id] = self._server.loop.create_task(
-                client.play_media_direct(
-                    stream_gen,
-                    self._player_formats[client.client_id],
-                    play_start_time_us=start_time_us,
-                    stream_start_time_us=stream_start_time_us,
-                )
+            player_format = self._player_formats[client.client_id]
+            if direct_session is not None and direct_session.handles_client(client):
+                direct_candidates.append(client)
+            else:
+                shared_clients_map[player_format].append(client)
+
+        for client in direct_candidates:
+            player_format = self._player_formats[client.client_id]
+            started = await self._start_direct_stream_for_client(
+                client,
+                player_format,
+                start_time_us=start_time_us,
+                stream_start_time_us=stream_start_time_us,
             )
+            if not started:
+                shared_clients_map[player_format].append(client)
+
+        sentinel: None | object = None
+        if shared_clients_map:
+            sentinel, format_subscribers = self._build_format_subscribers(shared_clients_map)
+            self._fanout_subscribers = format_subscribers
+            self._play_start_time_us = start_time_us
+            self._stream_task = self._start_fanout_task(
+                sentinel=sentinel,
+                format_subscribers=format_subscribers,
+                audio_stream=audio_stream,
+                audio_stream_format=audio_stream_format,
+            )
+            for clients_for_format in shared_clients_map.values():
+                for client in clients_for_format:
+                    self._send_stream_start_msg(client, self._player_formats[client.client_id])
+                    queue = self._fanout_queues[client.client_id]
+                    stream_gen = self._queue_stream(queue, sentinel)
+                    self._client_stream_tasks[client.client_id] = self._server.loop.create_task(
+                        client.play_media_direct(
+                            stream_gen,
+                            self._player_formats[client.client_id],
+                            play_start_time_us=start_time_us,
+                            stream_start_time_us=stream_start_time_us,
+                        )
+                    )
+        else:
+            self._play_start_time_us = start_time_us
+            self._stream_task = None
 
         self._current_state = PlaybackStateType.PLAYING
         self._signal_event(GroupStateChangedEvent(PlaybackStateType.PLAYING))
 
         try:
             end_times = await asyncio.gather(*self._client_stream_tasks.values())
-            await self._stream_task
+            if self._stream_task is not None:
+                await self._stream_task
         finally:
             self.stop()
 
@@ -457,6 +529,101 @@ class ClientGroup:
             pass
         except Exception:  # pragma: no cover - defensive logging
             logger.exception("Unhandled exception while stopping task %s", task)
+
+    async def _maybe_await(self, value: Any) -> Any:
+        """Await ``value`` when it is awaitable and return the result."""
+        if inspect.isawaitable(value):
+            return await value
+        return value
+
+    def _schedule_async_call(self, value: Any) -> None:
+        """Schedule ``value`` if it is awaitable, ignoring its result safely."""
+        if inspect.isawaitable(value):
+
+            async def _runner() -> None:
+                try:
+                    await value
+                except asyncio.CancelledError:  # pragma: no cover - expected during shutdown
+                    pass
+                except Exception:  # pragma: no cover - defensive logging
+                    logger.exception("Unhandled exception in scheduled callback")
+
+            self._server.loop.create_task(_runner())
+
+    async def _start_direct_stream_for_client(
+        self,
+        client: Client,
+        player_format: AudioFormat,
+        *,
+        start_time_us: int,
+        stream_start_time_us: int,
+    ) -> bool:
+        """Start a direct-session stream for ``client`` when available."""
+        session = self._direct_session
+        if session is None or not session.handles_client(client):
+            return False
+
+        supports_seek = getattr(session, "supports_seek", False)
+        offset_us = stream_start_time_us if supports_seek else 0
+        if stream_start_time_us and not supports_seek:
+            logger.debug(
+                "Direct session for %s does not support seeking; starting from beginning",
+                client.client_id,
+            )
+
+        try:
+            stream_candidate = session.get_stream(client, start_time_us, offset_us)
+            stream = await self._maybe_await(stream_candidate)
+        except Exception:  # pragma: no cover - integration failure
+            logger.exception("Direct session failed to provide stream for %s", client.client_id)
+            return False
+
+        if stream is None:
+            logger.debug("Direct session declined stream for client %s", client.client_id)
+            return False
+
+        await self._maybe_await(session.on_client_added(self, client))
+        task = self._server.loop.create_task(
+            client.play_media_direct(
+                stream,
+                player_format,
+                play_start_time_us=start_time_us,
+                stream_start_time_us=offset_us,
+            )
+        )
+        self._client_stream_tasks[client.client_id] = task
+        self._direct_clients.add(client.client_id)
+
+        if client.check_role(Roles.METADATA) or client.check_role(Roles.VISUALIZER):
+            self._send_stream_start_msg(client, None, include_player=False)
+
+        return True
+
+    async def _handle_late_join_direct(self, client: Client, player_format: AudioFormat) -> None:
+        """Attempt to launch a direct stream for a client that joined mid-session."""
+        session = self._direct_session
+        if session is None or not session.handles_client(client):
+            return
+
+        if self._play_start_time_us is None:
+            await self._maybe_await(session.on_client_added(self, client))
+            return
+
+        offset_us = max(
+            0,
+            int(self._server.loop.time() * 1_000_000) - self._play_start_time_us,
+        )
+        started = await self._start_direct_stream_for_client(
+            client,
+            player_format,
+            start_time_us=self._play_start_time_us,
+            stream_start_time_us=offset_us,
+        )
+        if not started:
+            logger.info(
+                "Direct session could not supply stream for late join %s; waiting for next track",
+                client.client_id,
+            )
 
     @staticmethod
     async def _queue_stream(
@@ -827,8 +994,9 @@ class ClientGroup:
         self._client_stream_tasks.clear()
 
         if self._stream_task is not None:
-            self._stream_task.cancel()
-            self._server.loop.create_task(self._await_task_completion(self._stream_task))
+            stream_task = self._stream_task
+            stream_task.cancel()
+            self._server.loop.create_task(self._await_task_completion(stream_task))
             self._stream_task = None
 
         for client in self._clients:
@@ -836,11 +1004,17 @@ class ClientGroup:
             if client.check_role(Roles.PLAYER):
                 self._player_formats.pop(client.client_id, None)
 
+        direct_session = self._direct_session
+        self._direct_session = None
+        if direct_session is not None:
+            self._schedule_async_call(direct_session.on_stop(self))
+
+        self._direct_clients.clear()
+
         self._audio_encoders.clear()
         self._audio_headers.clear()
         self._fanout_queues.clear()
         self._fanout_subscribers.clear()
-        self._stream_task = None
         self._current_media_art = None
         self._stream_audio_format = None
         self._play_start_time_us = None
@@ -1098,6 +1272,12 @@ class ClientGroup:
                             queue.put_nowait(None)
                     if task := self._client_stream_tasks.pop(client.client_id, None):
                         task.cancel()
+                    if client.client_id in self._direct_clients:
+                        self._direct_clients.discard(client.client_id)
+                        if self._direct_session is not None:
+                            self._schedule_async_call(
+                                self._direct_session.on_client_removed(self, client)
+                            )
         if not self._clients:
             # Emit event for group deletion, no clients left
             self._signal_event(GroupDeletedEvent())
@@ -1141,14 +1321,9 @@ class ClientGroup:
                 )
                 self._player_formats[client.client_id] = player_format
 
-                if not self._fanout_subscribers or self._play_start_time_us is None:
-                    logger.warning(
-                        "Active stream missing fan-out context; "
-                        "falling back to stream/start for %s",
-                        client.client_id,
-                    )
-                    self._send_stream_start_msg(client, player_format)
-                else:
+                if self._direct_session is not None:
+                    self._schedule_async_call(self._handle_late_join_direct(client, player_format))
+                elif self._fanout_subscribers and self._play_start_time_us is not None:
                     queue: Queue[bytes | None] = Queue()
                     self._fanout_queues[client.client_id] = queue
                     subscribers = self._fanout_subscribers.setdefault(player_format, [])
@@ -1167,8 +1342,16 @@ class ClientGroup:
                             stream_start_time_us=stream_offset_us,
                         )
                     )
+                    self._send_stream_start_msg(client, player_format)
                     if client.check_role(Roles.METADATA) or client.check_role(Roles.VISUALIZER):
                         self._send_stream_start_msg(client, None, include_player=False)
+                else:
+                    logger.warning(
+                        "Active stream missing fan-out context; "
+                        "falling back to stream/start for %s",
+                        client.client_id,
+                    )
+                    self._send_stream_start_msg(client, player_format)
             else:
                 self._send_stream_start_msg(client, None)
 
