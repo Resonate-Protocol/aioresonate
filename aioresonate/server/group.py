@@ -9,6 +9,7 @@ import uuid
 from asyncio import Queue, QueueFull, Task
 from collections import defaultdict
 from collections.abc import AsyncGenerator, Callable, Coroutine
+from contextlib import suppress
 from dataclasses import dataclass
 from enum import Enum
 from io import BytesIO
@@ -287,6 +288,8 @@ class ClientGroup:
         self._client_art_formats = {}
         self._client_stream_tasks: dict[str, asyncio.Task[int]] = {}
         self._fanout_queues: dict[str, Queue[bytes | None]] = {}
+        self._fanout_subscribers: dict[AudioFormat, list[Queue[bytes | None]]] = {}
+        self._play_start_time_us: int | None = None
         logger.debug(
             "ClientGroup initialized with %d client(s): %s",
             len(self._clients),
@@ -350,6 +353,8 @@ class ClientGroup:
 
         self._fanout_queues.clear()
         sentinel, format_subscribers = self._build_format_subscribers(format_to_clients)
+        self._fanout_subscribers = format_subscribers
+        self._play_start_time_us = start_time_us
         self._stream_task = self._start_fanout_task(
             sentinel=sentinel,
             format_subscribers=format_subscribers,
@@ -691,7 +696,11 @@ class ClientGroup:
         return max_frame_size if max_frame_size > 0 else int(source_format.sample_rate * 0.025)
 
     def _send_stream_start_msg(
-        self, client: Client, audio_format: AudioFormat | None = None
+        self,
+        client: Client,
+        audio_format: AudioFormat | None = None,
+        *,
+        include_player: bool = True,
     ) -> None:
         """Send a stream start message to a client with the specified audio format for players."""
         logger.debug(
@@ -699,7 +708,9 @@ class ClientGroup:
             client.client_id,
             audio_format,
         )
-        if client.check_role(Roles.PLAYER) and audio_format is not None:
+        if include_player and client.check_role(Roles.PLAYER):
+            if audio_format is None:
+                raise ValueError("audio_format must be provided for player clients")
             player_stream_info = StreamStartPlayer(
                 codec=audio_format.codec.value,
                 sample_rate=audio_format.sample_rate,
@@ -809,9 +820,11 @@ class ClientGroup:
         self._audio_encoders.clear()
         self._audio_headers.clear()
         self._fanout_queues.clear()
+        self._fanout_subscribers.clear()
         self._stream_task = None
         self._current_media_art = None
         self._stream_audio_format = None
+        self._play_start_time_us = None
 
         if self._current_state != PlaybackStateType.STOPPED:
             self._signal_event(GroupStateChangedEvent(PlaybackStateType.STOPPED))
@@ -1052,7 +1065,20 @@ class ClientGroup:
                 except QueueFull:
                     logger.warning("Failed to send stream end message to %s", client.client_id)
                 if client.check_role(Roles.PLAYER):
-                    del self._player_formats[client.client_id]
+                    player_format = self._player_formats.pop(client.client_id, None)
+                    queue = self._fanout_queues.pop(client.client_id, None)
+                    if (
+                        queue is not None
+                        and player_format is not None
+                        and (subscribers := self._fanout_subscribers.get(player_format))
+                    ):
+                        with suppress(ValueError):
+                            subscribers.remove(queue)
+                    if queue is not None:
+                        with suppress(QueueFull):
+                            queue.put_nowait(None)
+                    if task := self._client_stream_tasks.pop(client.client_id, None):
+                        task.cancel()
         if not self._clients:
             # Emit event for group deletion, no clients left
             self._signal_event(GroupDeletedEvent())
@@ -1090,15 +1116,42 @@ class ClientGroup:
         client._set_group(self)  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
         if self._stream_task is not None and self._stream_audio_format is not None:
             logger.debug("Joining client %s to current stream", client.client_id)
-            # Join it to the current stream
             if client.check_role(Roles.PLAYER):
                 player_format = client.determine_optimal_format(
                     self._stream_audio_format, self._preferred_stream_codec
                 )
                 self._player_formats[client.client_id] = player_format
+
+                if not self._fanout_subscribers or self._play_start_time_us is None:
+                    logger.warning(
+                        "Active stream missing fan-out context; "
+                        "falling back to stream/start for %s",
+                        client.client_id,
+                    )
+                    self._send_stream_start_msg(client, player_format)
+                else:
+                    queue: Queue[bytes | None] = Queue()
+                    self._fanout_queues[client.client_id] = queue
+                    subscribers = self._fanout_subscribers.setdefault(player_format, [])
+                    subscribers.append(queue)
+
+                    stream_offset_us = max(
+                        0,
+                        int(self._server.loop.time() * 1_000_000) - self._play_start_time_us,
+                    )
+                    stream_gen = self._queue_stream(queue, None)
+                    self._client_stream_tasks[client.client_id] = self._server.loop.create_task(
+                        client.play_media_direct(
+                            stream_gen,
+                            player_format,
+                            play_start_time_us=self._play_start_time_us,
+                            stream_start_time_us=stream_offset_us,
+                        )
+                    )
+                    if client.check_role(Roles.METADATA) or client.check_role(Roles.VISUALIZER):
+                        self._send_stream_start_msg(client, None, include_player=False)
             else:
-                player_format = None
-            self._send_stream_start_msg(client, player_format)
+                self._send_stream_start_msg(client, None)
 
         # Send current metadata to the new player if available
         if self._current_metadata is not None:
