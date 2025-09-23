@@ -29,7 +29,7 @@ from aioresonate.models.core import (
 from aioresonate.models.player import PlayerUpdateMessage, StreamRequestFormatMessage
 from aioresonate.models.types import ClientMessage, Roles, ServerMessage
 
-from .group import ClientGroup
+from .group import AudioCodec, AudioFormat, ClientGroup
 
 MAX_PENDING_MSG = 512
 
@@ -551,3 +551,130 @@ class Client:
     def _signal_event(self, event: ClientEvent) -> None:
         for cb in self._event_cbs:
             _ = self._server.loop.create_task(cb(event))  # Fire and forget event callback
+
+    def determine_optimal_format(
+        self,
+        source_format: AudioFormat,
+        preferred_codec: AudioCodec = AudioCodec.OPUS,
+    ) -> AudioFormat:
+        """
+        Determine the optimal audio format for this client given a source format.
+
+        Prefers higher quality within the client's capabilities and falls back gracefully.
+
+        Args:
+            source_format: The source audio format to match against.
+            preferred_codec: Preferred audio codec (e.g., Opus). Falls back when unsupported.
+
+        Returns:
+            AudioFormat: The optimal format for this client.
+        """
+        player_info = self.info
+
+        # Determine optimal sample rate
+        sample_rate = source_format.sample_rate
+        if (
+            player_info.player_support
+            and sample_rate not in player_info.player_support.support_sample_rates
+        ):
+            # Prefer lower rates that are closest to source, fallback to minimum
+            lower_rates = [
+                r for r in player_info.player_support.support_sample_rates if r < sample_rate
+            ]
+            sample_rate = (
+                max(lower_rates)
+                if lower_rates
+                else min(player_info.player_support.support_sample_rates)
+            )
+            self._logger.debug(
+                "Adjusted sample_rate for client %s: %s", self.client_id, sample_rate
+            )
+
+        # Determine optimal bit depth
+        bit_depth = source_format.bit_depth
+        if (
+            player_info.player_support
+            and bit_depth not in player_info.player_support.support_bit_depth
+        ):
+            if 16 in player_info.player_support.support_bit_depth:
+                bit_depth = 16
+            else:
+                raise NotImplementedError("Only 16bit is supported for now")
+            self._logger.debug("Adjusted bit_depth for client %s: %s", self.client_id, bit_depth)
+
+        # Determine optimal channel count
+        channels = source_format.channels
+        if (
+            player_info.player_support
+            and channels not in player_info.player_support.support_channels
+        ):
+            # Prefer stereo, then mono
+            if 2 in player_info.player_support.support_channels:
+                channels = 2
+            elif 1 in player_info.player_support.support_channels:
+                channels = 1
+            else:
+                raise NotImplementedError("Only mono and stereo are supported")
+            self._logger.debug("Adjusted channels for client %s: %s", self.client_id, channels)
+
+        # Determine optimal codec with fallback chain
+        codec_fallbacks = [preferred_codec, AudioCodec.FLAC, AudioCodec.OPUS, AudioCodec.PCM]
+        codec = None
+        for candidate_codec in codec_fallbacks:
+            if (
+                player_info.player_support
+                and candidate_codec.value in player_info.player_support.support_codecs
+            ):
+                # Special handling for Opus - check if sample rates are compatible
+                if candidate_codec == AudioCodec.OPUS:
+                    opus_rate_candidates = [
+                        (8000, sample_rate <= 8000),
+                        (12000, sample_rate <= 12000),
+                        (16000, sample_rate <= 16000),
+                        (24000, sample_rate <= 24000),
+                        (48000, True),  # Default fallback
+                    ]
+
+                    opus_sample_rate = None
+                    for candidate_rate, condition in opus_rate_candidates:
+                        if (
+                            condition
+                            and player_info.player_support
+                            and candidate_rate in player_info.player_support.support_sample_rates
+                        ):
+                            opus_sample_rate = candidate_rate
+                            break
+
+                    if opus_sample_rate is None:
+                        self._logger.error(
+                            "Client %s does not support any Opus sample rates, trying next codec",
+                            self.client_id,
+                        )
+                        continue  # Try next codec in fallback chain
+
+                    # Opus is viable, adjust sample rate and use it
+                    if sample_rate != opus_sample_rate:
+                        self._logger.debug(
+                            "Adjusted sample_rate for Opus on client %s: %s -> %s",
+                            self.client_id,
+                            sample_rate,
+                            opus_sample_rate,
+                        )
+                    sample_rate = opus_sample_rate
+
+                codec = candidate_codec
+                break
+
+        if codec is None:
+            raise ValueError(f"Client {self.client_id} does not support any known codec")
+
+        if codec != preferred_codec:
+            self._logger.info(
+                "Falling back from preferred codec %s to %s for client %s",
+                preferred_codec,
+                codec,
+                self.client_id,
+            )
+
+        # FLAC and PCM support any sample rate, no adjustment needed
+        return AudioFormat(sample_rate, bit_depth, channels, codec)

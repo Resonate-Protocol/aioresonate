@@ -321,8 +321,8 @@ class ClientGroup:
         for client in self._clients:
             if client.check_role(Roles.PLAYER):
                 logger.debug("Selecting format for player %s", client.client_id)
-                player_format = self.determine_player_format(
-                    client, audio_stream_format, preferred_stream_codec
+                player_format = client.determine_optimal_format(
+                    audio_stream_format, preferred_stream_codec
                 )
                 self._player_formats[client.client_id] = player_format
                 logger.debug(
@@ -346,135 +346,51 @@ class ClientGroup:
         self._current_state = PlaybackStateType.PLAYING
         self._signal_event(GroupStateChangedEvent(PlaybackStateType.PLAYING))
 
-    def determine_player_format(
-        self,
-        player: "Client",
-        source_format: AudioFormat,
-        preferred_codec: AudioCodec = AudioCodec.OPUS,
-    ) -> AudioFormat:
-        """
-        Determine the optimal audio format for the given player and source.
+    def suggest_optimal_sample_rate(self, source_sample_rate: int) -> int:
+        """Suggest an optimal sample rate for the next track.
 
-        Analyzes the player's capabilities and returns the best matching format,
-        preferring higher quality when available and falling back gracefully.
+        Analyzes all player clients in this group and returns the best sample rate that
+        minimizes resampling across group members. Preference order:
+        - If there is a common supported rate across all players, choose the one closest
+          to the source sample rate (tie-breaker: higher rate).
+        - Otherwise, choose the rate supported by the most players; among those, pick the
+          closest to the source (tie-breaker: higher rate).
 
         Args:
-            player: The player to determine a format for.
-            source_format: The source audio format to match against.
-            preferred_codec: Preferred audio codec (e.g., Opus).
-                In case the player doesn't support it, falls back to another codec.
+            source_sample_rate: The sample rate of the upcoming source media.
 
         Returns:
-            AudioFormat: The optimal format for the player.
+            The recommended sample rate in Hz.
         """
-        # TODO: move this to client.py instead
-        player_info = player.info
+        supported_sets: list[set[int]] = [
+            set(client.info.player_support.support_sample_rates)
+            for client in self._clients
+            if client.check_role(Roles.PLAYER) and client.info.player_support
+        ]
 
-        # Determine optimal sample rate
-        sample_rate = source_format.sample_rate
-        if (
-            player_info.player_support
-            and sample_rate not in player_info.player_support.support_sample_rates
-        ):
-            # Prefer lower rates that are closest to source, fallback to minimum
-            lower_rates = [
-                r for r in player_info.player_support.support_sample_rates if r < sample_rate
-            ]
-            sample_rate = (
-                max(lower_rates)
-                if lower_rates
-                else min(player_info.player_support.support_sample_rates)
-            )
-            logger.debug("Adjusted sample_rate for player %s: %s", player.client_id, sample_rate)
+        if not supported_sets:
+            return source_sample_rate
 
-        # Determine optimal bit depth
-        bit_depth = source_format.bit_depth
-        if (
-            player_info.player_support
-            and bit_depth not in player_info.player_support.support_bit_depth
-        ):
-            if 16 in player_info.player_support.support_bit_depth:
-                bit_depth = 16
-            else:
-                raise NotImplementedError("Only 16bit is supported for now")
-            logger.debug("Adjusted bit_depth for player %s: %s", player.client_id, bit_depth)
+        # Helper for choosing the closest candidate, biasing towards higher rates on ties
+        def choose(candidates: set[int]) -> int:
+            # Compute the minimal absolute distance to the source sample rate
+            best_distance = min(abs(r - source_sample_rate) for r in candidates)
+            # Keep all candidates at that distance and pick the highest rate on a tie
+            best_rates = [r for r in candidates if abs(r - source_sample_rate) == best_distance]
+            return max(best_rates)
 
-        # Determine optimal channel count
-        channels = source_format.channels
-        if (
-            player_info.player_support
-            and channels not in player_info.player_support.support_channels
-        ):
-            # Prefer stereo, then mono
-            if 2 in player_info.player_support.support_channels:
-                channels = 2
-            elif 1 in player_info.player_support.support_channels:
-                channels = 1
-            else:
-                raise NotImplementedError("Only mono and stereo are supported")
-            logger.debug("Adjusted channels for player %s: %s", player.client_id, channels)
+        # 1) Intersection across all players
+        if (supported_sets) and (intersection := set.intersection(*supported_sets)):
+            return choose(intersection)
 
-        # Determine optimal codec with fallback chain
-        codec_fallbacks = [preferred_codec, AudioCodec.FLAC, AudioCodec.OPUS, AudioCodec.PCM]
-        codec = None
-        for candidate_codec in codec_fallbacks:
-            if (
-                player_info.player_support
-                and candidate_codec.value in player_info.player_support.support_codecs
-            ):
-                # Special handling for Opus - check if sample rates are compatible
-                if candidate_codec == AudioCodec.OPUS:
-                    opus_rate_candidates = [
-                        (8000, sample_rate <= 8000),
-                        (12000, sample_rate <= 12000),
-                        (16000, sample_rate <= 16000),
-                        (24000, sample_rate <= 24000),
-                        (48000, True),  # Default fallback
-                    ]
-
-                    opus_sample_rate = None
-                    for candidate_rate, condition in opus_rate_candidates:
-                        if (
-                            condition
-                            and player_info.player_support
-                            and candidate_rate in player_info.player_support.support_sample_rates
-                        ):
-                            opus_sample_rate = candidate_rate
-                            break
-
-                    if opus_sample_rate is None:
-                        logger.error(
-                            "Player %s does not support any Opus sample rates, trying next codec",
-                            player.client_id,
-                        )
-                        continue  # Try next codec in fallback chain
-
-                    # Opus is viable, adjust sample rate and use it
-                    if sample_rate != opus_sample_rate:
-                        logger.debug(
-                            "Adjusted sample_rate for Opus on player %s: %s -> %s",
-                            player.client_id,
-                            sample_rate,
-                            opus_sample_rate,
-                        )
-                    sample_rate = opus_sample_rate
-
-                codec = candidate_codec
-                break
-
-        if codec is None:
-            raise ValueError(f"Player {player.client_id} does not support any known codec")
-
-        if codec != preferred_codec:
-            logger.info(
-                "Falling back from preferred codec %s to %s for player %s",
-                preferred_codec,
-                codec,
-                player.client_id,
-            )
-
-        # FLAC and PCM support any sample rate, no adjustment needed
-        return AudioFormat(sample_rate, bit_depth, channels, codec)
+        # 2) No common rate; pick the rate supported by the most players, then closest to source
+        counts: dict[int, int] = {}
+        for s in supported_sets:
+            for r in s:
+                counts[r] = counts.get(r, 0) + 1
+        max_count = max(counts.values())
+        top_rates = {r for r, c in counts.items() if c == max_count}
+        return choose(top_rates)
 
     def _get_or_create_audio_encoder(self, audio_format: AudioFormat) -> av.AudioCodecContext:
         """
@@ -948,8 +864,8 @@ class ClientGroup:
             logger.debug("Joining client %s to current stream", client.client_id)
             # Join it to the current stream
             if client.check_role(Roles.PLAYER):
-                player_format = self.determine_player_format(
-                    client, self._stream_audio_format, self._preferred_stream_codec
+                player_format = client.determine_optimal_format(
+                    self._stream_audio_format, self._preferred_stream_codec
                 )
                 self._player_formats[client.client_id] = player_format
             else:
