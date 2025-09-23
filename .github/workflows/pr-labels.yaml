@@ -5,6 +5,7 @@ name: PR Labels
 on:
   pull_request:
     types:
+      - opened
       - synchronize
       - labeled
       - unlabeled
