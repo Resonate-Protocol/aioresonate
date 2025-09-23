@@ -1,16 +1,19 @@
 """Represents a single client device connected to the server."""
 
 import asyncio
+import base64
 import logging
-from collections.abc import Callable, Coroutine
+from collections.abc import AsyncGenerator, Callable, Coroutine
 from contextlib import suppress
 from enum import Enum
 from typing import TYPE_CHECKING, cast
 
+import av
 from aiohttp import ClientWebSocketResponse, WSMessage, WSMsgType, web
 from attr import dataclass
+from av import logging as av_logging
 
-from aioresonate.models import unpack_binary_header
+from aioresonate.models import BinaryMessageType, pack_binary_header_raw, unpack_binary_header
 from aioresonate.models.controller import (
     GroupCommandClientMessage,
     GroupGetListClientMessage,
@@ -25,8 +28,14 @@ from aioresonate.models.core import (
     ServerHelloPayload,
     ServerTimeMessage,
     ServerTimePayload,
+    StreamStartMessage,
+    StreamStartPayload,
 )
-from aioresonate.models.player import PlayerUpdateMessage, StreamRequestFormatMessage
+from aioresonate.models.player import (
+    PlayerUpdateMessage,
+    StreamRequestFormatMessage,
+    StreamStartPlayer,
+)
 from aioresonate.models.types import ClientMessage, Roles, ServerMessage
 
 from .group import AudioCodec, AudioFormat, ClientGroup
@@ -678,3 +687,297 @@ class Client:
 
         # FLAC and PCM support any sample rate, no adjustment needed
         return AudioFormat(sample_rate, bit_depth, channels, codec)
+
+    def _build_encoder(
+        self,
+        audio_format: AudioFormat,
+        input_audio_layout: str,
+        input_audio_format: str,
+    ) -> tuple[av.AudioCodecContext | None, str | None, int]:
+        """
+        Create and open an encoder if needed.
+
+        Returns:
+            tuple of (encoder, header_b64, samples_per_chunk).
+            For PCM, returns (None, None, default_samples_per_chunk).
+        """
+        if audio_format.codec == AudioCodec.PCM:
+            # Default to ~25ms chunks for PCM
+            samples_per_chunk = int(audio_format.sample_rate * 0.025)
+            return None, None, samples_per_chunk
+
+        encoder = cast(
+            "av.AudioCodecContext", av.AudioCodecContext.create(audio_format.codec.value, "w")
+        )
+        encoder.sample_rate = audio_format.sample_rate
+        encoder.layout = input_audio_layout
+        encoder.format = input_audio_format
+        if audio_format.codec == AudioCodec.FLAC:
+            # Only default compression level for now
+            encoder.options = {"compression_level": "5"}
+        with av_logging.Capture() as logs:
+            encoder.open()
+        for log in logs:
+            self._logger.debug("Opening AudioCodecContext log from av: %s", log)
+        header = bytes(encoder.extradata) if encoder.extradata else b""
+        # For FLAC, we need to construct a proper FLAC stream header ourselves
+        # since ffmpeg only provides the StreamInfo metadata block in extradata:
+        # See https://datatracker.ietf.org/doc/rfc9639/ Section 8.1
+        if audio_format.codec == AudioCodec.FLAC and header:
+            # FLAC stream signature (4 bytes): "fLaC"
+            # Metadata block header (4 bytes):
+            # - Bit 0: last metadata block (1 since we only have one)
+            # - Bits 1-7: block type (0 for StreamInfo)
+            # - Next 3 bytes: block length of the next metadata block in bytes
+            # StreamInfo block (34 bytes): as provided by ffmpeg
+            header = b"fLaC\x80" + (len(header)).to_bytes(3, "big") + header
+        codec_header_b64 = base64.b64encode(header).decode()
+        samples_per_chunk = (
+            int(encoder.frame_size) if encoder.frame_size else int(audio_format.sample_rate * 0.025)
+        )
+        return encoder, codec_header_b64, samples_per_chunk
+
+    async def _skip_initial_bytes(
+        self, audio_stream: AsyncGenerator[bytes, None], bytes_to_skip_total: int
+    ) -> bytearray:
+        """Consume from audio_stream until bytes_to_skip_total are skipped; return remainder."""
+        pending = bytearray()
+        if bytes_to_skip_total <= 0:
+            return pending
+        async for buf in audio_stream:
+            if not buf:
+                continue
+            if bytes_to_skip_total >= len(buf):
+                bytes_to_skip_total -= len(buf)
+                continue
+            pending.extend(buf[bytes_to_skip_total:])
+            bytes_to_skip_total = 0
+            break
+        while bytes_to_skip_total > 0:
+            try:
+                buf = await audio_stream.__anext__()
+            except StopAsyncIteration:
+                return pending
+            if bytes_to_skip_total >= len(buf):
+                bytes_to_skip_total -= len(buf)
+                continue
+            pending.extend(buf[bytes_to_skip_total:])
+            bytes_to_skip_total = 0
+        return pending
+
+    def _send_pcm(self, chunk: bytes, timestamp_us: int) -> None:
+        header = pack_binary_header_raw(BinaryMessageType.AUDIO_CHUNK.value, timestamp_us)
+        self.send_message(header + chunk)
+
+    def _encode_and_send(
+        self,
+        encoder: av.AudioCodecContext,
+        input_audio_format: str,
+        input_audio_layout: str,
+        samples_per_chunk: int,
+        chunk: bytes,
+        timestamp_us: int,
+    ) -> None:
+        frame = av.AudioFrame(
+            format=input_audio_format, layout=input_audio_layout, samples=samples_per_chunk
+        )
+        frame.sample_rate = encoder.sample_rate
+        frame.planes[0].update(chunk)
+        packets = encoder.encode(frame)
+        for packet in packets:
+            header = pack_binary_header_raw(BinaryMessageType.AUDIO_CHUNK.value, timestamp_us)
+            self.send_message(header + bytes(packet))
+
+    def _calc_buffer_duration_us(self, audio_format: AudioFormat, bytes_per_sample: int) -> int:
+        """Approximate device buffer duration based on reported capacity and PCM math."""
+        assert self.info.player_support is not None
+        capacity = self.info.player_support.buffer_capacity
+        bytes_per_second = audio_format.sample_rate * audio_format.channels * bytes_per_sample
+        return int(1_000_000 * capacity / max(1, bytes_per_second))
+
+    async def _drain_and_send(
+        self,
+        *,
+        input_buffer: bytearray,
+        chunk_bytes: int,
+        audio_format: AudioFormat,
+        samples_per_chunk: int,
+        encoder: av.AudioCodecContext | None,
+        input_audio_format: str,
+        input_audio_layout: str,
+        chunk_timestamp_us: int,
+        buffer_duration_us: int,
+    ) -> int:
+        """Drain full chunks from input_buffer, send them, and apply backpressure if needed."""
+        while len(input_buffer) >= chunk_bytes:
+            chunk_to_send = bytes(input_buffer[:chunk_bytes])
+            del input_buffer[:chunk_bytes]
+
+            if audio_format.codec == AudioCodec.PCM:
+                self._send_pcm(chunk_to_send, chunk_timestamp_us)
+            else:
+                assert encoder is not None
+                self._encode_and_send(
+                    encoder,
+                    input_audio_format,
+                    input_audio_layout,
+                    samples_per_chunk,
+                    chunk_to_send,
+                    chunk_timestamp_us,
+                )
+
+            # Advance timestamp by this chunk duration
+            duration_us = int(samples_per_chunk * 1_000_000 / audio_format.sample_rate)
+            chunk_timestamp_us += duration_us
+
+            # Simple backpressure to avoid overfilling device buffers
+            now = int(self._server.loop.time() * 1_000_000)
+            time_until_play = chunk_timestamp_us - now
+            if time_until_play > buffer_duration_us:
+                await asyncio.sleep((time_until_play - buffer_duration_us) / 1_000_000)
+
+        return chunk_timestamp_us
+
+    def _flush_encoder(self, encoder: av.AudioCodecContext | None, timestamp_us: int) -> None:
+        if encoder is None:
+            return
+        for packet in encoder.encode(None):
+            header = pack_binary_header_raw(BinaryMessageType.AUDIO_CHUNK.value, timestamp_us)
+            self.send_message(header + bytes(packet))
+
+    async def _process_stream(
+        self,
+        audio_stream: AsyncGenerator[bytes, None],
+        input_buffer: bytearray,
+        *,
+        chunk_bytes: int,
+        audio_format: AudioFormat,
+        samples_per_chunk: int,
+        encoder: av.AudioCodecContext | None,
+        input_audio_format: str,
+        input_audio_layout: str,
+        chunk_timestamp_us: int,
+        buffer_duration_us: int,
+    ) -> int:
+        async for chunk in audio_stream:
+            if chunk:
+                input_buffer.extend(chunk)
+            chunk_timestamp_us = await self._drain_and_send(
+                input_buffer=input_buffer,
+                chunk_bytes=chunk_bytes,
+                audio_format=audio_format,
+                samples_per_chunk=samples_per_chunk,
+                encoder=encoder,
+                input_audio_format=input_audio_format,
+                input_audio_layout=input_audio_layout,
+                chunk_timestamp_us=chunk_timestamp_us,
+                buffer_duration_us=buffer_duration_us,
+            )
+        return chunk_timestamp_us
+
+    async def play_media_direct(
+        self,
+        audio_stream: AsyncGenerator[bytes, None],
+        audio_format: AudioFormat,
+        *,
+        play_start_time_us: int,
+        stream_start_time_us: int = 0,
+    ) -> int:
+        """
+        Stream pre-resampled PCM to this client with optional compression and precise timing.
+
+        Prefer the group-level method for simple cases. This low-level API targets advanced
+        scenarios like per-client DSP. It does not stop the client/group; the caller manages
+        lifecycle.
+
+        Mid-stream behavior: Skips PCM samples equal to `stream_start_time_us` before sending,
+        enabling seeking and late joins.
+
+        Args:
+            audio_stream: Async generator yielding PCM bytes already in `audio_format`.
+            audio_format: Target format for this client (rate, depth, channels, codec).
+            play_start_time_us: Absolute timestamp when playback should begin for the first chunk.
+            stream_start_time_us: Offset within the stream to start from (microseconds).
+
+        Returns:
+            Absolute timestamp (microseconds) when this stream will end.
+        """
+        self._ensure_role(Roles.PLAYER)
+        player_info = self.info
+        assert player_info.player_support is not None, "Player support info required"
+
+        # Validate input format
+        if audio_format.bit_depth not in (16, 24):
+            raise ValueError("Only 16 or 24 bit PCM is supported")
+        if audio_format.channels not in (1, 2):
+            raise ValueError("Only mono or stereo are supported")
+
+        bytes_per_sample = 2 if audio_format.bit_depth == 16 else 3
+        input_audio_format = "s16" if audio_format.bit_depth == 16 else "s24"
+        input_audio_layout = "stereo" if audio_format.channels == 2 else "mono"
+
+        # Setup encoder if needed and prepare codec header
+        encoder, codec_header_b64, samples_per_chunk = self._build_encoder(
+            audio_format, input_audio_layout, input_audio_format
+        )
+
+        # Send stream start to this client
+        player_stream_info = StreamStartPlayer(
+            codec=audio_format.codec.value,
+            sample_rate=audio_format.sample_rate,
+            channels=audio_format.channels,
+            bit_depth=audio_format.bit_depth,
+            codec_header=codec_header_b64,
+        )
+        self.send_message(StreamStartMessage(StreamStartPayload(player=player_stream_info)))
+
+        chunk_bytes = samples_per_chunk * audio_format.channels * bytes_per_sample
+
+        # Skip initial offset within the stream
+        bytes_to_skip_total = (
+            int((stream_start_time_us * audio_format.sample_rate) / 1_000_000)
+            * audio_format.channels
+            * bytes_per_sample
+        )
+        pending = await self._skip_initial_bytes(audio_stream, bytes_to_skip_total)
+        if bytes_to_skip_total > 0 and not pending:
+            # Nothing left to stream
+            return play_start_time_us
+
+        # Streaming loop
+        chunk_timestamp_us = play_start_time_us
+        input_buffer = pending
+
+        # Approximate buffer duration from reported capacity (assuming PCM math)
+        buffer_duration_us = self._calc_buffer_duration_us(audio_format, bytes_per_sample)
+
+        # Main streaming
+        chunk_timestamp_us = await self._process_stream(
+            audio_stream,
+            input_buffer,
+            chunk_bytes=chunk_bytes,
+            audio_format=audio_format,
+            samples_per_chunk=samples_per_chunk,
+            encoder=encoder,
+            input_audio_format=input_audio_format,
+            input_audio_layout=input_audio_layout,
+            chunk_timestamp_us=chunk_timestamp_us,
+            buffer_duration_us=buffer_duration_us,
+        )
+
+        # Drain any remaining full chunks
+        chunk_timestamp_us = await self._drain_and_send(
+            input_buffer=input_buffer,
+            chunk_bytes=chunk_bytes,
+            audio_format=audio_format,
+            samples_per_chunk=samples_per_chunk,
+            encoder=encoder,
+            input_audio_format=input_audio_format,
+            input_audio_layout=input_audio_layout,
+            chunk_timestamp_us=chunk_timestamp_us,
+            buffer_duration_us=buffer_duration_us,
+        )
+
+        # Flush encoder and return end timestamp
+        self._flush_encoder(encoder, chunk_timestamp_us)
+        return chunk_timestamp_us
