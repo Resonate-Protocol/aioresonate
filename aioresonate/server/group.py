@@ -13,7 +13,7 @@ from contextlib import suppress
 from dataclasses import dataclass
 from enum import Enum
 from io import BytesIO
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import av
 from av import logging as av_logging
@@ -449,6 +449,16 @@ class ClientGroup:
         return sentinel, format_subscribers
 
     @staticmethod
+    async def _await_task_completion(task: Task[Any]) -> None:
+        """Await task completion while squelching cancellation and logging failures."""
+        try:
+            await task
+        except asyncio.CancelledError:  # pragma: no cover - expected during shutdown
+            pass
+        except Exception:  # pragma: no cover - defensive logging
+            logger.exception("Unhandled exception while stopping task %s", task)
+
+    @staticmethod
     async def _queue_stream(
         queue: Queue[bytes | None], sentinel: None
     ) -> AsyncGenerator[bytes, None]:
@@ -806,16 +816,25 @@ class ClientGroup:
             [c.client_id for c in self._clients],
         )
 
+        active_client_tasks = list(self._client_stream_tasks.values())
+        for queue in list(self._fanout_queues.values()):
+            with suppress(QueueFull):
+                queue.put_nowait(None)
+
+        for task in active_client_tasks:
+            task.cancel()
+            self._server.loop.create_task(self._await_task_completion(task))
+        self._client_stream_tasks.clear()
+
         if self._stream_task is not None:
             self._stream_task.cancel()
-        for task in self._client_stream_tasks.values():
-            task.cancel()
-        self._client_stream_tasks.clear()
+            self._server.loop.create_task(self._await_task_completion(self._stream_task))
+            self._stream_task = None
 
         for client in self._clients:
             self._send_stream_end_msg(client)
             if client.check_role(Roles.PLAYER):
-                del self._player_formats[client.client_id]
+                self._player_formats.pop(client.client_id, None)
 
         self._audio_encoders.clear()
         self._audio_headers.clear()
