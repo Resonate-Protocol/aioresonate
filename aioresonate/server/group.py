@@ -1,10 +1,13 @@
 """Manages and synchronizes playback for a group of one or more clients."""
 
+from __future__ import annotations
+
 import asyncio
 import base64
 import logging
 import uuid
-from asyncio import QueueFull, Task
+from asyncio import Queue, QueueFull, Task
+from collections import defaultdict
 from collections.abc import AsyncGenerator, Callable, Coroutine
 from dataclasses import dataclass
 from enum import Enum
@@ -155,7 +158,7 @@ class Metadata:
 
     # TODO: inject track_progress and timestamp when sending updates?
 
-    def diff_update(self, last: "Metadata | None", timestamp: int) -> SessionUpdateMetadata:
+    def diff_update(self, last: Metadata | None, timestamp: int) -> SessionUpdateMetadata:
         """Build a SessionUpdateMetadata containing only changed fields compared to last."""
         metadata_update = SessionUpdateMetadata(timestamp=timestamp)
 
@@ -228,13 +231,13 @@ class ClientGroup:
     a group to simplify grouping requests.
     """
 
-    _clients: list["Client"]
+    _clients: list[Client]
     """List of all clients in this group."""
     _player_formats: dict[str, AudioFormat]
     """Mapping of client IDs (with the player role) to their selected audio formats."""
     _client_art_formats: dict[str, PictureFormat]
     """Mapping of client IDs (with the metadata role) to their selected artwork formats."""
-    _server: "ResonateServer"
+    _server: ResonateServer
     """Reference to the ResonateServer instance."""
     _stream_task: Task[None] | None = None
     """Task handling the audio streaming loop, None when not streaming."""
@@ -259,7 +262,7 @@ class ClientGroup:
     _scheduled_format_changes: dict[str, tuple[StreamUpdateMessage, AudioFormat]]
     """Mapping of client IDs to upcoming stream updates requested by the player."""
 
-    def __init__(self, server: "ResonateServer", *args: "Client") -> None:
+    def __init__(self, server: ResonateServer, *args: Client) -> None:
         """
         DO NOT CALL THIS CONSTRUCTOR. INTERNAL USE ONLY.
 
@@ -282,11 +285,101 @@ class ClientGroup:
         self._group_id = str(uuid.uuid4())
         self._scheduled_format_changes = {}
         self._client_art_formats = {}
+        self._client_stream_tasks: dict[str, asyncio.Task[int]] = {}
+        self._fanout_queues: dict[str, Queue[bytes | None]] = {}
         logger.debug(
             "ClientGroup initialized with %d client(s): %s",
             len(self._clients),
             [type(c).__name__ for c in self._clients],
         )
+
+    async def play_media_group(
+        self,
+        audio_stream: AsyncGenerator[bytes, None],
+        audio_stream_format: AudioFormat,
+        *,
+        preferred_stream_codec: AudioCodec = AudioCodec.OPUS,
+        play_start_time_us: int | None = None,
+        stream_start_time_us: int = 0,
+    ) -> int:
+        """Start synchronized playback for the current group.
+
+        Args:
+            audio_stream: Async generator yielding PCM audio chunks as bytes.
+            audio_stream_format: Format specification for the input audio data.
+            preferred_stream_codec: Preferred codec to use when selecting per-player formats.
+            play_start_time_us: Absolute timestamp when playback should begin. If ``None``,
+                the group schedules playback using ``INITIAL_PLAYBACK_DELAY_US`` as before.
+            stream_start_time_us: Offset within the source stream (in microseconds) that all
+                players should start from. Mid-stream joins are handled later when per-client
+                streaming is delegated.
+
+        Returns:
+            Absolute timestamp (microseconds) when the stream is expected to finish once
+            the source generator is exhausted.
+        """
+        logger.debug(
+            "Starting play_media_group with audio_stream_format=%s, "
+            "play_start_time_us=%s, stream_start_time_us=%s",
+            audio_stream_format,
+            play_start_time_us,
+            stream_start_time_us,
+        )
+        stopped = self.stop()
+        if stopped:
+            # Wait a bit to allow clients to process the stream end
+            await asyncio.sleep(0.5)
+
+        self._stream_audio_format = audio_stream_format
+        self._preferred_stream_codec = preferred_stream_codec
+        start_time_us = (
+            play_start_time_us
+            if play_start_time_us is not None
+            else int(self._server.loop.time() * 1_000_000) + INITIAL_PLAYBACK_DELAY_US
+        )
+        player_clients, format_to_clients = self._select_player_formats(
+            audio_stream_format, preferred_stream_codec
+        )
+        if not player_clients:
+            logger.warning("No player-capable clients in group; skipping playback")
+            self._send_initial_stream_start(set())
+            return start_time_us
+
+        player_ids = {client.client_id for client in player_clients}
+        self._send_initial_stream_start(player_ids)
+
+        self._fanout_queues.clear()
+        sentinel, format_subscribers = self._build_format_subscribers(format_to_clients)
+        self._stream_task = self._start_fanout_task(
+            sentinel=sentinel,
+            format_subscribers=format_subscribers,
+            audio_stream=audio_stream,
+            audio_stream_format=audio_stream_format,
+        )
+
+        self._client_stream_tasks.clear()
+        for client in player_clients:
+            queue = self._fanout_queues[client.client_id]
+            stream_gen = self._queue_stream(queue, sentinel)
+            self._client_stream_tasks[client.client_id] = self._server.loop.create_task(
+                client.play_media_direct(
+                    stream_gen,
+                    self._player_formats[client.client_id],
+                    play_start_time_us=start_time_us,
+                    stream_start_time_us=stream_start_time_us,
+                )
+            )
+
+        self._current_state = PlaybackStateType.PLAYING
+        self._signal_event(GroupStateChangedEvent(PlaybackStateType.PLAYING))
+
+        try:
+            end_times = await asyncio.gather(*self._client_stream_tasks.values())
+            await self._stream_task
+        finally:
+            self.stop()
+
+        return max(end_times) if end_times else start_time_us
 
     async def play_media(
         self,
@@ -294,57 +387,158 @@ class ClientGroup:
         audio_stream_format: AudioFormat,
         preferred_stream_codec: AudioCodec = AudioCodec.OPUS,
     ) -> None:
-        """
-        Start playback of a new media stream.
-
-        Stops any current stream and starts a new one with the given audio source.
-        The audio source should provide uncompressed PCM audio data.
-        Format conversion and synchronization for all players will be handled automatically.
-
-        Args:
-            audio_stream: Async generator yielding PCM audio chunks as bytes.
-            audio_stream_format: Format specification for the input audio data.
-        """
-        logger.debug("Starting play_media with audio_stream_format: %s", audio_stream_format)
-        stopped = self.stop()
-        if stopped:
-            # Wait a bit to allow clients to process the stream end
-            await asyncio.sleep(0.5)
-        # TODO: open questions:
-        # - how to communicate to the caller what audio_format is preferred,
-        #   especially on topology changes
-        # - how to sync metadata/media_art with this audio stream?
-
-        self._stream_audio_format = audio_stream_format
-        self._preferred_stream_codec = preferred_stream_codec
-
-        for client in self._clients:
-            if client.check_role(Roles.PLAYER):
-                logger.debug("Selecting format for player %s", client.client_id)
-                player_format = client.determine_optimal_format(
-                    audio_stream_format, preferred_stream_codec
-                )
-                self._player_formats[client.client_id] = player_format
-                logger.debug(
-                    "Sending stream start to player %s with format %s",
-                    client.client_id,
-                    player_format,
-                )
-            else:
-                logger.debug("Sending stream start to client %s", client.client_id)
-                player_format = None
-            self._send_stream_start_msg(client, player_format)
-
-        self._stream_task = self._server.loop.create_task(
-            self._stream_audio(
-                int(self._server.loop.time() * 1_000_000) + INITIAL_PLAYBACK_DELAY_US,
-                audio_stream,
-                audio_stream_format,
-            )
+        """Backward compatible wrapper around :meth:`play_media_group`."""
+        await self.play_media_group(
+            audio_stream,
+            audio_stream_format,
+            preferred_stream_codec=preferred_stream_codec,
         )
 
-        self._current_state = PlaybackStateType.PLAYING
-        self._signal_event(GroupStateChangedEvent(PlaybackStateType.PLAYING))
+    def _select_player_formats(
+        self,
+        audio_stream_format: AudioFormat,
+        preferred_stream_codec: AudioCodec,
+    ) -> tuple[list[Client], dict[AudioFormat, list[Client]]]:
+        """Select optimal formats for all player clients and group them by format."""
+        player_clients = [client for client in self._clients if client.check_role(Roles.PLAYER)]
+        format_to_clients: dict[AudioFormat, list[Client]] = defaultdict(list)
+
+        self._player_formats.clear()
+
+        for client in player_clients:
+            logger.debug("Selecting format for player %s", client.client_id)
+            player_format = client.determine_optimal_format(
+                audio_stream_format, preferred_stream_codec
+            )
+            self._player_formats[client.client_id] = player_format
+            format_to_clients[player_format].append(client)
+            logger.debug("Selected format %s for player %s", player_format, client.client_id)
+
+        return player_clients, format_to_clients
+
+    def _send_initial_stream_start(self, player_ids: set[str]) -> None:
+        """Send initial stream start messages for metadata/visualizer roles."""
+        for client in self._clients:
+            if (
+                client.client_id in player_ids
+                or client.check_role(Roles.METADATA)
+                or client.check_role(Roles.VISUALIZER)
+            ):
+                self._send_stream_start_msg(client, None)
+
+    def _build_format_subscribers(
+        self,
+        format_to_clients: dict[AudioFormat, list[Client]],
+    ) -> tuple[None, dict[AudioFormat, list[Queue[bytes | None]]]]:
+        """Create subscriber queues for each unique audio format."""
+        sentinel: None = None
+        format_subscribers: dict[AudioFormat, list[Queue[bytes | None]]] = {}
+
+        for audio_format, clients_for_format in format_to_clients.items():
+            queues: list[Queue[bytes | None]] = []
+            for client in clients_for_format:
+                queue: Queue[bytes | None] = Queue()
+                self._fanout_queues[client.client_id] = queue
+                queues.append(queue)
+            format_subscribers[audio_format] = queues
+
+        return sentinel, format_subscribers
+
+    @staticmethod
+    async def _queue_stream(
+        queue: Queue[bytes | None], sentinel: None
+    ) -> AsyncGenerator[bytes, None]:
+        """Yield chunks from ``queue`` until the sentinel marker is received."""
+        while True:
+            chunk = await queue.get()
+            if chunk is sentinel:
+                break
+            yield chunk
+
+    def _start_fanout_task(
+        self,
+        *,
+        sentinel: None,
+        format_subscribers: dict[AudioFormat, list[Queue[bytes | None]]],
+        audio_stream: AsyncGenerator[bytes, None],
+        audio_stream_format: AudioFormat,
+    ) -> asyncio.Task[None]:
+        """Start background fan-out task that resamples and distributes PCM chunks."""
+
+        async def fanout_audio() -> None:
+            format_result = self._validate_audio_format(audio_stream_format)
+            if format_result is None:
+                raise ValueError("Unsupported source audio format")
+            input_bytes_per_sample, input_audio_format, input_audio_layout = format_result
+            bytes_per_input_sample = audio_stream_format.channels * input_bytes_per_sample
+            samples_per_chunk = self._calculate_optimal_chunk_samples(audio_stream_format)
+            resamplers: dict[AudioFormat, av.AudioResampler] = {}
+            input_buffer = bytearray()
+            minimum_chunk_bytes = samples_per_chunk * bytes_per_input_sample
+
+            async def dispatch_frame(frame: av.AudioFrame) -> None:
+                for target_format, subscriber_queues in format_subscribers.items():
+                    resampler = resamplers.get(target_format)
+                    if resampler is None:
+                        resampler = av.AudioResampler(
+                            format="s16" if target_format.bit_depth == 16 else "s24",
+                            layout="stereo" if target_format.channels == 2 else "mono",
+                            rate=target_format.sample_rate,
+                        )
+                        resamplers[target_format] = resampler
+
+                    out_frames = resampler.resample(frame)
+                    for out_frame in out_frames:
+                        bytes_per_sample = 2 if target_format.bit_depth == 16 else 3
+                        expected_bytes = (
+                            bytes_per_sample * target_format.channels * out_frame.samples
+                        )
+                        pcm_bytes = bytes(out_frame.planes[0])[:expected_bytes]
+                        await asyncio.gather(
+                            *(queue.put(pcm_bytes) for queue in subscriber_queues),
+                            return_exceptions=True,
+                        )
+
+            async def process_available(*, force_flush: bool) -> None:
+                while len(input_buffer) >= bytes_per_input_sample:
+                    if not force_flush and len(input_buffer) < minimum_chunk_bytes:
+                        break
+
+                    available_samples = len(input_buffer) // bytes_per_input_sample
+                    sample_count = (
+                        available_samples
+                        if force_flush
+                        else min(available_samples, samples_per_chunk)
+                    )
+                    chunk_bytes = bytes(input_buffer[: sample_count * bytes_per_input_sample])
+                    del input_buffer[: sample_count * bytes_per_input_sample]
+
+                    frame = av.AudioFrame(
+                        format=input_audio_format,
+                        layout=input_audio_layout,
+                        samples=sample_count,
+                    )
+                    frame.sample_rate = audio_stream_format.sample_rate
+                    frame.planes[0].update(chunk_bytes)
+                    await dispatch_frame(frame)
+
+            try:
+                async for chunk in audio_stream:
+                    if chunk:
+                        input_buffer.extend(chunk)
+                    await process_available(force_flush=False)
+                await process_available(force_flush=True)
+            finally:
+                await asyncio.gather(
+                    *(
+                        queue.put(sentinel)
+                        for queues in format_subscribers.values()
+                        for queue in queues
+                    ),
+                    return_exceptions=True,
+                )
+
+        return self._server.loop.create_task(fanout_audio())
 
     def suggest_optimal_sample_rate(self, source_sample_rate: int) -> int:
         """Suggest an optimal sample rate for the next track.
@@ -498,7 +692,7 @@ class ClientGroup:
         return max_frame_size if max_frame_size > 0 else int(source_format.sample_rate * 0.025)
 
     def _send_stream_start_msg(
-        self, client: "Client", audio_format: AudioFormat | None = None
+        self, client: Client, audio_format: AudioFormat | None = None
     ) -> None:
         """Send a stream start message to a client with the specified audio format for players."""
         logger.debug(
@@ -506,9 +700,7 @@ class ClientGroup:
             client.client_id,
             audio_format,
         )
-        if client.check_role(Roles.PLAYER):
-            if audio_format is None:
-                raise ValueError("audio_format must be provided for player clients")
+        if client.check_role(Roles.PLAYER) and audio_format is not None:
             player_stream_info = StreamStartPlayer(
                 codec=audio_format.codec.value,
                 sample_rate=audio_format.sample_rate,
@@ -544,17 +736,22 @@ class ClientGroup:
             metadata=metadata_stream_info,
             visualizer=visualizer_stream_info,
         )
-        logger.debug("Sending stream start message to client %s: %s", client.client_id, stream_info)
-        client.send_message(StreamStartMessage(stream_info))
+        if player_stream_info or metadata_stream_info or visualizer_stream_info:
+            logger.debug(
+                "Sending stream start message to client %s: %s",
+                client.client_id,
+                stream_info,
+            )
+            client.send_message(StreamStartMessage(stream_info))
 
-    def _send_stream_end_msg(self, client: "Client") -> None:
+    def _send_stream_end_msg(self, client: Client) -> None:
         """Send a stream end message to a client to stop playback."""
         logger.debug("ending stream for %s (%s)", client.name, client.client_id)
         # Lifetime of album artwork is bound to the stream
         _ = self._client_art_formats.pop(client.client_id, None)
         client.send_message(StreamEndMessage())
 
-    def stop(self) -> bool:
+    def stop(self, stop_time_us: int | None = None) -> bool:
         """
         Stop playback for the group and clean up resources.
 
@@ -563,18 +760,48 @@ class ClientGroup:
         - Sends stream end messages to all clients
         - Clears all buffers and format mappings
         - Cleans up all audio encoders
+        - Clears active client stream tasks
+
+        Args:
+            stop_time_us: Optional absolute timestamp (microseconds) when playback should
+                stop. When provided and in the future, the stop request is scheduled and
+                this method returns immediately.
 
         Returns:
-            bool: True if an active stream was stopped, False if no stream was active.
+            bool: True if an active or scheduled stream was stopped (or scheduled to stop),
+            False if no stream was active.
         """
-        if self._stream_task is None:
+        active = self._stream_task is not None or bool(self._client_stream_tasks)
+
+        if stop_time_us is not None:
+            now_us = int(self._server.loop.time() * 1_000_000)
+            if stop_time_us > now_us:
+                delay = (stop_time_us - now_us) / 1_000_000
+
+                def _delayed_stop() -> None:
+                    try:
+                        self.stop()
+                    except Exception:  # pragma: no cover - defensive safety net
+                        logger.exception("Scheduled stop failed")
+
+                self._server.loop.call_later(delay, _delayed_stop)
+                return active
+
+        if not active:
             logger.debug("stop called but no active stream task")
             return False
+
         logger.debug(
             "Stopping playback for group with clients: %s",
             [c.client_id for c in self._clients],
         )
-        _ = self._stream_task.cancel()  # Don't care about cancellation result
+
+        if self._stream_task is not None:
+            self._stream_task.cancel()
+        for task in self._client_stream_tasks.values():
+            task.cancel()
+        self._client_stream_tasks.clear()
+
         for client in self._clients:
             self._send_stream_end_msg(client)
             if client.check_role(Roles.PLAYER):
@@ -582,8 +809,10 @@ class ClientGroup:
 
         self._audio_encoders.clear()
         self._audio_headers.clear()
+        self._fanout_queues.clear()
         self._stream_task = None
         self._current_media_art = None
+        self._stream_audio_format = None
 
         if self._current_state != PlaybackStateType.STOPPED:
             self._signal_event(GroupStateChangedEvent(PlaybackStateType.STOPPED))
@@ -711,7 +940,7 @@ class ClientGroup:
 
         return letterboxed
 
-    def _send_media_art_to_client(self, client: "Client", image: Image.Image) -> None:
+    def _send_media_art_to_client(self, client: Client, image: Image.Image) -> None:
         """Send media art to a specific client with appropriate format and sizing."""
         if not client.check_role(Roles.METADATA) or not client.info.metadata_support:
             return
@@ -758,7 +987,7 @@ class ClientGroup:
             client.send_message(header + img_data)
 
     @property
-    def clients(self) -> list["Client"]:
+    def clients(self) -> list[Client]:
         """All clients that are part of this group."""
         return self._clients
 
@@ -795,7 +1024,7 @@ class ClientGroup:
         """Current playback state of the group."""
         return self._current_state
 
-    def remove_client(self, client: "Client") -> None:
+    def remove_client(self, client: Client) -> None:
         """
         Remove a client from this group.
 
@@ -834,7 +1063,7 @@ class ClientGroup:
         # Each client needs to be in a group, add it to a new one
         client._set_group(ClientGroup(self._server, client))  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
 
-    def add_client(self, client: "Client") -> None:
+    def add_client(self, client: Client) -> None:
         """
         Add a client to this group.
 
@@ -935,7 +1164,7 @@ class ClientGroup:
 
     def _resample_and_encode_to_player(
         self,
-        player: "Client",
+        player: Client,
         player_format: AudioFormat,
         in_frame: av.AudioFrame,
         resamplers: dict[AudioFormat, av.AudioResampler],
@@ -1003,8 +1232,8 @@ class ClientGroup:
 
     def handle_stream_format_request(
         self,
-        player: "Client",
-        request: "StreamRequestFormatPayload",
+        player: Client,
+        request: StreamRequestFormatPayload,
     ) -> None:
         """Handle stream/request-format from a player and send stream/update."""
         # Only applicable if there is an active stream
@@ -1094,7 +1323,7 @@ class ClientGroup:
             new_format,
         )
 
-    def _update_player_format(self, player: "Client") -> None:
+    def _update_player_format(self, player: Client) -> None:
         """Apply any scheduled format changes for a player if needed."""
         if change := self._scheduled_format_changes.pop(player.client_id, None):
             format_change_message, new_format = change
