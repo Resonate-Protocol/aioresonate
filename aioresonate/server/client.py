@@ -3,10 +3,11 @@
 import asyncio
 import base64
 import logging
+from collections import deque
 from collections.abc import AsyncGenerator, Callable, Coroutine
 from contextlib import suppress
 from enum import Enum
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, NamedTuple, cast
 
 import av
 from aiohttp import ClientWebSocketResponse, WSMessage, WSMsgType, web
@@ -41,6 +42,254 @@ from aioresonate.models.types import ClientMessage, Roles, ServerMessage
 from .group import AudioCodec, AudioFormat, ClientGroup
 
 MAX_PENDING_MSG = 512
+BUFFER_HIGH_WATERMARK_RATIO = 0.9
+BUFFER_SLEEP_MIN_US = 5_000
+
+
+class _BufferedChunk(NamedTuple):
+    """Represents compressed audio bytes scheduled for playback."""
+
+    end_time_us: int
+    """Absolute timestamp when these bytes should be fully consumed."""
+    byte_count: int
+    """Compressed byte count occupying the device buffer."""
+
+
+def _samples_to_microseconds(sample_count: int, sample_rate: int) -> int:
+    """Convert a number of samples to microseconds using ``sample_rate``."""
+    return int(sample_count * 1_000_000 / sample_rate)
+
+
+class _BufferTracker:
+    """Tracks compressed bytes queued for playback and applies backpressure."""
+
+    __slots__ = (
+        "_logger",
+        "_loop",
+        "buffered_bytes",
+        "buffered_chunks",
+        "capacity_bytes",
+        "client_id",
+        "high_water_bytes",
+        "max_usage_bytes",
+    )
+
+    def __init__(
+        self,
+        *,
+        loop: asyncio.AbstractEventLoop,
+        logger: logging.Logger,
+        client_id: str,
+        capacity_bytes: int,
+    ) -> None:
+        self._loop = loop
+        self._logger = logger
+        self.client_id = client_id
+        self.capacity_bytes = capacity_bytes
+        self.high_water_bytes = max(1, int(capacity_bytes * BUFFER_HIGH_WATERMARK_RATIO))
+        self.buffered_chunks: deque[_BufferedChunk] = deque()
+        self.buffered_bytes = 0
+        self.max_usage_bytes = 0
+
+    def prune_consumed(self, now_us: int | None = None) -> int:
+        """Drop chunks that should have finished playback by ``now_us``."""
+        if now_us is None:
+            now_us = int(self._loop.time() * 1_000_000)
+        while self.buffered_chunks and self.buffered_chunks[0].end_time_us <= now_us:
+            self.buffered_bytes -= self.buffered_chunks.popleft().byte_count
+        self.buffered_bytes = max(self.buffered_bytes, 0)
+        return now_us
+
+    async def wait_for_capacity(self, bytes_needed: int, expected_end_us: int) -> None:
+        """Block until the device buffer can accept ``bytes_needed`` more bytes."""
+        if bytes_needed <= 0:
+            return
+        if bytes_needed >= self.capacity_bytes:
+            self._logger.warning(
+                "Chunk size %s exceeds reported buffer capacity %s for client %s",
+                bytes_needed,
+                self.capacity_bytes,
+                self.client_id,
+            )
+            return
+
+        while True:
+            now_us = self.prune_consumed()
+            projected_usage = self.buffered_bytes + bytes_needed
+            if projected_usage <= self.capacity_bytes:
+                if projected_usage > self.high_water_bytes and self.capacity_bytes:
+                    fill = 100 * projected_usage / self.capacity_bytes
+                    self._logger.debug(
+                        "Buffer at %.1f%% for client %s (%s/%s bytes)",
+                        fill,
+                        self.client_id,
+                        projected_usage,
+                        self.capacity_bytes,
+                    )
+                return
+
+            sleep_target_us = (
+                self.buffered_chunks[0].end_time_us if self.buffered_chunks else expected_end_us
+            )
+            sleep_us = max(BUFFER_SLEEP_MIN_US, sleep_target_us - now_us)
+            await asyncio.sleep(sleep_us / 1_000_000)
+
+    def register(self, end_time_us: int, byte_count: int) -> None:
+        """Record bytes added to the buffer finishing at ``end_time_us``."""
+        if byte_count <= 0:
+            return
+        self.buffered_chunks.append(_BufferedChunk(end_time_us, byte_count))
+        self.buffered_bytes += byte_count
+        self.max_usage_bytes = max(self.max_usage_bytes, self.buffered_bytes)
+
+
+class _DirectStreamContext:
+    """Holds state while streaming audio directly to a client."""
+
+    __slots__ = (
+        "_send_pcm",
+        "audio_format",
+        "buffer_tracker",
+        "client",
+        "compressed_bytes_sent",
+        "encoder",
+        "frame_stride_bytes",
+        "input_audio_format",
+        "input_audio_layout",
+        "pcm_bytes_consumed",
+        "play_start_time_us",
+        "samples_enqueued_total",
+        "samples_per_chunk",
+        "samples_sent_total",
+    )
+
+    def __init__(
+        self,
+        *,
+        client: "Client",
+        audio_format: AudioFormat,
+        input_audio_format: str,
+        input_audio_layout: str,
+        samples_per_chunk: int,
+        buffer_tracker: _BufferTracker,
+        play_start_time_us: int,
+        encoder: av.AudioCodecContext | None,
+        frame_stride_bytes: int,
+        send_pcm: Callable[[bytes, int], None],
+    ) -> None:
+        self.client = client
+        self.audio_format = audio_format
+        self.input_audio_format = input_audio_format
+        self.input_audio_layout = input_audio_layout
+        self.samples_per_chunk = samples_per_chunk
+        self._send_pcm = send_pcm
+        self.buffer_tracker = buffer_tracker
+        self.play_start_time_us = play_start_time_us
+        self.encoder = encoder
+        self.frame_stride_bytes = frame_stride_bytes
+        self.samples_enqueued_total = 0
+        self.samples_sent_total = 0
+        self.pcm_bytes_consumed = 0
+        self.compressed_bytes_sent = 0
+
+    @property
+    def sample_rate(self) -> int:
+        return self.audio_format.sample_rate
+
+    def _timeline_us(self, samples: int) -> int:
+        return self.play_start_time_us + _samples_to_microseconds(samples, self.sample_rate)
+
+    async def send_pcm_chunk(self, chunk: bytes, sample_count: int) -> None:
+        start_us = self._timeline_us(self.samples_sent_total)
+        end_us = self._timeline_us(self.samples_sent_total + sample_count)
+        await self.buffer_tracker.wait_for_capacity(len(chunk), end_us)
+        self._send_pcm(chunk, start_us)
+        self.buffer_tracker.register(end_us, len(chunk))
+        self.samples_sent_total += sample_count
+        self.compressed_bytes_sent += len(chunk)
+
+    async def send_encoded_chunk(self, chunk: bytes, sample_count: int) -> None:
+        encoder = self.encoder
+        if encoder is None:
+            raise RuntimeError("send_encoded_chunk called without encoder")
+
+        frame = av.AudioFrame(
+            format=self.input_audio_format,
+            layout=self.input_audio_layout,
+            samples=sample_count,
+        )
+        frame.sample_rate = encoder.sample_rate
+        frame.planes[0].update(chunk)
+
+        self.samples_enqueued_total += sample_count
+        packets = encoder.encode(frame)
+
+        if not packets:
+            return
+
+        for packet in packets:
+            available_samples = max(self.samples_enqueued_total - self.samples_sent_total, 0)
+            packet_samples = packet.duration or available_samples
+            if available_samples and packet_samples > available_samples:
+                packet_samples = available_samples
+            if packet_samples <= 0:
+                packet_samples = packet.duration or self.samples_per_chunk
+
+            payload = bytes(packet)
+            start_us = self._timeline_us(self.samples_sent_total)
+            end_us = self._timeline_us(self.samples_sent_total + packet_samples)
+            await self.buffer_tracker.wait_for_capacity(len(payload), end_us)
+            header = pack_binary_header_raw(BinaryMessageType.AUDIO_CHUNK.value, start_us)
+            self.client.send_message(header + payload)
+            self.buffer_tracker.register(end_us, len(payload))
+            self.compressed_bytes_sent += len(payload)
+            self.samples_sent_total += packet_samples
+
+    async def flush_encoder(self) -> None:
+        encoder = self.encoder
+        if encoder is None:
+            return
+
+        for packet in encoder.encode(None):
+            available_samples = max(self.samples_enqueued_total - self.samples_sent_total, 0)
+            packet_samples = packet.duration or available_samples or self.samples_per_chunk
+            if available_samples and packet_samples > available_samples:
+                packet_samples = available_samples
+
+            payload = bytes(packet)
+            start_us = self._timeline_us(self.samples_sent_total)
+            end_us = self._timeline_us(self.samples_sent_total + packet_samples)
+            await self.buffer_tracker.wait_for_capacity(len(payload), end_us)
+            header = pack_binary_header_raw(BinaryMessageType.AUDIO_CHUNK.value, start_us)
+            self.client.send_message(header + payload)
+            self.buffer_tracker.register(end_us, len(payload))
+            self.compressed_bytes_sent += len(payload)
+            self.samples_sent_total += packet_samples
+
+    async def drain_ready_chunks(self, input_buffer: bytearray, *, force_flush: bool) -> None:
+        while True:
+            available_samples = len(input_buffer) // self.frame_stride_bytes
+            if available_samples <= 0:
+                return
+
+            if not force_flush and available_samples < self.samples_per_chunk:
+                return
+            sample_count = (
+                available_samples if force_flush else min(available_samples, self.samples_per_chunk)
+            )
+            chunk_size = sample_count * self.frame_stride_bytes
+            if chunk_size <= 0:
+                return
+
+            chunk = bytes(input_buffer[:chunk_size])
+            del input_buffer[:chunk_size]
+            self.pcm_bytes_consumed += chunk_size
+
+            if self.encoder is None:
+                await self.send_pcm_chunk(chunk, sample_count)
+            else:
+                await self.send_encoded_chunk(chunk, sample_count)
+
 
 logger = logging.getLogger(__name__)
 
@@ -769,112 +1018,6 @@ class Client:
         header = pack_binary_header_raw(BinaryMessageType.AUDIO_CHUNK.value, timestamp_us)
         self.send_message(header + chunk)
 
-    def _encode_and_send(
-        self,
-        encoder: av.AudioCodecContext,
-        input_audio_format: str,
-        input_audio_layout: str,
-        samples_per_chunk: int,
-        chunk: bytes,
-        timestamp_us: int,
-    ) -> None:
-        frame = av.AudioFrame(
-            format=input_audio_format, layout=input_audio_layout, samples=samples_per_chunk
-        )
-        frame.sample_rate = encoder.sample_rate
-        frame.planes[0].update(chunk)
-        packets = encoder.encode(frame)
-        for packet in packets:
-            header = pack_binary_header_raw(BinaryMessageType.AUDIO_CHUNK.value, timestamp_us)
-            self.send_message(header + bytes(packet))
-
-    def _calc_buffer_duration_us(self, audio_format: AudioFormat, bytes_per_sample: int) -> int:
-        """Approximate device buffer duration based on reported capacity and PCM math."""
-        assert self.info.player_support is not None
-        capacity = self.info.player_support.buffer_capacity
-        bytes_per_second = audio_format.sample_rate * audio_format.channels * bytes_per_sample
-        return int(1_000_000 * capacity / max(1, bytes_per_second))
-
-    async def _drain_and_send(
-        self,
-        *,
-        input_buffer: bytearray,
-        chunk_bytes: int,
-        audio_format: AudioFormat,
-        samples_per_chunk: int,
-        encoder: av.AudioCodecContext | None,
-        input_audio_format: str,
-        input_audio_layout: str,
-        chunk_timestamp_us: int,
-        buffer_duration_us: int,
-    ) -> int:
-        """Drain full chunks from input_buffer, send them, and apply backpressure if needed."""
-        while len(input_buffer) >= chunk_bytes:
-            chunk_to_send = bytes(input_buffer[:chunk_bytes])
-            del input_buffer[:chunk_bytes]
-
-            if audio_format.codec == AudioCodec.PCM:
-                self._send_pcm(chunk_to_send, chunk_timestamp_us)
-            else:
-                assert encoder is not None
-                self._encode_and_send(
-                    encoder,
-                    input_audio_format,
-                    input_audio_layout,
-                    samples_per_chunk,
-                    chunk_to_send,
-                    chunk_timestamp_us,
-                )
-
-            # Advance timestamp by this chunk duration
-            duration_us = int(samples_per_chunk * 1_000_000 / audio_format.sample_rate)
-            chunk_timestamp_us += duration_us
-
-            # Simple backpressure to avoid overfilling device buffers
-            now = int(self._server.loop.time() * 1_000_000)
-            time_until_play = chunk_timestamp_us - now
-            if time_until_play > buffer_duration_us:
-                await asyncio.sleep((time_until_play - buffer_duration_us) / 1_000_000)
-
-        return chunk_timestamp_us
-
-    def _flush_encoder(self, encoder: av.AudioCodecContext | None, timestamp_us: int) -> None:
-        if encoder is None:
-            return
-        for packet in encoder.encode(None):
-            header = pack_binary_header_raw(BinaryMessageType.AUDIO_CHUNK.value, timestamp_us)
-            self.send_message(header + bytes(packet))
-
-    async def _process_stream(
-        self,
-        audio_stream: AsyncGenerator[bytes, None],
-        input_buffer: bytearray,
-        *,
-        chunk_bytes: int,
-        audio_format: AudioFormat,
-        samples_per_chunk: int,
-        encoder: av.AudioCodecContext | None,
-        input_audio_format: str,
-        input_audio_layout: str,
-        chunk_timestamp_us: int,
-        buffer_duration_us: int,
-    ) -> int:
-        async for chunk in audio_stream:
-            if chunk:
-                input_buffer.extend(chunk)
-            chunk_timestamp_us = await self._drain_and_send(
-                input_buffer=input_buffer,
-                chunk_bytes=chunk_bytes,
-                audio_format=audio_format,
-                samples_per_chunk=samples_per_chunk,
-                encoder=encoder,
-                input_audio_format=input_audio_format,
-                input_audio_layout=input_audio_layout,
-                chunk_timestamp_us=chunk_timestamp_us,
-                buffer_duration_us=buffer_duration_us,
-            )
-        return chunk_timestamp_us
-
     async def play_media_direct(
         self,
         audio_stream: AsyncGenerator[bytes, None],
@@ -931,53 +1074,59 @@ class Client:
         )
         self.send_message(StreamStartMessage(StreamStartPayload(player=player_stream_info)))
 
-        chunk_bytes = samples_per_chunk * audio_format.channels * bytes_per_sample
+        frame_stride_bytes = audio_format.channels * bytes_per_sample
+        buffer_capacity_bytes = player_info.player_support.buffer_capacity
+        buffer_tracker = _BufferTracker(
+            loop=self._server.loop,
+            logger=self._logger,
+            client_id=self.client_id,
+            capacity_bytes=buffer_capacity_bytes,
+        )
+        context = _DirectStreamContext(
+            client=self,
+            audio_format=audio_format,
+            input_audio_format=input_audio_format,
+            input_audio_layout=input_audio_layout,
+            samples_per_chunk=samples_per_chunk,
+            buffer_tracker=buffer_tracker,
+            play_start_time_us=play_start_time_us,
+            encoder=encoder,
+            frame_stride_bytes=frame_stride_bytes,
+            send_pcm=self._send_pcm,
+        )
 
         # Skip initial offset within the stream
         bytes_to_skip_total = (
-            int((stream_start_time_us * audio_format.sample_rate) / 1_000_000)
-            * audio_format.channels
-            * bytes_per_sample
+            int((stream_start_time_us * audio_format.sample_rate) / 1_000_000) * frame_stride_bytes
         )
         pending = await self._skip_initial_bytes(audio_stream, bytes_to_skip_total)
         if bytes_to_skip_total > 0 and not pending:
-            # Nothing left to stream
             return play_start_time_us
 
-        # Streaming loop
-        chunk_timestamp_us = play_start_time_us
         input_buffer = pending
 
-        # Approximate buffer duration from reported capacity (assuming PCM math)
-        buffer_duration_us = self._calc_buffer_duration_us(audio_format, bytes_per_sample)
+        async for chunk in audio_stream:
+            if not chunk:
+                continue
+            input_buffer.extend(chunk)
+            await context.drain_ready_chunks(input_buffer, force_flush=False)
 
-        # Main streaming
-        chunk_timestamp_us = await self._process_stream(
-            audio_stream,
-            input_buffer,
-            chunk_bytes=chunk_bytes,
-            audio_format=audio_format,
-            samples_per_chunk=samples_per_chunk,
-            encoder=encoder,
-            input_audio_format=input_audio_format,
-            input_audio_layout=input_audio_layout,
-            chunk_timestamp_us=chunk_timestamp_us,
-            buffer_duration_us=buffer_duration_us,
+        await context.drain_ready_chunks(input_buffer, force_flush=True)
+        await context.flush_encoder()
+
+        buffer_tracker.prune_consumed()
+        end_timestamp_us = play_start_time_us + _samples_to_microseconds(
+            context.samples_sent_total,
+            audio_format.sample_rate,
         )
 
-        # Drain any remaining full chunks
-        chunk_timestamp_us = await self._drain_and_send(
-            input_buffer=input_buffer,
-            chunk_bytes=chunk_bytes,
-            audio_format=audio_format,
-            samples_per_chunk=samples_per_chunk,
-            encoder=encoder,
-            input_audio_format=input_audio_format,
-            input_audio_layout=input_audio_layout,
-            chunk_timestamp_us=chunk_timestamp_us,
-            buffer_duration_us=buffer_duration_us,
+        self._logger.debug(
+            "Completed direct stream for client %s: pcm=%sB compressed=%sB max_buffer=%s/%sB",
+            self.client_id,
+            context.pcm_bytes_consumed,
+            context.compressed_bytes_sent,
+            buffer_tracker.max_usage_bytes,
+            buffer_capacity_bytes,
         )
 
-        # Flush encoder and return end timestamp
-        self._flush_encoder(encoder, chunk_timestamp_us)
-        return chunk_timestamp_us
+        return end_timestamp_us

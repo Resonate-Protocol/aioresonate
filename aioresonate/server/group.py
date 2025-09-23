@@ -419,11 +419,10 @@ class ClientGroup:
     def _send_initial_stream_start(self, player_ids: set[str]) -> None:
         """Send initial stream start messages for metadata/visualizer roles."""
         for client in self._clients:
-            if (
-                client.client_id in player_ids
-                or client.check_role(Roles.METADATA)
-                or client.check_role(Roles.VISUALIZER)
-            ):
+            if client.client_id in player_ids:
+                # Player clients receive their stream/start from play_media_direct.
+                continue
+            if client.check_role(Roles.METADATA) or client.check_role(Roles.VISUALIZER):
                 self._send_stream_start_msg(client, None)
 
     def _build_format_subscribers(
