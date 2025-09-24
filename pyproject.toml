@@ -13,7 +13,14 @@ classifiers = [
   "Programming Language :: Python :: 3.12",
   "Programming Language :: Python :: 3.13",
 ]
-dependencies = ["aiohttp>=3.9.2", "av>=15.0.0", "pillow>=11.0.0", "zeroconf>=0.147", "mashumaro>=3.14"]
+dependencies = [
+  "aiohttp>=3.9.2",
+  "av>=15.0.0",
+  "mashumaro>=3.14",
+  "orjson>=3.10.0",
+  "pillow>=11.0.0",
+  "zeroconf>=0.147",
+]
 
 description = "Async Python implementation of the Resonate Protocol."
 license = { text = "Apache-2.0" }
@@ -35,6 +42,12 @@ test = [
   "tomli==2.2.1",
   "ruff==0.13.1",
 ]
+cli = [
+  "sounddevice>=0.4.6",
+]
+
+[project.scripts]
+resonate-cli = "aioresonate.cli:main"
 
 [tool.codespell]
 # ignore-words-list = ""
@@ -42,6 +55,9 @@ test = [
 [tool.ruff]
 fix = true
 show-fixes = true
+exclude = [
+  "esphome-resonate-implementation",
+]
 
 line-length = 100
 target-version = "py312"
@@ -61,6 +77,7 @@ max-statements = 50
 platform = "linux"
 python_version = "3.12"
 follow_imports = "normal"
+exclude = "esphome-resonate-implementation"
 
 # suppress errors about unsatisfied imports
 ignore_missing_imports = true

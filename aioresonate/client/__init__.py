@@ -1,6 +1,5 @@
-"""
-Resonate Client implementation to connect to a Resonate Server and play audio.
+"""Public interface for the Resonate client package."""
 
-ResonateClient is a python library that implements a client for the Resonate
-protocol, providing a base for building resonate-compatible client applications.
-"""
+from .client import ResonateClient
+
+__all__ = ["ResonateClient"]
