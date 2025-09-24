@@ -634,6 +634,8 @@ class ClientGroup:
     def _send_stream_end_msg(self, client: "Client") -> None:
         """Send a stream end message to a client to stop playback."""
         logger.debug("ending stream for %s (%s)", client.name, client.client_id)
+        # Lifetime of album artwork is bound to the stream
+        _ = self._client_art_formats.pop(client.client_id, None)
         client.send_message(StreamEndMessage())
 
     def stop(self) -> bool:
