@@ -281,6 +281,7 @@ class ClientGroup:
         self._event_cbs = []
         self._group_id = str(uuid.uuid4())
         self._scheduled_format_changes = {}
+        self._client_art_formats = {}
         logger.debug(
             "ClientGroup initialized with %d client(s): %s",
             len(self._clients),
