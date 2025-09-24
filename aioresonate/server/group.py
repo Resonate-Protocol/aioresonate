@@ -281,6 +281,7 @@ class ClientGroup:
         self._event_cbs = []
         self._group_id = str(uuid.uuid4())
         self._scheduled_format_changes = {}
+        self._client_art_formats = {}
         logger.debug(
             "ClientGroup initialized with %d client(s): %s",
             len(self._clients),
@@ -633,6 +634,8 @@ class ClientGroup:
     def _send_stream_end_msg(self, client: "Client") -> None:
         """Send a stream end message to a client to stop playback."""
         logger.debug("ending stream for %s (%s)", client.name, client.client_id)
+        # Lifetime of album artwork is bound to the stream
+        _ = self._client_art_formats.pop(client.client_id, None)
         client.send_message(StreamEndMessage())
 
     def stop(self) -> bool:
@@ -797,7 +800,10 @@ class ClientGroup:
         if not client.check_role(Roles.METADATA) or not client.info.metadata_support:
             return
 
-        art_format = self._client_art_formats[client.client_id]
+        art_format = self._client_art_formats.get(client.client_id)
+        if art_format is None:
+            # Do nothing if we are not in an active session or this client doesn't support artwork
+            return
         metadata_support = client.info.metadata_support
         width = metadata_support.media_width
         height = metadata_support.media_height
