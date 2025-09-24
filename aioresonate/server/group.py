@@ -800,7 +800,10 @@ class ClientGroup:
         if not client.check_role(Roles.METADATA) or not client.info.metadata_support:
             return
 
-        art_format = self._client_art_formats[client.client_id]
+        art_format = self._client_art_formats.get(client.client_id)
+        if art_format is None:
+            # Do nothing if we are not in an active session or this client doesn't support artwork
+            return
         metadata_support = client.info.metadata_support
         width = metadata_support.media_width
         height = metadata_support.media_height
