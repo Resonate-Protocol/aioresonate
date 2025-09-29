@@ -782,7 +782,6 @@ class Client:
     def determine_optimal_format(
         self,
         source_format: AudioFormat,
-        preferred_codec: AudioCodec = AudioCodec.OPUS,
     ) -> AudioFormat:
         """
         Determine the optimal audio format for this client given a source format.
@@ -845,7 +844,7 @@ class Client:
             self._logger.debug("Adjusted channels for client %s: %s", self.client_id, channels)
 
         # Determine optimal codec with fallback chain
-        codec_fallbacks = [preferred_codec, AudioCodec.FLAC, AudioCodec.OPUS, AudioCodec.PCM]
+        codec_fallbacks = [AudioCodec.FLAC, AudioCodec.OPUS, AudioCodec.PCM]
         codec = None
         for candidate_codec in codec_fallbacks:
             if (
@@ -894,14 +893,6 @@ class Client:
 
         if codec is None:
             raise ValueError(f"Client {self.client_id} does not support any known codec")
-
-        if codec != preferred_codec:
-            self._logger.info(
-                "Falling back from preferred codec %s to %s for client %s",
-                preferred_codec,
-                codec,
-                self.client_id,
-            )
 
         # FLAC and PCM support any sample rate, no adjustment needed
         return AudioFormat(sample_rate, bit_depth, channels, codec)

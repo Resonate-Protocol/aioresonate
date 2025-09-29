@@ -14,7 +14,7 @@ from contextlib import suppress
 from dataclasses import dataclass
 from enum import Enum
 from io import BytesIO
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, cast
 
 import av
 from av import logging as av_logging
@@ -75,35 +75,6 @@ class AudioCodec(Enum):
 
 class GroupEvent:
     """Base event type used by ClientGroup.add_event_listener()."""
-
-
-class DirectStreamSession(ABC):
-    """Interface integrations can implement to supply per-client PCM streams.
-
-    Implementations are responsible for ensuring returned generators stay
-    aligned with the shared playback clock. Generators may be cancelled at any
-    time when clients leave or playback stops.
-    """
-
-    supports_seek: bool = False
-    """True when the session can start streams at arbitrary offsets."""
-
-    def handles_client(self, _client: Client) -> bool:
-        """Return ``True`` when this session replaces the shared stream for ``client``."""
-        return True
-
-    @abstractmethod
-    async def get_stream(
-        self,
-        client: Client,
-        start_time_us: int,
-        offset_time_us: int,
-    ) -> AsyncGenerator[bytes, None] | None:
-        """Return PCM for ``client`` or ``None`` to fall back to the shared resampler.
-
-        The returned generator may be cancelled at any time if the client leaves
-        or playback stops.
-        """
 
 
 # TODO: make types more fancy
@@ -255,6 +226,46 @@ class Metadata:
         return metadata_update
 
 
+class DirectStreamSession(ABC):
+    """
+    Interface resonate servers can implement to supply per-client PCM streams.
+
+    Implementations are responsible for ensuring returned generators stay
+    aligned with the shared playback clock. Generators may be cancelled at any
+    time when clients leave or playback stops.
+    """
+
+    supports_seek: bool = False
+    """
+    True when the session can start streams at arbitrary offsets.
+
+    If False offset_time_us passed to get_stream() will always be 0.
+    """
+
+    def handles_client(self, _client: Client) -> bool:
+        """Return True when this session replaces the shared stream for client."""
+        return True
+
+    @abstractmethod
+    async def get_stream(
+        self,
+        client: Client,
+        audio_format: AudioFormat,
+        start_time_us: int,
+        offset_time_us: int,
+    ) -> AsyncGenerator[bytes, None]:
+        """
+        Return PCM audio stream for a client.
+
+        Will only be called for clients where handles_client() returned True.
+
+        The returned generator may be cancelled at any time if the client leaves
+        or playback stops.
+
+        The generator must yield raw PCM audio chunks in the specified format.
+        """
+
+
 class ClientGroup:
     """
     A group of one or more clients for synchronized playback.
@@ -334,27 +345,30 @@ class ClientGroup:
         audio_stream: AsyncGenerator[bytes, None],
         audio_stream_format: AudioFormat,
         *,
-        preferred_stream_codec: AudioCodec | None = AudioCodec.OPUS,
         play_start_time_us: int | None = None,
         stream_start_time_us: int = 0,
         direct_session: DirectStreamSession | None = None,
     ) -> int:
-        """Start synchronized playback for the current group.
+        """
+        Start synchronized playback for the current group.
+
+        TODO: caller is responsible to play new media or stop stream
 
         Args:
             audio_stream: Async generator yielding PCM audio chunks as bytes.
             audio_stream_format: Format specification for the input audio data.
-            preferred_stream_codec: Preferred codec to use when selecting per-player formats.
-            play_start_time_us: Absolute timestamp when playback should begin. If ``None``,
-                the group schedules playback using ``INITIAL_PLAYBACK_DELAY_US`` as before.
+            play_start_time_us: Absolute timestamp when playback should begin. If None,
+                the group schedules playback as soon as possible.
+                Use this to schedule the next track in advance for gapless playback.
             stream_start_time_us: Offset within the source stream (in microseconds) that all
                 players should start from. Mid-stream joins are handled later when per-client
                 streaming is delegated.
-            direct_session: Optional integration-provided streamer for per-client audio.
+            direct_session: Optional DirectStreamSession instance that can provide per-client
+                PCM streams for any client. (For example, to handle DSP independently per client.)
 
         Returns:
             Absolute timestamp (microseconds) when the stream is expected to finish once
-            the source generator is exhausted.
+            the audio_stream generator is exhausted.
         """
         logger.debug(
             "Starting play_media with audio_stream_format=%s, "
@@ -363,28 +377,33 @@ class ClientGroup:
             play_start_time_us,
             stream_start_time_us,
         )
-        stopped = self.stop()
-        if stopped:
-            # Wait a bit to allow clients to process the stream end
-            await asyncio.sleep(0.5)
 
         self._stream_audio_format = audio_stream_format
-        self._preferred_stream_codec = preferred_stream_codec or AudioCodec.OPUS
         start_time_us = (
             play_start_time_us
             if play_start_time_us is not None
             else int(self._server.loop.time() * 1_000_000) + INITIAL_PLAYBACK_DELAY_US
         )
-        player_clients, format_to_clients = self._select_player_formats(
-            audio_stream_format, self._preferred_stream_codec
-        )
-        if not player_clients:
-            logger.warning("No player-capable clients in group; skipping playback")
-            self._send_initial_stream_start(set())
-            return start_time_us
+        player_clients = [client for client in self._clients if client.check_role(Roles.PLAYER)]
+        format_to_clients: dict[AudioFormat, list[Client]] = defaultdict(list)
+
+        self._player_formats.clear()
+
+        for client in player_clients:
+            logger.debug("Selecting format for player %s", client.client_id)
+            player_format = client.determine_optimal_format(audio_stream_format)
+            self._player_formats[client.client_id] = player_format
+            format_to_clients[player_format].append(client)
+            logger.debug("Selected format %s for player %s", player_format, client.client_id)
 
         player_ids = {client.client_id for client in player_clients}
-        self._send_initial_stream_start(player_ids)
+        """Send initial stream start messages for metadata/visualizer roles."""
+        for client in self._clients:
+            if client.client_id in player_ids:
+                # Player clients receive their stream/start from play_media_direct.
+                continue
+            if client.check_role(Roles.METADATA) or client.check_role(Roles.VISUALIZER):
+                self._send_stream_start_msg(client, None)
 
         self._fanout_queues.clear()
         self._fanout_subscribers.clear()
@@ -393,34 +412,41 @@ class ClientGroup:
 
         # Partition players into those handled by the direct session and those
         # that should use the shared fan-out pipeline.
-        shared_clients_map: dict[AudioFormat, list[Client]] = defaultdict(list)
-        direct_candidates: list[Client] = []
+        shared_clients_map: dict[AudioFormat, list[Client]] = {}
+        direct_clients: list[Client] = []
 
         for client in player_clients:
             player_format = self._player_formats[client.client_id]
             if direct_session is not None and direct_session.handles_client(client):
-                direct_candidates.append(client)
+                direct_clients.append(client)
             else:
                 shared_clients_map[player_format].append(client)
 
         # Launch direct-session streams first so that the shared fan-out only
         # has to service the remaining players.
-        for client in direct_candidates:
+        for client in direct_clients:
             player_format = self._player_formats[client.client_id]
-            started = await self._start_direct_stream_for_client(
+            await self._start_direct_stream_for_client(
                 client,
                 player_format,
                 start_time_us=start_time_us,
                 stream_start_time_us=stream_start_time_us,
             )
-            if not started:
-                shared_clients_map[player_format].append(client)
 
         sentinel: None = None
         if shared_clients_map:
             # Build and start the shared fan-out pipeline for all remaining
             # players that still need group-managed resampling.
-            format_subscribers = self._build_format_subscribers(shared_clients_map)
+            format_subscribers: dict[AudioFormat, list[Queue[bytes | None]]] = {}
+
+            for audio_format, clients_for_format in format_to_clients.items():
+                queues: list[Queue[bytes | None]] = []
+                for client in clients_for_format:
+                    queue: Queue[bytes | None] = Queue()
+                    self._fanout_queues[client.client_id] = queue
+                    queues.append(queue)
+                format_subscribers[audio_format] = queues
+
             self._fanout_subscribers = format_subscribers
             self._play_start_time_us = start_time_us
             self._stream_task = self._start_fanout_task(
@@ -433,10 +459,21 @@ class ClientGroup:
                 for client in clients_for_format:
                     self._send_stream_start_msg(client, self._player_formats[client.client_id])
                     queue = self._fanout_queues[client.client_id]
-                    stream_gen = self._queue_stream(queue, sentinel)
+
+                    async def stream_gen(
+                        queue_ref: Queue[bytes | None] = queue,
+                        sentinel_ref: None = sentinel,
+                    ) -> AsyncGenerator[bytes, None]:
+                        while True:
+                            chunk = await queue_ref.get()
+                            if chunk is sentinel_ref:
+                                break
+                            assert isinstance(chunk, bytes)
+                            yield chunk
+
                     self._client_stream_tasks[client.client_id] = self._server.loop.create_task(
                         client._play_media_direct(  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
-                            stream_gen,
+                            stream_gen(),
                             self._player_formats[client.client_id],
                             play_start_time_us=start_time_us,
                             stream_start_time_us=stream_start_time_us,
@@ -449,72 +486,11 @@ class ClientGroup:
         self._current_state = PlaybackStateType.PLAYING
         self._signal_event(GroupStateChangedEvent(PlaybackStateType.PLAYING))
 
-        try:
-            end_times = await asyncio.gather(*self._client_stream_tasks.values())
-            if self._stream_task is not None:
-                await self._stream_task
-        finally:
-            self.stop()
+        end_times = await asyncio.gather(*self._client_stream_tasks.values())
+        if self._stream_task is not None:
+            await self._stream_task
 
         return max(end_times) if end_times else start_time_us
-
-    def _select_player_formats(
-        self,
-        audio_stream_format: AudioFormat,
-        preferred_stream_codec: AudioCodec,
-    ) -> tuple[list[Client], dict[AudioFormat, list[Client]]]:
-        """Select optimal formats for all player clients and group them by format."""
-        player_clients = [client for client in self._clients if client.check_role(Roles.PLAYER)]
-        format_to_clients: dict[AudioFormat, list[Client]] = defaultdict(list)
-
-        self._player_formats.clear()
-
-        for client in player_clients:
-            logger.debug("Selecting format for player %s", client.client_id)
-            player_format = client.determine_optimal_format(
-                audio_stream_format, preferred_stream_codec
-            )
-            self._player_formats[client.client_id] = player_format
-            format_to_clients[player_format].append(client)
-            logger.debug("Selected format %s for player %s", player_format, client.client_id)
-
-        return player_clients, format_to_clients
-
-    def _send_initial_stream_start(self, player_ids: set[str]) -> None:
-        """Send initial stream start messages for metadata/visualizer roles."""
-        for client in self._clients:
-            if client.client_id in player_ids:
-                # Player clients receive their stream/start from play_media_direct.
-                continue
-            if client.check_role(Roles.METADATA) or client.check_role(Roles.VISUALIZER):
-                self._send_stream_start_msg(client, None)
-
-    def _build_format_subscribers(
-        self,
-        format_to_clients: dict[AudioFormat, list[Client]],
-    ) -> dict[AudioFormat, list[Queue[bytes | None]]]:
-        """Create subscriber queues for each unique audio format."""
-        format_subscribers: dict[AudioFormat, list[Queue[bytes | None]]] = {}
-
-        for audio_format, clients_for_format in format_to_clients.items():
-            queues: list[Queue[bytes | None]] = []
-            for client in clients_for_format:
-                queue: Queue[bytes | None] = Queue()
-                self._fanout_queues[client.client_id] = queue
-                queues.append(queue)
-            format_subscribers[audio_format] = queues
-
-        return format_subscribers
-
-    @staticmethod
-    async def _await_task_completion(task: Task[Any]) -> None:
-        """Await ``task`` and log unexpected exceptions."""
-        try:
-            await task
-        except asyncio.CancelledError:  # pragma: no cover - expected during shutdown
-            pass
-        except Exception:  # pragma: no cover - defensive logging
-            logger.exception("Unhandled exception while stopping task %s", task)
 
     async def _start_direct_stream_for_client(
         self,
@@ -523,11 +499,10 @@ class ClientGroup:
         *,
         start_time_us: int,
         stream_start_time_us: int,
-    ) -> bool:
+    ) -> None:
         """Start a direct-session stream for ``client`` when available."""
         session = self._direct_session
-        if session is None or not session.handles_client(client):
-            return False
+        assert session is not None
 
         supports_seek = session.supports_seek
         offset_us = stream_start_time_us if supports_seek else 0
@@ -537,15 +512,8 @@ class ClientGroup:
                 client.client_id,
             )
 
-        try:
-            stream = await session.get_stream(client, start_time_us, offset_us)
-        except Exception:  # pragma: no cover - integration failure
-            logger.exception("Direct session failed to provide stream for %s", client.client_id)
-            return False
+        stream = await session.get_stream(client, player_format, start_time_us, offset_us)
 
-        if stream is None:
-            logger.debug("Direct session declined stream for client %s", client.client_id)
-            return False
         task = self._server.loop.create_task(
             client._play_media_direct(  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
                 stream,
@@ -558,8 +526,6 @@ class ClientGroup:
 
         if client.check_role(Roles.METADATA) or client.check_role(Roles.VISUALIZER):
             self._send_stream_start_msg(client, None, include_player=False)
-
-        return True
 
     async def _handle_late_join_direct(self, client: Client, player_format: AudioFormat) -> None:
         """Attempt to launch a direct stream for a client that joined mid-session."""
@@ -578,29 +544,12 @@ class ClientGroup:
             0,
             int(self._server.loop.time() * 1_000_000) - self._play_start_time_us,
         )
-        started = await self._start_direct_stream_for_client(
+        await self._start_direct_stream_for_client(
             client,
             player_format,
             start_time_us=self._play_start_time_us,
             stream_start_time_us=offset_us,
         )
-        if not started:
-            logger.info(
-                "Direct session could not supply stream for late join %s; waiting for next track",
-                client.client_id,
-            )
-
-    @staticmethod
-    async def _queue_stream(
-        queue: Queue[bytes | None], sentinel: None
-    ) -> AsyncGenerator[bytes, None]:
-        """Yield chunks from ``queue`` until the sentinel marker is received."""
-        while True:
-            chunk = await queue.get()
-            if chunk is sentinel:
-                break
-            assert isinstance(chunk, bytes)
-            yield chunk
 
     def _start_fanout_task(
         self,
@@ -900,7 +849,7 @@ class ClientGroup:
         _ = self._client_art_formats.pop(client.client_id, None)
         client.send_message(StreamEndMessage())
 
-    def stop(self, stop_time_us: int | None = None) -> bool:
+    async def stop(self, stop_time_us: int | None = None) -> bool:  # noqa: PLR0915
         """
         Stop playback for the group and clean up resources.
 
@@ -927,10 +876,10 @@ class ClientGroup:
             if stop_time_us > now_us:
                 delay = (stop_time_us - now_us) / 1_000_000
 
-                def _delayed_stop() -> None:
+                async def _delayed_stop() -> None:
                     try:
-                        self.stop()
-                    except Exception:  # pragma: no cover - defensive safety net
+                        await self.stop()
+                    except Exception:
                         logger.exception("Scheduled stop failed")
 
                 self._server.loop.call_later(delay, _delayed_stop)
@@ -952,13 +901,23 @@ class ClientGroup:
 
         for task in active_client_tasks:
             task.cancel()
-            self._server.loop.create_task(self._await_task_completion(task))
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                logger.exception("Unhandled exception while stopping client task")
         self._client_stream_tasks.clear()
 
         if self._stream_task is not None:
             stream_task = self._stream_task
             stream_task.cancel()
-            self._server.loop.create_task(self._await_task_completion(stream_task))
+            try:
+                await stream_task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                logger.exception("Unhandled exception while stopping stream task")
             self._stream_task = None
 
         for client in self._clients:
@@ -1238,7 +1197,7 @@ class ClientGroup:
         # Each client needs to be in a group, add it to a new one
         client._set_group(ClientGroup(self._server, client))  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
 
-    def add_client(self, client: Client) -> None:
+    def add_client(self, client: Client) -> None:  # noqa: PLR0915
         """
         Add a client to this group.
 
@@ -1267,9 +1226,7 @@ class ClientGroup:
         if self._stream_task is not None and self._stream_audio_format is not None:
             logger.debug("Joining client %s to current stream", client.client_id)
             if client.check_role(Roles.PLAYER):
-                player_format = client.determine_optimal_format(
-                    self._stream_audio_format, self._preferred_stream_codec
-                )
+                player_format = client.determine_optimal_format(self._stream_audio_format)
                 self._player_formats[client.client_id] = player_format
 
                 if self._direct_session is not None:
@@ -1286,10 +1243,20 @@ class ClientGroup:
                         0,
                         int(self._server.loop.time() * 1_000_000) - self._play_start_time_us,
                     )
-                    stream_gen = self._queue_stream(queue, None)
+
+                    async def stream_gen(
+                        queue_ref: Queue[bytes | None] = queue,
+                    ) -> AsyncGenerator[bytes, None]:
+                        while True:
+                            chunk = await queue_ref.get()
+                            if chunk is None:
+                                break
+                            assert isinstance(chunk, bytes)
+                            yield chunk
+
                     self._client_stream_tasks[client.client_id] = self._server.loop.create_task(
                         client._play_media_direct(  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
-                            stream_gen,
+                            stream_gen(),
                             player_format,
                             play_start_time_us=self._play_start_time_us,
                             stream_start_time_us=stream_offset_us,
