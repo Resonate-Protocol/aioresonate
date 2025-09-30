@@ -22,7 +22,6 @@ from PIL import Image
 
 from aioresonate.models import (
     BinaryMessageType,
-    RepeatMode,
     pack_binary_header_raw,
 )
 from aioresonate.models.controller import GroupCommandClientPayload
@@ -36,7 +35,6 @@ from aioresonate.models.core import (
     StreamUpdatePayload,
 )
 from aioresonate.models.metadata import (
-    SessionUpdateMetadata,
     StreamStartMetadata,
 )
 from aioresonate.models.player import (
@@ -53,11 +51,13 @@ from aioresonate.models.types import (
 from aioresonate.models.visualizer import StreamStartVisualizer
 
 from .audio_utils import build_flac_stream_header
+from .metadata import Metadata
 
 # The cyclic import is not an issue during runtime, so hide it
 # pyright: reportImportCycles=none
 if TYPE_CHECKING:
     from .client import ResonateClient
+    from .player import PlayerClient
     from .server import ResonateServer
 
 INITIAL_PLAYBACK_DELAY_US = 1_000_000
@@ -131,99 +131,6 @@ class AudioFormat:
     """Number of audio channels (1 for mono, 2 for stereo)."""
     codec: AudioCodec = AudioCodec.PCM
     """Audio codec of the stream."""
-
-
-@dataclass
-class Metadata:
-    """Metadata for media playback."""
-
-    title: str | None = None
-    """Title of the current media."""
-    artist: str | None = None
-    """Artist of the current media."""
-    album_artist: str | None = None
-    """Album artist of the current media."""
-    album: str | None = None
-    """Album of the current media."""
-    artwork_url: str | None = None
-    """Artwork URL of the current media."""
-    year: int | None = None
-    """Release year of the current media."""
-    track: int | None = None
-    """Track number of the current media."""
-    track_duration: int | None = None
-    """Track duration in seconds."""
-    playback_speed: int | None = 1
-    """Speed factor, 1.0 is normal speed."""
-    repeat: RepeatMode | None = None
-    """Current repeat mode."""
-    shuffle: bool | None = None
-    """Whether shuffle is enabled."""
-
-    # TODO: inject track_progress and timestamp when sending updates?
-
-    def diff_update(self, last: Metadata | None, timestamp: int) -> SessionUpdateMetadata:
-        """Build a SessionUpdateMetadata containing only changed fields compared to last."""
-        metadata_update = SessionUpdateMetadata(timestamp=timestamp)
-
-        # Only include fields that have changed since the last metadata update
-        if last is None or last.title != self.title:
-            metadata_update.title = self.title
-        if last is None or last.artist != self.artist:
-            metadata_update.artist = self.artist
-        if last is None or last.album_artist != self.album_artist:
-            metadata_update.album_artist = self.album_artist
-        if last is None or last.album != self.album:
-            metadata_update.album = self.album
-        if last is None or last.artwork_url != self.artwork_url:
-            metadata_update.artwork_url = self.artwork_url
-        if last is None or last.year != self.year:
-            metadata_update.year = self.year
-        if last is None or last.track != self.track:
-            metadata_update.track = self.track
-        if last is None or last.track_duration != self.track_duration:
-            metadata_update.track_duration = self.track_duration
-        if last is None or last.playback_speed != self.playback_speed:
-            metadata_update.playback_speed = self.playback_speed
-        if last is None or last.repeat != self.repeat:
-            metadata_update.repeat = self.repeat
-        if last is None or last.shuffle != self.shuffle:
-            metadata_update.shuffle = self.shuffle
-
-        return metadata_update
-
-    @staticmethod
-    def cleared_update(timestamp: int) -> SessionUpdateMetadata:
-        """Build a SessionUpdateMetadata that clears all metadata fields."""
-        metadata_update = SessionUpdateMetadata(timestamp=timestamp)
-        metadata_update.title = None
-        metadata_update.artist = None
-        metadata_update.album_artist = None
-        metadata_update.album = None
-        metadata_update.artwork_url = None
-        metadata_update.year = None
-        metadata_update.track = None
-        metadata_update.track_duration = None
-        metadata_update.playback_speed = None
-        metadata_update.repeat = None
-        metadata_update.shuffle = None
-        return metadata_update
-
-    def snapshot_update(self, timestamp: int) -> SessionUpdateMetadata:
-        """Build a SessionUpdateMetadata snapshot with all current values."""
-        metadata_update = SessionUpdateMetadata(timestamp=timestamp)
-        metadata_update.title = self.title
-        metadata_update.artist = self.artist
-        metadata_update.album_artist = self.album_artist
-        metadata_update.album = self.album
-        metadata_update.artwork_url = self.artwork_url
-        metadata_update.year = self.year
-        metadata_update.track = self.track
-        metadata_update.track_duration = self.track_duration
-        metadata_update.playback_speed = self.playback_speed
-        metadata_update.repeat = self.repeat
-        metadata_update.shuffle = self.shuffle
-        return metadata_update
 
 
 class DirectStreamSession(ABC):
@@ -340,6 +247,15 @@ class ResonateGroup:
             [type(c).__name__ for c in self._clients],
         )
 
+    def _player_clients(self) -> list[PlayerClient]:
+        """Return player helpers for all members that support the role."""
+        players: list[PlayerClient] = []
+        for client in self._clients:
+            player = client.player
+            if player is not None:
+                players.append(player)
+        return players
+
     async def play_media(  # noqa: PLR0915
         self,
         audio_stream: AsyncGenerator[bytes, None],
@@ -384,19 +300,21 @@ class ResonateGroup:
             if play_start_time_us is not None
             else int(self._server.loop.time() * 1_000_000) + INITIAL_PLAYBACK_DELAY_US
         )
-        player_clients = [client for client in self._clients if client.check_role(Roles.PLAYER)]
+        player_clients = self._player_clients()
+
         format_to_clients: dict[AudioFormat, list[ResonateClient]] = defaultdict(list)
 
         self._player_formats.clear()
 
-        for client in player_clients:
+        for player in player_clients:
+            client = player.client
             logger.debug("Selecting format for player %s", client.client_id)
-            player_format = client.player_throw.determine_optimal_format(audio_stream_format)
+            player_format = player.determine_optimal_format(audio_stream_format)
             self._player_formats[client.client_id] = player_format
             format_to_clients[player_format].append(client)
             logger.debug("Selected format %s for player %s", player_format, client.client_id)
 
-        player_ids = {client.client_id for client in player_clients}
+        player_ids = {player.client.client_id for player in player_clients}
         """Send initial stream start messages for metadata/visualizer roles."""
         for client in self._clients:
             if client.client_id in player_ids:
@@ -415,7 +333,8 @@ class ResonateGroup:
         shared_clients_map: dict[AudioFormat, list[ResonateClient]] = {}
         direct_clients: list[ResonateClient] = []
 
-        for client in player_clients:
+        for player in player_clients:
+            client = player.client
             player_format = self._player_formats[client.client_id]
             if direct_session is not None and direct_session.handles_client(client):
                 direct_clients.append(client)

@@ -34,7 +34,7 @@ from aioresonate.models.types import ClientMessage, Roles, ServerMessage
 
 from .controller import ControllerClient
 from .group import ResonateGroup
-from .metadata_client import MetadataClient
+from .metadata import MetadataClient
 from .player import PlayerClient
 from .visualizer import VisualizerClient
 
