@@ -57,7 +57,7 @@ from .audio_utils import build_flac_stream_header
 # The cyclic import is not an issue during runtime, so hide it
 # pyright: reportImportCycles=none
 if TYPE_CHECKING:
-    from .client import Client
+    from .client import ResonateClient
     from .server import ResonateServer
 
 INITIAL_PLAYBACK_DELAY_US = 1_000_000
@@ -242,14 +242,14 @@ class DirectStreamSession(ABC):
     If False offset_time_us passed to get_stream() will always be 0.
     """
 
-    def handles_client(self, _client: Client) -> bool:
+    def handles_client(self, _client: ResonateClient) -> bool:
         """Return True when this session replaces the shared stream for client."""
         return True
 
     @abstractmethod
     async def get_stream(
         self,
-        client: Client,
+        client: ResonateClient,
         audio_format: AudioFormat,
         start_time_us: int,
         offset_time_us: int,
@@ -266,7 +266,7 @@ class DirectStreamSession(ABC):
         """
 
 
-class ClientGroup:
+class ResonateGroup:
     """
     A group of one or more clients for synchronized playback.
 
@@ -275,7 +275,7 @@ class ClientGroup:
     a group to simplify grouping requests.
     """
 
-    _clients: list[Client]
+    _clients: list[ResonateClient]
     """List of all clients in this group."""
     _player_formats: dict[str, AudioFormat]
     """Mapping of client IDs (with the player role) to their selected audio formats."""
@@ -306,7 +306,7 @@ class ClientGroup:
     _scheduled_format_changes: dict[str, tuple[StreamUpdateMessage, AudioFormat]]
     """Mapping of client IDs to upcoming stream updates requested by the player."""
 
-    def __init__(self, server: ResonateServer, *args: Client) -> None:
+    def __init__(self, server: ResonateServer, *args: ResonateClient) -> None:
         """
         DO NOT CALL THIS CONSTRUCTOR. INTERNAL USE ONLY.
 
@@ -385,7 +385,7 @@ class ClientGroup:
             else int(self._server.loop.time() * 1_000_000) + INITIAL_PLAYBACK_DELAY_US
         )
         player_clients = [client for client in self._clients if client.check_role(Roles.PLAYER)]
-        format_to_clients: dict[AudioFormat, list[Client]] = defaultdict(list)
+        format_to_clients: dict[AudioFormat, list[ResonateClient]] = defaultdict(list)
 
         self._player_formats.clear()
 
@@ -412,8 +412,8 @@ class ClientGroup:
 
         # Partition players into those handled by the direct session and those
         # that should use the shared fan-out pipeline.
-        shared_clients_map: dict[AudioFormat, list[Client]] = {}
-        direct_clients: list[Client] = []
+        shared_clients_map: dict[AudioFormat, list[ResonateClient]] = {}
+        direct_clients: list[ResonateClient] = []
 
         for client in player_clients:
             player_format = self._player_formats[client.client_id]
@@ -494,7 +494,7 @@ class ClientGroup:
 
     async def _start_direct_stream_for_client(
         self,
-        client: Client,
+        client: ResonateClient,
         player_format: AudioFormat,
         *,
         start_time_us: int,
@@ -527,7 +527,9 @@ class ClientGroup:
         if client.check_role(Roles.METADATA) or client.check_role(Roles.VISUALIZER):
             self._send_stream_start_msg(client, None, include_player=False)
 
-    async def _handle_late_join_direct(self, client: Client, player_format: AudioFormat) -> None:
+    async def _handle_late_join_direct(
+        self, client: ResonateClient, player_format: AudioFormat
+    ) -> None:
         """Attempt to launch a direct stream for a client that joined mid-session."""
         session = self._direct_session
         if session is None or not session.handles_client(client):
@@ -785,7 +787,7 @@ class ClientGroup:
 
     def _send_stream_start_msg(
         self,
-        client: Client,
+        client: ResonateClient,
         audio_format: AudioFormat | None = None,
         *,
         include_player: bool = True,
@@ -842,7 +844,7 @@ class ClientGroup:
             )
             client.send_message(StreamStartMessage(stream_info))
 
-    def _send_stream_end_msg(self, client: Client) -> None:
+    def _send_stream_end_msg(self, client: ResonateClient) -> None:
         """Send a stream end message to a client to stop playback."""
         logger.debug("ending stream for %s (%s)", client.name, client.client_id)
         # Lifetime of album artwork is bound to the stream
@@ -1061,7 +1063,7 @@ class ClientGroup:
 
         return letterboxed
 
-    def _send_media_art_to_client(self, client: Client, image: Image.Image) -> None:
+    def _send_media_art_to_client(self, client: ResonateClient, image: Image.Image) -> None:
         """Send media art to a specific client with appropriate format and sizing."""
         if not client.check_role(Roles.METADATA) or not client.info.metadata_support:
             return
@@ -1108,7 +1110,7 @@ class ClientGroup:
             client.send_message(header + img_data)
 
     @property
-    def clients(self) -> list[Client]:
+    def clients(self) -> list[ResonateClient]:
         """All clients that are part of this group."""
         return self._clients
 
@@ -1145,7 +1147,7 @@ class ClientGroup:
         """Current playback state of the group."""
         return self._current_state
 
-    def remove_client(self, client: Client) -> None:
+    def remove_client(self, client: ResonateClient) -> None:
         """
         Remove a client from this group.
 
@@ -1195,9 +1197,9 @@ class ClientGroup:
             # Emit event for client removal
             self._signal_event(GroupMemberRemovedEvent(client.client_id))
         # Each client needs to be in a group, add it to a new one
-        client._set_group(ClientGroup(self._server, client))  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+        client._set_group(ResonateGroup(self._server, client))  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
 
-    def add_client(self, client: Client) -> None:  # noqa: PLR0915
+    def add_client(self, client: ResonateClient) -> None:  # noqa: PLR0915
         """
         Add a client to this group.
 
@@ -1338,7 +1340,7 @@ class ClientGroup:
 
     def _resample_and_encode_to_player(
         self,
-        player: Client,
+        player: ResonateClient,
         player_format: AudioFormat,
         in_frame: av.AudioFrame,
         resamplers: dict[AudioFormat, av.AudioResampler],
@@ -1406,7 +1408,7 @@ class ClientGroup:
 
     def handle_stream_format_request(
         self,
-        player: Client,
+        player: ResonateClient,
         request: StreamRequestFormatPayload,
     ) -> None:
         """Handle stream/request-format from a player and send stream/update."""
@@ -1497,7 +1499,7 @@ class ClientGroup:
             new_format,
         )
 
-    def _update_player_format(self, player: Client) -> None:
+    def _update_player_format(self, player: ResonateClient) -> None:
         """Apply any scheduled format changes for a player if needed."""
         if change := self._scheduled_format_changes.pop(player.client_id, None):
             format_change_message, new_format = change

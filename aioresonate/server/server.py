@@ -11,7 +11,7 @@ from aiohttp.client import ClientSession
 from zeroconf import InterfaceChoice, IPVersion, ServiceStateChange, Zeroconf
 from zeroconf.asyncio import AsyncServiceBrowser, AsyncServiceInfo, AsyncZeroconf
 
-from .client import Client
+from .client import ResonateClient
 
 logger = logging.getLogger(__name__)
 
@@ -45,7 +45,7 @@ async def _get_ip_pton(ip_string: str) -> bytes:
 class ResonateServer:
     """Resonate Server implementation to connect to and manage many Resonate Clients."""
 
-    _clients: set[Client]
+    _clients: set[ResonateClient]
     """All groups managed by this server."""
     _loop: asyncio.AbstractEventLoop
     _event_cbs: list[Callable[[ResonateEvent], Coroutine[None, None, None]]]
@@ -132,7 +132,7 @@ class ResonateServer:
         """Handle an incoming WebSocket connection from a Resonate client."""
         logger.debug("Incoming client connection from %s", request.remote)
 
-        client = Client(
+        client = ResonateClient(
             self,
             handle_client_connect=self._handle_client_connect,
             handle_client_disconnect=self._handle_client_disconnect,
@@ -190,7 +190,7 @@ class ResonateServer:
 
         try:
             while True:
-                client: Client | None = None
+                client: ResonateClient | None = None
                 retry_event = self._retry_events.get(url)
 
                 try:
@@ -202,7 +202,7 @@ class ResonateServer:
                     ) as wsock:
                         # Reset backoff on successful connect
                         backoff = 1.0
-                        client = Client(
+                        client = ResonateClient(
                             self,
                             handle_client_connect=self._handle_client_connect,
                             handle_client_disconnect=self._handle_client_disconnect,
@@ -271,7 +271,7 @@ class ResonateServer:
         for cb in self._event_cbs:
             _ = self._loop.create_task(cb(event))  # Fire and forget event callback
 
-    def _handle_client_connect(self, client: Client) -> None:
+    def _handle_client_connect(self, client: ResonateClient) -> None:
         """
         Register the client to the server.
 
@@ -284,7 +284,7 @@ class ResonateServer:
         self._clients.add(client)
         self._signal_event(ClientAddedEvent(client.client_id))
 
-    def _handle_client_disconnect(self, client: Client) -> None:
+    def _handle_client_disconnect(self, client: ResonateClient) -> None:
         """Unregister the client from the server."""
         if client not in self._clients:
             return
@@ -294,11 +294,11 @@ class ResonateServer:
         self._signal_event(ClientRemovedEvent(client.client_id))
 
     @property
-    def clients(self) -> set[Client]:
+    def clients(self) -> set[ResonateClient]:
         """Get the set of all clients connected to this server."""
         return self._clients
 
-    def get_client(self, client_id: str) -> Client | None:
+    def get_client(self, client_id: str) -> ResonateClient | None:
         """Get the client with the given id."""
         logger.debug("Looking for client with id: %s", client_id)
         for client in self.clients:
