@@ -14,6 +14,16 @@ class ResonatePlayer:
         assert self.client.info.player_support is not None
         return self.client.info.player_support
 
+    @property
+    def muted(self) -> bool:
+        """Mute state of this player."""
+        return self._muted
+
+    @property
+    def volume(self) -> int:
+        """Volume of this player."""
+        return self._volume
+
     def set_volume(self, volume: int) -> None:
         """Set the volume of this player."""
         self._logger.debug("Setting volume from %d to %d", self._volume, volume)

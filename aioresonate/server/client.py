@@ -1,19 +1,16 @@
 """Represents a single client device connected to the server."""
 
 import asyncio
-import base64
 import logging
-from collections.abc import AsyncGenerator, Callable, Coroutine
+from collections.abc import Callable, Coroutine
 from contextlib import suppress
 from enum import Enum
 from typing import TYPE_CHECKING, cast
 
-import av
 from aiohttp import ClientWebSocketResponse, WSMessage, WSMsgType, web
 from attr import dataclass
-from av import logging as av_logging
 
-from aioresonate.models import BinaryMessageType, pack_binary_header_raw, unpack_binary_header
+from aioresonate.models import unpack_binary_header
 from aioresonate.models.controller import (
     GroupCommandClientMessage,
     GroupGetListClientMessage,
@@ -28,25 +25,14 @@ from aioresonate.models.core import (
     ServerHelloPayload,
     ServerTimeMessage,
     ServerTimePayload,
-    StreamStartMessage,
-    StreamStartPayload,
 )
 from aioresonate.models.player import (
-    ClientHelloPlayerSupport,
     PlayerUpdateMessage,
-    PlayerUpdatePayload,
     StreamRequestFormatMessage,
-    StreamStartPlayer,
 )
 from aioresonate.models.types import ClientMessage, Roles, ServerMessage
-from aioresonate.server.streaming import (
-    _BufferTracker,
-    _DirectStreamContext,
-    _samples_to_microseconds,
-)
 
-from .audio_utils import build_flac_stream_header
-from .group import AudioCodec, AudioFormat, ResonateGroup
+from .group import ResonateGroup
 
 MAX_PENDING_MSG = 512
 
@@ -258,16 +244,6 @@ class ResonateClient:
         wsock = self._wsock_server or self._wsock_client
         assert wsock is not None
         return wsock
-
-    @property
-    def muted(self) -> bool:
-        """Mute state of this player."""
-        return self._muted
-
-    @property
-    def volume(self) -> int:
-        """Volume of this player."""
-        return self._volume
 
     @property
     def closing(self) -> bool:
