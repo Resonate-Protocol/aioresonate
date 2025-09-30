@@ -11,7 +11,11 @@ from av.logging import Capture
 
 from aioresonate.models import BinaryMessageType, pack_binary_header_raw
 from aioresonate.models.core import StreamStartMessage, StreamStartPayload
-from aioresonate.models.player import PlayerUpdatePayload, StreamStartPlayer
+from aioresonate.models.player import (
+    ClientHelloPlayerSupport,
+    PlayerUpdatePayload,
+    StreamStartPlayer,
+)
 from aioresonate.models.types import Roles
 
 from .client import VolumeChangedEvent
@@ -27,7 +31,7 @@ if TYPE_CHECKING:
     from .client import ResonateClient
 
 
-class ResonatePlayer:
+class PlayerClient:
     """Player."""
 
     client: ResonateClient
@@ -38,6 +42,11 @@ class ResonatePlayer:
         """Initialize player wrapper for a client."""
         self.client = client
         self._logger = client._logger.getChild("player")  # noqa: SLF001
+
+    @property
+    def support(self) -> ClientHelloPlayerSupport | None:
+        """Return player capabilities advertised in the hello payload."""
+        return self.client.info.player_support
 
     @property
     def muted(self) -> bool:
@@ -90,34 +99,22 @@ class ResonatePlayer:
         Returns:
             AudioFormat: The optimal format for this client.
         """
-        player_info = self.client.info
+        support = self.support
 
         # Determine optimal sample rate
         sample_rate = source_format.sample_rate
-        if (
-            player_info.player_support
-            and sample_rate not in player_info.player_support.support_sample_rates
-        ):
+        if support and sample_rate not in support.support_sample_rates:
             # Prefer lower rates that are closest to source, fallback to minimum
-            lower_rates = [
-                r for r in player_info.player_support.support_sample_rates if r < sample_rate
-            ]
-            sample_rate = (
-                max(lower_rates)
-                if lower_rates
-                else min(player_info.player_support.support_sample_rates)
-            )
+            lower_rates = [r for r in support.support_sample_rates if r < sample_rate]
+            sample_rate = max(lower_rates) if lower_rates else min(support.support_sample_rates)
             self._logger.debug(
                 "Adjusted sample_rate for client %s: %s", self.client.client_id, sample_rate
             )
 
         # Determine optimal bit depth
         bit_depth = source_format.bit_depth
-        if (
-            player_info.player_support
-            and bit_depth not in player_info.player_support.support_bit_depth
-        ):
-            if 16 in player_info.player_support.support_bit_depth:
+        if support and bit_depth not in support.support_bit_depth:
+            if 16 in support.support_bit_depth:
                 bit_depth = 16
             else:
                 raise NotImplementedError("Only 16bit is supported for now")
@@ -127,14 +124,11 @@ class ResonatePlayer:
 
         # Determine optimal channel count
         channels = source_format.channels
-        if (
-            player_info.player_support
-            and channels not in player_info.player_support.support_channels
-        ):
+        if support and channels not in support.support_channels:
             # Prefer stereo, then mono
-            if 2 in player_info.player_support.support_channels:
+            if 2 in support.support_channels:
                 channels = 2
-            elif 1 in player_info.player_support.support_channels:
+            elif 1 in support.support_channels:
                 channels = 1
             else:
                 raise NotImplementedError("Only mono and stereo are supported")
@@ -146,10 +140,7 @@ class ResonatePlayer:
         codec_fallbacks = [AudioCodec.FLAC, AudioCodec.OPUS, AudioCodec.PCM]
         codec = None
         for candidate_codec in codec_fallbacks:
-            if (
-                player_info.player_support
-                and candidate_codec.value in player_info.player_support.support_codecs
-            ):
+            if support and candidate_codec.value in support.support_codecs:
                 # Special handling for Opus - check if sample rates are compatible
                 if candidate_codec == AudioCodec.OPUS:
                     opus_rate_candidates = [
@@ -162,11 +153,7 @@ class ResonatePlayer:
 
                     opus_sample_rate = None
                     for candidate_rate, condition in opus_rate_candidates:
-                        if (
-                            condition
-                            and player_info.player_support
-                            and candidate_rate in player_info.player_support.support_sample_rates
-                        ):
+                        if condition and support and candidate_rate in support.support_sample_rates:
                             opus_sample_rate = candidate_rate
                             break
 
@@ -254,8 +241,8 @@ class ResonatePlayer:
         """Stream pre-formatted PCM for internal coordination by groups and sessions."""
         # Internal check; suppress style warning for accessing private API
         self.client._ensure_role(Roles.PLAYER)  # noqa: SLF001
-        player_info = self.client.info
-        assert player_info.player_support is not None, "Player support info required"
+        support = self.support
+        assert support is not None, "Player support info required"
 
         # Validate input format
         if audio_format.bit_depth != 16:
@@ -283,7 +270,7 @@ class ResonatePlayer:
         self.client.send_message(StreamStartMessage(StreamStartPayload(player=player_stream_info)))
 
         frame_stride_bytes = audio_format.channels * bytes_per_sample
-        buffer_capacity_bytes = player_info.player_support.buffer_capacity
+        buffer_capacity_bytes = support.buffer_capacity
         buffer_tracker = _BufferTracker(
             loop=self.client._server.loop,  # noqa: SLF001
             logger=self._logger,
