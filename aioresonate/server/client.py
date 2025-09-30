@@ -33,6 +33,7 @@ from aioresonate.models.player import (
 from aioresonate.models.types import ClientMessage, Roles, ServerMessage
 
 from .group import ResonateGroup
+from .player import ResonatePlayer
 
 MAX_PENDING_MSG = 512
 
@@ -266,10 +267,12 @@ class ResonateClient:
 
     @property
     def player(self) -> ResonatePlayer | None:
+        """Return the attached player instance, if available."""
         return self._player
 
     @property
     def player_throw(self) -> ResonatePlayer:
+        """Return the player or raise if the role is unsupported."""
         # TODO: think of better names
         if self._player is None:
             raise ValueError("Client does not support player role")

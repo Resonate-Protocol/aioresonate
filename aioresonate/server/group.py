@@ -391,7 +391,7 @@ class ResonateGroup:
 
         for client in player_clients:
             logger.debug("Selecting format for player %s", client.client_id)
-            player_format = client.determine_optimal_format(audio_stream_format)
+            player_format = client.player_throw.determine_optimal_format(audio_stream_format)
             self._player_formats[client.client_id] = player_format
             format_to_clients[player_format].append(client)
             logger.debug("Selected format %s for player %s", player_format, client.client_id)
@@ -472,7 +472,7 @@ class ResonateGroup:
                             yield chunk
 
                     self._client_stream_tasks[client.client_id] = self._server.loop.create_task(
-                        client._play_media_direct(  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+                        client.player_throw._play_media_direct(  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
                             stream_gen(),
                             self._player_formats[client.client_id],
                             play_start_time_us=start_time_us,
@@ -515,7 +515,7 @@ class ResonateGroup:
         stream = await session.get_stream(client, player_format, start_time_us, offset_us)
 
         task = self._server.loop.create_task(
-            client._play_media_direct(  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+            client.player_throw._play_media_direct(  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
                 stream,
                 player_format,
                 play_start_time_us=start_time_us,
@@ -1228,7 +1228,9 @@ class ResonateGroup:
         if self._stream_task is not None and self._stream_audio_format is not None:
             logger.debug("Joining client %s to current stream", client.client_id)
             if client.check_role(Roles.PLAYER):
-                player_format = client.determine_optimal_format(self._stream_audio_format)
+                player_format = client.player_throw.determine_optimal_format(
+                    self._stream_audio_format
+                )
                 self._player_formats[client.client_id] = player_format
 
                 if self._direct_session is not None:
@@ -1257,7 +1259,7 @@ class ResonateGroup:
                             yield chunk
 
                     self._client_stream_tasks[client.client_id] = self._server.loop.create_task(
-                        client._play_media_direct(  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+                        client.player_throw._play_media_direct(  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
                             stream_gen(),
                             player_format,
                             play_start_time_us=self._play_start_time_us,

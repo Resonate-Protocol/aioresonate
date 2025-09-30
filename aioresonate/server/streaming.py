@@ -3,7 +3,7 @@
 import asyncio
 import logging
 from collections import deque
-from collections.abc import Callable
+from collections.abc import AsyncGenerator, Callable
 from typing import TYPE_CHECKING, NamedTuple
 
 import av

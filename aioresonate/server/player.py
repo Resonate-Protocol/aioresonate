@@ -1,18 +1,43 @@
+"""Player implementation and streaming helpers."""
+
+from __future__ import annotations
+
+import base64
+from collections.abc import AsyncGenerator
+from typing import TYPE_CHECKING, cast
+
+import av
+from av.logging import Capture
+
+from aioresonate.models import BinaryMessageType, pack_binary_header_raw
+from aioresonate.models.core import StreamStartMessage, StreamStartPayload
+from aioresonate.models.player import PlayerUpdatePayload, StreamStartPlayer
+from aioresonate.models.types import Roles
+
+from .client import VolumeChangedEvent
+from .group import AudioCodec, AudioFormat
+from .streaming import (
+    _BufferTracker,
+    _DirectStreamContext,
+    _samples_to_microseconds,
+    build_flac_stream_header,
+)
+
+if TYPE_CHECKING:
+    from .client import ResonateClient
+
+
 class ResonatePlayer:
     """Player."""
 
-    client: "ResonateClient"
+    client: ResonateClient
     _volume: int = 100
     _muted: bool = False
 
-    def __init__(self, client: "ResonateClient") -> None:
+    def __init__(self, client: ResonateClient) -> None:
+        """Initialize player wrapper for a client."""
         self.client = client
         self._logger = client._logger.getChild("player")  # noqa: SLF001
-
-    @property
-    def info(self) -> ClientHelloPlayerSupport:
-        assert self.client.info.player_support is not None
-        return self.client.info.player_support
 
     @property
     def muted(self) -> bool:
@@ -40,11 +65,14 @@ class ResonatePlayer:
         self._logger.error("NOT SUPPORTED BY SPEC YET")
 
     def handle_player_update(self, state: PlayerUpdatePayload) -> None:
+        """Update internal mute/volume state from client report and emit event."""
         self._logger.debug("Received player state: volume=%d, muted=%s", state.volume, state.muted)
         if self._muted != state.muted or self._volume != state.volume:
             self._volume = state.volume
             self._muted = state.muted
-            self.client._signal_event(VolumeChangedEvent(volume=self._volume, muted=self._muted))  # noqa: SLF001
+            self.client._signal_event(  # noqa: SLF001
+                VolumeChangedEvent(volume=self._volume, muted=self._muted)
+            )
 
     def determine_optimal_format(
         self,
@@ -62,7 +90,7 @@ class ResonatePlayer:
         Returns:
             AudioFormat: The optimal format for this client.
         """
-        player_info = self.info
+        player_info = self.client.info
 
         # Determine optimal sample rate
         sample_rate = source_format.sample_rate
@@ -80,7 +108,7 @@ class ResonatePlayer:
                 else min(player_info.player_support.support_sample_rates)
             )
             self._logger.debug(
-                "Adjusted sample_rate for client %s: %s", self.client_id, sample_rate
+                "Adjusted sample_rate for client %s: %s", self.client.client_id, sample_rate
             )
 
         # Determine optimal bit depth
@@ -93,7 +121,9 @@ class ResonatePlayer:
                 bit_depth = 16
             else:
                 raise NotImplementedError("Only 16bit is supported for now")
-            self._logger.debug("Adjusted bit_depth for client %s: %s", self.client_id, bit_depth)
+            self._logger.debug(
+                "Adjusted bit_depth for client %s: %s", self.client.client_id, bit_depth
+            )
 
         # Determine optimal channel count
         channels = source_format.channels
@@ -108,7 +138,9 @@ class ResonatePlayer:
                 channels = 1
             else:
                 raise NotImplementedError("Only mono and stereo are supported")
-            self._logger.debug("Adjusted channels for client %s: %s", self.client_id, channels)
+            self._logger.debug(
+                "Adjusted channels for client %s: %s", self.client.client_id, channels
+            )
 
         # Determine optimal codec with fallback chain
         codec_fallbacks = [AudioCodec.FLAC, AudioCodec.OPUS, AudioCodec.PCM]
@@ -141,7 +173,7 @@ class ResonatePlayer:
                     if opus_sample_rate is None:
                         self._logger.error(
                             "Client %s does not support any Opus sample rates, trying next codec",
-                            self.client_id,
+                            self.client.client_id,
                         )
                         continue  # Try next codec in fallback chain
 
@@ -149,7 +181,7 @@ class ResonatePlayer:
                     if sample_rate != opus_sample_rate:
                         self._logger.debug(
                             "Adjusted sample_rate for Opus on client %s: %s -> %s",
-                            self.client_id,
+                            self.client.client_id,
                             sample_rate,
                             opus_sample_rate,
                         )
@@ -159,7 +191,7 @@ class ResonatePlayer:
                 break
 
         if codec is None:
-            raise ValueError(f"Client {self.client_id} does not support any known codec")
+            raise ValueError(f"Client {self.client.client_id} does not support any known codec")
 
         # FLAC and PCM support any sample rate, no adjustment needed
         return AudioFormat(sample_rate, bit_depth, channels, codec)
@@ -191,7 +223,7 @@ class ResonatePlayer:
         if audio_format.codec == AudioCodec.FLAC:
             # Only default compression level for now
             encoder.options = {"compression_level": "5"}
-        with av_logging.Capture() as logs:
+        with Capture() as logs:
             encoder.open()
         for log in logs:
             self._logger.debug("Opening AudioCodecContext log from av: %s", log)
@@ -209,7 +241,7 @@ class ResonatePlayer:
 
     def _send_pcm(self, chunk: bytes, timestamp_us: int) -> None:
         header = pack_binary_header_raw(BinaryMessageType.AUDIO_CHUNK.value, timestamp_us)
-        self.send_message(header + chunk)
+        self.client.send_message(header + chunk)
 
     async def _play_media_direct(
         self,
@@ -220,8 +252,9 @@ class ResonatePlayer:
         stream_start_time_us: int = 0,
     ) -> int:
         """Stream pre-formatted PCM for internal coordination by groups and sessions."""
-        self._ensure_role(Roles.PLAYER)
-        player_info = self.info
+        # Internal check; suppress style warning for accessing private API
+        self.client._ensure_role(Roles.PLAYER)  # noqa: SLF001
+        player_info = self.client.info
         assert player_info.player_support is not None, "Player support info required"
 
         # Validate input format
@@ -247,18 +280,18 @@ class ResonatePlayer:
             bit_depth=audio_format.bit_depth,
             codec_header=codec_header_b64,
         )
-        self.send_message(StreamStartMessage(StreamStartPayload(player=player_stream_info)))
+        self.client.send_message(StreamStartMessage(StreamStartPayload(player=player_stream_info)))
 
         frame_stride_bytes = audio_format.channels * bytes_per_sample
         buffer_capacity_bytes = player_info.player_support.buffer_capacity
         buffer_tracker = _BufferTracker(
-            loop=self._server.loop,
+            loop=self.client._server.loop,  # noqa: SLF001
             logger=self._logger,
-            client_id=self.client_id,
+            client_id=self.client.client_id,
             capacity_bytes=buffer_capacity_bytes,
         )
         context = _DirectStreamContext(
-            client=self,
+            client=self.client,
             audio_format=audio_format,
             input_audio_format=input_audio_format,
             input_audio_layout=input_audio_layout,
@@ -274,7 +307,9 @@ class ResonatePlayer:
         bytes_to_skip_total = (
             int((stream_start_time_us * audio_format.sample_rate) / 1_000_000) * frame_stride_bytes
         )
-        pending = await self._skip_initial_bytes(audio_stream, bytes_to_skip_total)
+        pending = await context._skip_initial_bytes(  # noqa: SLF001
+            audio_stream, bytes_to_skip_total
+        )
         if bytes_to_skip_total > 0 and not pending:
             return play_start_time_us
 
@@ -297,7 +332,7 @@ class ResonatePlayer:
 
         self._logger.debug(
             "Completed direct stream for client %s: pcm=%sB compressed=%sB max_buffer=%s/%sB",
-            self.client_id,
+            self.client.client_id,
             context.pcm_bytes_consumed,
             context.compressed_bytes_sent,
             buffer_tracker.max_usage_bytes,
