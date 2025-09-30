@@ -49,8 +49,8 @@ from aioresonate.models.types import (
     Roles,
 )
 from aioresonate.models.visualizer import StreamStartVisualizer
+from aioresonate.server.streaming import build_flac_stream_header
 
-from .audio_utils import build_flac_stream_header
 from .metadata import Metadata
 
 # The cyclic import is not an issue during runtime, so hide it
