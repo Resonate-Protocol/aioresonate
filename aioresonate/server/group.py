@@ -8,7 +8,6 @@ import logging
 import uuid
 from abc import ABC, abstractmethod
 from asyncio import Queue, QueueFull, Task
-from collections import defaultdict
 from collections.abc import AsyncGenerator, Callable, Coroutine
 from contextlib import suppress
 from dataclasses import dataclass
@@ -247,7 +246,7 @@ class ResonateGroup:
             [type(c).__name__ for c in self._clients],
         )
 
-    def _player_clients(self) -> list[PlayerClient]:
+    def _group_players(self) -> list[PlayerClient]:
         """Return player helpers for all members that support the role."""
         players: list[PlayerClient] = []
         for client in self._clients:
@@ -268,7 +267,7 @@ class ResonateGroup:
         """
         Start synchronized playback for the current group.
 
-        TODO: caller is responsible to play new media or stop stream
+        TODO: caller is responsible to play new media or stop stream after this is done
 
         Args:
             audio_stream: Async generator yielding PCM audio chunks as bytes.
@@ -300,25 +299,21 @@ class ResonateGroup:
             if play_start_time_us is not None
             else int(self._server.loop.time() * 1_000_000) + INITIAL_PLAYBACK_DELAY_US
         )
-        player_clients = self._player_clients()
+        group_players = self._group_players()
 
-        format_to_clients: dict[AudioFormat, list[ResonateClient]] = defaultdict(list)
+        format_to_player: dict[AudioFormat, list[PlayerClient]] = {}
 
         self._player_formats.clear()
 
-        for player in player_clients:
+        for player in group_players:
             client = player.client
-            logger.debug("Selecting format for player %s", client.client_id)
             player_format = player.determine_optimal_format(audio_stream_format)
             self._player_formats[client.client_id] = player_format
-            format_to_clients[player_format].append(client)
+            format_to_player[player_format].append(player)
             logger.debug("Selected format %s for player %s", player_format, client.client_id)
 
-        player_ids = {player.client.client_id for player in player_clients}
-        """Send initial stream start messages for metadata/visualizer roles."""
         for client in self._clients:
-            if client.client_id in player_ids:
-                # Player clients receive their stream/start from play_media_direct.
+            if client.check_role(Roles.PLAYER):
                 continue
             if client.check_role(Roles.METADATA) or client.check_role(Roles.VISUALIZER):
                 self._send_stream_start_msg(client, None)
@@ -330,23 +325,23 @@ class ResonateGroup:
 
         # Partition players into those handled by the direct session and those
         # that should use the shared fan-out pipeline.
-        shared_clients_map: dict[AudioFormat, list[ResonateClient]] = {}
-        direct_clients: list[ResonateClient] = []
+        shared_clients_map: dict[AudioFormat, list[PlayerClient]] = {}
+        direct_players: list[PlayerClient] = []
 
-        for player in player_clients:
+        for player in group_players:
             client = player.client
             player_format = self._player_formats[client.client_id]
             if direct_session is not None and direct_session.handles_client(client):
-                direct_clients.append(client)
+                direct_players.append(player)
             else:
-                shared_clients_map[player_format].append(client)
+                shared_clients_map[player_format].append(player)
 
         # Launch direct-session streams first so that the shared fan-out only
         # has to service the remaining players.
-        for client in direct_clients:
-            player_format = self._player_formats[client.client_id]
+        for player in direct_players:
+            player_format = self._player_formats[player.client.client_id]
             await self._start_direct_stream_for_client(
-                client,
+                player.client,
                 player_format,
                 start_time_us=start_time_us,
                 stream_start_time_us=stream_start_time_us,
@@ -358,11 +353,11 @@ class ResonateGroup:
             # players that still need group-managed resampling.
             format_subscribers: dict[AudioFormat, list[Queue[bytes | None]]] = {}
 
-            for audio_format, clients_for_format in format_to_clients.items():
+            for audio_format, players_for_format in format_to_player.items():
                 queues: list[Queue[bytes | None]] = []
-                for client in clients_for_format:
+                for player in players_for_format:
                     queue: Queue[bytes | None] = Queue()
-                    self._fanout_queues[client.client_id] = queue
+                    self._fanout_queues[player.client.client_id] = queue
                     queues.append(queue)
                 format_subscribers[audio_format] = queues
 
@@ -374,10 +369,12 @@ class ResonateGroup:
                 audio_stream=audio_stream,
                 audio_stream_format=audio_stream_format,
             )
-            for clients_for_format in shared_clients_map.values():
-                for client in clients_for_format:
-                    self._send_stream_start_msg(client, self._player_formats[client.client_id])
-                    queue = self._fanout_queues[client.client_id]
+            for players_for_format in shared_clients_map.values():
+                for player in players_for_format:
+                    self._send_stream_start_msg(
+                        player.client, self._player_formats[player.client.client_id]
+                    )
+                    queue = self._fanout_queues[player.client.client_id]
 
                     async def stream_gen(
                         queue_ref: Queue[bytes | None] = queue,
@@ -390,12 +387,14 @@ class ResonateGroup:
                             assert isinstance(chunk, bytes)
                             yield chunk
 
-                    self._client_stream_tasks[client.client_id] = self._server.loop.create_task(
-                        client.player_throw._play_media_direct(  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
-                            stream_gen(),
-                            self._player_formats[client.client_id],
-                            play_start_time_us=start_time_us,
-                            stream_start_time_us=stream_start_time_us,
+                    self._client_stream_tasks[player.client.client_id] = (
+                        self._server.loop.create_task(
+                            player._play_media_direct(  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+                                stream_gen(),
+                                self._player_formats[player.client.client_id],
+                                play_start_time_us=start_time_us,
+                                stream_start_time_us=stream_start_time_us,
+                            )
                         )
                     )
         else:
