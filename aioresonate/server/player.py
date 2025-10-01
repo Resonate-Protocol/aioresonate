@@ -16,7 +16,6 @@ from aioresonate.models.player import (
     PlayerUpdatePayload,
     StreamStartPlayer,
 )
-from aioresonate.models.types import Roles
 
 from .client import VolumeChangedEvent
 from .group import AudioCodec, AudioFormat
@@ -239,7 +238,6 @@ class PlayerClient:
     ) -> int:
         """Stream pre-formatted PCM for internal coordination by groups and sessions."""
         # Internal check; suppress style warning for accessing private API
-        self.client._ensure_role(Roles.PLAYER)  # noqa: SLF001
         support = self.support
         assert support is not None, "Player support info required"
 

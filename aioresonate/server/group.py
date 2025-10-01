@@ -246,15 +246,6 @@ class ResonateGroup:
             [type(c).__name__ for c in self._clients],
         )
 
-    def _group_players(self) -> list[PlayerClient]:
-        """Return player helpers for all members that support the role."""
-        players: list[PlayerClient] = []
-        for client in self._clients:
-            player = client.player
-            if player is not None:
-                players.append(player)
-        return players
-
     async def play_media(  # noqa: PLR0915
         self,
         audio_stream: AsyncGenerator[bytes, None],
@@ -299,7 +290,7 @@ class ResonateGroup:
             if play_start_time_us is not None
             else int(self._server.loop.time() * 1_000_000) + INITIAL_PLAYBACK_DELAY_US
         )
-        group_players = self._group_players()
+        group_players = self.players()
 
         format_to_player: dict[AudioFormat, list[PlayerClient]] = {}
 
@@ -1032,6 +1023,10 @@ class ResonateGroup:
     def clients(self) -> list[ResonateClient]:
         """All clients that are part of this group."""
         return self._clients
+
+    def players(self) -> list[PlayerClient]:
+        """Return player helpers for all members that support the role."""
+        return [client.player for client in self._clients if client.player is not None]
 
     def _handle_group_command(self, cmd: GroupCommandClientPayload) -> None:
         # TODO: verify that this command is actually supported for the current state
