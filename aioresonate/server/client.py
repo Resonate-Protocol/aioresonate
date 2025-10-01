@@ -279,12 +279,10 @@ class ResonateClient:
         return self._player
 
     @property
-    def player_throw(self) -> PlayerClient:
+    def require_player(self) -> PlayerClient:
         """Return the player or raise if the role is unsupported."""
-        # TODO: think of better names
         if self._player is None:
-            self._ensure_role(Roles.PLAYER)
-            self._player = PlayerClient(self)
+            raise ValueError(f"Client does not support role: {Roles.PLAYER}")
         return self._player
 
     @property
@@ -293,11 +291,10 @@ class ResonateClient:
         return self._controller
 
     @property
-    def controller_throw(self) -> ControllerClient:
+    def require_controller(self) -> ControllerClient:
         """Return controller helper or raise if role unsupported."""
         if self._controller is None:
-            self._ensure_role(Roles.CONTROLLER)
-            self._controller = ControllerClient(self)
+            raise ValueError(f"Client does not support role: {Roles.CONTROLLER}")
         return self._controller
 
     @property
@@ -306,11 +303,10 @@ class ResonateClient:
         return self._metadata_client
 
     @property
-    def metadata_throw(self) -> MetadataClient:
+    def require_metadata(self) -> MetadataClient:
         """Return metadata helper or raise if role unsupported."""
         if self._metadata_client is None:
-            self._ensure_role(Roles.METADATA)
-            self._metadata_client = MetadataClient(self)
+            raise ValueError(f"Client does not support role: {Roles.METADATA}")
         return self._metadata_client
 
     @property
@@ -319,11 +315,10 @@ class ResonateClient:
         return self._visualizer
 
     @property
-    def visualizer_throw(self) -> VisualizerClient:
+    def require_visualizer(self) -> VisualizerClient:
         """Return visualizer helper or raise if role unsupported."""
         if self._visualizer is None:
-            self._ensure_role(Roles.VISUALIZER)
-            self._visualizer = VisualizerClient(self)
+            raise ValueError(f"Client does not support role: {Roles.VISUALIZER}")
         return self._visualizer
 
     def _set_group(self, group: "ResonateGroup") -> None:
@@ -465,6 +460,17 @@ class ResonateClient:
                 self._client_id = client_info.client_id
                 self._logger.info("Client ID set to %s", self._client_id)
                 self._logger = logger.getChild(self._client_id)
+
+                # Initialize role helpers based on supported roles
+                if Roles.PLAYER in self._roles:
+                    self._player = PlayerClient(self)
+                if Roles.CONTROLLER in self._roles:
+                    self._controller = ControllerClient(self)
+                if Roles.METADATA in self._roles:
+                    self._metadata_client = MetadataClient(self)
+                if Roles.VISUALIZER in self._roles:
+                    self._visualizer = VisualizerClient(self)
+
                 self._handle_client_connect(self)
                 self._logger.debug("Sending server/hello in response to client/hello")
                 self.send_message(
@@ -486,19 +492,19 @@ class ResonateClient:
                 )
             # Player messages
             case PlayerUpdateMessage(state):
-                self.player_throw.handle_player_update(state)
+                self.require_player.handle_player_update(state)
             case StreamRequestFormatMessage(payload):
                 self._ensure_role(Roles.PLAYER)
                 self.group.handle_stream_format_request(self, payload)
             # Controller messages
             case GroupGetListClientMessage() as group_get_list:
-                self.controller_throw.handle_get_list(group_get_list)
+                self.require_controller.handle_get_list(group_get_list)
             case GroupJoinClientMessage(payload):
-                self.controller_throw.handle_join(payload)
+                self.require_controller.handle_join(payload)
             case GroupUnjoinClientMessage() as group_unjoin:
-                self.controller_throw.handle_unjoin(group_unjoin)
+                self.require_controller.handle_unjoin(group_unjoin)
             case GroupCommandClientMessage(group_command):
-                self.controller_throw.handle_command(group_command)
+                self.require_controller.handle_command(group_command)
 
     async def _writer(self) -> None:
         """Write outgoing messages from the queue."""

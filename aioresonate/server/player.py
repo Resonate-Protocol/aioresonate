@@ -21,8 +21,7 @@ from aioresonate.models.types import Roles
 from .client import VolumeChangedEvent
 from .group import AudioCodec, AudioFormat
 from .streaming import (
-    _BufferTracker,
-    _DirectStreamContext,
+    BufferTracker,
     _samples_to_microseconds,
     build_flac_stream_header,
 )
@@ -230,7 +229,7 @@ class PlayerClient:
         header = pack_binary_header_raw(BinaryMessageType.AUDIO_CHUNK.value, timestamp_us)
         self.client.send_message(header + chunk)
 
-    async def _play_media_direct(
+    async def _play_media_direct(  # noqa: C901, PLR0915
         self,
         audio_stream: AsyncGenerator[bytes, None],
         audio_format: AudioFormat,
@@ -271,57 +270,165 @@ class PlayerClient:
 
         frame_stride_bytes = audio_format.channels * bytes_per_sample
         buffer_capacity_bytes = support.buffer_capacity
-        buffer_tracker = _BufferTracker(
+        buffer_tracker = BufferTracker(
             loop=self.client._server.loop,  # noqa: SLF001
             logger=self._logger,
             client_id=self.client.client_id,
             capacity_bytes=buffer_capacity_bytes,
         )
-        context = _DirectStreamContext(
-            client=self.client,
-            audio_format=audio_format,
-            input_audio_format=input_audio_format,
-            input_audio_layout=input_audio_layout,
-            samples_per_chunk=samples_per_chunk,
-            buffer_tracker=buffer_tracker,
-            play_start_time_us=play_start_time_us,
-            encoder=encoder,
-            frame_stride_bytes=frame_stride_bytes,
-            send_pcm=self._send_pcm,
-        )
+        samples_enqueued_total = 0
+        samples_sent_total = 0
+        pcm_bytes_consumed = 0
+        compressed_bytes_sent = 0
 
         # Skip initial offset within the stream
         bytes_to_skip_total = (
             int((stream_start_time_us * audio_format.sample_rate) / 1_000_000) * frame_stride_bytes
         )
-        pending = await context._skip_initial_bytes(  # noqa: SLF001
-            audio_stream, bytes_to_skip_total
-        )
+        pending = bytearray()
+        if bytes_to_skip_total >= 0:
+            async for buf in audio_stream:
+                if not buf:
+                    continue
+                if bytes_to_skip_total >= len(buf):
+                    bytes_to_skip_total -= len(buf)
+                    continue
+                pending.extend(buf[bytes_to_skip_total:])
+                bytes_to_skip_total = 0
+                break
+            while bytes_to_skip_total > 0:
+                try:
+                    buf = await audio_stream.__anext__()
+                except StopAsyncIteration:
+                    break
+                if bytes_to_skip_total >= len(buf):
+                    bytes_to_skip_total -= len(buf)
+                    continue
+                pending.extend(buf[bytes_to_skip_total:])
+                bytes_to_skip_total = 0
         if bytes_to_skip_total > 0 and not pending:
             return play_start_time_us
 
         input_buffer = pending
 
+        def _timeline_us(samples: int) -> int:
+            """Translate samples from stream start into an absolute timestamp."""
+            return play_start_time_us + _samples_to_microseconds(samples, audio_format.sample_rate)
+
+        async def flush_encoder() -> None:
+            nonlocal compressed_bytes_sent, samples_sent_total
+            if encoder is None:
+                return
+
+            for packet in encoder.encode(None):
+                available_samples = max(samples_enqueued_total - samples_sent_total, 0)
+                packet_samples = packet.duration or available_samples or samples_per_chunk
+                if available_samples and packet_samples > available_samples:
+                    packet_samples = available_samples
+
+                payload = bytes(packet)
+                start_us = _timeline_us(samples_sent_total)
+                end_us = _timeline_us(samples_sent_total + packet_samples)
+                await buffer_tracker.wait_for_capacity(len(payload), end_us)
+                header = pack_binary_header_raw(BinaryMessageType.AUDIO_CHUNK.value, start_us)
+                self.client.send_message(header + payload)
+                buffer_tracker.register(end_us, len(payload))
+                compressed_bytes_sent += len(payload)
+                samples_sent_total += packet_samples
+
+        async def send_pcm_chunk(chunk: bytes, sample_count: int) -> None:
+            nonlocal samples_sent_total, compressed_bytes_sent
+            start_us = _timeline_us(samples_sent_total)
+            end_us = _timeline_us(samples_sent_total + sample_count)
+            await buffer_tracker.wait_for_capacity(len(chunk), end_us)
+            self._send_pcm(chunk, start_us)
+            buffer_tracker.register(end_us, len(chunk))
+            samples_sent_total += sample_count
+            compressed_bytes_sent += len(chunk)
+
+        async def send_encoded_chunk(chunk: bytes, sample_count: int) -> None:
+            nonlocal compressed_bytes_sent, samples_sent_total, samples_enqueued_total
+            if encoder is None:
+                raise RuntimeError("send_encoded_chunk called without encoder")
+
+            frame = av.AudioFrame(
+                format=input_audio_format,
+                layout=input_audio_layout,
+                samples=sample_count,
+            )
+            frame.sample_rate = encoder.sample_rate
+            frame.planes[0].update(chunk)
+
+            samples_enqueued_total += sample_count
+            packets = encoder.encode(frame)
+
+            if not packets:
+                return
+
+            for packet in packets:
+                available_samples = max(samples_enqueued_total - samples_sent_total, 0)
+                packet_samples = packet.duration or available_samples
+                if available_samples and packet_samples > available_samples:
+                    packet_samples = available_samples
+                if packet_samples <= 0:
+                    packet_samples = packet.duration or samples_per_chunk
+
+                payload = bytes(packet)
+                start_us = _timeline_us(samples_sent_total)
+                end_us = _timeline_us(samples_sent_total + packet_samples)
+                await buffer_tracker.wait_for_capacity(len(payload), end_us)
+                header = pack_binary_header_raw(BinaryMessageType.AUDIO_CHUNK.value, start_us)
+                self.client.send_message(header + payload)
+                buffer_tracker.register(end_us, len(payload))
+                compressed_bytes_sent += len(payload)
+                samples_sent_total += packet_samples
+
+        async def drain_ready_chunks(input_buffer: bytearray, *, force_flush: bool) -> None:
+            """Send chunks while avoiding buffer overflows unless flushing remaining data."""
+            nonlocal pcm_bytes_consumed
+            while True:
+                available_samples = len(input_buffer) // frame_stride_bytes
+                if available_samples <= 0:
+                    return
+
+                if not force_flush and available_samples < samples_per_chunk:
+                    return
+                sample_count = (
+                    available_samples if force_flush else min(available_samples, samples_per_chunk)
+                )
+                chunk_size = sample_count * frame_stride_bytes
+                if chunk_size <= 0:
+                    return
+
+                chunk = bytes(input_buffer[:chunk_size])
+                del input_buffer[:chunk_size]
+                pcm_bytes_consumed += chunk_size
+
+                if encoder is None:
+                    await send_pcm_chunk(chunk, sample_count)
+                else:
+                    await send_encoded_chunk(chunk, sample_count)
+
         async for chunk in audio_stream:
             if not chunk:
                 continue
             input_buffer.extend(chunk)
-            await context.drain_ready_chunks(input_buffer, force_flush=False)
+            await drain_ready_chunks(input_buffer, force_flush=False)
 
-        await context.drain_ready_chunks(input_buffer, force_flush=True)
-        await context.flush_encoder()
+        await drain_ready_chunks(input_buffer, force_flush=True)
+        await flush_encoder()
 
         buffer_tracker.prune_consumed()
         end_timestamp_us = play_start_time_us + _samples_to_microseconds(
-            context.samples_sent_total,
+            samples_sent_total,
             audio_format.sample_rate,
         )
 
         self._logger.debug(
             "Completed direct stream for client %s: pcm=%sB compressed=%sB max_buffer=%s/%sB",
             self.client.client_id,
-            context.pcm_bytes_consumed,
-            context.compressed_bytes_sent,
+            pcm_bytes_consumed,
+            compressed_bytes_sent,
             buffer_tracker.max_usage_bytes,
             buffer_capacity_bytes,
         )

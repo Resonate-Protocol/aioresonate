@@ -418,7 +418,7 @@ class ResonateGroup:
         start_time_us: int,
         stream_start_time_us: int,
     ) -> None:
-        """Start a direct-session stream for ``client`` when available."""
+        """Start a direct-session stream for client when available."""
         session = self._direct_session
         assert session is not None
 
@@ -433,7 +433,7 @@ class ResonateGroup:
         stream = await session.get_stream(client, player_format, start_time_us, offset_us)
 
         task = self._server.loop.create_task(
-            client.player_throw._play_media_direct(  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+            client.require_player._play_media_direct(  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
                 stream,
                 player_format,
                 play_start_time_us=start_time_us,
@@ -1147,7 +1147,7 @@ class ResonateGroup:
         if self._stream_task is not None and self._stream_audio_format is not None:
             logger.debug("Joining client %s to current stream", client.client_id)
             if client.check_role(Roles.PLAYER):
-                player_format = client.player_throw.determine_optimal_format(
+                player_format = client.require_player.determine_optimal_format(
                     self._stream_audio_format
                 )
                 self._player_formats[client.client_id] = player_format
@@ -1178,7 +1178,7 @@ class ResonateGroup:
                             yield chunk
 
                     self._client_stream_tasks[client.client_id] = self._server.loop.create_task(
-                        client.player_throw._play_media_direct(  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+                        client.require_player._play_media_direct(  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
                             stream_gen(),
                             player_format,
                             play_start_time_us=self._play_start_time_us,
