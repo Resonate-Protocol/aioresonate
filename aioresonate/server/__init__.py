@@ -25,6 +25,7 @@ __all__ = [
     "VolumeChangedEvent",
 ]
 
+from .audio import AudioFormat
 from .client import (
     ClientEvent,
     ClientGroupChangedEvent,
@@ -32,7 +33,6 @@ from .client import (
     VolumeChangedEvent,
 )
 from .group import (
-    AudioFormat,
     GroupCommandEvent,
     GroupDeletedEvent,
     GroupEvent,
