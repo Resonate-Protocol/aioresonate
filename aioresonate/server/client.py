@@ -189,26 +189,26 @@ class ResonateClient:
         self._logger.debug("Disconnecting client")
 
         if self.disconnect_behaviour == DisconnectBehaviour.UNGROUP:
-            self.ungroup()
+            await self.ungroup()
             # Try to stop playback if we were playing alone before disconnecting
-            _ = self.group.stop()
+            await self.group.stop()
         elif self.disconnect_behaviour == DisconnectBehaviour.STOP:
-            _ = self.group.stop()
-            self.ungroup()
+            await self.group.stop()
+            await self.ungroup()
 
         # Cancel running tasks
         if self._writer_task and not self._writer_task.done():
             self._logger.debug("Cancelling writer task")
-            _ = self._writer_task.cancel()  # Don't care about cancellation result
+            self._writer_task.cancel()  # Don't care about cancellation result
             with suppress(asyncio.CancelledError):
                 await self._writer_task
         # Handle task is cancelled implicitly when wsock closes or externally
 
         # Close WebSocket
         if self._wsock_client is not None and not self._wsock_client.closed:
-            _ = await self._wsock_client.close()  # Don't care about close result
+            await self._wsock_client.close()
         elif self._wsock_server is not None and not self._wsock_server.closed:
-            _ = await self._wsock_server.close()  # Don't care about close result
+            await self._wsock_server.close()
 
         if self._client_id is not None:
             self._handle_client_disconnect(self)
@@ -335,7 +335,7 @@ class ResonateClient:
         # Emit event for group change
         self._signal_event(ClientGroupChangedEvent(group))
 
-    def ungroup(self) -> None:
+    async def ungroup(self) -> None:
         """
         Remove the client from the group.
 
@@ -343,7 +343,7 @@ class ResonateClient:
         """
         if len(self._group.clients) > 1:
             self._logger.debug("Ungrouping client from group")
-            self._group.remove_client(self)
+            await self._group.remove_client(self)
         else:
             self._logger.debug("Client already alone in group, no ungrouping needed")
 
@@ -354,7 +354,7 @@ class ResonateClient:
             try:
                 async with asyncio.timeout(10):
                     # Prepare response, writer not needed
-                    _ = await self._wsock_server.prepare(self._request)
+                    await self._wsock_server.prepare(self._request)
             except TimeoutError:
                 self._logger.warning("Timeout preparing request")
                 raise
@@ -386,7 +386,7 @@ class ResonateClient:
                     self._logger.debug("Writer task ended, closing connection")
                     # Cancel the receive task if it's still pending
                     if receive_task in pending:
-                        _ = receive_task.cancel()  # Don't care about cancellation result
+                        receive_task.cancel()
                     break
 
                 # Get the message from the completed receive task
@@ -418,14 +418,14 @@ class ResonateClient:
             self._logger.exception("Unexpected error inside websocket API")
         finally:
             if receive_task and not receive_task.done():
-                _ = receive_task.cancel()  # Don't care about cancellation result
+                receive_task.cancel()
 
     async def _cleanup_connection(self) -> None:
         """Clean up WebSocket connection and tasks."""
         wsock = self._wsock_client or self._wsock_server
         try:
             if wsock and not wsock.closed:
-                _ = await wsock.close()  # Don't care about close result
+                await wsock.close()
         except Exception:
             self._logger.exception("Failed to close websocket")
         await self.disconnect()
@@ -585,4 +585,4 @@ class ResonateClient:
 
     def _signal_event(self, event: ClientEvent) -> None:
         for cb in self._event_cbs:
-            _ = self._server.loop.create_task(cb(event))  # Fire and forget event callback
+            self._server.loop.create_task(cb(event))

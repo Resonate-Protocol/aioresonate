@@ -180,7 +180,7 @@ class ResonateServer:
         connection_task = self._connection_tasks.pop(url, None)
         if connection_task is not None:
             logger.debug("Disconnecting from client at URL: %s", url)
-            _ = connection_task.cancel()  # Don't care about cancellation result
+            connection_task.cancel()
 
     async def _handle_client_connection(self, url: str) -> None:
         """Handle the actual connection to a client."""
@@ -230,7 +230,7 @@ class ResonateServer:
                 if retry_event is not None:
                     try:
                         # Always returns True when event is set
-                        _ = await asyncio.wait_for(retry_event.wait(), timeout=backoff)
+                        await asyncio.wait_for(retry_event.wait(), timeout=backoff)
                         logger.debug("Immediate retry requested for %s", url)
                         # Clear the event for next time
                         retry_event.clear()
@@ -248,8 +248,8 @@ class ResonateServer:
             # NOTE: Intentional catch-all to log unexpected exceptions so they are visible.
             logger.exception("Unexpected error occurred")
         finally:
-            _ = self._connection_tasks.pop(url, None)  # Cleanup connection tasks dict
-            _ = self._retry_events.pop(url, None)  # Cleanup retry events dict
+            self._connection_tasks.pop(url, None)  # Cleanup connection tasks dict
+            self._retry_events.pop(url, None)  # Cleanup retry events dict
 
     def add_event_listener(
         self, callback: Callable[[ResonateEvent], Coroutine[None, None, None]]
@@ -269,7 +269,7 @@ class ResonateServer:
     def _signal_event(self, event: ResonateEvent) -> None:
         """Signal an event to all registered listeners."""
         for cb in self._event_cbs:
-            _ = self._loop.create_task(cb(event))  # Fire and forget event callback
+            self._loop.create_task(cb(event))
 
     def _handle_client_connect(self, client: ResonateClient) -> None:
         """
@@ -337,7 +337,7 @@ class ResonateServer:
         logger.info("Starting Resonate server on port %d", port)
         self._app = web.Application()
         # Create perpetual WebSocket route for client connections
-        _ = self._app.router.add_get(api_path, self.on_client_connect)
+        self._app.router.add_get(api_path, self.on_client_connect)
         self._app_runner = web.AppRunner(self._app)
         await self._app_runner.setup()
 

@@ -758,7 +758,7 @@ class ResonateGroup:
         """Send a stream end message to a client to stop playback."""
         logger.debug("ending stream for %s (%s)", client.name, client.client_id)
         # Lifetime of album artwork is bound to the stream
-        _ = self._client_art_formats.pop(client.client_id, None)
+        self._client_art_formats.pop(client.client_id, None)
         client.send_message(StreamEndMessage())
 
     async def stop(self, stop_time_us: int | None = None) -> bool:  # noqa: PLR0915
@@ -1054,14 +1054,14 @@ class ResonateGroup:
 
     def _signal_event(self, event: GroupEvent) -> None:
         for cb in self._event_cbs:
-            _ = self._server.loop.create_task(cb(event))  # Fire and forget event callback
+            self._server.loop.create_task(cb(event))
 
     @property
     def state(self) -> PlaybackStateType:
         """Current playback state of the group."""
         return self._current_state
 
-    def remove_client(self, client: ResonateClient) -> None:
+    async def remove_client(self, client: ResonateClient) -> None:
         """
         Remove a client from this group.
 
@@ -1079,7 +1079,7 @@ class ResonateGroup:
         logger.debug("removing %s from group with members: %s", client.client_id, self._clients)
         if len(self._clients) == 1:
             # Delete this group if that was the last client
-            _ = self.stop()
+            await self.stop()
             self._clients = []
         else:
             self._clients.remove(client)
@@ -1113,7 +1113,7 @@ class ResonateGroup:
         # Each client needs to be in a group, add it to a new one
         client._set_group(ResonateGroup(self._server, client))  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
 
-    def add_client(self, client: ResonateClient) -> None:  # noqa: PLR0915
+    async def add_client(self, client: ResonateClient) -> None:  # noqa: PLR0915
         """
         Add a client to this group.
 
@@ -1125,11 +1125,11 @@ class ResonateGroup:
             client: The client to add to this group.
         """
         logger.debug("adding %s to group with members: %s", client.client_id, self._clients)
-        _ = client.group.stop()
+        await client.group.stop()
         if client in self._clients:
             return
         # Remove it from any existing group first
-        client.ungroup()
+        await client.ungroup()
 
         # Add client to this group's client list
         self._clients.append(client)
