@@ -73,7 +73,7 @@ class AudioCodec(Enum):
 
 
 class GroupEvent:
-    """Base event type used by ClientGroup.add_event_listener()."""
+    """Base event type used by ResonateGroup.add_event_listener()."""
 
 
 # TODO: make types more fancy
@@ -218,7 +218,7 @@ class ResonateGroup:
 
         Groups are managed automatically by the server.
 
-        Initialize a new ClientGroup.
+        Initialize a new ResonateGroup.
 
         Args:
             server: The ResonateServer instance this group belongs to.
@@ -241,7 +241,7 @@ class ResonateGroup:
         self._direct_session: DirectStreamSession | None = None
         self._play_start_time_us: int | None = None
         logger.debug(
-            "ClientGroup initialized with %d client(s): %s",
+            "ResonateGroup initialized with %d client(s): %s",
             len(self._clients),
             [type(c).__name__ for c in self._clients],
         )
@@ -559,7 +559,8 @@ class ResonateGroup:
         return self._server.loop.create_task(fanout_audio())
 
     def suggest_optimal_sample_rate(self, source_sample_rate: int) -> int:
-        """Suggest an optimal sample rate for the next track.
+        """
+        Suggest an optimal sample rate for the next track.
 
         Analyzes all player clients in this group and returns the best sample rate that
         minimizes resampling across group members. Preference order:

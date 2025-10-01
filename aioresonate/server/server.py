@@ -319,7 +319,8 @@ class ResonateServer:
         return self._name
 
     async def start_server(self, port: int = 8927, host: str = "0.0.0.0") -> None:
-        """Start the Resonate Server.
+        """
+        Start the Resonate Server.
 
         This will start the Resonate server to connect to clients for both:
         - Client initiated connections: This will advertise this server via mDNS as _resonate_server

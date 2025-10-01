@@ -241,7 +241,8 @@ class _DirectStreamContext:
     async def _skip_initial_bytes(
         self, audio_stream: AsyncGenerator[bytes, None], bytes_to_skip_total: int
     ) -> bytearray:
-        """Consume chunks until ``bytes_to_skip_total`` have been dropped.
+        """
+        Consume chunks until ``bytes_to_skip_total`` have been dropped.
 
         Returns the first buffered bytes that should be played after the skipped
         portion (possibly empty when the stream ended).

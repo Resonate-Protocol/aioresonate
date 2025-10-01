@@ -328,12 +328,12 @@ class ResonateClient:
 
     def _set_group(self, group: "ResonateGroup") -> None:
         """
-        Set the group for this client. For internal use by ClientGroup only.
+        Set the group for this client. For internal use by ResonateGroup only.
 
         NOTE: this does not update the group's client list
 
         Args:
-            group: The ClientGroup to assign this client to.
+            group: The ResonateGroup to assign this client to.
         """
         self._group = group
 
