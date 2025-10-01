@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 from collections.abc import Awaitable, Callable, Sequence
 from contextlib import suppress
 from dataclasses import dataclass
@@ -417,7 +418,7 @@ class ResonateClient:
             (now_us - payload.client_transmitted)
             - (payload.server_transmitted - payload.server_received)
         ) / 2
-        self._time_filter.update(offset, delay, now_us)
+        self._time_filter.update(round(offset), round(delay), now_us)
         self._pending_time_message = False
 
     async def _handle_stream_start(self, message: StreamStartMessage) -> None:
@@ -514,7 +515,7 @@ class ResonateClient:
         self._audio_player.submit(play_at_us, payload)
 
     def _compute_play_time(self, server_timestamp_us: int) -> int:
-        if self._time_filter.ready:
+        if self._time_filter._count >= 2 and not math.isinf(self._time_filter._offset_covariance):  # noqa: SLF001
             play_time = self._time_filter.compute_client_time(server_timestamp_us)
             return play_time + self._static_delay_us
         # Fallback: add a conservative delay if time sync isn't ready yet
@@ -557,7 +558,9 @@ class ResonateClient:
             pass
 
     def _compute_time_sync_interval(self) -> float:
-        if not self._time_filter.ready:
+        if not (
+            self._time_filter._count >= 2 and not math.isinf(self._time_filter._offset_covariance)  # noqa: SLF001
+        ):
             return 0.2
         error = self._time_filter.error
         if error < 1_000:
