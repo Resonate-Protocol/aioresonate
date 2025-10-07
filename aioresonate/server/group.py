@@ -264,7 +264,6 @@ class ResonateGroup:
         channel_formats = dict(self._channel_formats)
         streamer = Streamer(
             loop=self._server.loop,
-            logger=logger,
             play_start_time_us=start_time_us,
         )
 
@@ -282,7 +281,6 @@ class ResonateGroup:
                     buffer_capacity_bytes=support.buffer_capacity,
                     channel=channel_name,
                     send=player.client.send_message,
-                    logger=None,
                 )
             )
 
@@ -459,7 +457,6 @@ class ResonateGroup:
                     buffer_capacity_bytes=support.buffer_capacity,
                     channel=channel_name,
                     send=player.client.send_message,
-                    logger=None,
                 )
             )
         future: asyncio.Future[dict[str, StreamStartPlayer]] = self._server.loop.create_future()

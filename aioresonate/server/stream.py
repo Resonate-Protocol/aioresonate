@@ -19,6 +19,8 @@ from aioresonate.models.player import StreamStartPlayer
 
 DEFAULT_CHANNEL_NAME = "default"
 
+logger = logging.getLogger(__name__)
+
 
 class AudioCodec(Enum):
     """Supported audio codecs."""
@@ -79,7 +81,6 @@ class BufferTracker:
         self,
         *,
         loop: asyncio.AbstractEventLoop,
-        logger: logging.Logger,
         client_id: str,
         capacity_bytes: int,
     ) -> None:
@@ -93,7 +94,6 @@ class BufferTracker:
             capacity_bytes: Maximum buffer capacity in bytes reported by the client.
         """
         self._loop = loop
-        self._logger = logger
         self.client_id = client_id
         self.capacity_bytes = capacity_bytes
         self.buffered_chunks: deque[BufferedChunk] = deque()
@@ -115,7 +115,7 @@ class BufferTracker:
             return
         if bytes_needed >= self.capacity_bytes:
             # TODO: raise exception instead?
-            self._logger.warning(
+            logger.warning(
                 "Chunk size %s exceeds reported buffer capacity %s for client %s",
                 bytes_needed,
                 self.capacity_bytes,
@@ -153,7 +153,6 @@ def build_encoder_for_format(
     *,
     input_audio_layout: str,
     input_audio_format: str,
-    logger: logging.Logger | None = None,
 ) -> tuple[av.AudioCodecContext | None, str | None, int]:
     """Create and configure an encoder for the target audio format."""
     if audio_format.codec == AudioCodec.PCM:
@@ -216,7 +215,6 @@ class ClientStreamConfig:
     buffer_capacity_bytes: int
     channel: str = DEFAULT_CHANNEL_NAME
     send: Callable[[bytes], None] | None = None
-    logger: logging.Logger | None = None
 
 
 @dataclass
@@ -318,12 +316,10 @@ class Streamer:
         self,
         *,
         loop: asyncio.AbstractEventLoop,
-        logger: logging.Logger,
         play_start_time_us: int,
     ) -> None:
         """Create a streamer bound to the event loop and playback start time."""
         self._loop = loop
-        self._logger = logger
         self._play_start_time_us = play_start_time_us
         self._channels: dict[str, ChannelSpec] = {}
         self._pipelines: dict[tuple[str, AudioFormat], PipelineState] = {}
@@ -387,7 +383,6 @@ class Streamer:
                     client_cfg.target_format,
                     input_audio_layout=target_layout,
                     input_audio_format=target_av_format,
-                    logger=client_cfg.logger or self._logger,
                 )
                 pipeline = PipelineState(
                     channel=channel_spec,
@@ -408,7 +403,6 @@ class Streamer:
 
             buffer_tracker = BufferTracker(
                 loop=self._loop,
-                logger=client_cfg.logger or self._logger,
                 client_id=client_cfg.client_id,
                 capacity_bytes=client_cfg.buffer_capacity_bytes,
             )
