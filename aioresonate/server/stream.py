@@ -44,8 +44,16 @@ class AudioFormat:
 
 def build_flac_stream_header(extradata: bytes) -> bytes:
     """Return a complete FLAC stream header for encoder extradata."""
-    if not extradata:
-        return extradata
+    # For FLAC, we need to construct a proper FLAC stream header ourselves
+    # since ffmpeg only provides the StreamInfo metadata block in extradata:
+    # See https://datatracker.ietf.org/doc/rfc9639/ Section 8.1
+
+    # FLAC stream signature (4 bytes): "fLaC"
+    # Metadata block header (4 bytes):
+    # - Bit 0: last metadata block (1 since we only have one)
+    # - Bits 1-7: block type (0 for StreamInfo)
+    # - Next 3 bytes: block length of the next metadata block in bytes
+    # StreamInfo block (34 bytes): as provided by ffmpeg
     return b"fLaC\x80" + len(extradata).to_bytes(3, "big") + extradata
 
 

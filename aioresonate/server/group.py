@@ -561,9 +561,6 @@ class ResonateGroup:
         self._audio_encoders[audio_format] = ctx
         header = bytes(ctx.extradata) if ctx.extradata else b""
 
-        # For FLAC, we need to construct a proper FLAC stream header ourselves
-        # since ffmpeg only provides the StreamInfo metadata block in extradata:
-        # See https://datatracker.ietf.org/doc/rfc9639/ Section 8.1
         if audio_format.codec == AudioCodec.FLAC and header:
             header = build_flac_stream_header(header)
 
