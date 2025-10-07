@@ -9,17 +9,13 @@ from collections import defaultdict, deque
 from collections.abc import AsyncGenerator, Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import TYPE_CHECKING, NamedTuple, cast
+from typing import NamedTuple, cast
 
 import av
 from av.logging import Capture
 
 from aioresonate.models import BinaryMessageType, pack_binary_header_raw
 from aioresonate.models.player import StreamStartPlayer
-
-if TYPE_CHECKING:
-    from .client import ResonateClient
-
 
 DEFAULT_CHANNEL_NAME = "default"
 
@@ -115,6 +111,7 @@ class BufferTracker:
         if bytes_needed <= 0:
             return
         if bytes_needed >= self.capacity_bytes:
+            # TODO: raise exception instead?
             self._logger.warning(
                 "Chunk size %s exceeds reported buffer capacity %s for client %s",
                 bytes_needed,
@@ -213,7 +210,6 @@ class ClientStreamConfig:
 
     client_id: str
     target_format: AudioFormat
-    chunk_samples: int
     buffer_capacity_bytes: int
     channel: str = DEFAULT_CHANNEL_NAME
     send: Callable[[bytes], None] | None = None
@@ -260,7 +256,7 @@ class PlayerState:
     """Tracks delivery state for a single player."""
 
     config: ClientStreamConfig
-    pipeline_key: tuple[str, AudioFormat, int]
+    pipeline_key: tuple[str, AudioFormat]
     queue: deque[PreparedChunkState] = field(default_factory=deque)
     buffer_tracker: BufferTracker | None = None
 
@@ -311,23 +307,6 @@ class MediaStream:
         """Expose available channels and their audio formats."""
         return {name: channel.audio_format for name, channel in self._channels.items()}
 
-    def handles_client(
-        self, _client: ResonateClient
-    ) -> bool:  # pragma: no cover - default behaviour
-        """Override to route individual clients to bespoke channels."""
-        return False
-
-    async def create_client_channel(
-        self,
-        client: ResonateClient,
-        audio_format: AudioFormat,
-        start_time_us: int,
-        stream_start_time_us: int,
-    ) -> tuple[str, AsyncGenerator[bytes, None], AudioFormat] | None:
-        """Return a dedicated channel for the given client when required."""
-        _ = (client, audio_format, start_time_us, stream_start_time_us)
-        return None
-
 
 class Streamer:
     """Adapts incoming channel data to player-specific formats."""
@@ -344,7 +323,7 @@ class Streamer:
         self._logger = logger
         self._play_start_time_us = play_start_time_us
         self._channels: dict[str, ChannelSpec] = {}
-        self._pipelines: dict[tuple[str, AudioFormat, int], PipelineState] = {}
+        self._pipelines: dict[tuple[str, AudioFormat], PipelineState] = {}
         self._pipelines_by_channel: dict[str, list[PipelineState]] = defaultdict(list)
         self._players: dict[str, PlayerState] = {}
         self._last_chunk_end_us: int | None = None
@@ -386,7 +365,6 @@ class Streamer:
             pipeline_key = (
                 client_cfg.channel,
                 client_cfg.target_format,
-                client_cfg.chunk_samples,
             )
             pipeline = self._pipelines.get(pipeline_key)
             if pipeline is None:
@@ -408,8 +386,6 @@ class Streamer:
                     input_audio_format=target_av_format,
                     logger=client_cfg.logger or self._logger,
                 )
-                # Use encoder-provided chunk size when available
-                chunk_samples = client_cfg.chunk_samples or chunk_samples
                 pipeline = PipelineState(
                     channel=channel_spec,
                     target_format=client_cfg.target_format,

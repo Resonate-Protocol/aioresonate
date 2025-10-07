@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 
 from aioresonate.models.player import ClientHelloPlayerSupport, PlayerUpdatePayload
 
-from .client import VolumeChangedEvent
+from .events import VolumeChangedEvent
 from .stream import AudioCodec, AudioFormat
 
 if TYPE_CHECKING:

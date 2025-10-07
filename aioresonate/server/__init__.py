@@ -25,12 +25,8 @@ __all__ = [
     "VolumeChangedEvent",
 ]
 
-from .client import (
-    ClientEvent,
-    ClientGroupChangedEvent,
-    ResonateClient,
-    VolumeChangedEvent,
-)
+from .client import ResonateClient
+from .events import ClientEvent, ClientGroupChangedEvent, VolumeChangedEvent
 from .group import (
     GroupCommandEvent,
     GroupDeletedEvent,

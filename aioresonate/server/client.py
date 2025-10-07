@@ -8,7 +8,6 @@ from enum import Enum
 from typing import TYPE_CHECKING, cast
 
 from aiohttp import ClientWebSocketResponse, WSMessage, WSMsgType, web
-from attr import dataclass
 
 from aioresonate.models import unpack_binary_header
 from aioresonate.models.controller import (
@@ -33,6 +32,7 @@ from aioresonate.models.player import (
 from aioresonate.models.types import ClientMessage, Roles, ServerMessage
 
 from .controller import ControllerClient
+from .events import ClientEvent, ClientGroupChangedEvent
 from .group import ResonateGroup
 from .metadata import MetadataClient
 from .player import PlayerClient
@@ -62,26 +62,6 @@ class DisconnectBehaviour(Enum):
     """
     The client will stop playback of the whole group when it gets disconnected.
     """
-
-
-class ClientEvent:
-    """Base event type used by Client.add_event_listener()."""
-
-
-@dataclass
-class VolumeChangedEvent(ClientEvent):
-    """The volume or mute status of the player was changed."""
-
-    volume: int
-    muted: bool
-
-
-@dataclass
-class ClientGroupChangedEvent(ClientEvent):
-    """The client was moved to a different group."""
-
-    new_group: "ResonateGroup"
-    """The new group the client is now part of."""
 
 
 class ResonateClient:
