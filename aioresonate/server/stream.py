@@ -57,11 +57,6 @@ def build_flac_stream_header(extradata: bytes) -> bytes:
     return b"fLaC\x80" + len(extradata).to_bytes(3, "big") + extradata
 
 
-def _samples_to_microseconds(sample_count: int, sample_rate: int) -> int:
-    """Convert a number of samples to microseconds using sample_rate."""
-    return int(sample_count * 1_000_000 / sample_rate)
-
-
 class BufferedChunk(NamedTuple):
     """Represents compressed audio bytes scheduled for playback."""
 
@@ -587,11 +582,11 @@ class Streamer:
         if not pipeline.subscribers or sample_count <= 0:
             return
         start_samples = pipeline.samples_produced
-        start_us = self._play_start_time_us + _samples_to_microseconds(
-            start_samples, pipeline.target_format.sample_rate
+        start_us = self._play_start_time_us + int(
+            start_samples * 1_000_000 / pipeline.target_format.sample_rate
         )
-        end_us = self._play_start_time_us + _samples_to_microseconds(
-            start_samples + sample_count, pipeline.target_format.sample_rate
+        end_us = self._play_start_time_us + int(
+            (start_samples + sample_count) * 1_000_000 / pipeline.target_format.sample_rate
         )
         chunk = PreparedChunkState(
             payload=payload,
