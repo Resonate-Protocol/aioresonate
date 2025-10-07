@@ -46,11 +46,10 @@ from aioresonate.models.types import (
     Roles,
 )
 from aioresonate.models.visualizer import StreamStartVisualizer
-from aioresonate.server.streaming import build_flac_stream_header
+from aioresonate.server.stream import build_flac_stream_header
 
-from .audio import AudioCodec, AudioFormat
 from .metadata import Metadata
-from .stream import ClientStreamConfig, MediaStream, Streamer
+from .stream import AudioCodec, AudioFormat, ClientStreamConfig, MediaStream, Streamer
 
 # The cyclic import is not an issue during runtime, so hide it
 # pyright: reportImportCycles=none

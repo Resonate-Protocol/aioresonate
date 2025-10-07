@@ -6,8 +6,8 @@ from typing import TYPE_CHECKING
 
 from aioresonate.models.player import ClientHelloPlayerSupport, PlayerUpdatePayload
 
-from .audio import AudioCodec, AudioFormat
 from .client import VolumeChangedEvent
+from .stream import AudioCodec, AudioFormat
 
 if TYPE_CHECKING:
     from .client import ResonateClient

@@ -25,7 +25,6 @@ __all__ = [
     "VolumeChangedEvent",
 ]
 
-from .audio import AudioFormat
 from .client import (
     ClientEvent,
     ClientGroupChangedEvent,
@@ -42,3 +41,4 @@ from .group import (
     ResonateGroup,
 )
 from .server import ClientAddedEvent, ClientRemovedEvent, ResonateEvent, ResonateServer
+from .stream import AudioFormat
