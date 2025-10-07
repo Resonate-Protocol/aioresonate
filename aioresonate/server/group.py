@@ -28,8 +28,6 @@ from aioresonate.models.core import (
     StreamEndMessage,
     StreamStartMessage,
     StreamStartPayload,
-    StreamUpdateMessage,
-    StreamUpdatePayload,
 )
 from aioresonate.models.metadata import (
     StreamStartMetadata,
@@ -37,7 +35,6 @@ from aioresonate.models.metadata import (
 from aioresonate.models.player import (
     StreamRequestFormatPayload,
     StreamStartPlayer,
-    StreamUpdatePlayer,
 )
 from aioresonate.models.types import (
     MediaCommand,
@@ -162,8 +159,6 @@ class ResonateGroup:
     """Current playback state of the group."""
     _group_id: str
     """Unique identifier for this group."""
-    _scheduled_format_changes: dict[str, tuple[StreamUpdateMessage, AudioFormat]]
-    """Mapping of client IDs to upcoming stream updates requested by the player."""
     _streamer: Streamer | None
     """Active Streamer instance for the current stream, None when not streaming."""
     _media_stream: MediaStream | None
@@ -203,7 +198,6 @@ class ResonateGroup:
         self._audio_headers = {}
         self._event_cbs = []
         self._group_id = str(uuid.uuid4())
-        self._scheduled_format_changes = {}
         self._streamer: Streamer | None = None
         self._media_stream: MediaStream | None = None
         self._channel_formats: dict[str, AudioFormat] = {}
@@ -703,7 +697,9 @@ class ResonateGroup:
                     except Exception:
                         logger.exception("Scheduled stop failed")
 
-                self._server.loop.call_later(delay, _delayed_stop)
+                self._server.loop.call_later(
+                    delay, lambda: self._server.loop.create_task(_delayed_stop())
+                )
                 return active
 
         if not active:
@@ -1154,86 +1150,4 @@ class ResonateGroup:
         request: StreamRequestFormatPayload,
     ) -> None:
         """Handle stream/request-format from a player and send stream/update."""
-        if self._stream_task is None or self._stream_audio_format is None:
-            logger.debug(
-                "Ignoring stream/request-format from %s without active stream",
-                player.client_id,
-            )
-            return
-
-        # Start from the current player format or determine from source
-        current = self._player_formats.get(player.client_id)
-        assert current is not None, "Player must have a current format if streaming"
-
-        # Apply requested overrides
-        codec = current.codec
-        if request.codec is not None:
-            try:
-                codec = AudioCodec(request.codec)
-            except ValueError:
-                logger.warning(
-                    "Player %s requested switch to unsupported codec %s, ignoring",
-                    player.client_id,
-                    request.codec,
-                )
-                codec = current.codec
-            # Ensure requested codec is supported by player
-            if (
-                player.info.player_support
-                and codec.value not in player.info.player_support.support_codecs
-            ):
-                raise ValueError(
-                    f"Player {player.client_id} does not support requested codec {codec}"
-                )
-
-        sample_rate = request.sample_rate or current.sample_rate
-        if (
-            player.info.player_support
-            and sample_rate not in player.info.player_support.support_sample_rates
-        ):
-            raise ValueError(
-                f"Player {player.client_id} does not support requested sample rate {sample_rate}"
-            )
-
-        bit_depth = request.bit_depth or current.bit_depth
-        if (
-            player.info.player_support
-            and bit_depth not in player.info.player_support.support_bit_depth
-        ):
-            raise ValueError(
-                f"Player {player.client_id} does not support requested bit depth {bit_depth}"
-            )
-        if bit_depth != 16:
-            raise NotImplementedError("Only 16bit audio is supported for now")
-
-        channels = request.channels or current.channels
-        if (
-            player.info.player_support
-            and channels not in player.info.player_support.support_channels
-        ):
-            raise ValueError(
-                f"Player {player.client_id} does not support requested channel count {channels}"
-            )
-        if channels not in (1, 2):
-            raise NotImplementedError("Only mono and stereo audio is supported for now")
-
-        new_format = AudioFormat(
-            sample_rate=sample_rate,
-            bit_depth=bit_depth,
-            channels=channels,
-            codec=codec,
-        )
-
-        header = self._get_audio_header(new_format)
-
-        update = StreamUpdatePlayer(
-            codec=new_format.codec.value,
-            sample_rate=new_format.sample_rate,
-            channels=new_format.channels,
-            bit_depth=new_format.bit_depth,
-            codec_header=header,
-        )
-        self._scheduled_format_changes[player.client_id] = (
-            StreamUpdateMessage(StreamUpdatePayload(player=update)),
-            new_format,
-        )
+        raise NotImplementedError("Dynamic format changes are not yet implemented")
