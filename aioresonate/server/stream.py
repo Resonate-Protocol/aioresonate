@@ -17,8 +17,6 @@ from av.logging import Capture
 from aioresonate.models import BinaryMessageType, pack_binary_header_raw
 from aioresonate.models.player import StreamStartPlayer
 
-DEFAULT_CHANNEL_NAME = "default"
-
 logger = logging.getLogger(__name__)
 
 
@@ -208,7 +206,6 @@ class ClientStreamConfig:
     client_id: str
     target_format: AudioFormat
     buffer_capacity_bytes: int
-    channel: str = DEFAULT_CHANNEL_NAME
     send: Callable[[bytes], None] | None = None
 
 
@@ -258,50 +255,29 @@ class PlayerState:
 
 
 class MediaStream:
-    """Container for channels that make up a logical media stream."""
-
-    supports_seek: bool = False
+    """Container for a single audio stream with its format."""
 
     def __init__(
         self,
         *,
         main_channel: AsyncGenerator[bytes, None],
         audio_format: AudioFormat,
-        channel_name: str = DEFAULT_CHANNEL_NAME,
-        additional_channels: Mapping[str, tuple[AsyncGenerator[bytes, None], AudioFormat]]
-        | None = None,
         supports_seek: bool = False,
     ) -> None:
-        """Initialise the media stream with its primary channel and metadata."""
-        self._channels: dict[str, Channel] = {
-            channel_name: Channel(channel_name, audio_format, main_channel)
-        }
-        if additional_channels:
-            for name, (gen, fmt) in additional_channels.items():
-                self._channels[name] = Channel(name, fmt, gen)
-        self._default_channel = channel_name
+        """Initialise the media stream with audio source and format."""
+        self._source = main_channel
+        self._audio_format = audio_format
         self.supports_seek = supports_seek
 
-    def get_channel(self, name: str = DEFAULT_CHANNEL_NAME) -> Channel:
-        """Return channel metadata and generator by name."""
-        return self._channels[name]
-
-    def iter_channel(self, name: str = DEFAULT_CHANNEL_NAME) -> AsyncGenerator[bytes, None]:
-        """Return the async generator for a channel."""
-        return self.get_channel(name).source
+    @property
+    def source(self) -> AsyncGenerator[bytes, None]:
+        """Return the audio source generator."""
+        return self._source
 
     @property
-    def default_channel_name(self) -> str:
-        """Return the name of the primary channel consumed by all players."""
-        return self._default_channel
-
-    def default_channel_format(self) -> AudioFormat:
-        """Return the audio format for the default channel."""
-        return self.get_channel(self._default_channel).audio_format
-
-    def available_channels(self) -> Mapping[str, AudioFormat]:
-        """Expose available channels and their audio formats."""
-        return {name: channel.audio_format for name, channel in self._channels.items()}
+    def audio_format(self) -> AudioFormat:
+        """Return the audio format of the stream."""
+        return self._audio_format
 
 
 class Streamer:
@@ -351,18 +327,20 @@ class Streamer:
         for client_cfg in clients:
             if client_cfg.send is None:
                 raise ValueError(f"Client {client_cfg.client_id} missing send callback")
-            if client_cfg.channel not in self._channels:
+
+            channel_name = next(iter(self._channels.keys()))
+            if channel_name not in self._channels:
                 raise KeyError(
-                    f"Unknown channel {client_cfg.channel!r} requested by {client_cfg.client_id}"
+                    f"Unknown channel {channel_name!r} requested by {client_cfg.client_id}"
                 )
 
             pipeline_key = (
-                client_cfg.channel,
+                channel_name,
                 client_cfg.target_format,
             )
             pipeline = self._pipelines.get(pipeline_key)
             if pipeline is None:
-                channel_spec = self._channels[client_cfg.channel]
+                channel_spec = self._channels[channel_name]
                 (
                     target_bytes_per_sample,
                     target_av_format,
@@ -621,7 +599,6 @@ def _resolve_audio_format(audio_format: AudioFormat) -> tuple[int, str, str]:
 
 
 __all__ = [
-    "DEFAULT_CHANNEL_NAME",
     "AudioCodec",
     "AudioFormat",
     "Channel",

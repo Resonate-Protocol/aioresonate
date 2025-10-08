@@ -217,7 +217,7 @@ class ResonateGroup:
         self._channel_generators.clear()
         self._player_channels.clear()
 
-        default_format = media_stream.default_channel_format()
+        default_format = media_stream.audio_format
         self._stream_audio_format = default_format
 
         start_time_us = (
@@ -234,19 +234,15 @@ class ResonateGroup:
             return start_time_us
 
         self._player_formats.clear()
-        self._channel_formats = dict(media_stream.available_channels())
-        self._channel_generators = {
-            name: media_stream.iter_channel(name) for name in self._channel_formats
-        }
+        channel_name = "default"
+        self._channel_formats = {channel_name: media_stream.audio_format}
+        self._channel_generators = {channel_name: media_stream.source}
 
-        # Configure each player with their format and channel
-        # All players get the default channel unless MediaStream provides additional channels
         for player in group_players:
             client = player.client
             player_format = player.determine_optimal_format(default_format)
             self._player_formats[client.client_id] = player_format
-            # All players use default channel for now (additional channels can be added later)
-            self._player_channels[client.client_id] = media_stream.default_channel_name
+            self._player_channels[client.client_id] = channel_name
 
         channel_formats = dict(self._channel_formats)
         streamer = Streamer(
@@ -254,19 +250,16 @@ class ResonateGroup:
             play_start_time_us=start_time_us,
         )
 
-        # Build client configurations for all players
         client_configs: list[ClientStreamConfig] = []
         for player in group_players:
             support = player.support
             if support is None:
                 raise ValueError(f"Player {player.client.client_id} lacks support payload")
-            channel_name = self._player_channels[player.client.client_id]
             client_configs.append(
                 ClientStreamConfig(
                     client_id=player.client.client_id,
                     target_format=self._player_formats[player.client.client_id],
                     buffer_capacity_bytes=support.buffer_capacity,
-                    channel=channel_name,
                     send=player.client.send_message,
                 )
             )
@@ -385,7 +378,6 @@ class ResonateGroup:
 
     async def _reconfigure_streamer(
         self,
-        media_stream: MediaStream,
     ) -> dict[str, StreamStartPlayer]:
         """Reconfigure the running streamer and return start payloads for new clients."""
         if self._streamer is None or self._stream_commands is None or self._stream_task is None:
@@ -398,13 +390,11 @@ class ResonateGroup:
             assert player.support
             client_id = player.client.client_id
             target_format = self._player_formats[client_id]
-            channel_name = self._player_channels.get(client_id, media_stream.default_channel_name)
             client_configs.append(
                 ClientStreamConfig(
                     client_id=client_id,
                     target_format=target_format,
                     buffer_capacity_bytes=player.support.buffer_capacity,
-                    channel=channel_name,
                     send=player.client.send_message,
                 )
             )
@@ -843,9 +833,7 @@ class ResonateGroup:
                 and client.check_role(Roles.PLAYER)
             ):
                 try:
-                    await self._reconfigure_streamer(
-                        media_stream=self._media_stream,
-                    )
+                    await self._reconfigure_streamer()
                 except RuntimeError:
                     logger.info(
                         "Stopping playback to rebuild streamer after removing %s",
@@ -900,11 +888,8 @@ class ResonateGroup:
                     self._stream_audio_format
                 )
                 self._player_formats[client.client_id] = player_format
-                # Assign to default channel (additional channels can be added later if needed)
                 if self._media_stream:
-                    self._player_channels[client.client_id] = (
-                        self._media_stream.default_channel_name
-                    )
+                    self._player_channels[client.client_id] = "default"
 
                 if (
                     self._streamer is None
@@ -923,9 +908,7 @@ class ResonateGroup:
                         await self.stop()
                     else:
                         try:
-                            start_payloads = await self._reconfigure_streamer(
-                                media_stream=self._media_stream,
-                            )
+                            start_payloads = await self._reconfigure_streamer()
                         except RuntimeError:
                             logger.info(
                                 "Stopping playback to restart streamer for new client %s",
