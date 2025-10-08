@@ -44,21 +44,6 @@ class AudioFormat:
     """Audio codec of the stream."""
 
 
-def build_flac_stream_header(extradata: bytes) -> bytes:
-    """Return a complete FLAC stream header for encoder extradata."""
-    # For FLAC, we need to construct a proper FLAC stream header ourselves
-    # since ffmpeg only provides the StreamInfo metadata block in extradata:
-    # See https://datatracker.ietf.org/doc/rfc9639/ Section 8.1
-
-    # FLAC stream signature (4 bytes): "fLaC"
-    # Metadata block header (4 bytes):
-    # - Bit 0: last metadata block (1 since we only have one)
-    # - Bits 1-7: block type (0 for StreamInfo)
-    # - Next 3 bytes: block length of the next metadata block in bytes
-    # StreamInfo block (34 bytes): as provided by ffmpeg
-    return b"fLaC\x80" + len(extradata).to_bytes(3, "big") + extradata
-
-
 class BufferedChunk(NamedTuple):
     """Represents compressed audio bytes scheduled for playback."""
 
@@ -176,7 +161,17 @@ def build_encoder_for_format(
 
     header = bytes(encoder.extradata) if encoder.extradata else b""
     if audio_format.codec == AudioCodec.FLAC and header:
-        header = build_flac_stream_header(header)
+        # For FLAC, we need to construct a proper FLAC stream header ourselves
+        # since ffmpeg only provides the StreamInfo metadata block in extradata:
+        # See https://datatracker.ietf.org/doc/rfc9639/ Section 8.1
+
+        # FLAC stream signature (4 bytes): "fLaC"
+        # Metadata block header (4 bytes):
+        # - Bit 0: last metadata block (1 since we only have one)
+        # - Bits 1-7: block type (0 for StreamInfo)
+        # - Next 3 bytes: block length of the next metadata block in bytes
+        # StreamInfo block (34 bytes): as provided by ffmpeg
+        header = b"fLaC\x80" + len(header).to_bytes(3, "big") + header
 
     codec_header_b64 = base64.b64encode(header).decode()
     samples_per_chunk = (

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import base64
 import logging
 import uuid
 from asyncio import Task
@@ -13,8 +12,6 @@ from dataclasses import dataclass
 from io import BytesIO
 from typing import TYPE_CHECKING, cast
 
-import av
-from av import logging as av_logging
 from PIL import Image
 
 from aioresonate.models import (
@@ -43,7 +40,6 @@ from aioresonate.models.types import (
     Roles,
 )
 from aioresonate.models.visualizer import StreamStartVisualizer
-from aioresonate.server.stream import build_flac_stream_header
 
 from .metadata import Metadata
 from .stream import AudioCodec, AudioFormat, ClientStreamConfig, MediaStream, Streamer
@@ -51,6 +47,8 @@ from .stream import AudioCodec, AudioFormat, ClientStreamConfig, MediaStream, St
 # The cyclic import is not an issue during runtime, so hide it
 # pyright: reportImportCycles=none
 if TYPE_CHECKING:
+    import av
+
     from .client import ResonateClient
     from .player import PlayerClient
     from .server import ResonateServer
@@ -148,8 +146,6 @@ class ResonateGroup:
     _current_media_art: Image.Image | None = None
     """Current media art image for the group, None if no image set."""
     _audio_encoders: dict[AudioFormat, av.AudioCodecContext]
-    """Mapping of audio formats to their av encoder contexts."""
-    _audio_headers: dict[AudioFormat, str]
     """Mapping of audio formats to their base64 encoded headers."""
     _preferred_stream_codec: AudioCodec = AudioCodec.OPUS
     """Preferred codec used by the current stream."""
@@ -195,7 +191,6 @@ class ResonateGroup:
         self._current_metadata = None
         self._current_media_art = None
         self._audio_encoders = {}
-        self._audio_headers = {}
         self._event_cbs = []
         self._group_id = str(uuid.uuid4())
         self._streamer: Streamer | None = None
@@ -298,17 +293,17 @@ class ResonateGroup:
         # Notify clients about the upcoming stream configuration
         for player in group_players:
             player_payload = start_payloads.get(player.client.client_id)
+            assert player_payload is not None
             self._send_stream_start_msg(
                 player.client,
-                None,
-                player_info=player_payload,
+                player_payload,
             )
 
         for client in self._clients:
             if client.check_role(Roles.PLAYER):
                 continue
             if client.check_role(Roles.METADATA) or client.check_role(Roles.VISUALIZER):
-                self._send_stream_start_msg(client, None, include_player=False)
+                self._send_stream_start_msg(client, None)
 
         self._current_state = PlaybackStateType.PLAYING
         self._signal_event(GroupStateChangedEvent(PlaybackStateType.PLAYING))
@@ -520,106 +515,14 @@ class ResonateGroup:
         top_rates = {r for r, c in counts.items() if c == max_count}
         return choose(top_rates)
 
-    def _get_or_create_audio_encoder(self, audio_format: AudioFormat) -> av.AudioCodecContext:
-        """
-        Get or create an audio encoder for the given audio format.
-
-        Args:
-            audio_format: The audio format to create an encoder for.
-                The sample rate and bit depth will be shared for both the input and output streams.
-                The input stream must be in a s16 or s24 format. The output stream will be in the
-                specified codec.
-
-        Returns:
-            av.AudioCodecContext: The audio encoder context.
-        """
-        if audio_format in self._audio_encoders:
-            return self._audio_encoders[audio_format]
-
-        # Create audio encoder context
-        ctx = cast(
-            "av.AudioCodecContext", av.AudioCodecContext.create(audio_format.codec.value, "w")
-        )
-        ctx.sample_rate = audio_format.sample_rate
-        ctx.layout = "stereo" if audio_format.channels == 2 else "mono"
-        assert audio_format.bit_depth in (16, 24)
-        ctx.format = "s16" if audio_format.bit_depth == 16 else "s24"
-
-        if audio_format.codec == AudioCodec.FLAC:
-            # Default compression level for now
-            ctx.options = {"compression_level": "5"}
-
-        with av_logging.Capture() as logs:
-            ctx.open()
-        for log in logs:
-            logger.debug("Opening AudioCodecContext log from av: %s", log)
-
-        # Store the encoder and extract the header
-        self._audio_encoders[audio_format] = ctx
-        header = bytes(ctx.extradata) if ctx.extradata else b""
-
-        if audio_format.codec == AudioCodec.FLAC and header:
-            header = build_flac_stream_header(header)
-
-        self._audio_headers[audio_format] = base64.b64encode(header).decode()
-
-        logger.debug(
-            "Created audio encoder: frame_size=%d, header_length=%d",
-            ctx.frame_size,
-            len(header),
-        )
-
-        return ctx
-
-    def _get_audio_header(self, audio_format: AudioFormat) -> str | None:
-        """
-        Get the codec header for the given audio format.
-
-        Args:
-            audio_format: The audio format to get the header for.
-
-        Returns:
-            str: Base64 encoded codec header.
-        """
-        if audio_format.codec == AudioCodec.PCM:
-            return None
-        if audio_format not in self._audio_headers:
-            # Create encoder to generate header
-            self._get_or_create_audio_encoder(audio_format)
-
-        return self._audio_headers[audio_format]
-
     def _send_stream_start_msg(
         self,
         client: ResonateClient,
-        audio_format: AudioFormat | None = None,
-        *,
-        include_player: bool = True,
-        player_info: StreamStartPlayer | None = None,
+        player_stream_info: StreamStartPlayer | None = None,
     ) -> None:
         """Send a stream start message to a client with the specified audio format for players."""
-        logger.debug(
-            "_send_stream_start_msg: client=%s, format=%s",
-            client.client_id,
-            audio_format,
-        )
-        if include_player and client.check_role(Roles.PLAYER):
-            if player_info is not None:
-                player_stream_info = player_info
-            else:
-                if audio_format is None:
-                    raise ValueError("audio_format must be provided for player clients")
-                player_stream_info = StreamStartPlayer(
-                    codec=audio_format.codec.value,
-                    sample_rate=audio_format.sample_rate,
-                    channels=audio_format.channels,
-                    bit_depth=audio_format.bit_depth,
-                    codec_header=self._get_audio_header(audio_format),
-                )
-        else:
-            player_stream_info = None
+        assert client.check_role(Roles.PLAYER) == (player_stream_info is not None)
         if client.check_role(Roles.METADATA) and client.info.metadata_support:
-            # Choose the first supported picture format as a simple strategy
             supported = client.info.metadata_support.support_picture_formats
             art_format: PictureFormat | None = None
             for fmt in (PictureFormat.JPEG, PictureFormat.PNG, PictureFormat.BMP):
@@ -644,13 +547,12 @@ class ResonateGroup:
             metadata=metadata_stream_info,
             visualizer=visualizer_stream_info,
         )
-        if player_stream_info or metadata_stream_info or visualizer_stream_info:
-            logger.debug(
-                "Sending stream start message to client %s: %s",
-                client.client_id,
-                stream_info,
-            )
-            client.send_message(StreamStartMessage(stream_info))
+        logger.debug(
+            "Sending stream start message to client %s: %s",
+            client.client_id,
+            stream_info,
+        )
+        client.send_message(StreamStartMessage(stream_info))
 
     def _send_stream_end_msg(self, client: ResonateClient) -> None:
         """Send a stream end message to a client to stop playback."""
@@ -735,7 +637,6 @@ class ResonateGroup:
                 self._player_formats.pop(client.client_id, None)
 
         self._audio_encoders.clear()
-        self._audio_headers.clear()
         self._current_media_art = None
         self._stream_audio_format = None
         self._play_start_time_us = None
@@ -1101,11 +1002,10 @@ class ResonateGroup:
                                 if payload is not None and player_obj is not None:
                                     self._send_stream_start_msg(
                                         player_obj.client,
-                                        None,
-                                        player_info=payload,
+                                        player_stream_info=payload,
                                     )
             elif client.check_role(Roles.METADATA) or client.check_role(Roles.VISUALIZER):
-                self._send_stream_start_msg(client, None, include_player=False)
+                self._send_stream_start_msg(client, None)
 
         # Send current metadata to the new player if available
         if self._current_metadata is not None:
