@@ -178,15 +178,6 @@ def build_encoder_for_format(
     return encoder, codec_header_b64, samples_per_chunk
 
 
-@dataclass
-class Channel:
-    """Represents a PCM-producing audio channel."""
-
-    name: str
-    audio_format: AudioFormat
-    source: AsyncGenerator[bytes, None]
-
-
 @dataclass(frozen=True)
 class ChannelSpec:
     """Expanded channel metadata used by the Streamer."""
@@ -260,14 +251,12 @@ class MediaStream:
     def __init__(
         self,
         *,
-        main_channel: AsyncGenerator[bytes, None],
+        source: AsyncGenerator[bytes, None],
         audio_format: AudioFormat,
-        supports_seek: bool = False,
     ) -> None:
         """Initialise the media stream with audio source and format."""
-        self._source = main_channel
+        self._source = source
         self._audio_format = audio_format
-        self.supports_seek = supports_seek
 
     @property
     def source(self) -> AsyncGenerator[bytes, None]:
@@ -282,6 +271,21 @@ class MediaStream:
 
 class Streamer:
     """Adapts incoming channel data to player-specific formats."""
+
+    _loop: asyncio.AbstractEventLoop
+    """Event loop used for time calculations and task scheduling."""
+    _play_start_time_us: int
+    """Absolute timestamp in microseconds when playback should start."""
+    _channels: dict[str, ChannelSpec]
+    """Mapping of channel names to their expanded specifications."""
+    _pipelines: dict[tuple[str, AudioFormat], PipelineState]
+    """Mapping of (channel_name, target_format) to pipeline state."""
+    _pipelines_by_channel: dict[str, list[PipelineState]]
+    """Mapping of channel names to all pipelines consuming from that channel."""
+    _players: dict[str, PlayerState]
+    """Mapping of client IDs to their player delivery state."""
+    _last_chunk_end_us: int | None
+    """End timestamp of the most recently prepared chunk, None if no chunks prepared yet."""
 
     def __init__(
         self,
@@ -601,7 +605,6 @@ def _resolve_audio_format(audio_format: AudioFormat) -> tuple[int, str, str]:
 __all__ = [
     "AudioCodec",
     "AudioFormat",
-    "Channel",
     "ChannelSpec",
     "ClientStreamConfig",
     "MediaStream",
