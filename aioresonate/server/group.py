@@ -115,9 +115,6 @@ class _StreamerReconfigureCommand(_StreamerCommand):
 
     channel_formats: dict[str, AudioFormat]
     client_configs: list[ClientStreamConfig]
-    new_client_ids: set[str]
-    removed_client_ids: set[str]
-    result: asyncio.Future[dict[str, StreamStartPlayer]]
 
 
 class ResonateGroup:
@@ -322,7 +319,7 @@ class ResonateGroup:
 
         return end_time_us
 
-    async def _run_streamer(  # noqa: PLR0915
+    async def _run_streamer(
         self,
         streamer: Streamer,
         channel_generators: dict[str, AsyncGenerator[bytes, None]],
@@ -331,70 +328,41 @@ class ResonateGroup:
         """Consume media channels, distribute via streamer, and return end timestamp."""
         last_end_us = self._play_start_time_us or int(self._server.loop.time() * 1_000_000)
         cancelled = False
-        pending_chunks: dict[str, asyncio.Task[bytes]] = {
-            name: self._server.loop.create_task(generator.__anext__())
-            for name, generator in channel_generators.items()
-        }
-        command_task: asyncio.Task[_StreamerCommand] | None = None
-        if command_queue is not None:
-            command_task = self._server.loop.create_task(command_queue.get())
 
         try:
-            while pending_chunks:
-                for name in list(pending_chunks):
-                    if name not in channel_generators:
-                        task = pending_chunks.pop(name)
-                        task.cancel()
-                        with suppress(asyncio.CancelledError):
-                            await task
-                for name, generator in channel_generators.items():
-                    if name not in pending_chunks:
-                        pending_chunks[name] = self._server.loop.create_task(generator.__anext__())
-
-                wait_set: set[asyncio.Task[object]] = set(pending_chunks.values())
-                if command_task is not None:
-                    wait_set.add(command_task)
-                done, _ = await asyncio.wait(wait_set, return_when=asyncio.FIRST_COMPLETED)
-
-                if command_task is not None and command_task in done:
-                    command = command_task.result()
+            while channel_generators:
+                # Check for commands before processing chunks
+                if command_queue is not None and not command_queue.empty():
+                    command = command_queue.get_nowait()
                     if isinstance(command, _StreamerReconfigureCommand):
                         try:
                             streamer.flush()
                             await streamer.send()
                             streamer.reset()
-                            start_payloads = streamer.configure(
+                            # TODO(refactor): send session/update or session/start for affected
+                            # players only here
+                            streamer.configure(
                                 channels=command.channel_formats,
                                 clients=command.client_configs,
                             )
-                        except Exception as exc:
-                            if not command.result.done():
-                                command.result.set_exception(exc)
+                        except Exception:
                             logger.exception("Failed to reconfigure streamer")
-                        else:
-                            if not command.result.done():
-                                command.result.set_result(start_payloads)
-                    if command_queue is not None:
-                        command_task = self._server.loop.create_task(command_queue.get())
                     continue
 
-                completed_channels = [name for name, task in pending_chunks.items() if task in done]
+                # Sequentially fetch chunks from all active generators
                 chunk_map: dict[str, bytes] = {}
-                for name in completed_channels:
-                    task = pending_chunks.pop(name)
+                for name in list(channel_generators.keys()):
+                    generator = channel_generators.get(name)
+                    if generator is None:
+                        continue
                     try:
-                        chunk = task.result()
+                        chunk = await anext(generator)
+                        chunk_map[name] = chunk
                     except StopAsyncIteration:
                         channel_generators.pop(name, None)
-                        continue
                     except Exception:
                         logger.exception("Channel %s raised during streaming", name)
                         channel_generators.pop(name, None)
-                        continue
-                    chunk_map[name] = chunk
-                    pending_chunks[name] = self._server.loop.create_task(
-                        channel_generators[name].__anext__()
-                    )
 
                 if not chunk_map:
                     continue
@@ -417,19 +385,12 @@ class ResonateGroup:
             for generator in channel_generators.values():
                 with suppress(Exception):
                     await generator.aclose()
-            if command_task is not None:
-                command_task.cancel()
-                with suppress(asyncio.CancelledError):
-                    await command_task
             if cancelled and streamer.last_chunk_end_time_us is not None:
                 last_end_us = streamer.last_chunk_end_time_us
 
     async def _reconfigure_streamer(
         self,
-        *,
         media_stream: MediaStream,
-        new_client_ids: set[str],
-        removed_client_ids: set[str],
     ) -> dict[str, StreamStartPlayer]:
         """Reconfigure the running streamer and return start payloads for new clients."""
         if self._streamer is None or self._stream_commands is None or self._stream_task is None:
@@ -439,9 +400,7 @@ class ResonateGroup:
         client_configs: list[ClientStreamConfig] = []
 
         for player in self.players():
-            support = player.support
-            if support is None:
-                raise ValueError(f"Player {player.client.client_id} lacks support payload")
+            assert player.support
             client_id = player.client.client_id
             target_format = self._player_formats[client_id]
             channel_name = self._player_channels.get(client_id, media_stream.default_channel_name)
@@ -449,7 +408,7 @@ class ResonateGroup:
                 ClientStreamConfig(
                     client_id=client_id,
                     target_format=target_format,
-                    buffer_capacity_bytes=support.buffer_capacity,
+                    buffer_capacity_bytes=player.support.buffer_capacity,
                     channel=channel_name,
                     send=player.client.send_message,
                 )
@@ -459,9 +418,6 @@ class ResonateGroup:
             _StreamerReconfigureCommand(
                 channel_formats=channel_formats,
                 client_configs=client_configs,
-                new_client_ids=new_client_ids,
-                removed_client_ids=removed_client_ids,
-                result=future,
             )
         )
         start_payloads = await future
@@ -891,12 +847,9 @@ class ResonateGroup:
                 and self._media_stream is not None
                 and client.check_role(Roles.PLAYER)
             ):
-                removed_ids = {client.client_id}
                 try:
                     await self._reconfigure_streamer(
                         media_stream=self._media_stream,
-                        new_client_ids=set(),
-                        removed_client_ids=removed_ids,
                     )
                 except RuntimeError:
                     logger.info(
@@ -977,8 +930,6 @@ class ResonateGroup:
                         try:
                             start_payloads = await self._reconfigure_streamer(
                                 media_stream=self._media_stream,
-                                new_client_ids=new_ids,
-                                removed_client_ids=set(),
                             )
                         except RuntimeError:
                             logger.info(
