@@ -105,12 +105,7 @@ class GroupDeletedEvent(GroupEvent):
 
 
 @dataclass
-class _StreamerCommand:
-    """Base class for commands sent to the shared Streamer task."""
-
-
-@dataclass
-class _StreamerReconfigureCommand(_StreamerCommand):
+class _StreamerReconfigureCommand:
     """Request to reconfigure the running streamer with new client topology."""
 
     channel_formats: dict[str, AudioFormat]
@@ -162,7 +157,7 @@ class ResonateGroup:
     """Mapping of channel names to their audio data generators for the current stream."""
     _player_channels: dict[str, str]
     """Mapping of player IDs to their assigned channel names."""
-    _stream_commands: asyncio.Queue[_StreamerCommand] | None
+    _stream_commands: asyncio.Queue[_StreamerReconfigureCommand] | None
     """Command queue for the active streamer task, None when not streaming."""
     _play_start_time_us: int | None
     """Absolute timestamp in microseconds when playback started, None when not streaming."""
@@ -195,7 +190,7 @@ class ResonateGroup:
         self._channel_formats: dict[str, AudioFormat] = {}
         self._channel_generators: dict[str, AsyncGenerator[bytes, None]] = {}
         self._player_channels: dict[str, str] = {}
-        self._stream_commands: asyncio.Queue[_StreamerCommand] | None = None
+        self._stream_commands: asyncio.Queue[_StreamerReconfigureCommand] | None = None
         self._play_start_time_us: int | None = None
         logger.debug(
             "ResonateGroup initialized with %d client(s): %s",
@@ -323,7 +318,7 @@ class ResonateGroup:
         self,
         streamer: Streamer,
         channel_generators: dict[str, AsyncGenerator[bytes, None]],
-        command_queue: asyncio.Queue[_StreamerCommand] | None,
+        command_queue: asyncio.Queue[_StreamerReconfigureCommand] | None,
     ) -> int:
         """Consume media channels, distribute via streamer, and return end timestamp."""
         last_end_us = self._play_start_time_us or int(self._server.loop.time() * 1_000_000)
