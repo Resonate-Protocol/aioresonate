@@ -6,7 +6,7 @@ import asyncio
 import logging
 import uuid
 from asyncio import Task
-from collections.abc import AsyncGenerator, Callable, Coroutine
+from collections.abc import Callable, Coroutine
 from contextlib import suppress
 from dataclasses import dataclass
 from io import BytesIO
@@ -108,7 +108,7 @@ class GroupDeletedEvent(GroupEvent):
 class _StreamerReconfigureCommand:
     """Request to reconfigure the running streamer with new client topology."""
 
-    channel_formats: dict[str, AudioFormat]
+    audio_format: AudioFormat
     client_configs: list[ClientStreamConfig]
 
 
@@ -131,8 +131,6 @@ class ResonateGroup:
     """Reference to the ResonateServer instance."""
     _stream_task: Task[int] | None = None
     """Task handling the audio streaming loop, None when not streaming."""
-    _stream_audio_format: AudioFormat | None = None
-    """The source audio format for the current stream, None when not streaming."""
     _current_metadata: Metadata | None = None
     """Current metadata for the group, None if no metadata set."""
     _current_media_art: Image.Image | None = None
@@ -151,12 +149,6 @@ class ResonateGroup:
     """Active Streamer instance for the current stream, None when not streaming."""
     _media_stream: MediaStream | None
     """Current MediaStream being played, None when not streaming."""
-    _channel_formats: dict[str, AudioFormat]
-    """Mapping of channel names to their audio formats for the current stream."""
-    _channel_generators: dict[str, AsyncGenerator[bytes, None]]
-    """Mapping of channel names to their audio data generators for the current stream."""
-    _player_channels: dict[str, str]
-    """Mapping of player IDs to their assigned channel names."""
     _stream_commands: asyncio.Queue[_StreamerReconfigureCommand] | None
     """Command queue for the active streamer task, None when not streaming."""
     _play_start_time_us: int | None
@@ -179,7 +171,6 @@ class ResonateGroup:
         self._client_art_formats = {}
         self._server = server
         self._stream_task: Task[int] | None = None
-        self._stream_audio_format: AudioFormat | None = None
         self._current_metadata = None
         self._current_media_art = None
         self._audio_encoders = {}
@@ -187,9 +178,6 @@ class ResonateGroup:
         self._group_id = str(uuid.uuid4())
         self._streamer: Streamer | None = None
         self._media_stream: MediaStream | None = None
-        self._channel_formats: dict[str, AudioFormat] = {}
-        self._channel_generators: dict[str, AsyncGenerator[bytes, None]] = {}
-        self._player_channels: dict[str, str] = {}
         self._stream_commands: asyncio.Queue[_StreamerReconfigureCommand] | None = None
         self._play_start_time_us: int | None = None
         logger.debug(
@@ -198,7 +186,7 @@ class ResonateGroup:
             [type(c).__name__ for c in self._clients],
         )
 
-    async def play_media(  # noqa: PLR0915
+    async def play_media(
         self,
         media_stream: MediaStream,
         *,
@@ -214,11 +202,6 @@ class ResonateGroup:
 
         self._media_stream = media_stream
         self._streamer = None
-        self._channel_generators.clear()
-        self._player_channels.clear()
-
-        default_format = media_stream.audio_format
-        self._stream_audio_format = default_format
 
         start_time_us = (
             play_start_time_us
@@ -234,17 +217,12 @@ class ResonateGroup:
             return start_time_us
 
         self._player_formats.clear()
-        channel_name = "default"
-        self._channel_formats = {channel_name: media_stream.audio_format}
-        self._channel_generators = {channel_name: media_stream.source}
 
         for player in group_players:
             client = player.client
-            player_format = player.determine_optimal_format(default_format)
+            player_format = player.determine_optimal_format(media_stream.audio_format)
             self._player_formats[client.client_id] = player_format
-            self._player_channels[client.client_id] = channel_name
 
-        channel_formats = dict(self._channel_formats)
         streamer = Streamer(
             loop=self._server.loop,
             play_start_time_us=start_time_us,
@@ -265,14 +243,13 @@ class ResonateGroup:
             )
 
         start_payloads = streamer.configure(
-            channels=channel_formats,
+            audio_format=media_stream.audio_format,
             clients=client_configs,
         )
-        self._channel_formats = channel_formats
         self._streamer = streamer
         self._stream_commands = asyncio.Queue()
         self._stream_task = self._server.loop.create_task(
-            self._run_streamer(streamer, self._channel_generators, self._stream_commands)
+            self._run_streamer(streamer, media_stream, self._stream_commands)
         )
 
         # Notify clients about the upcoming stream configuration
@@ -298,9 +275,6 @@ class ResonateGroup:
             end_time_us = await self._stream_task
             self._stream_task = None
 
-        self._channel_generators.clear()
-        self._channel_formats.clear()
-        self._player_channels.clear()
         self._streamer = None
         self._media_stream = None
         self._stream_commands = None
@@ -310,7 +284,7 @@ class ResonateGroup:
     async def _run_streamer(
         self,
         streamer: Streamer,
-        channel_generators: dict[str, AsyncGenerator[bytes, None]],
+        media_stream: MediaStream,
         command_queue: asyncio.Queue[_StreamerReconfigureCommand] | None,
     ) -> int:
         """Consume media channels, distribute via streamer, and return end timestamp."""
@@ -318,7 +292,7 @@ class ResonateGroup:
         cancelled = False
 
         try:
-            while channel_generators:
+            while media_stream.source:
                 # Check for commands before processing chunks
                 if command_queue is not None and not command_queue.empty():
                     command = command_queue.get_nowait()
@@ -330,32 +304,16 @@ class ResonateGroup:
                             # TODO(refactor): send session/update or session/start for affected
                             # players only here
                             streamer.configure(
-                                channels=command.channel_formats,
+                                audio_format=command.audio_format,
                                 clients=command.client_configs,
                             )
                         except Exception:
                             logger.exception("Failed to reconfigure streamer")
                     continue
 
-                # Sequentially fetch chunks from all active generators
-                chunk_map: dict[str, bytes] = {}
-                for name in list(channel_generators.keys()):
-                    generator = channel_generators.get(name)
-                    if generator is None:
-                        continue
-                    try:
-                        chunk = await anext(generator)
-                        chunk_map[name] = chunk
-                    except StopAsyncIteration:
-                        channel_generators.pop(name, None)
-                    except Exception:
-                        logger.exception("Channel %s raised during streaming", name)
-                        channel_generators.pop(name, None)
+                chunk = await anext(media_stream.source)
 
-                if not chunk_map:
-                    continue
-
-                streamer.prepare(chunk_map)
+                streamer.prepare(chunk)
                 await streamer.send()
 
             streamer.flush()
@@ -370,9 +328,6 @@ class ResonateGroup:
         else:
             return last_end_us
         finally:
-            for generator in channel_generators.values():
-                with suppress(Exception):
-                    await generator.aclose()
             if cancelled and streamer.last_chunk_end_time_us is not None:
                 last_end_us = streamer.last_chunk_end_time_us
 
@@ -380,10 +335,14 @@ class ResonateGroup:
         self,
     ) -> dict[str, StreamStartPlayer]:
         """Reconfigure the running streamer and return start payloads for new clients."""
-        if self._streamer is None or self._stream_commands is None or self._stream_task is None:
+        if (
+            self._streamer is None
+            or self._stream_commands is None
+            or self._stream_task is None
+            or self._media_stream is None
+        ):
             raise RuntimeError("Streamer is not running")
 
-        channel_formats = dict(self._channel_formats)
         client_configs: list[ClientStreamConfig] = []
 
         for player in self.players():
@@ -401,13 +360,11 @@ class ResonateGroup:
         future: asyncio.Future[dict[str, StreamStartPlayer]] = self._server.loop.create_future()
         await self._stream_commands.put(
             _StreamerReconfigureCommand(
-                channel_formats=channel_formats,
+                audio_format=self._media_stream.audio_format,
                 client_configs=client_configs,
             )
         )
-        start_payloads = await future
-        self._channel_formats = channel_formats
-        return start_payloads
+        return await future
 
     def suggest_optimal_sample_rate(self, source_sample_rate: int) -> int:
         """
@@ -502,7 +459,7 @@ class ResonateGroup:
         self._client_art_formats.pop(client.client_id, None)
         client.send_message(StreamEndMessage())
 
-    async def stop(self, stop_time_us: int | None = None) -> bool:  # noqa: PLR0915
+    async def stop(self, stop_time_us: int | None = None) -> bool:
         """
         Stop playback for the group and clean up resources.
 
@@ -563,12 +520,9 @@ class ResonateGroup:
             self._streamer.reset()
             self._streamer = None
 
-        for generator in self._channel_generators.values():
+        if self._media_stream is not None:
             with suppress(Exception):
-                await generator.aclose()
-        self._channel_generators.clear()
-        self._channel_formats.clear()
-        self._player_channels.clear()
+                await self._media_stream.source.aclose()
         self._media_stream = None
         self._stream_commands = None
 
@@ -579,7 +533,6 @@ class ResonateGroup:
 
         self._audio_encoders.clear()
         self._current_media_art = None
-        self._stream_audio_format = None
         self._play_start_time_us = None
 
         if self._current_state != PlaybackStateType.STOPPED:
@@ -823,7 +776,6 @@ class ResonateGroup:
             self._clients.remove(client)
             if client.check_role(Roles.PLAYER):
                 self._player_formats.pop(client.client_id, None)
-                self._player_channels.pop(client.client_id, None)
             self._send_stream_end_msg(client)
 
             # Reconfigure streamer if actively streaming
@@ -855,7 +807,7 @@ class ResonateGroup:
         # Each client needs to be in a group, add it to a new one
         client._set_group(ResonateGroup(self._server, client))  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
 
-    async def add_client(self, client: ResonateClient) -> None:  # noqa: PLR0915
+    async def add_client(self, client: ResonateClient) -> None:
         """
         Add a client to this group.
 
@@ -881,16 +833,13 @@ class ResonateGroup:
 
         # Then set the group (which will emit ClientGroupChangedEvent)
         client._set_group(self)  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
-        if self._stream_task is not None and self._stream_audio_format is not None:
+        if self._stream_task is not None and self._media_stream:
             logger.debug("Joining client %s to current stream", client.client_id)
             if client.check_role(Roles.PLAYER):
                 player_format = client.require_player.determine_optimal_format(
-                    self._stream_audio_format
+                    self._media_stream.audio_format
                 )
                 self._player_formats[client.client_id] = player_format
-                if self._media_stream:
-                    self._player_channels[client.client_id] = "default"
-
                 if (
                     self._streamer is None
                     or self._stream_commands is None
@@ -903,36 +852,32 @@ class ResonateGroup:
                     await self.stop()
                 else:
                     new_ids = {client.client_id}
-                    if self._media_stream is None:
-                        logger.info("No media stream available, stopping playback")
+                    try:
+                        start_payloads = await self._reconfigure_streamer()
+                    except RuntimeError:
+                        logger.info(
+                            "Stopping playback to restart streamer for new client %s",
+                            client.client_id,
+                        )
+                        await self.stop()
+                    except Exception:
+                        logger.exception(
+                            "Failed to reconfigure streamer for new client %s; stopping stream",
+                            client.client_id,
+                        )
                         await self.stop()
                     else:
-                        try:
-                            start_payloads = await self._reconfigure_streamer()
-                        except RuntimeError:
-                            logger.info(
-                                "Stopping playback to restart streamer for new client %s",
-                                client.client_id,
-                            )
-                            await self.stop()
-                        except Exception:
-                            logger.exception(
-                                "Failed to reconfigure streamer for new client %s; stopping stream",
-                                client.client_id,
-                            )
-                            await self.stop()
-                        else:
-                            player_lookup = {
-                                player.client.client_id: player for player in self.players()
-                            }
-                            for added_id in new_ids:
-                                payload = start_payloads.get(added_id)
-                                player_obj = player_lookup.get(added_id)
-                                if payload is not None and player_obj is not None:
-                                    self._send_stream_start_msg(
-                                        player_obj.client,
-                                        player_stream_info=payload,
-                                    )
+                        player_lookup = {
+                            player.client.client_id: player for player in self.players()
+                        }
+                        for added_id in new_ids:
+                            payload = start_payloads.get(added_id)
+                            player_obj = player_lookup.get(added_id)
+                            if payload is not None and player_obj is not None:
+                                self._send_stream_start_msg(
+                                    player_obj.client,
+                                    player_stream_info=payload,
+                                )
             elif client.check_role(Roles.METADATA) or client.check_role(Roles.VISUALIZER):
                 self._send_stream_start_msg(client, None)
 

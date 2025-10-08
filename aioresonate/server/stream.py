@@ -5,8 +5,8 @@ from __future__ import annotations
 import asyncio
 import base64
 import logging
-from collections import defaultdict, deque
-from collections.abc import AsyncGenerator, Callable, Iterable, Mapping
+from collections import deque
+from collections.abc import AsyncGenerator, Callable, Iterable
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import NamedTuple, cast
@@ -182,7 +182,6 @@ def build_encoder_for_format(
 class ChannelSpec:
     """Expanded channel metadata used by the Streamer."""
 
-    name: str
     audio_format: AudioFormat
     bytes_per_sample: int
     frame_stride: int
@@ -240,7 +239,7 @@ class PlayerState:
     """Tracks delivery state for a single player."""
 
     config: ClientStreamConfig
-    pipeline_key: tuple[str, AudioFormat]
+    pipeline_key: AudioFormat
     queue: deque[PreparedChunkState] = field(default_factory=deque)
     buffer_tracker: BufferTracker | None = None
 
@@ -276,16 +275,14 @@ class Streamer:
     """Event loop used for time calculations and task scheduling."""
     _play_start_time_us: int
     """Absolute timestamp in microseconds when playback should start."""
-    _channels: dict[str, ChannelSpec]
-    """Mapping of channel names to their expanded specifications."""
-    _pipelines: dict[tuple[str, AudioFormat], PipelineState]
-    """Mapping of (channel_name, target_format) to pipeline state."""
-    _pipelines_by_channel: dict[str, list[PipelineState]]
-    """Mapping of channel names to all pipelines consuming from that channel."""
+    _pipelines: dict[AudioFormat, PipelineState]
+    """Mapping of target_format to pipeline state."""
     _players: dict[str, PlayerState]
     """Mapping of client IDs to their player delivery state."""
     _last_chunk_end_us: int | None
     """End timestamp of the most recently prepared chunk, None if no chunks prepared yet."""
+    _channel: ChannelSpec | None = None
+    """The default audio channel."""
 
     def __init__(
         self,
@@ -296,35 +293,29 @@ class Streamer:
         """Create a streamer bound to the event loop and playback start time."""
         self._loop = loop
         self._play_start_time_us = play_start_time_us
-        self._channels: dict[str, ChannelSpec] = {}
-        self._pipelines: dict[tuple[str, AudioFormat], PipelineState] = {}
-        self._pipelines_by_channel: dict[str, list[PipelineState]] = defaultdict(list)
+        self._pipelines: dict[AudioFormat, PipelineState] = {}
         self._players: dict[str, PlayerState] = {}
         self._last_chunk_end_us: int | None = None
 
     def configure(
         self,
         *,
-        channels: Mapping[str, AudioFormat],
+        audio_format: AudioFormat,
         clients: Iterable[ClientStreamConfig],
     ) -> dict[str, StreamStartPlayer]:
         """Configure pipelines for the provided clients and channels."""
-        self._channels.clear()
         self._pipelines.clear()
-        self._pipelines_by_channel.clear()
         self._players.clear()
         self._last_chunk_end_us = None
 
-        for name, audio_format in channels.items():
-            bytes_per_sample, av_format, av_layout = _resolve_audio_format(audio_format)
-            self._channels[name] = ChannelSpec(
-                name=name,
-                audio_format=audio_format,
-                bytes_per_sample=bytes_per_sample,
-                frame_stride=bytes_per_sample * audio_format.channels,
-                av_format=av_format,
-                av_layout=av_layout,
-            )
+        bytes_per_sample, av_format, av_layout = _resolve_audio_format(audio_format)
+        self._channel = ChannelSpec(
+            audio_format=audio_format,
+            bytes_per_sample=bytes_per_sample,
+            frame_stride=bytes_per_sample * audio_format.channels,
+            av_format=av_format,
+            av_layout=av_layout,
+        )
 
         start_payloads: dict[str, StreamStartPlayer] = {}
 
@@ -332,19 +323,10 @@ class Streamer:
             if client_cfg.send is None:
                 raise ValueError(f"Client {client_cfg.client_id} missing send callback")
 
-            channel_name = next(iter(self._channels.keys()))
-            if channel_name not in self._channels:
-                raise KeyError(
-                    f"Unknown channel {channel_name!r} requested by {client_cfg.client_id}"
-                )
-
-            pipeline_key = (
-                channel_name,
-                client_cfg.target_format,
-            )
+            pipeline_key = client_cfg.target_format
             pipeline = self._pipelines.get(pipeline_key)
             if pipeline is None:
-                channel_spec = self._channels[channel_name]
+                channel_spec = self._channel
                 (
                     target_bytes_per_sample,
                     target_av_format,
@@ -374,7 +356,6 @@ class Streamer:
                     codec_header_b64=codec_header_b64,
                 )
                 self._pipelines[pipeline_key] = pipeline
-                self._pipelines_by_channel[channel_spec.name].append(pipeline)
 
             pipeline.subscribers.append(client_cfg.client_id)
 
@@ -400,24 +381,21 @@ class Streamer:
 
         return start_payloads
 
-    def prepare(self, channel_payloads: Mapping[str, bytes]) -> None:
+    def prepare(self, chunk: bytes) -> None:
         """Ingest raw PCM data for each channel and prepare per-player chunks."""
-        for name, payload in channel_payloads.items():
-            pipeline_list = self._pipelines_by_channel.get(name)
-            if not pipeline_list:
-                continue
-            channel_spec = self._channels[name]
-            if len(payload) % channel_spec.frame_stride:
-                raise ValueError(f"Payload for channel {name!r} must be aligned to whole samples")
-            sample_count = len(payload) // channel_spec.frame_stride
-            if sample_count == 0:
-                continue
-            for pipeline in pipeline_list:
-                self._process_pipeline_payload(
-                    pipeline,
-                    payload,
-                    sample_count,
-                )
+        if self._channel is None:
+            raise RuntimeError("Streamer not configured")
+        if len(chunk) % self._channel.frame_stride:
+            raise ValueError("Chunk must be aligned to whole samples")
+        sample_count = len(chunk) // self._channel.frame_stride
+        if sample_count == 0:
+            return
+        for pipeline in self._pipelines.values():
+            self._process_pipeline_payload(
+                pipeline,
+                chunk,
+                sample_count,
+            )
 
     async def send(self) -> bool:
         """Send all ready chunks to clients, applying buffer backpressure."""
@@ -466,9 +444,8 @@ class Streamer:
         """Reset state, releasing encoders and resamplers."""
         for pipeline in self._pipelines.values():
             pipeline.encoder = None
-        self._channels.clear()
+        self._channel = None
         self._pipelines.clear()
-        self._pipelines_by_channel.clear()
         self._players.clear()
 
     def _process_pipeline_payload(
