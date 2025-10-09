@@ -247,7 +247,7 @@ class ResonateGroup:
         self._streamer = streamer
         self._stream_commands = asyncio.Queue()
         self._stream_task = self._server.loop.create_task(
-            self._run_streamer(streamer, media_stream, self._stream_commands)
+            self._run_streamer(streamer, media_stream)
         )
 
         # Notify clients about the upcoming stream configuration
@@ -283,7 +283,6 @@ class ResonateGroup:
         self,
         streamer: Streamer,
         media_stream: MediaStream,
-        command_queue: asyncio.Queue[_StreamerReconfigureCommand] | None,
     ) -> int:
         """Consume media channels, distribute via streamer, and return end timestamp."""
         last_end_us = self._play_start_time_us or int(self._server.loop.time() * 1_000_000)
@@ -292,8 +291,8 @@ class ResonateGroup:
         try:
             while media_stream.source:
                 # Check for commands before processing chunks
-                if command_queue is not None and not command_queue.empty():
-                    command = command_queue.get_nowait()
+                if self._stream_commands is not None and not self._stream_commands.empty():
+                    command = self._stream_commands.get_nowait()
                     try:
                         start_payloads = streamer.configure(
                             audio_format=command.audio_format,
