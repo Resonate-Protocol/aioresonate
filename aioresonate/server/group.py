@@ -296,19 +296,54 @@ class ResonateGroup:
                 # Check for commands before processing chunks
                 if command_queue is not None and not command_queue.empty():
                     command = command_queue.get_nowait()
-                    if isinstance(command, _StreamerReconfigureCommand):
-                        try:
-                            streamer.flush()
-                            await streamer.send()
-                            streamer.reset()
-                            # TODO(refactor): send session/update or session/start for affected
-                            # players only here
-                            streamer.configure(
-                                audio_format=command.audio_format,
-                                clients=command.client_configs,
+                    try:
+                        start_payloads = streamer.configure(
+                            audio_format=command.audio_format,
+                            clients=command.client_configs,
+                        )
+                        # Send stream/start messages to affected players
+                        player_lookup = {
+                            player.client.client_id: player for player in self.players()
+                        }
+                        for client_id, player_payload in start_payloads.items():
+                            player_obj = player_lookup.get(client_id)
+                            if player_obj is not None:
+                                self._send_stream_start_msg(
+                                    player_obj.client,
+                                    player_stream_info=player_payload,
+                                )
+                        # Send session/update to all clients
+                        for client in self._clients:
+                            if client.check_role(Roles.METADATA):
+                                metadata_update = (
+                                    self._current_metadata.snapshot_update(
+                                        int(self._server.loop.time() * 1_000_000)
+                                    )
+                                    if self._current_metadata is not None
+                                    else None
+                                )
+                            else:
+                                metadata_update = None
+                            if client.check_role(Roles.CONTROLLER) or client.check_role(
+                                Roles.METADATA
+                            ):
+                                playback_state = (
+                                    PlaybackStateType.PLAYING
+                                    if self._current_state == PlaybackStateType.PLAYING
+                                    else PlaybackStateType.PAUSED
+                                )
+                            else:
+                                playback_state = None
+                            message = SessionUpdateMessage(
+                                SessionUpdatePayload(
+                                    group_id=self._group_id,
+                                    playback_state=playback_state,
+                                    metadata=metadata_update,
+                                )
                             )
-                        except Exception:
-                            logger.exception("Failed to reconfigure streamer")
+                            client.send_message(message)
+                    except Exception:
+                        logger.exception("Failed to reconfigure streamer")
                     continue
 
                 chunk = await anext(media_stream.source)
@@ -331,10 +366,8 @@ class ResonateGroup:
             if cancelled and streamer.last_chunk_end_time_us is not None:
                 last_end_us = streamer.last_chunk_end_time_us
 
-    async def _reconfigure_streamer(
-        self,
-    ) -> dict[str, StreamStartPlayer]:
-        """Reconfigure the running streamer and return start payloads for new clients."""
+    def _reconfigure_streamer(self) -> None:
+        """Reconfigure the running streamer with current client topology."""
         if (
             self._streamer is None
             or self._stream_commands is None
@@ -357,14 +390,12 @@ class ResonateGroup:
                     send=player.client.send_message,
                 )
             )
-        future: asyncio.Future[dict[str, StreamStartPlayer]] = self._server.loop.create_future()
-        await self._stream_commands.put(
+        self._stream_commands.put_nowait(
             _StreamerReconfigureCommand(
                 audio_format=self._media_stream.audio_format,
                 client_configs=client_configs,
             )
         )
-        return await future
 
     def suggest_optimal_sample_rate(self, source_sample_rate: int) -> int:
         """
@@ -784,20 +815,7 @@ class ResonateGroup:
                 and self._media_stream is not None
                 and client.check_role(Roles.PLAYER)
             ):
-                try:
-                    await self._reconfigure_streamer()
-                except RuntimeError:
-                    logger.info(
-                        "Stopping playback to rebuild streamer after removing %s",
-                        client.client_id,
-                    )
-                    await self.stop()
-                except Exception:
-                    logger.exception(
-                        "Failed to reconfigure streamer after removing %s",
-                        client.client_id,
-                    )
-                    await self.stop()
+                self._reconfigure_streamer()
         if not self._clients:
             # Emit event for group deletion, no clients left
             self._signal_event(GroupDeletedEvent())
@@ -840,44 +858,7 @@ class ResonateGroup:
                     self._media_stream.audio_format
                 )
                 self._player_formats[client.client_id] = player_format
-                if (
-                    self._streamer is None
-                    or self._stream_commands is None
-                    or self._stream_task is None
-                ):
-                    logger.info(
-                        "Stopping playback to add player %s (streamer inactive)",
-                        client.client_id,
-                    )
-                    await self.stop()
-                else:
-                    new_ids = {client.client_id}
-                    try:
-                        start_payloads = await self._reconfigure_streamer()
-                    except RuntimeError:
-                        logger.info(
-                            "Stopping playback to restart streamer for new client %s",
-                            client.client_id,
-                        )
-                        await self.stop()
-                    except Exception:
-                        logger.exception(
-                            "Failed to reconfigure streamer for new client %s; stopping stream",
-                            client.client_id,
-                        )
-                        await self.stop()
-                    else:
-                        player_lookup = {
-                            player.client.client_id: player for player in self.players()
-                        }
-                        for added_id in new_ids:
-                            payload = start_payloads.get(added_id)
-                            player_obj = player_lookup.get(added_id)
-                            if payload is not None and player_obj is not None:
-                                self._send_stream_start_msg(
-                                    player_obj.client,
-                                    player_stream_info=payload,
-                                )
+                self._reconfigure_streamer()
             elif client.check_role(Roles.METADATA) or client.check_role(Roles.VISUALIZER):
                 self._send_stream_start_msg(client, None)
 
