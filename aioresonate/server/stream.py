@@ -303,11 +303,8 @@ class Streamer:
         audio_format: AudioFormat,
         clients: Iterable[ClientStreamConfig],
     ) -> dict[str, StreamStartPlayer]:
-        """Configure pipelines for the provided clients and channels."""
-        self._pipelines.clear()
-        self._players.clear()
-        self._last_chunk_end_us = None
-
+        """Configure or reconfigure pipelines for the provided clients, preserving timing state."""
+        # Update channel spec if audio format changed
         bytes_per_sample, av_format, av_layout = _resolve_audio_format(audio_format)
         self._channel = ChannelSpec(
             audio_format=audio_format,
@@ -317,6 +314,12 @@ class Streamer:
             av_layout=av_layout,
         )
 
+        # Clear subscriber lists to rebuild them
+        for existing_pipeline in self._pipelines.values():
+            existing_pipeline.subscribers.clear()
+
+        # Build new player and subscription configuration
+        new_players: dict[str, PlayerState] = {}
         start_payloads: dict[str, StreamStartPlayer] = {}
 
         for client_cfg in clients:
@@ -324,8 +327,11 @@ class Streamer:
                 raise ValueError(f"Client {client_cfg.client_id} missing send callback")
 
             pipeline_key = client_cfg.target_format
-            pipeline = self._pipelines.get(pipeline_key)
+            pipeline: PipelineState | None = self._pipelines.get(pipeline_key)
             if pipeline is None:
+                # Create new pipeline for this format
+                if self._channel is None:
+                    raise RuntimeError("Streamer channel not initialized")
                 channel_spec = self._channel
                 (
                     target_bytes_per_sample,
@@ -359,17 +365,24 @@ class Streamer:
 
             pipeline.subscribers.append(client_cfg.client_id)
 
-            buffer_tracker = BufferTracker(
-                loop=self._loop,
-                client_id=client_cfg.client_id,
-                capacity_bytes=client_cfg.buffer_capacity_bytes,
+            # Reuse existing buffer tracker if this client already exists
+            old_player = self._players.get(client_cfg.client_id)
+            buffer_tracker = (
+                old_player.buffer_tracker
+                if old_player
+                else BufferTracker(
+                    loop=self._loop,
+                    client_id=client_cfg.client_id,
+                    capacity_bytes=client_cfg.buffer_capacity_bytes,
+                )
             )
+
             player_state = PlayerState(
                 config=client_cfg,
                 pipeline_key=pipeline_key,
                 buffer_tracker=buffer_tracker,
             )
-            self._players[client_cfg.client_id] = player_state
+            new_players[client_cfg.client_id] = player_state
 
             start_payloads[client_cfg.client_id] = StreamStartPlayer(
                 codec=client_cfg.target_format.codec.value,
@@ -378,6 +391,18 @@ class Streamer:
                 bit_depth=client_cfg.target_format.bit_depth,
                 codec_header=pipeline.codec_header_b64,
             )
+
+        # Remove pipelines with no subscribers
+        pipelines_to_remove = [
+            key for key, pipeline in self._pipelines.items() if not pipeline.subscribers
+        ]
+        for key in pipelines_to_remove:
+            pipeline = self._pipelines.pop(key)
+            if pipeline.encoder:
+                pipeline.encoder = None
+
+        # Replace players dict
+        self._players = new_players
 
         return start_payloads
 
