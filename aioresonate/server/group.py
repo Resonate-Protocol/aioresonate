@@ -191,13 +191,11 @@ class ResonateGroup:
         media_stream: MediaStream,
         *,
         play_start_time_us: int | None = None,
-        stream_start_time_us: int = 0,
     ) -> int:
         """Start synchronized playback for the current group using a MediaStream."""
         logger.debug(
-            "Starting play_media with play_start_time_us=%s, stream_start_time_us=%s",
+            "Starting play_media with play_start_time_us=%s",
             play_start_time_us,
-            stream_start_time_us,
         )
 
         self._media_stream = media_stream
