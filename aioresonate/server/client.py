@@ -179,7 +179,7 @@ class ResonateClient:
         # Cancel running tasks
         if self._writer_task and not self._writer_task.done():
             self._logger.debug("Cancelling writer task")
-            self._writer_task.cancel()  # Don't care about cancellation result
+            self._writer_task.cancel()
             with suppress(asyncio.CancelledError):
                 await self._writer_task
         # Handle task is cancelled implicitly when wsock closes or externally

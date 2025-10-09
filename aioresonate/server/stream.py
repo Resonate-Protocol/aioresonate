@@ -153,9 +153,8 @@ def build_encoder_for_format(
 
     with Capture() as logs:
         encoder.open()
-    if logger is not None:
-        for log in logs:
-            logger.debug("Opening AudioCodecContext log from av: %s", log)
+    for log in logs:
+        logger.debug("Opening AudioCodecContext log from av: %s", log)
 
     header = bytes(encoder.extradata) if encoder.extradata else b""
     if audio_format.codec == AudioCodec.FLAC and header:
