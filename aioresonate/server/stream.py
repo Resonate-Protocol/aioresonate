@@ -12,6 +12,7 @@ from enum import Enum
 from typing import NamedTuple, cast
 
 import av
+from av import audio
 from av.logging import Capture
 
 from aioresonate.models import BinaryMessageType, pack_binary_header_raw
@@ -40,6 +41,20 @@ class AudioFormat:
     """Number of audio channels (1 for mono, 2 for stereo)."""
     codec: AudioCodec = AudioCodec.PCM
     """Audio codec of the stream."""
+
+
+@dataclass
+class SourceChunk:
+    """Raw PCM chunk received from the source."""
+
+    payload: bytes
+    """Raw PCM audio data."""
+    start_time_us: int
+    """Absolute timestamp when this chunk starts playing."""
+    end_time_us: int
+    """Absolute timestamp when this chunk finishes playing."""
+    sample_count: int
+    """Number of audio samples in this chunk."""
 
 
 class BufferedChunk(NamedTuple):
@@ -169,9 +184,9 @@ def build_encoder_for_format(
         samples_per_chunk = int(audio_format.sample_rate * 0.025)
         return None, None, samples_per_chunk
 
-    encoder = cast(
-        "av.AudioCodecContext", av.AudioCodecContext.create(audio_format.codec.value, "w")
-    )
+    codec = "libopus" if audio_format.codec == AudioCodec.OPUS else audio_format.codec.value
+
+    encoder = cast("av.AudioCodecContext", av.AudioCodecContext.create(codec, "w"))
     encoder.sample_rate = audio_format.sample_rate
     encoder.layout = input_audio_layout
     encoder.format = input_audio_format
@@ -198,15 +213,24 @@ def build_encoder_for_format(
         header = b"fLaC\x80" + len(header).to_bytes(3, "big") + header
 
     codec_header_b64 = base64.b64encode(header).decode()
-    samples_per_chunk = (
-        int(encoder.frame_size) if encoder.frame_size else int(audio_format.sample_rate * 0.025)
-    )
+
+    # Calculate samples per chunk
+    if audio_format.codec == AudioCodec.FLAC:
+        # FLAC: Use 25ms chunks regardless of encoder frame_size
+        samples_per_chunk = int(audio_format.sample_rate * 0.025)
+    elif encoder.frame_size and encoder.frame_size > 0:
+        # Use recommended frame size for other codecs (e.g., OPUS)
+        samples_per_chunk = int(encoder.frame_size)
+    else:
+        raise ValueError(
+            f"Codec {audio_format.codec.value} encoder has invalid frame_size: {encoder.frame_size}"
+        )
     return encoder, codec_header_b64, samples_per_chunk
 
 
 @dataclass(frozen=True)
 class ChannelSpec:
-    """Expanded channel metadata used by the Streamer."""
+    """Source audio format with computed PyAV parameters for processing."""
 
     audio_format: AudioFormat
     bytes_per_sample: int
@@ -222,7 +246,7 @@ class ClientStreamConfig:
     client_id: str
     target_format: AudioFormat
     buffer_capacity_bytes: int
-    send: Callable[[bytes], None] | None = None
+    send: Callable[[bytes], None]
 
 
 @dataclass
@@ -258,6 +282,7 @@ class PipelineState:
     samples_enqueued: int = 0
     samples_encoded: int = 0
     flushed: bool = False
+    source_read_position: int = 0
 
 
 @dataclass
@@ -268,6 +293,7 @@ class PlayerState:
     pipeline_key: AudioFormat
     queue: deque[PreparedChunkState] = field(default_factory=deque)
     buffer_tracker: BufferTracker | None = None
+    join_time_us: int | None = None
 
 
 class MediaStream:
@@ -309,6 +335,12 @@ class Streamer:
     """End timestamp of the most recently prepared chunk, None if no chunks prepared yet."""
     _channel: ChannelSpec | None = None
     """The default audio channel."""
+    _source_buffer: deque[SourceChunk]
+    """Buffer of raw PCM chunks from the source."""
+    _source_samples_produced: int
+    """Total number of samples added to the source buffer."""
+    _source_buffer_target_duration_us: int
+    """Target duration for source buffer in microseconds."""
 
     def __init__(
         self,
@@ -322,6 +354,9 @@ class Streamer:
         self._pipelines: dict[AudioFormat, PipelineState] = {}
         self._players: dict[str, PlayerState] = {}
         self._last_chunk_end_us: int | None = None
+        self._source_buffer: deque[SourceChunk] = deque()
+        self._source_samples_produced = 0
+        self._source_buffer_target_duration_us = 5_000_000  # 5 seconds
 
     def configure(
         self,
@@ -329,7 +364,17 @@ class Streamer:
         audio_format: AudioFormat,
         clients: Iterable[ClientStreamConfig],
     ) -> dict[str, StreamStartPlayer]:
-        """Configure or reconfigure pipelines for the provided clients, preserving timing state."""
+        """Configure or reconfigure pipelines for the provided clients.
+
+        This method sets up or updates the streaming pipelines for all clients.
+
+        Args:
+            audio_format: The source audio format.
+            clients: Configuration for each client/player.
+
+        Returns:
+            Dictionary mapping client IDs to their StreamStartPlayer messages.
+        """
         # Update channel spec if audio format changed
         bytes_per_sample, av_format, av_layout = _resolve_audio_format(audio_format)
         self._channel = ChannelSpec(
@@ -349,9 +394,6 @@ class Streamer:
         start_payloads: dict[str, StreamStartPlayer] = {}
 
         for client_cfg in clients:
-            if client_cfg.send is None:
-                raise ValueError(f"Client {client_cfg.client_id} missing send callback")
-
             pipeline_key = client_cfg.target_format
             pipeline: PipelineState | None = self._pipelines.get(pipeline_key)
             if pipeline is None:
@@ -391,8 +433,21 @@ class Streamer:
 
             pipeline.subscribers.append(client_cfg.client_id)
 
-            # Reuse existing buffer tracker if this client already exists
             old_player = self._players.get(client_cfg.client_id)
+
+            # Reuse existing player if format unchanged
+            if old_player and old_player.pipeline_key == pipeline_key:
+                old_player.config = client_cfg
+                new_players[client_cfg.client_id] = old_player
+                continue
+
+            # Format changed - clean up old queue refcounts
+            if old_player and old_player.pipeline_key != pipeline_key:
+                for chunk in old_player.queue:
+                    chunk.refcount -= 1
+                old_player.queue.clear()
+
+            # Create new player or reconfigure existing one
             buffer_tracker = (
                 old_player.buffer_tracker
                 if old_player
@@ -403,11 +458,22 @@ class Streamer:
                 )
             )
 
+            # Calculate join time for new/reconfigured player
+            join_time_us = int(self._loop.time() * 1_000_000)
+
             player_state = PlayerState(
                 config=client_cfg,
                 pipeline_key=pipeline_key,
                 buffer_tracker=buffer_tracker,
+                join_time_us=join_time_us,
             )
+
+            # Queue future chunks for new/reconfigured player
+            for chunk in pipeline.prepared:
+                if chunk.start_time_us >= join_time_us:
+                    player_state.queue.append(chunk)
+                    chunk.refcount += 1
+
             new_players[client_cfg.client_id] = player_state
 
             start_payloads[client_cfg.client_id] = StreamStartPlayer(
@@ -432,51 +498,145 @@ class Streamer:
 
         return start_payloads
 
-    def prepare(self, chunk: bytes) -> None:
-        """Ingest raw PCM data for each channel and prepare per-player chunks."""
+    def prepare(self, chunk: bytes) -> bool:
+        """Buffer raw PCM data from the source.
+
+        Args:
+            chunk: Raw PCM audio data to buffer.
+
+        Returns:
+            True if more data is wanted (buffer duration < target), False otherwise.
+        """
         if self._channel is None:
             raise RuntimeError("Streamer not configured")
         if len(chunk) % self._channel.frame_stride:
             raise ValueError("Chunk must be aligned to whole samples")
         sample_count = len(chunk) // self._channel.frame_stride
         if sample_count == 0:
-            return
-        for pipeline in self._pipelines.values():
-            self._process_pipeline_payload(
-                pipeline,
-                chunk,
-                sample_count,
-            )
+            return True
 
-    async def send(self) -> bool:
-        """Send all ready chunks to clients, applying buffer backpressure."""
-        pending = False
-        for player_state in self._players.values():
-            tracker = player_state.buffer_tracker
-            if tracker is None:
-                continue
-            queue = player_state.queue
-            while queue:
-                chunk = queue[0]
-                await tracker.wait_for_capacity(chunk.byte_count, chunk.end_time_us)
-                header = pack_binary_header_raw(
-                    BinaryMessageType.AUDIO_CHUNK.value, chunk.start_time_us
-                )
-                send_fn = player_state.config.send
-                if send_fn is None:
-                    raise RuntimeError(
-                        f"Player {player_state.config.client_id} missing send callback"
+        # Calculate timestamps for this chunk
+        start_samples = self._source_samples_produced
+        start_us = self._play_start_time_us + int(
+            start_samples * 1_000_000 / self._channel.audio_format.sample_rate
+        )
+        end_us = self._play_start_time_us + int(
+            (start_samples + sample_count) * 1_000_000 / self._channel.audio_format.sample_rate
+        )
+
+        # Create and buffer the source chunk
+        source_chunk = SourceChunk(
+            payload=chunk,
+            start_time_us=start_us,
+            end_time_us=end_us,
+            sample_count=sample_count,
+        )
+        self._source_buffer.append(source_chunk)
+        self._source_samples_produced += sample_count
+
+        # Calculate current buffer duration
+        if self._source_buffer:
+            buffer_duration_us = (
+                self._source_buffer[-1].end_time_us - self._source_buffer[0].start_time_us
+            )
+            return buffer_duration_us < self._source_buffer_target_duration_us
+
+        return True
+
+    async def send(self) -> None:
+        """Process source buffer, encode, and send to clients until all queues are empty.
+
+        This method performs three stages in a loop:
+        1. Process source chunks through pipelines (resample/encode)
+        2. Send prepared chunks to players (waits for earliest blocked player)
+        3. Prune old data
+
+        Continues until all player queues are empty.
+        """
+        while True:
+            # Stage 1: Process source buffer through pipelines
+            for pipeline in self._pipelines.values():
+                self._process_pipeline_from_source(pipeline)
+
+            # Stage 2: Deliver to players with smart waiting
+            earliest_blocked_player = None
+            earliest_blocked_chunk = None
+            earliest_end_time_us = None
+
+            for player_state in self._players.values():
+                tracker = player_state.buffer_tracker
+                if tracker is None:
+                    continue
+                queue = player_state.queue
+
+                # Send as much as we can without blocking
+                while queue:
+                    chunk = queue[0]
+
+                    # Skip chunks that are too close to playback or already in the past
+                    now_us = int(self._loop.time() * 1_000_000)
+                    min_send_margin_us = 100_000  # 100ms for network + client processing
+                    if chunk.start_time_us < now_us + min_send_margin_us:
+                        # Chunk is stale, skip it without sending
+                        logger.debug(
+                            "Skipping stale chunk for %s (starts in %d us)",
+                            player_state.config.client_id,
+                            chunk.start_time_us - now_us,
+                        )
+                        queue.popleft()
+                        chunk.refcount -= 1
+                        pipeline = self._pipelines[player_state.pipeline_key]
+                        if (
+                            chunk.refcount == 0
+                            and pipeline.prepared
+                            and pipeline.prepared[0] is chunk
+                        ):
+                            safety_margin_us = 2_000_000
+                            if chunk.end_time_us < now_us - safety_margin_us:
+                                pipeline.prepared.popleft()
+                        continue
+
+                    # Check if we can send without waiting
+                    if not tracker.has_capacity_now(chunk.byte_count):
+                        # This player is blocked - track if this chunk is earliest
+                        if earliest_end_time_us is None or chunk.end_time_us < earliest_end_time_us:
+                            earliest_blocked_player = player_state
+                            earliest_blocked_chunk = chunk
+                            earliest_end_time_us = chunk.end_time_us
+                        break
+
+                    # We have capacity - send immediately
+                    header = pack_binary_header_raw(
+                        BinaryMessageType.AUDIO_CHUNK.value, chunk.start_time_us
                     )
-                send_fn(header + chunk.payload)
-                tracker.register(chunk.end_time_us, chunk.byte_count)
-                queue.popleft()
-                chunk.refcount -= 1
-                pipeline = self._pipelines[player_state.pipeline_key]
-                if chunk.refcount == 0 and pipeline.prepared and pipeline.prepared[0] is chunk:
-                    pipeline.prepared.popleft()
-            if queue:
-                pending = True
-        return not pending
+                    player_state.config.send(header + chunk.payload)
+                    tracker.register(chunk.end_time_us, chunk.byte_count)
+                    queue.popleft()
+                    chunk.refcount -= 1
+                    pipeline = self._pipelines[player_state.pipeline_key]
+                    # Only remove from prepared if consumed by all players AND old enough.
+                    # This preserves recent chunks for late joiners even after consumption.
+                    if chunk.refcount == 0 and pipeline.prepared and pipeline.prepared[0] is chunk:
+                        now_us = int(self._loop.time() * 1_000_000)
+                        safety_margin_us = 2_000_000  # 2 seconds for late joiner support
+                        if chunk.end_time_us < now_us - safety_margin_us:
+                            pipeline.prepared.popleft()
+
+            # If any player is blocked, wait for the one with earliest chunk
+            if earliest_blocked_player is not None and earliest_blocked_chunk is not None:
+                tracker = earliest_blocked_player.buffer_tracker
+                if tracker is not None:
+                    await tracker.wait_for_capacity(
+                        earliest_blocked_chunk.byte_count, earliest_blocked_chunk.end_time_us
+                    )
+                continue  # More work to do, loop again
+
+            # Stage 3: Cleanup
+            self._prune_old_data()
+
+            # Check if there's still work pending (any non-empty queues)
+            if not any(player_state.queue for player_state in self._players.values()):
+                break  # All queues empty, we're done
 
     def flush(self) -> None:
         """Flush all pipelines, preparing any buffered data for sending."""
@@ -498,6 +658,62 @@ class Streamer:
         self._channel = None
         self._pipelines.clear()
         self._players.clear()
+
+    def _prune_old_data(self) -> None:
+        """Prune old source and prepared chunks to free memory.
+
+        This implements time-based retention:
+        - Source chunks: Remove chunks that all pipelines have processed
+        - Prepared chunks: Remove chunks older than safety margin (2 seconds)
+        """
+        # Prune source buffer based on minimum read position across all pipelines
+        if self._pipelines and self._source_buffer:
+            min_read_position = min(
+                (pipeline.source_read_position for pipeline in self._pipelines.values()),
+                default=0,
+            )
+            # Remove source chunks that all pipelines have consumed
+            while min_read_position > 0 and self._source_buffer:
+                self._source_buffer.popleft()
+                # Update all pipeline read positions
+                for pipeline in self._pipelines.values():
+                    pipeline.source_read_position -= 1
+                min_read_position -= 1
+
+        # Prune prepared chunks based on time (keep 2 seconds of history for late joiners)
+        now_us = int(self._loop.time() * 1_000_000)
+        safety_margin_us = 2_000_000  # 2 seconds
+        cutoff_us = now_us - safety_margin_us
+
+        for pipeline in self._pipelines.values():
+            while pipeline.prepared and pipeline.prepared[0].end_time_us < cutoff_us:
+                pipeline.prepared.popleft()
+
+    def _process_pipeline_from_source(self, pipeline: PipelineState) -> bool:
+        """Process available source chunks through this pipeline.
+
+        Args:
+            pipeline: The pipeline to process.
+
+        Returns:
+            True if any work was done, False otherwise.
+        """
+        if not pipeline.subscribers:
+            return False
+
+        any_work = False
+        # Process all available source chunks that haven't been processed yet
+        while pipeline.source_read_position < len(self._source_buffer):
+            source_chunk = self._source_buffer[pipeline.source_read_position]
+            self._process_pipeline_payload(
+                pipeline,
+                source_chunk.payload,
+                source_chunk.sample_count,
+            )
+            pipeline.source_read_position += 1
+            any_work = True
+
+        return any_work
 
     def _process_pipeline_payload(
         self,
@@ -567,7 +783,26 @@ class Streamer:
 
     def _handle_encoded_packet(self, pipeline: PipelineState, packet: av.Packet) -> None:
         available = max(pipeline.samples_enqueued - pipeline.samples_encoded, 0)
-        packet_samples = packet.duration or available or pipeline.chunk_samples
+
+        # Determine packet sample count
+        # For OPUS: Always use chunk_samples for consistent timing
+        # OPUS packet.duration can be unreliable or in wrong timebase
+        if pipeline.target_format.codec == AudioCodec.OPUS:
+            packet_samples = pipeline.chunk_samples
+        elif packet.duration and packet.duration > 0:
+            # Trust packet duration when provided by encoder (for FLAC, etc.)
+            packet_samples = packet.duration
+        else:
+            # Fallback: use chunk_samples (NOT available, which can be huge for buffered encoders)
+            packet_samples = pipeline.chunk_samples
+            logger.warning(
+                "Codec %s: packet.duration is %s, using chunk_samples=%d (available=%d)",
+                pipeline.target_format.codec.value,
+                packet.duration,
+                pipeline.chunk_samples,
+                available,
+            )
+
         payload = bytes(packet)
         self._publish_chunk(pipeline, payload, packet_samples)
         pipeline.samples_encoded += packet_samples
@@ -587,6 +822,20 @@ class Streamer:
         end_us = self._play_start_time_us + int(
             (start_samples + sample_count) * 1_000_000 / pipeline.target_format.sample_rate
         )
+
+        # Debug OPUS timestamps
+        if pipeline.target_format.codec == AudioCodec.OPUS and pipeline.samples_produced < 10000:
+            logger.warning(
+                "OPUS chunk #%d: start_samples=%d, sample_count=%d, "
+                "sample_rate=%d, start_us=%d, duration_us=%d",
+                len(pipeline.prepared),
+                start_samples,
+                sample_count,
+                pipeline.target_format.sample_rate,
+                start_us - self._play_start_time_us,
+                end_us - start_us,
+            )
+
         chunk = PreparedChunkState(
             payload=payload,
             start_time_us=start_us,
