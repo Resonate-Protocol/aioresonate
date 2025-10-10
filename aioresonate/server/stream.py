@@ -92,6 +92,33 @@ class BufferTracker:
         self.buffered_bytes = max(self.buffered_bytes, 0)
         return now_us
 
+    def has_capacity_now(self, bytes_needed: int) -> bool:
+        """Check if buffer can accept bytes_needed without waiting.
+
+        This is a non-blocking version of wait_for_capacity that returns immediately.
+
+        Args:
+            bytes_needed: Number of bytes to check capacity for.
+
+        Returns:
+            True if the buffer has capacity for bytes_needed, False otherwise.
+        """
+        if bytes_needed <= 0:
+            return True
+        if bytes_needed >= self.capacity_bytes:
+            # Chunk exceeds capacity, but allow it through
+            logger.warning(
+                "Chunk size %s exceeds reported buffer capacity %s for client %s",
+                bytes_needed,
+                self.capacity_bytes,
+                self.client_id,
+            )
+            return True
+
+        self.prune_consumed()
+        projected_usage = self.buffered_bytes + bytes_needed
+        return projected_usage <= self.capacity_bytes
+
     async def wait_for_capacity(self, bytes_needed: int, expected_end_us: int) -> None:
         """Block until the device buffer can accept bytes_needed more bytes."""
         if bytes_needed <= 0:
