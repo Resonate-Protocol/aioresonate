@@ -560,6 +560,8 @@ class Streamer:
                     self._perform_catchup(player_state)
 
             # Stage 2: Send chunks to players with backpressure control
+            now_us = int(self._loop.time() * 1_000_000)
+            min_send_margin_us = 100_000  # 100ms for network + client processing
             earliest_blocked_player = None
             earliest_blocked_chunk = None
             earliest_end_time_us = None
@@ -575,8 +577,6 @@ class Streamer:
                     chunk = queue[0]
 
                     # Skip chunks that are too close to playback or already in the past
-                    now_us = int(self._loop.time() * 1_000_000)
-                    min_send_margin_us = 100_000  # 100ms for network + client processing
                     if chunk.start_time_us < now_us + min_send_margin_us:
                         # Chunk is stale, skip it without sending
                         logger.debug(
