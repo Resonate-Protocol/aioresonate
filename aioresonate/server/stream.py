@@ -94,7 +94,6 @@ class BufferTracker:
         self.capacity_bytes = capacity_bytes
         self.buffered_chunks: deque[BufferedChunk] = deque()
         self.buffered_bytes = 0
-        self.max_usage_bytes = 0
 
     def prune_consumed(self, now_us: int | None = None) -> int:
         """Drop finished chunks and return the timestamp used for the calculation."""
@@ -166,7 +165,6 @@ class BufferTracker:
             return
         self.buffered_chunks.append(BufferedChunk(end_time_us, byte_count))
         self.buffered_bytes += byte_count
-        self.max_usage_bytes = max(self.max_usage_bytes, self.buffered_bytes)
 
 
 def _resolve_audio_format(audio_format: AudioFormat) -> tuple[int, str, str]:
@@ -301,8 +299,6 @@ class PipelineState:
     """Source audio specification."""
     target_format: AudioFormat
     """Target output format."""
-    target_bytes_per_sample: int
-    """Target bytes per sample."""
     target_frame_stride: int
     """Target bytes per frame."""
     target_av_format: str
@@ -325,10 +321,6 @@ class PipelineState:
     """Client IDs subscribed to this pipeline."""
     samples_produced: int = 0
     """Total samples published from this pipeline."""
-    samples_enqueued: int = 0
-    """Total samples enqueued to encoder."""
-    samples_encoded: int = 0
-    """Total samples encoded by encoder."""
     flushed: bool = False
     """Whether pipeline has been flushed."""
     source_read_position: int = 0
@@ -477,7 +469,6 @@ class Streamer:
                 pipeline = PipelineState(
                     channel=source_spec,
                     target_format=client_cfg.target_format,
-                    target_bytes_per_sample=target_bytes_per_sample,
                     target_frame_stride=target_bytes_per_sample * client_cfg.target_format.channels,
                     target_av_format=target_av_format,
                     target_layout=target_layout,
@@ -1213,7 +1204,6 @@ class Streamer:
         )
         frame.sample_rate = pipeline.target_format.sample_rate
         frame.planes[0].update(chunk)
-        pipeline.samples_enqueued += sample_count
         packets = pipeline.encoder.encode(frame)
         for packet in packets:
             self._handle_encoded_packet(pipeline, packet)
@@ -1229,7 +1219,6 @@ class Streamer:
             raise ValueError(f"Invalid packet duration: {packet.duration!r}")
         chunk_data = bytes(packet)
         self._publish_chunk(pipeline, chunk_data, packet.duration)
-        pipeline.samples_encoded += packet.duration
 
     def _publish_chunk(
         self,
