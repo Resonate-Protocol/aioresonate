@@ -329,15 +329,15 @@ class Streamer:
     """Mapping of target_format to pipeline state."""
     _players: dict[str, PlayerState]
     """Mapping of client IDs to their player delivery state."""
-    _last_chunk_end_us: int | None
+    _last_chunk_end_us: int | None = None
     """End timestamp of the most recently prepared chunk, None if no chunks prepared yet."""
     _channel: SourceAudioSpec | None = None
     """The source audio specification."""
     _source_buffer: deque[SourceChunk]
     """Buffer of raw PCM chunks that are scheduled for playback but not yet finished playing."""
-    _source_samples_produced: int
-    """Total number of samples added to the source buffer."""
-    _source_buffer_target_duration_us: int
+    _source_samples_produced: int = 0
+    """Total number of samples added to the source buffer (used for timestamp calculation)."""
+    _source_buffer_target_duration_us: int = 5_000_000
     """Target duration for source buffer in microseconds."""
 
     def __init__(
@@ -349,12 +349,9 @@ class Streamer:
         """Create a streamer bound to the event loop and playback start time."""
         self._loop = loop
         self._play_start_time_us = play_start_time_us
-        self._pipelines: dict[AudioFormat, PipelineState] = {}
-        self._players: dict[str, PlayerState] = {}
-        self._last_chunk_end_us: int | None = None
-        self._source_buffer: deque[SourceChunk] = deque()
-        self._source_samples_produced = 0
-        self._source_buffer_target_duration_us = 5_000_000  # 5 seconds
+        self._pipelines = {}
+        self._players = {}
+        self._source_buffer = deque()
 
     def configure(
         self,
