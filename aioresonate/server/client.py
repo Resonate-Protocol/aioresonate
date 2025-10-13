@@ -38,7 +38,7 @@ from .metadata import MetadataClient
 from .player import PlayerClient
 from .visualizer import VisualizerClient
 
-MAX_PENDING_MSG = 512
+MAX_PENDING_MSG = 4096  # Temporarily increased to test queue overflow hypothesis
 
 
 logger = logging.getLogger(__name__)
