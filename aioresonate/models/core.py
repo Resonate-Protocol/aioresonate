@@ -1,4 +1,5 @@
-"""Core messages for the Resonate protocol.
+"""
+Core messages for the Resonate protocol.
 
 This module contains the fundamental messages that establish communication between
 clients and the server. These messages handle initial handshakes, ongoing clock

@@ -1,23 +1,21 @@
 """Manages and synchronizes playback for a group of one or more clients."""
 
+from __future__ import annotations
+
 import asyncio
-import base64
 import logging
 import uuid
-from asyncio import QueueFull, Task
-from collections.abc import AsyncGenerator, Callable, Coroutine
+from asyncio import Task
+from collections.abc import Callable, Coroutine
+from contextlib import suppress
 from dataclasses import dataclass
-from enum import Enum
 from io import BytesIO
 from typing import TYPE_CHECKING, cast
 
-import av
-from av import logging as av_logging
 from PIL import Image
 
 from aioresonate.models import (
     BinaryMessageType,
-    RepeatMode,
     pack_binary_header_raw,
 )
 from aioresonate.models.controller import GroupCommandClientPayload
@@ -27,17 +25,13 @@ from aioresonate.models.core import (
     StreamEndMessage,
     StreamStartMessage,
     StreamStartPayload,
-    StreamUpdateMessage,
-    StreamUpdatePayload,
 )
 from aioresonate.models.metadata import (
-    SessionUpdateMetadata,
     StreamStartMetadata,
 )
 from aioresonate.models.player import (
     StreamRequestFormatPayload,
     StreamStartPlayer,
-    StreamUpdatePlayer,
 )
 from aioresonate.models.types import (
     MediaCommand,
@@ -47,10 +41,16 @@ from aioresonate.models.types import (
 )
 from aioresonate.models.visualizer import StreamStartVisualizer
 
+from .metadata import Metadata
+from .stream import AudioCodec, AudioFormat, ClientStreamConfig, MediaStream, Streamer
+
 # The cyclic import is not an issue during runtime, so hide it
 # pyright: reportImportCycles=none
 if TYPE_CHECKING:
-    from .client import Client
+    import av
+
+    from .client import ResonateClient
+    from .player import PlayerClient
     from .server import ResonateServer
 
 INITIAL_PLAYBACK_DELAY_US = 1_000_000
@@ -58,16 +58,8 @@ INITIAL_PLAYBACK_DELAY_US = 1_000_000
 logger = logging.getLogger(__name__)
 
 
-class AudioCodec(Enum):
-    """Supported audio codecs."""
-
-    PCM = "pcm"
-    FLAC = "flac"
-    OPUS = "opus"
-
-
 class GroupEvent:
-    """Base event type used by ClientGroup.add_event_listener()."""
+    """Base event type used by ResonateGroup.add_event_listener()."""
 
 
 # TODO: make types more fancy
@@ -112,114 +104,15 @@ class GroupDeletedEvent(GroupEvent):
     """This group has no more members and has been deleted."""
 
 
-@dataclass(frozen=True)
-class AudioFormat:
-    """Audio format of a stream."""
-
-    sample_rate: int
-    """Sample rate in Hz (e.g., 44100, 48000)."""
-    bit_depth: int
-    """Bit depth in bits per sample (16 or 24)."""
-    channels: int
-    """Number of audio channels (1 for mono, 2 for stereo)."""
-    codec: AudioCodec = AudioCodec.PCM
-    """Audio codec of the stream."""
-
-
 @dataclass
-class Metadata:
-    """Metadata for media playback."""
+class _StreamerReconfigureCommand:
+    """Request to reconfigure the running streamer with new client topology."""
 
-    title: str | None = None
-    """Title of the current media."""
-    artist: str | None = None
-    """Artist of the current media."""
-    album_artist: str | None = None
-    """Album artist of the current media."""
-    album: str | None = None
-    """Album of the current media."""
-    artwork_url: str | None = None
-    """Artwork URL of the current media."""
-    year: int | None = None
-    """Release year of the current media."""
-    track: int | None = None
-    """Track number of the current media."""
-    track_duration: int | None = None
-    """Track duration in seconds."""
-    playback_speed: int | None = 1
-    """Speed factor, 1.0 is normal speed."""
-    repeat: RepeatMode | None = None
-    """Current repeat mode."""
-    shuffle: bool | None = None
-    """Whether shuffle is enabled."""
-
-    # TODO: inject track_progress and timestamp when sending updates?
-
-    def diff_update(self, last: "Metadata | None", timestamp: int) -> SessionUpdateMetadata:
-        """Build a SessionUpdateMetadata containing only changed fields compared to last."""
-        metadata_update = SessionUpdateMetadata(timestamp=timestamp)
-
-        # Only include fields that have changed since the last metadata update
-        if last is None or last.title != self.title:
-            metadata_update.title = self.title
-        if last is None or last.artist != self.artist:
-            metadata_update.artist = self.artist
-        if last is None or last.album_artist != self.album_artist:
-            metadata_update.album_artist = self.album_artist
-        if last is None or last.album != self.album:
-            metadata_update.album = self.album
-        if last is None or last.artwork_url != self.artwork_url:
-            metadata_update.artwork_url = self.artwork_url
-        if last is None or last.year != self.year:
-            metadata_update.year = self.year
-        if last is None or last.track != self.track:
-            metadata_update.track = self.track
-        if last is None or last.track_duration != self.track_duration:
-            metadata_update.track_duration = self.track_duration
-        if last is None or last.playback_speed != self.playback_speed:
-            metadata_update.playback_speed = self.playback_speed
-        if last is None or last.repeat != self.repeat:
-            metadata_update.repeat = self.repeat
-        if last is None or last.shuffle != self.shuffle:
-            metadata_update.shuffle = self.shuffle
-
-        return metadata_update
-
-    @staticmethod
-    def cleared_update(timestamp: int) -> SessionUpdateMetadata:
-        """Build a SessionUpdateMetadata that clears all metadata fields."""
-        metadata_update = SessionUpdateMetadata(timestamp=timestamp)
-        metadata_update.title = None
-        metadata_update.artist = None
-        metadata_update.album_artist = None
-        metadata_update.album = None
-        metadata_update.artwork_url = None
-        metadata_update.year = None
-        metadata_update.track = None
-        metadata_update.track_duration = None
-        metadata_update.playback_speed = None
-        metadata_update.repeat = None
-        metadata_update.shuffle = None
-        return metadata_update
-
-    def snapshot_update(self, timestamp: int) -> SessionUpdateMetadata:
-        """Build a SessionUpdateMetadata snapshot with all current values."""
-        metadata_update = SessionUpdateMetadata(timestamp=timestamp)
-        metadata_update.title = self.title
-        metadata_update.artist = self.artist
-        metadata_update.album_artist = self.album_artist
-        metadata_update.album = self.album
-        metadata_update.artwork_url = self.artwork_url
-        metadata_update.year = self.year
-        metadata_update.track = self.track
-        metadata_update.track_duration = self.track_duration
-        metadata_update.playback_speed = self.playback_speed
-        metadata_update.repeat = self.repeat
-        metadata_update.shuffle = self.shuffle
-        return metadata_update
+    audio_format: AudioFormat
+    client_configs: list[ClientStreamConfig]
 
 
-class ClientGroup:
+class ResonateGroup:
     """
     A group of one or more clients for synchronized playback.
 
@@ -228,25 +121,21 @@ class ClientGroup:
     a group to simplify grouping requests.
     """
 
-    _clients: list["Client"]
+    _clients: list[ResonateClient]
     """List of all clients in this group."""
     _player_formats: dict[str, AudioFormat]
     """Mapping of client IDs (with the player role) to their selected audio formats."""
     _client_art_formats: dict[str, PictureFormat]
     """Mapping of client IDs (with the metadata role) to their selected artwork formats."""
-    _server: "ResonateServer"
+    _server: ResonateServer
     """Reference to the ResonateServer instance."""
-    _stream_task: Task[None] | None = None
+    _stream_task: Task[int] | None = None
     """Task handling the audio streaming loop, None when not streaming."""
-    _stream_audio_format: AudioFormat | None = None
-    """The source audio format for the current stream, None when not streaming."""
     _current_metadata: Metadata | None = None
     """Current metadata for the group, None if no metadata set."""
     _current_media_art: Image.Image | None = None
     """Current media art image for the group, None if no image set."""
     _audio_encoders: dict[AudioFormat, av.AudioCodecContext]
-    """Mapping of audio formats to their av encoder contexts."""
-    _audio_headers: dict[AudioFormat, str]
     """Mapping of audio formats to their base64 encoded headers."""
     _preferred_stream_codec: AudioCodec = AudioCodec.OPUS
     """Preferred codec used by the current stream."""
@@ -256,354 +145,331 @@ class ClientGroup:
     """Current playback state of the group."""
     _group_id: str
     """Unique identifier for this group."""
-    _scheduled_format_changes: dict[str, tuple[StreamUpdateMessage, AudioFormat]]
-    """Mapping of client IDs to upcoming stream updates requested by the player."""
+    _streamer: Streamer | None
+    """Active Streamer instance for the current stream, None when not streaming."""
+    _media_stream: MediaStream | None
+    """Current MediaStream being played, None when not streaming."""
+    _stream_commands: asyncio.Queue[_StreamerReconfigureCommand] | None
+    """Command queue for the active streamer task, None when not streaming."""
+    _play_start_time_us: int | None
+    """Absolute timestamp in microseconds when playback started, None when not streaming."""
 
-    def __init__(self, server: "ResonateServer", *args: "Client") -> None:
+    def __init__(self, server: ResonateServer, *args: ResonateClient) -> None:
         """
         DO NOT CALL THIS CONSTRUCTOR. INTERNAL USE ONLY.
 
         Groups are managed automatically by the server.
 
-        Initialize a new ClientGroup.
+        Initialize a new ResonateGroup.
 
         Args:
             server: The ResonateServer instance this group belongs to.
             *args: Clients to add to this group.
         """
-        self._server = server
         self._clients = list(args)
         self._player_formats = {}
+        self._client_art_formats = {}
+        self._server = server
+        self._stream_task: Task[int] | None = None
         self._current_metadata = None
         self._current_media_art = None
         self._audio_encoders = {}
-        self._audio_headers = {}
         self._event_cbs = []
         self._group_id = str(uuid.uuid4())
-        self._scheduled_format_changes = {}
-        self._client_art_formats = {}
+        self._streamer: Streamer | None = None
+        self._media_stream: MediaStream | None = None
+        self._stream_commands: asyncio.Queue[_StreamerReconfigureCommand] | None = None
+        self._play_start_time_us: int | None = None
         logger.debug(
-            "ClientGroup initialized with %d client(s): %s",
+            "ResonateGroup initialized with %d client(s): %s",
             len(self._clients),
             [type(c).__name__ for c in self._clients],
         )
 
     async def play_media(
         self,
-        audio_stream: AsyncGenerator[bytes, None],
-        audio_stream_format: AudioFormat,
-        preferred_stream_codec: AudioCodec = AudioCodec.OPUS,
-    ) -> None:
-        """
-        Start playback of a new media stream.
+        media_stream: MediaStream,
+        *,
+        play_start_time_us: int | None = None,
+    ) -> int:
+        """Start synchronized playback for the current group using a MediaStream."""
+        logger.debug(
+            "Starting play_media with play_start_time_us=%s",
+            play_start_time_us,
+        )
 
-        Stops any current stream and starts a new one with the given audio source.
-        The audio source should provide uncompressed PCM audio data.
-        Format conversion and synchronization for all players will be handled automatically.
+        self._media_stream = media_stream
+        self._streamer = None
 
-        Args:
-            audio_stream: Async generator yielding PCM audio chunks as bytes.
-            audio_stream_format: Format specification for the input audio data.
-        """
-        logger.debug("Starting play_media with audio_stream_format: %s", audio_stream_format)
-        stopped = self.stop()
-        if stopped:
-            # Wait a bit to allow clients to process the stream end
-            await asyncio.sleep(0.5)
-        # TODO: open questions:
-        # - how to communicate to the caller what audio_format is preferred,
-        #   especially on topology changes
-        # - how to sync metadata/media_art with this audio stream?
+        start_time_us = (
+            play_start_time_us
+            if play_start_time_us is not None
+            else int(self._server.loop.time() * 1_000_000) + INITIAL_PLAYBACK_DELAY_US
+        )
+        self._play_start_time_us = start_time_us
 
-        self._stream_audio_format = audio_stream_format
-        self._preferred_stream_codec = preferred_stream_codec
+        group_players = self.players()
+        if not group_players:
+            logger.info("No player clients in group; skipping playback")
+            self._current_state = PlaybackStateType.STOPPED
+            return start_time_us
+
+        self._player_formats.clear()
+
+        for player in group_players:
+            client = player.client
+            player_format = player.determine_optimal_format(media_stream.audio_format)
+            self._player_formats[client.client_id] = player_format
+
+        streamer = Streamer(
+            loop=self._server.loop,
+            play_start_time_us=start_time_us,
+        )
+
+        client_configs: list[ClientStreamConfig] = []
+        for player in group_players:
+            support = player.support
+            if support is None:
+                raise ValueError(f"Player {player.client.client_id} lacks support payload")
+            client_configs.append(
+                ClientStreamConfig(
+                    client_id=player.client.client_id,
+                    target_format=self._player_formats[player.client.client_id],
+                    buffer_capacity_bytes=support.buffer_capacity,
+                    send=player.client.send_message,
+                )
+            )
+
+        start_payloads = streamer.configure(
+            audio_format=media_stream.audio_format,
+            clients=client_configs,
+        )
+        self._streamer = streamer
+        self._stream_commands = asyncio.Queue()
+        self._stream_task = self._server.loop.create_task(
+            self._run_streamer(streamer, media_stream)
+        )
+
+        # Notify clients about the upcoming stream configuration
+        for player in group_players:
+            player_payload = start_payloads.get(player.client.client_id)
+            assert player_payload is not None
+            self._send_stream_start_msg(
+                player.client,
+                player_payload,
+            )
 
         for client in self._clients:
             if client.check_role(Roles.PLAYER):
-                logger.debug("Selecting format for player %s", client.client_id)
-                player_format = self.determine_player_format(
-                    client, audio_stream_format, preferred_stream_codec
-                )
-                self._player_formats[client.client_id] = player_format
-                logger.debug(
-                    "Sending stream start to player %s with format %s",
-                    client.client_id,
-                    player_format,
-                )
-            else:
-                logger.debug("Sending stream start to client %s", client.client_id)
-                player_format = None
-            self._send_stream_start_msg(client, player_format)
-
-        self._stream_task = self._server.loop.create_task(
-            self._stream_audio(
-                int(self._server.loop.time() * 1_000_000) + INITIAL_PLAYBACK_DELAY_US,
-                audio_stream,
-                audio_stream_format,
-            )
-        )
+                continue
+            if client.check_role(Roles.METADATA) or client.check_role(Roles.VISUALIZER):
+                self._send_stream_start_msg(client, None)
 
         self._current_state = PlaybackStateType.PLAYING
         self._signal_event(GroupStateChangedEvent(PlaybackStateType.PLAYING))
 
-    def determine_player_format(
+        end_time_us = start_time_us
+        if self._stream_task is not None:
+            end_time_us = await self._stream_task
+            self._stream_task = None
+
+        self._streamer = None
+        self._media_stream = None
+        self._stream_commands = None
+
+        return end_time_us
+
+    async def _run_streamer(  # noqa: PLR0915
         self,
-        player: "Client",
-        source_format: AudioFormat,
-        preferred_codec: AudioCodec = AudioCodec.OPUS,
-    ) -> AudioFormat:
-        """
-        Determine the optimal audio format for the given player and source.
+        streamer: Streamer,
+        media_stream: MediaStream,
+    ) -> int:
+        """Consume media channels, distribute via streamer, and return end timestamp."""
+        last_end_us = self._play_start_time_us or int(self._server.loop.time() * 1_000_000)
+        cancelled = False
+        just_started = True
 
-        Analyzes the player's capabilities and returns the best matching format,
-        preferring higher quality when available and falling back gracefully.
+        try:
+            while True:
+                # Check for commands before processing chunks
+                if self._stream_commands is not None and not self._stream_commands.empty():
+                    # We handle reconfiguration requests only between chunks so that
+                    # all clients only receive binary messages once the session was correctly
+                    # started or updated
+                    command = self._stream_commands.get_nowait()
+                    start_payloads = streamer.configure(
+                        audio_format=command.audio_format,
+                        clients=command.client_configs,
+                    )
+                    # Send stream/start messages to affected players
+                    player_lookup = {player.client.client_id: player for player in self.players()}
+                    for client_id, player_payload in start_payloads.items():
+                        player_obj = player_lookup.get(client_id)
+                        if player_obj is not None:
+                            self._send_stream_start_msg(
+                                player_obj.client,
+                                player_stream_info=player_payload,
+                            )
+                    # Send session/update to all clients
+                    # TODO: only send to clients that were affected by the change!
+                    for client in self._clients:
+                        if client.check_role(Roles.METADATA):
+                            metadata_update = (
+                                self._current_metadata.snapshot_update(
+                                    int(self._server.loop.time() * 1_000_000)
+                                )
+                                if self._current_metadata is not None
+                                else None
+                            )
+                        else:
+                            metadata_update = None
+                        if client.check_role(Roles.CONTROLLER) or client.check_role(Roles.METADATA):
+                            playback_state = (
+                                PlaybackStateType.PLAYING
+                                if self._current_state == PlaybackStateType.PLAYING
+                                else PlaybackStateType.PAUSED
+                            )
+                        else:
+                            playback_state = None
+                        message = SessionUpdateMessage(
+                            SessionUpdatePayload(
+                                group_id=self._group_id,
+                                playback_state=playback_state,
+                                metadata=metadata_update,
+                            )
+                        )
+                        client.send_message(message)
+                    continue
 
-        Args:
-            player: The player to determine a format for.
-            source_format: The source audio format to match against.
-            preferred_codec: Preferred audio codec (e.g., Opus).
-                In case the player doesn't support it, falls back to another codec.
-
-        Returns:
-            AudioFormat: The optimal format for the player.
-        """
-        # TODO: move this to client.py instead
-        player_info = player.info
-
-        # Determine optimal sample rate
-        sample_rate = source_format.sample_rate
-        if (
-            player_info.player_support
-            and sample_rate not in player_info.player_support.support_sample_rates
-        ):
-            # Prefer lower rates that are closest to source, fallback to minimum
-            lower_rates = [
-                r for r in player_info.player_support.support_sample_rates if r < sample_rate
-            ]
-            sample_rate = (
-                max(lower_rates)
-                if lower_rates
-                else min(player_info.player_support.support_sample_rates)
-            )
-            logger.debug("Adjusted sample_rate for player %s: %s", player.client_id, sample_rate)
-
-        # Determine optimal bit depth
-        bit_depth = source_format.bit_depth
-        if (
-            player_info.player_support
-            and bit_depth not in player_info.player_support.support_bit_depth
-        ):
-            if 16 in player_info.player_support.support_bit_depth:
-                bit_depth = 16
-            else:
-                raise NotImplementedError("Only 16bit is supported for now")
-            logger.debug("Adjusted bit_depth for player %s: %s", player.client_id, bit_depth)
-
-        # Determine optimal channel count
-        channels = source_format.channels
-        if (
-            player_info.player_support
-            and channels not in player_info.player_support.support_channels
-        ):
-            # Prefer stereo, then mono
-            if 2 in player_info.player_support.support_channels:
-                channels = 2
-            elif 1 in player_info.player_support.support_channels:
-                channels = 1
-            else:
-                raise NotImplementedError("Only mono and stereo are supported")
-            logger.debug("Adjusted channels for player %s: %s", player.client_id, channels)
-
-        # Determine optimal codec with fallback chain
-        codec_fallbacks = [preferred_codec, AudioCodec.FLAC, AudioCodec.OPUS, AudioCodec.PCM]
-        codec = None
-        for candidate_codec in codec_fallbacks:
-            if (
-                player_info.player_support
-                and candidate_codec.value in player_info.player_support.support_codecs
-            ):
-                # Special handling for Opus - check if sample rates are compatible
-                if candidate_codec == AudioCodec.OPUS:
-                    opus_rate_candidates = [
-                        (8000, sample_rate <= 8000),
-                        (12000, sample_rate <= 12000),
-                        (16000, sample_rate <= 16000),
-                        (24000, sample_rate <= 24000),
-                        (48000, True),  # Default fallback
-                    ]
-
-                    opus_sample_rate = None
-                    for candidate_rate, condition in opus_rate_candidates:
-                        if (
-                            condition
-                            and player_info.player_support
-                            and candidate_rate in player_info.player_support.support_sample_rates
+                if just_started:
+                    try:
+                        while streamer.prepare(
+                            await anext(media_stream.source), during_initial_buffering=True
                         ):
-                            opus_sample_rate = candidate_rate
-                            break
+                            # Pre-fill the initial buffer
+                            pass
+                    except StopAsyncIteration:
+                        # Source exhausted, exit loop
+                        break
+                    just_started = False
 
-                    if opus_sample_rate is None:
-                        logger.error(
-                            "Player %s does not support any Opus sample rates, trying next codec",
-                            player.client_id,
-                        )
-                        continue  # Try next codec in fallback chain
+                try:
+                    chunk = await anext(media_stream.source)
+                except StopAsyncIteration:
+                    # Source exhausted, exit loop
+                    break
 
-                    # Opus is viable, adjust sample rate and use it
-                    if sample_rate != opus_sample_rate:
-                        logger.debug(
-                            "Adjusted sample_rate for Opus on player %s: %s -> %s",
-                            player.client_id,
-                            sample_rate,
-                            opus_sample_rate,
-                        )
-                    sample_rate = opus_sample_rate
+                # Prepare the chunk
+                streamer.prepare(chunk)
 
-                codec = candidate_codec
-                break
+                # Send all prepared chunks
+                await streamer.send()
 
-        if codec is None:
-            raise ValueError(f"Player {player.client_id} does not support any known codec")
+            # We are done
 
-        if codec != preferred_codec:
-            logger.info(
-                "Falling back from preferred codec %s to %s for player %s",
-                preferred_codec,
-                codec,
-                player.client_id,
+            streamer.flush()
+            # Send all remaining chunks
+            await streamer.send()
+            if streamer.last_chunk_end_time_us is not None:
+                last_end_us = streamer.last_chunk_end_time_us
+        except asyncio.CancelledError:
+            cancelled = True
+            streamer.flush()
+            # Send all remaining chunks
+            await streamer.send()
+            raise
+        else:
+            return last_end_us
+        finally:
+            if cancelled and streamer.last_chunk_end_time_us is not None:
+                last_end_us = streamer.last_chunk_end_time_us
+
+    def _reconfigure_streamer(self) -> None:
+        """Reconfigure the running streamer with current client topology."""
+        if (
+            self._streamer is None
+            or self._stream_commands is None
+            or self._stream_task is None
+            or self._media_stream is None
+        ):
+            raise RuntimeError("Streamer is not running")
+
+        client_configs: list[ClientStreamConfig] = []
+
+        for player in self.players():
+            assert player.support
+            client_id = player.client.client_id
+            target_format = self._player_formats[client_id]
+            client_configs.append(
+                ClientStreamConfig(
+                    client_id=client_id,
+                    target_format=target_format,
+                    buffer_capacity_bytes=player.support.buffer_capacity,
+                    send=player.client.send_message,
+                )
             )
-
-        # FLAC and PCM support any sample rate, no adjustment needed
-        return AudioFormat(sample_rate, bit_depth, channels, codec)
-
-    def _get_or_create_audio_encoder(self, audio_format: AudioFormat) -> av.AudioCodecContext:
-        """
-        Get or create an audio encoder for the given audio format.
-
-        Args:
-            audio_format: The audio format to create an encoder for.
-                The sample rate and bit depth will be shared for both the input and output streams.
-                The input stream must be in a s16 or s24 format. The output stream will be in the
-                specified codec.
-
-        Returns:
-            av.AudioCodecContext: The audio encoder context.
-        """
-        if audio_format in self._audio_encoders:
-            return self._audio_encoders[audio_format]
-
-        # Create audio encoder context
-        ctx = cast(
-            "av.AudioCodecContext", av.AudioCodecContext.create(audio_format.codec.value, "w")
-        )
-        ctx.sample_rate = audio_format.sample_rate
-        ctx.layout = "stereo" if audio_format.channels == 2 else "mono"
-        assert audio_format.bit_depth in (16, 24)
-        ctx.format = "s16" if audio_format.bit_depth == 16 else "s24"
-
-        if audio_format.codec == AudioCodec.FLAC:
-            # Default compression level for now
-            ctx.options = {"compression_level": "5"}
-
-        with av_logging.Capture() as logs:
-            ctx.open()
-        for log in logs:
-            logger.debug("Opening AudioCodecContext log from av: %s", log)
-
-        # Store the encoder and extract the header
-        self._audio_encoders[audio_format] = ctx
-        header = bytes(ctx.extradata) if ctx.extradata else b""
-
-        # For FLAC, we need to construct a proper FLAC stream header ourselves
-        # since ffmpeg only provides the StreamInfo metadata block in extradata:
-        # See https://datatracker.ietf.org/doc/rfc9639/ Section 8.1
-        if audio_format.codec == AudioCodec.FLAC and header:
-            # FLAC stream signature (4 bytes): "fLaC"
-            # Metadata block header (4 bytes):
-            # - Bit 0: last metadata block (1 since we only have one)
-            # - Bits 1-7: block type (0 for StreamInfo)
-            # - Next 3 bytes: block length of the next metadata block in bytes
-            # StreamInfo block (34 bytes): as provided by ffmpeg
-            header = b"fLaC\x80" + (len(header)).to_bytes(3, "big") + header
-
-        self._audio_headers[audio_format] = base64.b64encode(header).decode()
-
-        logger.debug(
-            "Created audio encoder: frame_size=%d, header_length=%d",
-            ctx.frame_size,
-            len(header),
+        self._stream_commands.put_nowait(
+            _StreamerReconfigureCommand(
+                audio_format=self._media_stream.audio_format,
+                client_configs=client_configs,
+            )
         )
 
-        return ctx
-
-    def _get_audio_header(self, audio_format: AudioFormat) -> str | None:
+    def suggest_optimal_sample_rate(self, source_sample_rate: int) -> int:
         """
-        Get the codec header for the given audio format.
+        Suggest an optimal sample rate for the next track.
+
+        Analyzes all player clients in this group and returns the best sample rate that
+        minimizes resampling across group members. Preference order:
+        - If there is a common supported rate across all players, choose the one closest
+          to the source sample rate (tie-breaker: higher rate).
+        - Otherwise, choose the rate supported by the most players; among those, pick the
+          closest to the source (tie-breaker: higher rate).
 
         Args:
-            audio_format: The audio format to get the header for.
+            source_sample_rate: The sample rate of the upcoming source media.
 
         Returns:
-            str: Base64 encoded codec header.
+            The recommended sample rate in Hz.
         """
-        if audio_format.codec == AudioCodec.PCM:
-            return None
-        if audio_format not in self._audio_headers:
-            # Create encoder to generate header
-            self._get_or_create_audio_encoder(audio_format)
-
-        return self._audio_headers[audio_format]
-
-    def _calculate_optimal_chunk_samples(self, source_format: AudioFormat) -> int:
-        compressed_players = [
-            player
-            for player in self._clients
-            if self._player_formats.get(player.client_id, AudioFormat(0, 0, 0)).codec
-            != AudioCodec.PCM
+        supported_sets: list[set[int]] = [
+            set(client.info.player_support.support_sample_rates)
+            for client in self._clients
+            if client.check_role(Roles.PLAYER) and client.info.player_support
         ]
 
-        if not compressed_players:
-            # All players use PCM, use 25ms chunks
-            return int(source_format.sample_rate * 0.025)
+        if not supported_sets:
+            return source_sample_rate
 
-        # TODO: replace this logic by allowing each device to have their own preferred chunk size,
-        # does this even work in cases with different codecs?
-        max_frame_size = 0
-        for player in compressed_players:
-            player_format = self._player_formats[player.client_id]
-            encoder = self._get_or_create_audio_encoder(player_format)
+        # Helper for choosing the closest candidate, biasing towards higher rates on ties
+        def choose(candidates: set[int]) -> int:
+            # Compute the minimal absolute distance to the source sample rate
+            best_distance = min(abs(r - source_sample_rate) for r in candidates)
+            # Keep all candidates at that distance and pick the highest rate on a tie
+            best_rates = [r for r in candidates if abs(r - source_sample_rate) == best_distance]
+            return max(best_rates)
 
-            # Scale frame size to source sample rate
-            scaled_frame_size = int(
-                encoder.frame_size * source_format.sample_rate / player_format.sample_rate
-            )
-            max_frame_size = max(max_frame_size, scaled_frame_size)
+        # 1) Intersection across all players
+        if (supported_sets) and (intersection := set.intersection(*supported_sets)):
+            return choose(intersection)
 
-        return max_frame_size if max_frame_size > 0 else int(source_format.sample_rate * 0.025)
+        # 2) No common rate; pick the rate supported by the most players, then closest to source
+        counts: dict[int, int] = {}
+        for s in supported_sets:
+            for r in s:
+                counts[r] = counts.get(r, 0) + 1
+        max_count = max(counts.values())
+        top_rates = {r for r, c in counts.items() if c == max_count}
+        return choose(top_rates)
 
     def _send_stream_start_msg(
-        self, client: "Client", audio_format: AudioFormat | None = None
+        self,
+        client: ResonateClient,
+        player_stream_info: StreamStartPlayer | None = None,
     ) -> None:
         """Send a stream start message to a client with the specified audio format for players."""
-        logger.debug(
-            "_send_stream_start_msg: client=%s, format=%s",
-            client.client_id,
-            audio_format,
-        )
-        if client.check_role(Roles.PLAYER):
-            if audio_format is None:
-                raise ValueError("audio_format must be provided for player clients")
-            player_stream_info = StreamStartPlayer(
-                codec=audio_format.codec.value,
-                sample_rate=audio_format.sample_rate,
-                channels=audio_format.channels,
-                bit_depth=audio_format.bit_depth,
-                codec_header=self._get_audio_header(audio_format),
-            )
-        else:
-            player_stream_info = None
+        assert client.check_role(Roles.PLAYER) == (player_stream_info is not None)
         if client.check_role(Roles.METADATA) and client.info.metadata_support:
-            # Choose the first supported picture format as a simple strategy
             supported = client.info.metadata_support.support_picture_formats
             art_format: PictureFormat | None = None
             for fmt in (PictureFormat.JPEG, PictureFormat.PNG, PictureFormat.BMP):
@@ -628,17 +494,21 @@ class ClientGroup:
             metadata=metadata_stream_info,
             visualizer=visualizer_stream_info,
         )
-        logger.debug("Sending stream start message to client %s: %s", client.client_id, stream_info)
+        logger.debug(
+            "Sending stream start message to client %s: %s",
+            client.client_id,
+            stream_info,
+        )
         client.send_message(StreamStartMessage(stream_info))
 
-    def _send_stream_end_msg(self, client: "Client") -> None:
+    def _send_stream_end_msg(self, client: ResonateClient) -> None:
         """Send a stream end message to a client to stop playback."""
         logger.debug("ending stream for %s (%s)", client.name, client.client_id)
         # Lifetime of album artwork is bound to the stream
-        _ = self._client_art_formats.pop(client.client_id, None)
+        self._client_art_formats.pop(client.client_id, None)
         client.send_message(StreamEndMessage())
 
-    def stop(self) -> bool:
+    async def stop(self, stop_time_us: int | None = None) -> bool:
         """
         Stop playback for the group and clean up resources.
 
@@ -648,26 +518,70 @@ class ClientGroup:
         - Clears all buffers and format mappings
         - Cleans up all audio encoders
 
+        Args:
+            stop_time_us: Optional absolute timestamp (microseconds) when playback should
+                stop. When provided and in the future, the stop request is scheduled and
+                this method returns immediately.
+
         Returns:
-            bool: True if an active stream was stopped, False if no stream was active.
+            bool: True if an active or scheduled stream was stopped (or scheduled to stop),
+            False if no stream was active.
         """
-        if self._stream_task is None:
-            logger.debug("stop called but no active stream task")
+        active = self._stream_task is not None
+
+        if stop_time_us is not None:
+            now_us = int(self._server.loop.time() * 1_000_000)
+            if stop_time_us > now_us:
+                delay = (stop_time_us - now_us) / 1_000_000
+
+                async def _delayed_stop() -> None:
+                    try:
+                        await self.stop()
+                    except Exception:
+                        logger.exception("Scheduled stop failed")
+
+                self._server.loop.call_later(
+                    delay, lambda: self._server.loop.create_task(_delayed_stop())
+                )
+                return active
+
+        if not active:
             return False
+
         logger.debug(
             "Stopping playback for group with clients: %s",
             [c.client_id for c in self._clients],
         )
-        _ = self._stream_task.cancel()  # Don't care about cancellation result
+
+        if self._stream_task is not None:
+            stream_task = self._stream_task
+            stream_task.cancel()
+            try:
+                await stream_task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                logger.exception("Unhandled exception while stopping stream task")
+            self._stream_task = None
+
+        if self._streamer is not None:
+            self._streamer.reset()
+            self._streamer = None
+
+        if self._media_stream is not None:
+            with suppress(Exception):
+                await self._media_stream.source.aclose()
+        self._media_stream = None
+        self._stream_commands = None
+
         for client in self._clients:
             self._send_stream_end_msg(client)
             if client.check_role(Roles.PLAYER):
-                del self._player_formats[client.client_id]
+                self._player_formats.pop(client.client_id, None)
 
         self._audio_encoders.clear()
-        self._audio_headers.clear()
-        self._stream_task = None
         self._current_media_art = None
+        self._play_start_time_us = None
 
         if self._current_state != PlaybackStateType.STOPPED:
             self._signal_event(GroupStateChangedEvent(PlaybackStateType.STOPPED))
@@ -692,7 +606,7 @@ class ClientGroup:
             client.send_message(message)
         return True
 
-    def set_metadata(self, metadata: Metadata | None) -> None:
+    def set_metadata(self, metadata: Metadata | None, timestamp: int | None = None) -> None:
         """
         Set metadata for the group and send to all clients.
 
@@ -700,6 +614,8 @@ class ClientGroup:
 
         Args:
             metadata: The new metadata to send to clients.
+            timestamp: Optional timestamp in microseconds for the metadata update.
+                If None, uses the current server time.
         """
         # TODO: integrate this more closely with play_media?
         # Check if metadata has actually changed
@@ -707,7 +623,8 @@ class ClientGroup:
             return
         last_metadata = self._current_metadata
 
-        timestamp = int(self._server.loop.time() * 1_000_000)
+        if timestamp is None:
+            timestamp = int(self._server.loop.time() * 1_000_000)
         if metadata is None:
             # Clear all metadata fields when metadata is None
             metadata_update = Metadata.cleared_update(timestamp)
@@ -795,7 +712,7 @@ class ClientGroup:
 
         return letterboxed
 
-    def _send_media_art_to_client(self, client: "Client", image: Image.Image) -> None:
+    def _send_media_art_to_client(self, client: ResonateClient, image: Image.Image) -> None:
         """Send media art to a specific client with appropriate format and sizing."""
         if not client.check_role(Roles.METADATA) or not client.info.metadata_support:
             return
@@ -842,9 +759,13 @@ class ClientGroup:
             client.send_message(header + img_data)
 
     @property
-    def clients(self) -> list["Client"]:
+    def clients(self) -> list[ResonateClient]:
         """All clients that are part of this group."""
         return self._clients
+
+    def players(self) -> list[PlayerClient]:
+        """Return player helpers for all members that support the role."""
+        return [client.player for client in self._clients if client.player is not None]
 
     def _handle_group_command(self, cmd: GroupCommandClientPayload) -> None:
         # TODO: verify that this command is actually supported for the current state
@@ -872,14 +793,14 @@ class ClientGroup:
 
     def _signal_event(self, event: GroupEvent) -> None:
         for cb in self._event_cbs:
-            _ = self._server.loop.create_task(cb(event))  # Fire and forget event callback
+            self._server.loop.create_task(cb(event))
 
     @property
     def state(self) -> PlaybackStateType:
         """Current playback state of the group."""
         return self._current_state
 
-    def remove_client(self, client: "Client") -> None:
+    async def remove_client(self, client: ResonateClient) -> None:
         """
         Remove a client from this group.
 
@@ -892,23 +813,25 @@ class ClientGroup:
             client: The client to remove from this group.
         """
         if client not in self._clients:
-            logger.debug("client %s not in group, skipping removal", client.client_id)
             return
         logger.debug("removing %s from group with members: %s", client.client_id, self._clients)
         if len(self._clients) == 1:
             # Delete this group if that was the last client
-            _ = self.stop()
+            await self.stop()
             self._clients = []
         else:
             self._clients.remove(client)
-            if self._stream_task is not None:
-                # Notify the client that the stream ended
-                try:
-                    self._send_stream_end_msg(client)
-                except QueueFull:
-                    logger.warning("Failed to send stream end message to %s", client.client_id)
-                if client.check_role(Roles.PLAYER):
-                    del self._player_formats[client.client_id]
+            if client.check_role(Roles.PLAYER):
+                self._player_formats.pop(client.client_id, None)
+            self._send_stream_end_msg(client)
+
+            # Reconfigure streamer if actively streaming
+            if (
+                self._stream_task is not None
+                and self._media_stream is not None
+                and client.check_role(Roles.PLAYER)
+            ):
+                self._reconfigure_streamer()
         if not self._clients:
             # Emit event for group deletion, no clients left
             self._signal_event(GroupDeletedEvent())
@@ -916,9 +839,9 @@ class ClientGroup:
             # Emit event for client removal
             self._signal_event(GroupMemberRemovedEvent(client.client_id))
         # Each client needs to be in a group, add it to a new one
-        client._set_group(ClientGroup(self._server, client))  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+        client._set_group(ResonateGroup(self._server, client))  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
 
-    def add_client(self, client: "Client") -> None:
+    async def add_client(self, client: ResonateClient) -> None:
         """
         Add a client to this group.
 
@@ -930,11 +853,11 @@ class ClientGroup:
             client: The client to add to this group.
         """
         logger.debug("adding %s to group with members: %s", client.client_id, self._clients)
-        _ = client.group.stop()
+        await client.group.stop()
         if client in self._clients:
             return
         # Remove it from any existing group first
-        client.ungroup()
+        await client.ungroup()
 
         # Add client to this group's client list
         self._clients.append(client)
@@ -944,17 +867,16 @@ class ClientGroup:
 
         # Then set the group (which will emit ClientGroupChangedEvent)
         client._set_group(self)  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
-        if self._stream_task is not None and self._stream_audio_format is not None:
+        if self._stream_task is not None and self._media_stream:
             logger.debug("Joining client %s to current stream", client.client_id)
-            # Join it to the current stream
             if client.check_role(Roles.PLAYER):
-                player_format = self.determine_player_format(
-                    client, self._stream_audio_format, self._preferred_stream_codec
+                player_format = client.require_player.determine_optimal_format(
+                    self._media_stream.audio_format
                 )
                 self._player_formats[client.client_id] = player_format
-            else:
-                player_format = None
-            self._send_stream_start_msg(client, player_format)
+                self._reconfigure_streamer()
+            elif client.check_role(Roles.METADATA) or client.check_role(Roles.VISUALIZER):
+                self._send_stream_start_msg(client, None)
 
         # Send current metadata to the new player if available
         if self._current_metadata is not None:
@@ -987,341 +909,10 @@ class ClientGroup:
         if self._current_media_art is not None:
             self._send_media_art_to_client(client, self._current_media_art)
 
-    def _validate_audio_format(self, audio_format: AudioFormat) -> tuple[int, str, str] | None:
-        """
-        Validate audio format and return format parameters.
-
-        Args:
-            audio_format: The source audio format to validate.
-
-        Returns:
-            Tuple of (bytes_per_sample, audio_format_str, layout_str) or None if invalid.
-        """
-        if audio_format.bit_depth == 16:
-            input_bytes_per_sample = 2
-            input_audio_format = "s16"
-        elif audio_format.bit_depth == 24:
-            input_bytes_per_sample = 3
-            input_audio_format = "s24"
-        else:
-            logger.error("Only 16bit and 24bit audio is supported")
-            return None
-
-        if audio_format.channels == 1:
-            input_audio_layout = "mono"
-        elif audio_format.channels == 2:
-            input_audio_layout = "stereo"
-        else:
-            logger.error("Only 1 and 2 channel audio is supported")
-            return None
-
-        return input_bytes_per_sample, input_audio_format, input_audio_layout
-
-    def _resample_and_encode_to_player(
-        self,
-        player: "Client",
-        player_format: AudioFormat,
-        in_frame: av.AudioFrame,
-        resamplers: dict[AudioFormat, av.AudioResampler],
-        chunk_timestamp_us: int,
-    ) -> tuple[int, int]:
-        """
-        Resample audio for a specific player and encode/send the data.
-
-        Args:
-            player: The player to send audio data to.
-            player_format: The target audio format for the player.
-            in_frame: The input audio frame to resample.
-            resamplers: Dictionary of existing resamplers for reuse.
-            chunk_timestamp_us: Timestamp for the audio chunk in microseconds.
-
-        Returns:
-            Tuple of (sample_count, duration_of_chunk_us).
-        """
-        resampler = resamplers.get(player_format)
-        if resampler is None:
-            resampler = av.AudioResampler(
-                format="s16" if player_format.bit_depth == 16 else "s24",
-                layout="stereo" if player_format.channels == 2 else "mono",
-                rate=player_format.sample_rate,
-            )
-            resamplers[player_format] = resampler
-
-        out_frames = resampler.resample(in_frame)
-        if len(out_frames) != 1:
-            logger.warning("resampling resulted in %s frames", len(out_frames))
-
-        sample_count = out_frames[0].samples
-        if player_format.codec in (AudioCodec.OPUS, AudioCodec.FLAC):
-            encoder = self._get_or_create_audio_encoder(player_format)
-            packets = encoder.encode(out_frames[0])
-
-            for packet in packets:
-                header = pack_binary_header_raw(
-                    BinaryMessageType.AUDIO_CHUNK.value,
-                    chunk_timestamp_us,
-                )
-                player.send_message(header + bytes(packet))
-        elif player_format.codec == AudioCodec.PCM:
-            # Send as raw PCM
-            # We need to manually slice the audio data since the buffer may be
-            # larger than than the expected size
-            audio_data = bytes(out_frames[0].planes[0])[
-                : (2 if player_format.bit_depth == 16 else 3)
-                * player_format.channels
-                * sample_count
-            ]
-            if len(out_frames[0].planes) != 1:
-                logger.warning("resampling resulted in %s planes", len(out_frames[0].planes))
-
-            header = pack_binary_header_raw(
-                BinaryMessageType.AUDIO_CHUNK.value,
-                chunk_timestamp_us,
-            )
-            player.send_message(header + audio_data)
-        else:
-            raise NotImplementedError(f"Codec {player_format.codec} is not supported yet")
-
-        duration_of_chunk_us = int((sample_count / player_format.sample_rate) * 1_000_000)
-        return sample_count, duration_of_chunk_us
-
     def handle_stream_format_request(
         self,
-        player: "Client",
-        request: "StreamRequestFormatPayload",
+        player: ResonateClient,
+        request: StreamRequestFormatPayload,
     ) -> None:
         """Handle stream/request-format from a player and send stream/update."""
-        # Only applicable if there is an active stream
-        if self._stream_task is None or self._stream_audio_format is None:
-            logger.debug(
-                "Ignoring stream/request-format from %s without active stream",
-                player.client_id,
-            )
-            return
-
-        # Start from the current player format or determine from source
-        current = self._player_formats.get(player.client_id)
-        assert current is not None, "Player must have a current format if streaming"
-
-        # Apply requested overrides
-        codec = current.codec
-        if request.codec is not None:
-            try:
-                codec = AudioCodec(request.codec)
-            except ValueError:
-                logger.warning(
-                    "Player %s requested switch to unsupported codec %s, ignoring",
-                    player.client_id,
-                    request.codec,
-                )
-                codec = current.codec
-            # Ensure requested codec is supported by player
-            if (
-                player.info.player_support
-                and codec.value not in player.info.player_support.support_codecs
-            ):
-                raise ValueError(
-                    f"Player {player.client_id} does not support requested codec {codec}"
-                )
-
-        sample_rate = request.sample_rate or current.sample_rate
-        if (
-            player.info.player_support
-            and sample_rate not in player.info.player_support.support_sample_rates
-        ):
-            raise ValueError(
-                f"Player {player.client_id} does not support requested sample rate {sample_rate}"
-            )
-
-        bit_depth = request.bit_depth or current.bit_depth
-        if (
-            player.info.player_support
-            and bit_depth not in player.info.player_support.support_bit_depth
-        ):
-            raise ValueError(
-                f"Player {player.client_id} does not support requested bit depth {bit_depth}"
-            )
-        if bit_depth != 16:
-            raise NotImplementedError("Only 16bit audio is supported for now")
-
-        channels = request.channels or current.channels
-        if (
-            player.info.player_support
-            and channels not in player.info.player_support.support_channels
-        ):
-            raise ValueError(
-                f"Player {player.client_id} does not support requested channel count {channels}"
-            )
-        if channels not in (1, 2):
-            raise NotImplementedError("Only mono and stereo audio is supported for now")
-
-        new_format = AudioFormat(
-            sample_rate=sample_rate,
-            bit_depth=bit_depth,
-            channels=channels,
-            codec=codec,
-        )
-
-        # Do not send the update yet, so the sending of this message and the actual format
-        # change during streaming happen in the correct order
-        header = self._get_audio_header(new_format)
-
-        update = StreamUpdatePlayer(
-            codec=new_format.codec.value,
-            sample_rate=new_format.sample_rate,
-            channels=new_format.channels,
-            bit_depth=new_format.bit_depth,
-            codec_header=header,
-        )
-        self._scheduled_format_changes[player.client_id] = (
-            StreamUpdateMessage(StreamUpdatePayload(player=update)),
-            new_format,
-        )
-
-    def _update_player_format(self, player: "Client") -> None:
-        """Apply any scheduled format changes for a player if needed."""
-        if change := self._scheduled_format_changes.pop(player.client_id, None):
-            format_change_message, new_format = change
-            logger.debug(
-                "Switching format for %s from %s to %s",
-                player.client_id,
-                self._player_formats.get(player.client_id, None),
-                new_format,
-            )
-            player.send_message(format_change_message)
-            self._player_formats[player.client_id] = new_format
-
-    async def _calculate_timing_and_sleep(
-        self,
-        chunk_timestamp_us: int,
-        buffer_duration_us: int,
-    ) -> None:
-        """
-        Calculate timing and sleep if needed to maintain buffer levels.
-
-        Args:
-            chunk_timestamp_us: Current chunk timestamp in microseconds.
-            buffer_duration_us: Maximum buffer duration in microseconds.
-        """
-        time_until_next_chunk = chunk_timestamp_us - int(self._server.loop.time() * 1_000_000)
-
-        # TODO: I think this may exclude the burst at startup?
-        if time_until_next_chunk > buffer_duration_us:
-            await asyncio.sleep((time_until_next_chunk - buffer_duration_us) / 1_000_000)
-
-    async def _stream_audio(
-        self,
-        start_time_us: int,
-        audio_source: AsyncGenerator[bytes, None],
-        audio_format: AudioFormat,
-    ) -> None:
-        """
-        Handle the audio streaming loop for all players in the group.
-
-        This method processes the audio source, converts formats as needed for each
-        player, maintains synchronization via timestamps, and manages buffer levels
-        to prevent overflows.
-
-        Args:
-            start_time_us: Initial playback timestamp in microseconds.
-            audio_source: Generator providing PCM audio chunks.
-            audio_format: Format specification for the source audio.
-        """
-        # TODO: Complete resampling
-        # -  deduplicate conversion when multiple players use the same rate
-        # - Maybe notify the library user that play_media should be restarted with
-        #   a better format?
-        # - Support other formats than pcm
-        # - Optimize this
-
-        try:
-            logger.debug(
-                "_stream_audio started: start_time_us=%d, audio_format=%s",
-                start_time_us,
-                audio_format,
-            )
-
-            # Validate and set up audio format
-            format_result = self._validate_audio_format(audio_format)
-            if format_result is None:
-                return
-            input_bytes_per_sample, input_audio_format, input_audio_layout = format_result
-
-            # Initialize streaming context variables
-            input_sample_size = audio_format.channels * input_bytes_per_sample
-            input_sample_rate = audio_format.sample_rate
-            input_samples_per_chunk = self._calculate_optimal_chunk_samples(audio_format)
-            chunk_timestamp_us = start_time_us
-
-            resamplers: dict[AudioFormat, av.AudioResampler] = {}
-
-            in_frame = av.AudioFrame(
-                format=input_audio_format,
-                layout=input_audio_layout,
-                samples=input_samples_per_chunk,
-            )
-            in_frame.sample_rate = input_sample_rate
-            input_buffer = bytearray()
-
-            logger.debug("Entering audio streaming loop")
-            async for chunk in audio_source:
-                input_buffer += bytes(chunk)
-                while len(input_buffer) >= (input_samples_per_chunk * input_sample_size):
-                    chunk_to_encode = input_buffer[: (input_samples_per_chunk * input_sample_size)]
-                    del input_buffer[: (input_samples_per_chunk * input_sample_size)]
-
-                    in_frame.planes[0].update(bytes(chunk_to_encode))
-
-                    sample_count = None
-                    # TODO: to what should we set this?
-                    buffer_duration_us = 2_000_000
-                    duration_of_samples_in_chunk: list[int] = []
-
-                    for player in self._clients:
-                        if not player.check_role(Roles.PLAYER):
-                            continue
-
-                        self._update_player_format(player)
-                        player_format = self._player_formats[player.client_id]
-
-                        try:
-                            sample_count, duration_us = self._resample_and_encode_to_player(
-                                player, player_format, in_frame, resamplers, chunk_timestamp_us
-                            )
-                            duration_of_samples_in_chunk.append(duration_us)
-                        except QueueFull:
-                            logger.warning(
-                                "Error sending audio chunk to %s, disconnecting player",
-                                player.client_id,
-                            )
-                            await player.disconnect()
-
-                        assert player.info.player_support is not None  # for type checking
-                        # Calculate buffer duration for this player
-                        player_buffer_capacity_samples = (
-                            player.info.player_support.buffer_capacity
-                        ) // ((player_format.bit_depth // 8) * player_format.channels)
-                        player_buffer_duration = int(
-                            1_000_000 * player_buffer_capacity_samples / player_format.sample_rate
-                        )
-                        buffer_duration_us = min(buffer_duration_us, player_buffer_duration)
-
-                    if sample_count is None:
-                        logger.error("No players in group, stopping stream")
-                        return
-
-                    # TODO: Is mean the correct approach here?
-                    # Or just make it based on the input stream
-                    chunk_timestamp_us += int(
-                        sum(duration_of_samples_in_chunk) / len(duration_of_samples_in_chunk)
-                    )
-
-                    await self._calculate_timing_and_sleep(chunk_timestamp_us, buffer_duration_us)
-
-            # TODO: flush buffer
-            logger.debug("Audio streaming loop ended")
-        except Exception:
-            logger.exception("failed to stream audio")
-        finally:
-            # TODO: Wait until all audio should be played, otherwise we cut off the audio
-            self.stop()
+        raise NotImplementedError("Dynamic format changes are not yet implemented")
