@@ -82,8 +82,6 @@ class PlayerClient:
             AudioFormat: The optimal format for this client.
         """
         support = self.support
-        # if support:
-        #     support.support_codecs = ["opus"]
 
         # Determine optimal sample rate
         sample_rate = source_format.sample_rate
