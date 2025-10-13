@@ -357,6 +357,11 @@ class PlayerState:
 class MediaStream:
     """Container for a single audio stream with its format."""
 
+    _source: AsyncGenerator[bytes, None]
+    """Audio source generator yielding PCM bytes."""
+    _audio_format: AudioFormat
+    """Audio format of the stream."""
+
     def __init__(
         self,
         *,
