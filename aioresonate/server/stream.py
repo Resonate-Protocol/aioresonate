@@ -468,7 +468,9 @@ class Streamer:
                     chunk.refcount += 1
 
             # Mark if player needs catch-up (actual sending happens in send())
-            player_state.needs_catchup = self._check_needs_catchup(player_state, join_time_us)
+            # player_state.needs_catchup = self._check_needs_catchup(player_state, join_time_us)  # noqa: E501, ERA001
+            # TODO: fix and re-enable catchup logic
+            player_state.needs_catchup = False  # disable catchup for now
 
             new_players[client_cfg.client_id] = player_state
 
