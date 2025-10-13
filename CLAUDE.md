@@ -1,0 +1,1 @@
+- Run ./scripts/run-in-env.sh pre-commit -a regularly to run linters, ruff and mypy (always run full pre-commit with -a)

@@ -1,4 +1,5 @@
-"""Metadata messages for the Resonate protocol.
+"""
+Metadata messages for the Resonate protocol.
 
 This module contains messages specific to clients with the metadata role, which
 handle display of track information, artwork, and playback state. Metadata clients
@@ -45,7 +46,8 @@ class ClientHelloMetadataSupport(DataClassORJSONMixin):
 # Server -> Client: stream/start metadata object
 @dataclass
 class StreamStartMetadata(DataClassORJSONMixin):
-    """Metadata object in stream/start message.
+    """
+    Metadata object in stream/start message.
 
     Sent to clients that specified supported picture formats.
     """

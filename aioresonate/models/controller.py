@@ -1,4 +1,5 @@
-"""Controller messages for the Resonate protocol.
+"""
+Controller messages for the Resonate protocol.
 
 This module contains messages specific to clients with the controller role, which
 enables remote control of groups and playback. Controller clients can browse
