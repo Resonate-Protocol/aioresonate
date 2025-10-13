@@ -226,7 +226,7 @@ def build_encoder_for_format(
 
 
 @dataclass(frozen=True)
-class ChannelSpec:
+class SourceAudioSpec:
     """Source audio format with computed PyAV parameters for processing."""
 
     audio_format: AudioFormat
@@ -262,7 +262,7 @@ class PreparedChunkState:
 class PipelineState:
     """Holds state for a distinct channel/format/chunk-size pipeline."""
 
-    channel: ChannelSpec
+    channel: SourceAudioSpec
     target_format: AudioFormat
     target_bytes_per_sample: int
     target_frame_stride: int
@@ -331,8 +331,8 @@ class Streamer:
     """Mapping of client IDs to their player delivery state."""
     _last_chunk_end_us: int | None
     """End timestamp of the most recently prepared chunk, None if no chunks prepared yet."""
-    _channel: ChannelSpec | None = None
-    """The default audio channel."""
+    _channel: SourceAudioSpec | None = None
+    """The source audio specification."""
     _source_buffer: deque[SourceChunk]
     """Buffer of raw PCM chunks that are scheduled for playback but not yet finished playing."""
     _source_samples_produced: int
@@ -373,9 +373,9 @@ class Streamer:
         Returns:
             Dictionary mapping client IDs to their StreamStartPlayer messages.
         """
-        # Update channel spec if audio format changed
+        # Update source audio spec if audio format changed
         bytes_per_sample, av_format, av_layout = _resolve_audio_format(audio_format)
-        self._channel = ChannelSpec(
+        self._channel = SourceAudioSpec(
             audio_format=audio_format,
             bytes_per_sample=bytes_per_sample,
             frame_stride=bytes_per_sample * audio_format.channels,
@@ -1204,8 +1204,8 @@ def _resolve_audio_format(audio_format: AudioFormat) -> tuple[int, str, str]:
 __all__ = [
     "AudioCodec",
     "AudioFormat",
-    "ChannelSpec",
     "ClientStreamConfig",
     "MediaStream",
+    "SourceAudioSpec",
     "Streamer",
 ]
