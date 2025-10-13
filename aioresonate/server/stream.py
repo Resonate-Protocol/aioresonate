@@ -898,7 +898,7 @@ class Streamer:
                 skip_duration_us = player_state.join_time_us - catchup_start_time_us
                 skip_samples = int(skip_duration_us * target_rate / 1_000_000)
 
-                logger.info(
+                logger.debug(
                     "Catch-up would start %d us before join time, "
                     "skipping first %d samples (%.1f ms)",
                     player_state.join_time_us - catchup_start_time_us,
@@ -1161,19 +1161,6 @@ class Streamer:
         end_us = self._play_start_time_us + int(
             (start_samples + sample_count) * 1_000_000 / pipeline.target_format.sample_rate
         )
-
-        # Debug OPUS timestamps
-        if pipeline.target_format.codec == AudioCodec.OPUS and pipeline.samples_produced < 10000:
-            logger.warning(
-                "OPUS chunk #%d: start_samples=%d, sample_count=%d, "
-                "sample_rate=%d, start_us=%d, duration_us=%d",
-                len(pipeline.prepared),
-                start_samples,
-                sample_count,
-                pipeline.target_format.sample_rate,
-                start_us - self._play_start_time_us,
-                end_us - start_us,
-            )
 
         chunk = PreparedChunkState(
             payload=payload,
