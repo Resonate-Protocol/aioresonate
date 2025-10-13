@@ -7,10 +7,15 @@ __all__ = [
     "BINARY_HEADER_SIZE",
     "BinaryHeader",
     "BinaryMessageType",
+    "ClientMessage",
     "MediaCommand",
+    "PictureFormat",
     "PlaybackStateType",
     "PlayerStateType",
     "RepeatMode",
+    "Roles",
+    "ServerMessage",
+    "UndefinedField",
     "controller",
     "core",
     "metadata",
@@ -18,6 +23,7 @@ __all__ = [
     "pack_binary_header_raw",
     "player",
     "types",
+    "undefined_field",
     "unpack_binary_header",
     "visualizer",
 ]
@@ -27,10 +33,16 @@ from typing import NamedTuple
 from . import controller, core, metadata, player, types, visualizer
 from .types import (
     BinaryMessageType,
+    ClientMessage,
     MediaCommand,
+    PictureFormat,
     PlaybackStateType,
     PlayerStateType,
     RepeatMode,
+    Roles,
+    ServerMessage,
+    UndefinedField,
+    undefined_field,
 )
 
 # Binary header (big-endian): message_type(1) + timestamp_us(8) = 9 bytes

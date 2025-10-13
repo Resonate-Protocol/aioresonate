@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
-
-from attr import dataclass
 
 if TYPE_CHECKING:
     from .group import ResonateGroup

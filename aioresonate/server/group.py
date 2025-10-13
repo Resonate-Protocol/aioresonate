@@ -191,13 +191,11 @@ class ResonateGroup:
         media_stream: MediaStream,
         *,
         play_start_time_us: int | None = None,
-        stream_start_time_us: int = 0,
     ) -> int:
         """Start synchronized playback for the current group using a MediaStream."""
         logger.debug(
-            "Starting play_media with play_start_time_us=%s, stream_start_time_us=%s",
+            "Starting play_media with play_start_time_us=%s",
             play_start_time_us,
-            stream_start_time_us,
         )
 
         self._media_stream = media_stream
@@ -249,7 +247,7 @@ class ResonateGroup:
         self._streamer = streamer
         self._stream_commands = asyncio.Queue()
         self._stream_task = self._server.loop.create_task(
-            self._run_streamer(streamer, media_stream, self._stream_commands)
+            self._run_streamer(streamer, media_stream)
         )
 
         # Notify clients about the upcoming stream configuration
@@ -285,79 +283,86 @@ class ResonateGroup:
         self,
         streamer: Streamer,
         media_stream: MediaStream,
-        command_queue: asyncio.Queue[_StreamerReconfigureCommand] | None,
     ) -> int:
         """Consume media channels, distribute via streamer, and return end timestamp."""
         last_end_us = self._play_start_time_us or int(self._server.loop.time() * 1_000_000)
         cancelled = False
 
         try:
-            while media_stream.source:
+            while True:
                 # Check for commands before processing chunks
-                if command_queue is not None and not command_queue.empty():
-                    command = command_queue.get_nowait()
-                    try:
-                        start_payloads = streamer.configure(
-                            audio_format=command.audio_format,
-                            clients=command.client_configs,
-                        )
-                        # Send stream/start messages to affected players
-                        player_lookup = {
-                            player.client.client_id: player for player in self.players()
-                        }
-                        for client_id, player_payload in start_payloads.items():
-                            player_obj = player_lookup.get(client_id)
-                            if player_obj is not None:
-                                self._send_stream_start_msg(
-                                    player_obj.client,
-                                    player_stream_info=player_payload,
-                                )
-                        # Send session/update to all clients
-                        for client in self._clients:
-                            if client.check_role(Roles.METADATA):
-                                metadata_update = (
-                                    self._current_metadata.snapshot_update(
-                                        int(self._server.loop.time() * 1_000_000)
-                                    )
-                                    if self._current_metadata is not None
-                                    else None
-                                )
-                            else:
-                                metadata_update = None
-                            if client.check_role(Roles.CONTROLLER) or client.check_role(
-                                Roles.METADATA
-                            ):
-                                playback_state = (
-                                    PlaybackStateType.PLAYING
-                                    if self._current_state == PlaybackStateType.PLAYING
-                                    else PlaybackStateType.PAUSED
-                                )
-                            else:
-                                playback_state = None
-                            message = SessionUpdateMessage(
-                                SessionUpdatePayload(
-                                    group_id=self._group_id,
-                                    playback_state=playback_state,
-                                    metadata=metadata_update,
-                                )
+                if self._stream_commands is not None and not self._stream_commands.empty():
+                    # We handle reconfiguration requests only between chunks so that
+                    # all clients only receive binary messages once the session was correctly
+                    # started or updated
+                    command = self._stream_commands.get_nowait()
+                    start_payloads = streamer.configure(
+                        audio_format=command.audio_format,
+                        clients=command.client_configs,
+                    )
+                    # Send stream/start messages to affected players
+                    player_lookup = {player.client.client_id: player for player in self.players()}
+                    for client_id, player_payload in start_payloads.items():
+                        player_obj = player_lookup.get(client_id)
+                        if player_obj is not None:
+                            self._send_stream_start_msg(
+                                player_obj.client,
+                                player_stream_info=player_payload,
                             )
-                            client.send_message(message)
-                    except Exception:
-                        logger.exception("Failed to reconfigure streamer")
+                    # Send session/update to all clients
+                    # TODO: only send to clients that were affected by the change!
+                    for client in self._clients:
+                        if client.check_role(Roles.METADATA):
+                            metadata_update = (
+                                self._current_metadata.snapshot_update(
+                                    int(self._server.loop.time() * 1_000_000)
+                                )
+                                if self._current_metadata is not None
+                                else None
+                            )
+                        else:
+                            metadata_update = None
+                        if client.check_role(Roles.CONTROLLER) or client.check_role(Roles.METADATA):
+                            playback_state = (
+                                PlaybackStateType.PLAYING
+                                if self._current_state == PlaybackStateType.PLAYING
+                                else PlaybackStateType.PAUSED
+                            )
+                        else:
+                            playback_state = None
+                        message = SessionUpdateMessage(
+                            SessionUpdatePayload(
+                                group_id=self._group_id,
+                                playback_state=playback_state,
+                                metadata=metadata_update,
+                            )
+                        )
+                        client.send_message(message)
                     continue
 
-                chunk = await anext(media_stream.source)
+                try:
+                    chunk = await anext(media_stream.source)
+                except StopAsyncIteration:
+                    # Source exhausted, exit loop
+                    break
 
+                # Prepare the chunk
                 streamer.prepare(chunk)
+
+                # Send all prepared chunks
                 await streamer.send()
 
+            # We are done
+
             streamer.flush()
+            # Send all remaining chunks
             await streamer.send()
             if streamer.last_chunk_end_time_us is not None:
                 last_end_us = streamer.last_chunk_end_time_us
         except asyncio.CancelledError:
             cancelled = True
             streamer.flush()
+            # Send all remaining chunks
             await streamer.send()
             raise
         else:
