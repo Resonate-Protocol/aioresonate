@@ -544,14 +544,14 @@ class Streamer:
         return True
 
     async def send(self) -> None:
-        """Send prepared chunks to clients until all queues are empty.
+        """Send prepared audio to all clients.
 
-        This method performs two stages in a loop:
+        This method performs three stages in a loop:
         1. Perform catch-up for late joiners (if needed)
-        2. Send prepared chunks to players (waits for earliest blocked player)
+        2. Send chunks to players with backpressure control
         3. Prune old data
 
-        Continues until all player queues are empty and catch-up is complete.
+        Continues until all pending audio has been delivered.
         """
         while True:
             # Stage 1: Perform catch-up for players that need it
@@ -559,7 +559,7 @@ class Streamer:
                 if player_state.needs_catchup:
                     self._perform_catchup(player_state)
 
-            # Stage 2: Deliver to players with smart waiting
+            # Stage 2: Send chunks to players with backpressure control
             earliest_blocked_player = None
             earliest_blocked_chunk = None
             earliest_end_time_us = None
@@ -627,13 +627,13 @@ class Streamer:
             # Stage 3: Cleanup
             self._prune_old_data()
 
-            # Check if there's still work pending (any non-empty queues or catch-up needed)
+            # Check if there's still work pending
             has_work = any(
                 player_state.queue or player_state.needs_catchup
                 for player_state in self._players.values()
             )
             if not has_work:
-                break  # All queues empty and catch-up complete, we're done
+                break  # All pending audio delivered, we're done
 
     def flush(self) -> None:
         """Flush all pipelines, preparing any buffered data for sending."""
