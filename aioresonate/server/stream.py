@@ -619,12 +619,13 @@ class Streamer:
     async def send(self) -> None:
         """Send prepared audio to all clients.
 
-        This method performs three stages in a loop:
+        This method performs four stages in a loop:
         1. Perform catch-up for late joiners (if needed)
         2. Send chunks to players with backpressure control
         3. Prune old data
+        4. Check exit conditions and apply source buffer backpressure
 
-        Continues until all pending audio has been delivered.
+        Continues until all pending audio has been delivered and source buffer is below target.
         """
         while True:
             # Stage 1: Perform catch-up for players that need it
@@ -687,13 +688,34 @@ class Streamer:
             # Stage 3: Cleanup
             self._prune_old_data()
 
-            # Check if there's still work pending
-            has_work = any(
+            # Stage 4: Check exit conditions and apply source buffer backpressure
+            has_client_work = any(
                 player_state.queue or player_state.needs_catchup
                 for player_state in self._players.values()
             )
-            if not has_work:
-                break  # All pending audio delivered, we're done
+
+            # Check source buffer status
+            source_buffer_ok = True
+            if self._source_buffer:
+                buffer_duration_us = (
+                    self._source_buffer[-1].end_time_us - self._source_buffer[0].start_time_us
+                )
+                source_buffer_ok = buffer_duration_us <= self._source_buffer_target_duration_us
+
+            # Exit when both conditions met
+            if not has_client_work and source_buffer_ok:
+                break
+
+            # If client work pending, continue immediately
+            if has_client_work:
+                continue
+
+            # Otherwise wait for source buffer to drain
+            now_us = int(self._loop.time() * 1_000_000)
+            sleep_until_us = self._source_buffer[0].end_time_us
+            sleep_duration_s = (sleep_until_us - now_us) / 1_000_000
+            if sleep_duration_s > 0:
+                await asyncio.sleep(sleep_duration_s)
 
     def flush(self) -> None:
         """Flush all pipelines, preparing any buffered data for sending."""
