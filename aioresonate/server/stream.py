@@ -584,15 +584,7 @@ class Streamer:
                             player_state.config.client_id,
                             chunk.start_time_us - now_us,
                         )
-                        queue.popleft()
-                        chunk.refcount -= 1
-                        pipeline = self._pipelines[player_state.pipeline_key]
-                        if (
-                            chunk.refcount == 0
-                            and pipeline.prepared
-                            and pipeline.prepared[0] is chunk
-                        ):
-                            pipeline.prepared.popleft()
+                        self._dequeue_chunk(player_state, chunk)
                         continue
 
                     # Check if we can send without waiting
@@ -610,12 +602,7 @@ class Streamer:
                     )
                     player_state.config.send(header + chunk.payload)
                     tracker.register(chunk.end_time_us, chunk.byte_count)
-                    queue.popleft()
-                    chunk.refcount -= 1
-                    pipeline = self._pipelines[player_state.pipeline_key]
-                    # Remove from prepared immediately when all active players have consumed it
-                    if chunk.refcount == 0 and pipeline.prepared and pipeline.prepared[0] is chunk:
-                        pipeline.prepared.popleft()
+                    self._dequeue_chunk(player_state, chunk)
 
             # If any player is blocked, wait for the one with earliest chunk
             if earliest_blocked_player is not None and earliest_blocked_chunk is not None:
@@ -655,6 +642,14 @@ class Streamer:
         self._channel = None
         self._pipelines.clear()
         self._players.clear()
+
+    def _dequeue_chunk(self, player_state: PlayerState, chunk: PreparedChunkState) -> None:
+        """Remove chunk from player queue and clean up pipeline if fully consumed."""
+        player_state.queue.popleft()
+        chunk.refcount -= 1
+        pipeline = self._pipelines[player_state.pipeline_key]
+        if chunk.refcount == 0 and pipeline.prepared and pipeline.prepared[0] is chunk:
+            pipeline.prepared.popleft()
 
     def _prune_old_data(self) -> None:
         """Prune old source chunks to free memory.
