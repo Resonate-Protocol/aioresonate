@@ -925,8 +925,8 @@ class Streamer:
         if temp_encoder is not None:
             packets = temp_encoder.encode(None)
             for packet in packets:
-                assert packet.duration
-                assert packet.duration > 0
+                if not packet.duration or packet.duration <= 0:
+                    raise ValueError(f"Invalid packet duration: {packet.duration!r}")
                 chunk_data = bytes(packet)
                 processed_chunks.append((chunk_data, packet.duration))
 
@@ -1069,8 +1069,8 @@ class Streamer:
                 packets = temp_encoder.encode(frame)
 
                 for packet in packets:
-                    assert packet.duration
-                    assert packet.duration > 0
+                    if not packet.duration or packet.duration <= 0:
+                        raise ValueError(f"Invalid packet duration: {packet.duration!r}")
                     chunk_data = bytes(packet)
                     processed_chunks.append((chunk_data, packet.duration))
 
@@ -1196,8 +1196,8 @@ class Streamer:
             pipeline: The pipeline that produced the packet.
             packet: The encoded audio packet from the encoder.
         """
-        assert packet.duration
-        assert packet.duration > 0
+        if not packet.duration or packet.duration <= 0:
+            raise ValueError(f"Invalid packet duration: {packet.duration!r}")
         chunk_data = bytes(packet)
         self._publish_chunk(pipeline, chunk_data, packet.duration)
         pipeline.samples_encoded += packet.duration
