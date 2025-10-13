@@ -555,6 +555,13 @@ class Streamer:
             if pipeline.encoder:
                 pipeline.encoder = None
 
+        # Clean up refcounts for players being removed
+        for old_client_id, old_player in self._players.items():
+            if old_client_id not in new_players:
+                for chunk in old_player.queue:
+                    chunk.refcount -= 1
+                old_player.queue.clear()
+
         # Replace players dict
         self._players = new_players
 
