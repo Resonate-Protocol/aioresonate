@@ -133,7 +133,7 @@ class BufferTracker:
         projected_usage = self.buffered_bytes + bytes_needed
         return projected_usage <= self.capacity_bytes
 
-    async def wait_for_capacity(self, bytes_needed: int, expected_end_us: int) -> None:
+    async def wait_for_capacity(self, bytes_needed: int) -> None:
         """Block until the device buffer can accept bytes_needed more bytes."""
         if bytes_needed <= 0:
             return
@@ -154,9 +154,7 @@ class BufferTracker:
                 # Returning here keeps the producer running because we are below capacity.
                 return
 
-            sleep_target_us = (
-                self.buffered_chunks[0].end_time_us if self.buffered_chunks else expected_end_us
-            )
+            sleep_target_us = self.buffered_chunks[0].end_time_us
             sleep_us = sleep_target_us - now_us
             if sleep_us <= 0:
                 await asyncio.sleep(0)
@@ -628,9 +626,7 @@ class Streamer:
             if earliest_blocked_player is not None and earliest_blocked_chunk is not None:
                 tracker = earliest_blocked_player.buffer_tracker
                 if tracker is not None:
-                    await tracker.wait_for_capacity(
-                        earliest_blocked_chunk.byte_count, earliest_blocked_chunk.end_time_us
-                    )
+                    await tracker.wait_for_capacity(earliest_blocked_chunk.byte_count)
                 continue  # More work to do, loop again
 
             # Stage 3: Cleanup
