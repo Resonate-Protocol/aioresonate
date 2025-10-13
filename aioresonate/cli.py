@@ -112,17 +112,16 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-async def _discover_server(timeout: float) -> str | None:
+async def _discover_server(discovery_timeout: float) -> str | None:
     """Discover a Resonate server via mDNS."""
     loop = asyncio.get_running_loop()
 
     class _Listener:
         def __init__(self) -> None:
             self.result: asyncio.Future[str] = loop.create_future()
+            self.tasks: set[asyncio.Task[None]] = set()
 
-        def _schedule(
-            self, zeroconf: AsyncZeroconf, service_type: str, name: str
-        ) -> None:
+        def _schedule(self, zeroconf: AsyncZeroconf, service_type: str, name: str) -> None:
             if self.result.done():
                 return
 
@@ -135,39 +134,39 @@ async def _discover_server(timeout: float) -> str | None:
                     return
                 host = addresses[0]
                 path_raw = info.properties.get(b"path")
-                path = path_raw.decode("utf-8", "ignore") if isinstance(path_raw, bytes) else DEFAULT_PATH
+                path = (
+                    path_raw.decode("utf-8", "ignore")
+                    if isinstance(path_raw, bytes)
+                    else DEFAULT_PATH
+                )
                 if not path:
                     path = DEFAULT_PATH
                 if not path.startswith("/"):
-                    path = '/' + path
+                    path = "/" + path
                 host_fmt = f"[{host}]" if ":" in host else host
                 url = f"ws://{host_fmt}:{info.port}{path}"
                 if not self.result.done():
                     self.result.set_result(url)
 
-            loop.create_task(process())
+            task = loop.create_task(process())
+            self.tasks.add(task)
+            task.add_done_callback(self.tasks.discard)
 
-        def add_service(
-            self, zeroconf: AsyncZeroconf, service_type: str, name: str
-        ) -> None:
+        def add_service(self, zeroconf: AsyncZeroconf, service_type: str, name: str) -> None:
             self._schedule(zeroconf, service_type, name)
 
-        def update_service(
-            self, zeroconf: AsyncZeroconf, service_type: str, name: str
-        ) -> None:
+        def update_service(self, zeroconf: AsyncZeroconf, service_type: str, name: str) -> None:
             self._schedule(zeroconf, service_type, name)
 
-        def remove_service(
-            self, zeroconf: AsyncZeroconf, service_type: str, name: str
-        ) -> None:
+        def remove_service(self, _zeroconf: AsyncZeroconf, _service_type: str, _name: str) -> None:
             return
 
     listener = _Listener()
     async with AsyncZeroconf() as zeroconf:
-        browser = AsyncServiceBrowser(zeroconf.zeroconf, SERVICE_TYPE, cast(Any, listener))
+        browser = AsyncServiceBrowser(zeroconf.zeroconf, SERVICE_TYPE, cast("Any", listener))
         try:
-            return await asyncio.wait_for(listener.result, timeout)
-        except asyncio.TimeoutError:
+            return await asyncio.wait_for(listener.result, discovery_timeout)
+        except TimeoutError:
             return None
         finally:
             await browser.async_cancel()
@@ -318,6 +317,7 @@ async def _toggle_mute(client: ResonateClient, state: CLIState) -> None:
     target = not bool(state.muted)
     await client.send_group_command(MediaCommand.MUTE, mute=target)
 
+
 def _handle_delay_command(client: ResonateClient, parts: list[str]) -> None:
     """Process delay commands from the keyboard loop."""
     if not parts or parts[0].lower() != "delay":
@@ -354,8 +354,10 @@ def _print_event(message: str) -> None:
 
 def _print_instructions() -> None:
     print(  # noqa: T201
-        ("Commands: play(p), pause, stop(s), next(n), prev(b), vol+/-, mute, toggle, delay, quit(q)\n"
-        "  delay [<ms>|+ <ms>|- <ms>] shows or adjusts the static delay"),
+        (
+            "Commands: play(p), pause, stop(s), next(n), prev(b), vol+/-, mute, toggle, delay, "
+            "quit(q)\n  delay [<ms>|+ <ms>|- <ms>] shows or adjusts the static delay"
+        ),
         flush=True,
     )
 
