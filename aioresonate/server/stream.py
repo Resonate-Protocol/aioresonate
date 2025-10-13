@@ -46,7 +46,7 @@ class AudioFormat:
 class SourceChunk:
     """Raw PCM chunk received from the source."""
 
-    payload: bytes
+    pcm_data: bytes
     """Raw PCM audio data."""
     start_time_us: int
     """Absolute timestamp when this chunk starts playing."""
@@ -250,7 +250,7 @@ class ClientStreamConfig:
 class PreparedChunkState:
     """Prepared chunk shared between all subscribers of a pipeline."""
 
-    payload: bytes
+    data: bytes
     start_time_us: int
     end_time_us: int
     sample_count: int
@@ -524,7 +524,7 @@ class Streamer:
 
         # Create and buffer the source chunk
         source_chunk = SourceChunk(
-            payload=chunk,
+            pcm_data=chunk,
             start_time_us=start_us,
             end_time_us=end_us,
             sample_count=sample_count,
@@ -602,7 +602,7 @@ class Streamer:
                     header = pack_binary_header_raw(
                         BinaryMessageType.AUDIO_CHUNK.value, chunk.start_time_us
                     )
-                    player_state.config.send(header + chunk.payload)
+                    player_state.config.send(header + chunk.data)
                     tracker.register(chunk.end_time_us, chunk.byte_count)
                     self._dequeue_chunk(player_state, chunk)
 
@@ -830,7 +830,7 @@ class Streamer:
                 samples=source_chunk.sample_count,
             )
             frame.sample_rate = self._channel.audio_format.sample_rate
-            frame.planes[0].update(source_chunk.payload)
+            frame.planes[0].update(source_chunk.pcm_data)
             out_frames = temp_resampler.resample(frame)
 
             for out_frame in out_frames:
@@ -866,8 +866,8 @@ class Streamer:
                     if pipeline.target_format.codec == AudioCodec.OPUS
                     else (packet.duration if packet.duration else pipeline.chunk_samples)
                 )
-                payload = bytes(packet)
-                processed_chunks.append((payload, sample_count))
+                chunk_data = bytes(packet)
+                processed_chunks.append((chunk_data, sample_count))
 
         # PHASE 2: Calculate timestamps using sample-based math (like prepared chunks)
         # Work backwards from first_queued_start_us to ensure perfect alignment
@@ -940,7 +940,7 @@ class Streamer:
         catchup_chunks: list[PreparedChunkState] = []
         samples_sent = 0
 
-        for payload, sample_count in processed_chunks:
+        for chunk_data, sample_count in processed_chunks:
             # Calculate timestamps from sample position (same method as prepared chunks)
             start_us = catchup_start_time_us + int(samples_sent * 1_000_000 / target_rate)
             end_us = catchup_start_time_us + int(
@@ -949,11 +949,11 @@ class Streamer:
 
             # Create chunk with refcount=1 (not shared, player-specific)
             chunk = PreparedChunkState(
-                payload=payload,
+                data=chunk_data,
                 start_time_us=start_us,
                 end_time_us=end_us,
                 sample_count=sample_count,
-                byte_count=len(payload),
+                byte_count=len(chunk_data),
                 refcount=1,  # Not shared - only for this player
             )
             catchup_chunks.append(chunk)
@@ -976,7 +976,7 @@ class Streamer:
             temp_buffer: Temporary buffer to drain.
             temp_encoder: Temporary encoder (or None for PCM).
             pipeline: Pipeline config.
-            processed_chunks: List to append (payload, sample_count) tuples to.
+            processed_chunks: List to append (chunk_data, sample_count) tuples to.
             force_flush: Whether to flush all remaining samples.
         """
         frame_stride = pipeline.target_frame_stride
@@ -1013,8 +1013,8 @@ class Streamer:
                         if pipeline.target_format.codec == AudioCodec.OPUS
                         else (packet.duration if packet.duration else pipeline.chunk_samples)
                     )
-                    payload = bytes(packet)
-                    processed_chunks.append((payload, packet_samples))
+                    chunk_data = bytes(packet)
+                    processed_chunks.append((chunk_data, packet_samples))
 
     def _process_pipeline_from_source(self, pipeline: PipelineState) -> bool:
         """Process available source chunks through this pipeline.
@@ -1032,9 +1032,9 @@ class Streamer:
         # Process all available source chunks that haven't been processed yet
         while pipeline.source_read_position < len(self._source_buffer):
             source_chunk = self._source_buffer[pipeline.source_read_position]
-            self._process_pipeline_payload(
+            self._process_source_pcm(
                 pipeline,
-                source_chunk.payload,
+                source_chunk.pcm_data,
                 source_chunk.sample_count,
             )
             pipeline.source_read_position += 1
@@ -1042,10 +1042,10 @@ class Streamer:
 
         return any_work
 
-    def _process_pipeline_payload(
+    def _process_source_pcm(
         self,
         pipeline: PipelineState,
-        payload: bytes,
+        source_pcm: bytes,
         sample_count: int,
     ) -> None:
         frame = av.AudioFrame(
@@ -1054,7 +1054,7 @@ class Streamer:
             samples=sample_count,
         )
         frame.sample_rate = pipeline.channel.audio_format.sample_rate
-        frame.planes[0].update(payload)
+        frame.planes[0].update(source_pcm)
         out_frames = pipeline.resampler.resample(frame)
         for out_frame in out_frames:
             expected = pipeline.target_frame_stride * out_frame.samples
@@ -1130,14 +1130,14 @@ class Streamer:
                 available,
             )
 
-        payload = bytes(packet)
-        self._publish_chunk(pipeline, payload, packet_samples)
+        chunk_data = bytes(packet)
+        self._publish_chunk(pipeline, chunk_data, packet_samples)
         pipeline.samples_encoded += packet_samples
 
     def _publish_chunk(
         self,
         pipeline: PipelineState,
-        payload: bytes,
+        audio_data: bytes,
         sample_count: int,
     ) -> None:
         if not pipeline.subscribers or sample_count <= 0:
@@ -1151,11 +1151,11 @@ class Streamer:
         )
 
         chunk = PreparedChunkState(
-            payload=payload,
+            data=audio_data,
             start_time_us=start_us,
             end_time_us=end_us,
             sample_count=sample_count,
-            byte_count=len(payload),
+            byte_count=len(audio_data),
             refcount=len(pipeline.subscribers),
         )
         pipeline.prepared.append(chunk)
