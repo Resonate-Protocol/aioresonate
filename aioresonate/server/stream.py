@@ -393,9 +393,7 @@ class Streamer:
             pipeline: PipelineState | None = self._pipelines.get(pipeline_key)
             if pipeline is None:
                 # Create new pipeline for this format
-                if self._channel is None:
-                    raise RuntimeError("Streamer channel not initialized")
-                channel_spec = self._channel
+                source_spec = self._channel
                 (
                     target_bytes_per_sample,
                     target_av_format,
@@ -413,7 +411,7 @@ class Streamer:
                     input_audio_format=target_av_format,
                 )
                 pipeline = PipelineState(
-                    channel=channel_spec,
+                    channel=source_spec,
                     target_format=client_cfg.target_format,
                     target_bytes_per_sample=target_bytes_per_sample,
                     target_frame_stride=target_bytes_per_sample * client_cfg.target_format.channels,
