@@ -861,9 +861,10 @@ class Streamer:
         if temp_encoder is not None:
             packets = temp_encoder.encode(None)
             for packet in packets:
-                sample_count = packet.duration if packet.duration else pipeline.chunk_samples
+                assert packet.duration
+                assert packet.duration > 0
                 chunk_data = bytes(packet)
-                processed_chunks.append((chunk_data, sample_count))
+                processed_chunks.append((chunk_data, packet.duration))
 
         # PHASE 2: Calculate timestamps using sample-based math (like prepared chunks)
         # Work backwards from first_queued_start_us to ensure perfect alignment
@@ -1004,9 +1005,10 @@ class Streamer:
                 packets = temp_encoder.encode(frame)
 
                 for packet in packets:
-                    packet_samples = packet.duration if packet.duration else pipeline.chunk_samples
+                    assert packet.duration
+                    assert packet.duration > 0
                     chunk_data = bytes(packet)
-                    processed_chunks.append((chunk_data, packet_samples))
+                    processed_chunks.append((chunk_data, packet.duration))
 
     def _process_pipeline_from_source(self, pipeline: PipelineState) -> bool:
         """Process available source chunks through this pipeline.
@@ -1101,26 +1103,11 @@ class Streamer:
             self._handle_encoded_packet(pipeline, packet)
 
     def _handle_encoded_packet(self, pipeline: PipelineState, packet: av.Packet) -> None:
-        available = max(pipeline.samples_enqueued - pipeline.samples_encoded, 0)
-
-        # Determine packet sample count
-        if packet.duration and packet.duration > 0:
-            # Trust packet duration when provided by encoder
-            packet_samples = packet.duration
-        else:
-            # Fallback: use chunk_samples (NOT available, which can be huge for buffered encoders)
-            packet_samples = pipeline.chunk_samples
-            logger.warning(
-                "Codec %s: packet.duration is %s, using chunk_samples=%d (available=%d)",
-                pipeline.target_format.codec.value,
-                packet.duration,
-                pipeline.chunk_samples,
-                available,
-            )
-
+        assert packet.duration
+        assert packet.duration > 0
         chunk_data = bytes(packet)
-        self._publish_chunk(pipeline, chunk_data, packet_samples)
-        pipeline.samples_encoded += packet_samples
+        self._publish_chunk(pipeline, chunk_data, packet.duration)
+        pipeline.samples_encoded += packet.duration
 
     def _publish_chunk(
         self,
