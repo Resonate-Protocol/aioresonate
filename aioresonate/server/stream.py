@@ -251,10 +251,15 @@ class SourceAudioSpec:
     """Source audio format with computed PyAV parameters for processing."""
 
     audio_format: AudioFormat
+    """Source audio format."""
     bytes_per_sample: int
+    """Bytes per sample (derived from bit depth)."""
     frame_stride: int
+    """Bytes per frame (bytes_per_sample * channels)."""
     av_format: str
+    """PyAV format string (e.g., 's16', 's24')."""
     av_layout: str
+    """PyAV channel layout (e.g., 'mono', 'stereo')."""
 
 
 @dataclass
@@ -262,9 +267,13 @@ class ClientStreamConfig:
     """Configuration for delivering audio to a player."""
 
     client_id: str
+    """Unique client identifier."""
     target_format: AudioFormat
+    """Target audio format for this client."""
     buffer_capacity_bytes: int
+    """Client's buffer capacity in bytes."""
     send: Callable[[bytes], None]
+    """Function to send data to client."""
 
 
 @dataclass
@@ -272,11 +281,17 @@ class PreparedChunkState:
     """Prepared chunk shared between all subscribers of a pipeline."""
 
     data: bytes
+    """Prepared/encoded audio data."""
     start_time_us: int
+    """Chunk playback start time in microseconds."""
     end_time_us: int
+    """Chunk playback end time in microseconds."""
     sample_count: int
+    """Number of samples in this chunk."""
     byte_count: int
+    """Size of chunk data in bytes."""
     refcount: int
+    """Number of subscribers using this chunk."""
 
 
 @dataclass
@@ -284,23 +299,41 @@ class PipelineState:
     """Holds state for a distinct channel/format/chunk-size pipeline."""
 
     channel: SourceAudioSpec
+    """Source audio specification."""
     target_format: AudioFormat
+    """Target output format."""
     target_bytes_per_sample: int
+    """Target bytes per sample."""
     target_frame_stride: int
+    """Target bytes per frame."""
     target_av_format: str
+    """Target PyAV format string."""
     target_layout: str
+    """Target PyAV channel layout."""
     chunk_samples: int
+    """Target samples per chunk."""
     resampler: av.AudioResampler
+    """PyAV audio resampler."""
     encoder: av.AudioCodecContext | None
+    """PyAV encoder (None for PCM)."""
     codec_header_b64: str | None
+    """Base64 encoded codec header."""
     buffer: bytearray = field(default_factory=bytearray)
+    """Resampled PCM buffer awaiting encoding."""
     prepared: deque[PreparedChunkState] = field(default_factory=deque)
+    """Prepared chunks ready for delivery."""
     subscribers: list[str] = field(default_factory=list)
+    """Client IDs subscribed to this pipeline."""
     samples_produced: int = 0
+    """Total samples published from this pipeline."""
     samples_enqueued: int = 0
+    """Total samples enqueued to encoder."""
     samples_encoded: int = 0
+    """Total samples encoded by encoder."""
     flushed: bool = False
+    """Whether pipeline has been flushed."""
     source_read_position: int = 0
+    """Position in source buffer for this pipeline."""
 
 
 @dataclass
@@ -308,11 +341,17 @@ class PlayerState:
     """Tracks delivery state for a single player."""
 
     config: ClientStreamConfig
+    """Client streaming configuration."""
     pipeline_key: AudioFormat
+    """Format key for pipeline lookup."""
     queue: deque[PreparedChunkState] = field(default_factory=deque)
+    """Chunks queued for delivery."""
     buffer_tracker: BufferTracker | None = None
+    """Tracks client buffer state."""
     join_time_us: int | None = None
+    """When player joined in microseconds."""
     needs_catchup: bool = False
+    """Whether player needs catch-up processing."""
 
 
 class MediaStream:
