@@ -12,7 +12,6 @@ from enum import Enum
 from typing import NamedTuple, cast
 
 import av
-from av import audio
 from av.logging import Capture
 
 from aioresonate.models import BinaryMessageType, pack_binary_header_raw
@@ -336,7 +335,7 @@ class Streamer:
     _channel: ChannelSpec | None = None
     """The default audio channel."""
     _source_buffer: deque[SourceChunk]
-    """Buffer of raw PCM chunks from the source."""
+    """Buffer of raw PCM chunks that are scheduled for playback but not yet finished playing."""
     _source_samples_produced: int
     """Total number of samples added to the source buffer."""
     _source_buffer_target_duration_us: int
@@ -474,6 +473,9 @@ class Streamer:
                     player_state.queue.append(chunk)
                     chunk.refcount += 1
 
+            # Check for and log any gaps in coverage
+            self._catch_up_player(player_state, join_time_us)
+
             new_players[client_cfg.client_id] = player_state
 
             start_payloads[client_cfg.client_id] = StreamStartPlayer(
@@ -499,7 +501,7 @@ class Streamer:
         return start_payloads
 
     def prepare(self, chunk: bytes) -> bool:
-        """Buffer raw PCM data from the source.
+        """Buffer raw PCM data and process through pipelines.
 
         Args:
             chunk: Raw PCM audio data to buffer.
@@ -534,6 +536,10 @@ class Streamer:
         self._source_buffer.append(source_chunk)
         self._source_samples_produced += sample_count
 
+        # Process the buffered data through all pipelines
+        for pipeline in self._pipelines.values():
+            self._process_pipeline_from_source(pipeline)
+
         # Calculate current buffer duration
         if self._source_buffer:
             buffer_duration_us = (
@@ -544,21 +550,16 @@ class Streamer:
         return True
 
     async def send(self) -> None:
-        """Process source buffer, encode, and send to clients until all queues are empty.
+        """Send prepared chunks to clients until all queues are empty.
 
-        This method performs three stages in a loop:
-        1. Process source chunks through pipelines (resample/encode)
-        2. Send prepared chunks to players (waits for earliest blocked player)
-        3. Prune old data
+        This method performs two stages in a loop:
+        1. Send prepared chunks to players (waits for earliest blocked player)
+        2. Prune old data
 
         Continues until all player queues are empty.
         """
         while True:
-            # Stage 1: Process source buffer through pipelines
-            for pipeline in self._pipelines.values():
-                self._process_pipeline_from_source(pipeline)
-
-            # Stage 2: Deliver to players with smart waiting
+            # Stage 1: Deliver to players with smart waiting
             earliest_blocked_player = None
             earliest_blocked_chunk = None
             earliest_end_time_us = None
@@ -591,9 +592,7 @@ class Streamer:
                             and pipeline.prepared
                             and pipeline.prepared[0] is chunk
                         ):
-                            safety_margin_us = 2_000_000
-                            if chunk.end_time_us < now_us - safety_margin_us:
-                                pipeline.prepared.popleft()
+                            pipeline.prepared.popleft()
                         continue
 
                     # Check if we can send without waiting
@@ -614,13 +613,9 @@ class Streamer:
                     queue.popleft()
                     chunk.refcount -= 1
                     pipeline = self._pipelines[player_state.pipeline_key]
-                    # Only remove from prepared if consumed by all players AND old enough.
-                    # This preserves recent chunks for late joiners even after consumption.
+                    # Remove from prepared immediately when all active players have consumed it
                     if chunk.refcount == 0 and pipeline.prepared and pipeline.prepared[0] is chunk:
-                        now_us = int(self._loop.time() * 1_000_000)
-                        safety_margin_us = 2_000_000  # 2 seconds for late joiner support
-                        if chunk.end_time_us < now_us - safety_margin_us:
-                            pipeline.prepared.popleft()
+                        pipeline.prepared.popleft()
 
             # If any player is blocked, wait for the one with earliest chunk
             if earliest_blocked_player is not None and earliest_blocked_chunk is not None:
@@ -631,7 +626,7 @@ class Streamer:
                     )
                 continue  # More work to do, loop again
 
-            # Stage 3: Cleanup
+            # Stage 2: Cleanup
             self._prune_old_data()
 
             # Check if there's still work pending (any non-empty queues)
@@ -660,34 +655,56 @@ class Streamer:
         self._players.clear()
 
     def _prune_old_data(self) -> None:
-        """Prune old source and prepared chunks to free memory.
+        """Prune old source chunks to free memory.
 
-        This implements time-based retention:
-        - Source chunks: Remove chunks that all pipelines have processed
-        - Prepared chunks: Remove chunks older than safety margin (2 seconds)
+        Removes source chunks that have finished playing (end_time_us <= now).
+        Prepared chunks are managed separately by refcount in send().
         """
-        # Prune source buffer based on minimum read position across all pipelines
-        if self._pipelines and self._source_buffer:
-            min_read_position = min(
-                (pipeline.source_read_position for pipeline in self._pipelines.values()),
-                default=0,
-            )
-            # Remove source chunks that all pipelines have consumed
-            while min_read_position > 0 and self._source_buffer:
-                self._source_buffer.popleft()
-                # Update all pipeline read positions
-                for pipeline in self._pipelines.values():
-                    pipeline.source_read_position -= 1
-                min_read_position -= 1
-
-        # Prune prepared chunks based on time (keep 2 seconds of history for late joiners)
+        # Prune source buffer based on playback time
         now_us = int(self._loop.time() * 1_000_000)
-        safety_margin_us = 2_000_000  # 2 seconds
-        cutoff_us = now_us - safety_margin_us
+        chunks_removed = 0
+        while self._source_buffer and self._source_buffer[0].end_time_us <= now_us:
+            self._source_buffer.popleft()
+            chunks_removed += 1
 
-        for pipeline in self._pipelines.values():
-            while pipeline.prepared and pipeline.prepared[0].end_time_us < cutoff_us:
-                pipeline.prepared.popleft()
+        # Update pipeline read positions to account for removed chunks
+        if chunks_removed > 0:
+            for pipeline in self._pipelines.values():
+                pipeline.source_read_position = max(
+                    0, pipeline.source_read_position - chunks_removed
+                )
+
+    def _catch_up_player(self, player_state: PlayerState, join_time_us: int) -> None:
+        """Check for gaps in player coverage and log warnings.
+
+        When a late joiner arrives, prepared chunks may have been removed after all
+        active players consumed them. This method checks for gaps and logs warnings.
+        Full catch-up with re-processing can be added in a future enhancement.
+
+        Args:
+            player_state: The late joining player.
+            join_time_us: Timestamp when the player joined.
+        """
+        # Check if there's a gap between join time and first queued chunk
+        if player_state.queue:
+            first_chunk_start = player_state.queue[0].start_time_us
+            gap_us = first_chunk_start - join_time_us
+            if gap_us > 100_000:  # Only log for gaps >100ms
+                logger.info(
+                    "Late joiner %s: %.1f ms gap between join and first chunk",
+                    player_state.config.client_id,
+                    gap_us / 1000,
+                )
+        elif self._source_buffer:
+            # No queued chunks, check against source buffer
+            earliest_source_us = self._source_buffer[0].start_time_us
+            gap_us = earliest_source_us - join_time_us
+            if gap_us > 0:
+                logger.info(
+                    "Late joiner %s: %.1f ms gap, no prepared chunks available",
+                    player_state.config.client_id,
+                    gap_us / 1000,
+                )
 
     def _process_pipeline_from_source(self, pipeline: PipelineState) -> bool:
         """Process available source chunks through this pipeline.
