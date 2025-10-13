@@ -57,7 +57,7 @@ class SourceChunk:
 
 
 class BufferedChunk(NamedTuple):
-    """Represents compressed audio bytes scheduled for playback."""
+    """Buffered chunk metadata tracked by BufferTracker for backpressure control."""
 
     end_time_us: int
     """Absolute timestamp when these bytes should be fully consumed."""
