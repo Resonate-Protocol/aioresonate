@@ -861,11 +861,7 @@ class Streamer:
         if temp_encoder is not None:
             packets = temp_encoder.encode(None)
             for packet in packets:
-                sample_count = (
-                    pipeline.chunk_samples
-                    if pipeline.target_format.codec == AudioCodec.OPUS
-                    else (packet.duration if packet.duration else pipeline.chunk_samples)
-                )
+                sample_count = packet.duration if packet.duration else pipeline.chunk_samples
                 chunk_data = bytes(packet)
                 processed_chunks.append((chunk_data, sample_count))
 
@@ -1008,11 +1004,7 @@ class Streamer:
                 packets = temp_encoder.encode(frame)
 
                 for packet in packets:
-                    packet_samples = (
-                        pipeline.chunk_samples
-                        if pipeline.target_format.codec == AudioCodec.OPUS
-                        else (packet.duration if packet.duration else pipeline.chunk_samples)
-                    )
+                    packet_samples = packet.duration if packet.duration else pipeline.chunk_samples
                     chunk_data = bytes(packet)
                     processed_chunks.append((chunk_data, packet_samples))
 
@@ -1112,12 +1104,8 @@ class Streamer:
         available = max(pipeline.samples_enqueued - pipeline.samples_encoded, 0)
 
         # Determine packet sample count
-        # For OPUS: Always use chunk_samples for consistent timing
-        # OPUS packet.duration can be unreliable or in wrong timebase
-        if pipeline.target_format.codec == AudioCodec.OPUS:
-            packet_samples = pipeline.chunk_samples
-        elif packet.duration and packet.duration > 0:
-            # Trust packet duration when provided by encoder (for FLAC, etc.)
+        if packet.duration and packet.duration > 0:
+            # Trust packet duration when provided by encoder
             packet_samples = packet.duration
         else:
             # Fallback: use chunk_samples (NOT available, which can be huge for buffered encoders)
