@@ -170,6 +170,27 @@ class BufferTracker:
         self.max_usage_bytes = max(self.max_usage_bytes, self.buffered_bytes)
 
 
+def _resolve_audio_format(audio_format: AudioFormat) -> tuple[int, str, str]:
+    """Resolve helper data for an audio format."""
+    if audio_format.bit_depth == 16:
+        bytes_per_sample = 2
+        av_format = "s16"
+    elif audio_format.bit_depth == 24:
+        bytes_per_sample = 3
+        av_format = "s24"
+    else:
+        raise ValueError("Only 16-bit and 24-bit PCM are supported")
+
+    if audio_format.channels == 1:
+        layout = "mono"
+    elif audio_format.channels == 2:
+        layout = "stereo"
+    else:
+        raise ValueError("Only mono and stereo layouts are supported")
+
+    return bytes_per_sample, av_format, layout
+
+
 def build_encoder_for_format(
     audio_format: AudioFormat,
     *,
@@ -1145,27 +1166,6 @@ class Streamer:
     def last_chunk_end_time_us(self) -> int | None:
         """Return the end timestamp of the most recently prepared chunk."""
         return self._last_chunk_end_us
-
-
-def _resolve_audio_format(audio_format: AudioFormat) -> tuple[int, str, str]:
-    """Resolve helper data for an audio format."""
-    if audio_format.bit_depth == 16:
-        bytes_per_sample = 2
-        av_format = "s16"
-    elif audio_format.bit_depth == 24:
-        bytes_per_sample = 3
-        av_format = "s24"
-    else:
-        raise ValueError("Only 16-bit and 24-bit PCM are supported")
-
-    if audio_format.channels == 1:
-        layout = "mono"
-    elif audio_format.channels == 2:
-        layout = "stereo"
-    else:
-        raise ValueError("Only mono and stereo layouts are supported")
-
-    return bytes_per_sample, av_format, layout
 
 
 __all__ = [
