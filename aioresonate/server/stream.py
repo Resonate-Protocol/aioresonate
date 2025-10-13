@@ -86,7 +86,6 @@ class BufferTracker:
 
         Args:
             loop: The event loop for timing calculations.
-            logger: Logger instance for this tracker.
             client_id: Identifier for the client being tracked.
             capacity_bytes: Maximum buffer capacity in bytes reported by the client.
         """
@@ -1107,6 +1106,13 @@ class Streamer:
         source_pcm: bytes,
         sample_count: int,
     ) -> None:
+        """Process source PCM data through the pipeline's resampler.
+
+        Args:
+            pipeline: The pipeline to process through.
+            source_pcm: Raw PCM audio data from the source.
+            sample_count: Number of samples in the source PCM data.
+        """
         frame = av.AudioFrame(
             format=pipeline.channel.av_format,
             layout=pipeline.channel.av_layout,
@@ -1127,6 +1133,15 @@ class Streamer:
         *,
         force_flush: bool,
     ) -> None:
+        """Drain the pipeline buffer by creating and publishing chunks.
+
+        Extracts complete chunks from the pipeline buffer and either publishes them
+        directly (for PCM) or encodes them first (for compressed codecs).
+
+        Args:
+            pipeline: The pipeline whose buffer to drain.
+            force_flush: If True, publish all available samples even if less than chunk_samples.
+        """
         if not pipeline.subscribers:
             pipeline.buffer.clear()
             return
@@ -1153,6 +1168,13 @@ class Streamer:
         chunk: bytes,
         sample_count: int,
     ) -> None:
+        """Encode a PCM chunk and publish the resulting packets.
+
+        Args:
+            pipeline: The pipeline containing the encoder.
+            chunk: Raw PCM audio data to encode.
+            sample_count: Number of samples in the chunk.
+        """
         if pipeline.encoder is None:
             raise RuntimeError("Encoder not configured for this pipeline")
         frame = av.AudioFrame(
@@ -1168,6 +1190,12 @@ class Streamer:
             self._handle_encoded_packet(pipeline, packet)
 
     def _handle_encoded_packet(self, pipeline: PipelineState, packet: av.Packet) -> None:
+        """Handle an encoded packet by publishing it as a chunk.
+
+        Args:
+            pipeline: The pipeline that produced the packet.
+            packet: The encoded audio packet from the encoder.
+        """
         assert packet.duration
         assert packet.duration > 0
         chunk_data = bytes(packet)
@@ -1180,6 +1208,16 @@ class Streamer:
         audio_data: bytes,
         sample_count: int,
     ) -> None:
+        """Create a PreparedChunkState and queue it for all subscribers.
+
+        Calculates timestamps based on sample position and queues the chunk
+        for delivery to all clients subscribed to this pipeline.
+
+        Args:
+            pipeline: The pipeline publishing the chunk.
+            audio_data: The encoded or PCM audio data.
+            sample_count: Number of samples in the chunk.
+        """
         if not pipeline.subscribers or sample_count <= 0:
             return
         start_samples = pipeline.samples_produced
