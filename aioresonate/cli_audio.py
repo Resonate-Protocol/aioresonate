@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import logging
+import threading
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Final, Protocol, cast
@@ -55,10 +55,15 @@ class AudioPlayer:
     _PREPLAY_MARGIN_US: Final[int] = 1_000
     """Microseconds before target play time to wake up for final scheduling."""
 
+    # Drift correction thresholds (from ESP32 implementation)
+    _HARD_SYNC_THRESHOLD_US: Final[int] = 50_000  # 50ms - aggressive correction
+    _SOFT_SYNC_THRESHOLD_US: Final[int] = 10_000  # 10ms - gentle correction
+
     def __init__(
         self,
         loop: asyncio.AbstractEventLoop,
         compute_client_time: Callable[[int], int],
+        compute_server_time: Callable[[int], int],
     ) -> None:
         """
         Initialize the audio player.
@@ -67,17 +72,26 @@ class AudioPlayer:
             loop: The asyncio event loop to use for scheduling.
             compute_client_time: Function that converts server timestamps to client
                 timestamps, accounting for clock drift and offset.
+            compute_server_time: Function that converts client timestamps to server
+                timestamps (inverse of compute_client_time).
         """
         self._loop = loop
         self._compute_client_time = compute_client_time
+        self._compute_server_time = compute_server_time
         self._format: PCMFormat | None = None
         self._queue: asyncio.PriorityQueue[tuple[int, int, _QueuedChunk]] = asyncio.PriorityQueue()
         self._counter = 0
-        self._task: asyncio.Task[None] | None = None
         self._stream: _AudioStreamProto | None = None
         self._closed = False
         self._audio_available = _sounddevice is not None
         self._output_latency_us = 0
+
+        # Drift tracking for feedback control
+        self._last_expected_server_time_us: int | None = None
+        self._drift_error_us = 0
+        self._correction_frames = 0.0
+        self._callback_lock = threading.Lock()
+
         if not self._audio_available:
             logger.warning("sounddevice is not installed. Audio playback will be disabled.")
 
@@ -92,21 +106,28 @@ class AudioPlayer:
         if not self._audio_available:
             return
         self._close_stream()
+
+        # Reset drift tracking on format change
+        self._last_expected_server_time_us = None
+        self._drift_error_us = 0
+        self._correction_frames = 0.0
+
         assert _sounddevice is not None  # for mypy
         dtype = "int16"
         try:
-            stream = _sounddevice.RawOutputStream(
+            # Use callback-based stream for true timing feedback
+            stream = _sounddevice.RawStream(
                 samplerate=pcm_format.sample_rate,
                 channels=pcm_format.channels,
                 dtype=dtype,
-                blocksize=0,
+                callback=self._audio_callback,
             )
             stream.start()
 
-            # Get output latency to compensate for sounddevice buffering
+            # Get output latency for logging (no longer used for compensation)
             latency_s = stream.latency
             self._output_latency_us = int(latency_s * 1_000_000)
-            logger.info("Audio output latency: %.1f ms", latency_s * 1000)
+            logger.info("Audio output latency: %.1f ms (managed by callback)", latency_s * 1000)
 
             self._stream = cast("_AudioStreamProto", stream)
         except Exception:  # pragma: no cover - backend failure
@@ -115,19 +136,9 @@ class AudioPlayer:
             self._audio_available = False
             self._output_latency_us = 0
 
-    def start(self) -> None:
-        """Start the background playback task."""
-        if self._task is None:
-            self._task = self._loop.create_task(self._run())
-
     async def stop(self) -> None:
         """Stop playback and release resources."""
         self._closed = True
-        if self._task is not None:
-            self._task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await self._task
-        self._task = None
         self._close_stream()
 
     def clear(self) -> None:
@@ -137,10 +148,179 @@ class AudioPlayer:
                 self._queue.get_nowait()
             except asyncio.QueueEmpty:  # pragma: no cover - race condition guard
                 break
+        # Reset drift tracking
+        self._last_expected_server_time_us = None
+        self._drift_error_us = 0
+        self._correction_frames = 0.0
+
+    def _audio_callback(
+        self,
+        indata: Any,  # noqa: ARG002 - unused but required by signature
+        outdata: Any,
+        frames: int,
+        time: Any,
+        status: Any,
+    ) -> None:
+        """
+        Audio callback invoked by sounddevice when output buffer needs filling.
+
+        This implements closed-loop feedback control similar to ESP32's speaker callback.
+
+        Args:
+            indata: Input data (unused for output-only stream).
+            outdata: Output buffer to fill with audio data.
+            frames: Number of frames requested.
+            time: Timing information including outputBufferDacTime.
+            status: Status flags (underrun, overflow, etc.).
+        """
+        if status:
+            logger.debug("Audio callback status: %s", status)
+
+        assert self._format is not None
+
+        # Get DAC time - when this audio will actually play
+        dac_time_s = time.outputBufferDacTime
+        dac_time_us = int(dac_time_s * 1_000_000)
+
+        # Convert to server timestamp - what should be playing at this DAC time
+        target_server_time_us = self._compute_server_time(dac_time_us)
+
+        # Measure and correct drift
+        correction_frames = self._measure_and_correct_drift(frames, target_server_time_us)
+
+        # Fill the output buffer
+        self._fill_audio_buffer(outdata, frames, target_server_time_us, correction_frames)
+
+    def _measure_and_correct_drift(self, frames: int, target_server_time_us: int) -> int:
+        """
+        Measure drift and compute correction frames needed.
+
+        Returns:
+            Number of frames to correct (positive = insert silence, negative = skip audio).
+        """
+        assert self._format is not None
+
+        # Measure drift if we have a previous reference
+        if self._last_expected_server_time_us is not None:
+            # Calculate how much time passed in the audio stream
+            frame_duration_us = int((frames * 1_000_000) / self._format.sample_rate)
+            expected_server_time_us = self._last_expected_server_time_us + frame_duration_us
+
+            # Drift = how far off we are from expected
+            self._drift_error_us = target_server_time_us - expected_server_time_us
+
+            if abs(self._drift_error_us) > 1000:  # Log if > 1ms
+                logger.debug("Drift error: %d us", self._drift_error_us)
+
+        # Update expected time for next callback
+        frame_duration_us = int((frames * 1_000_000) / self._format.sample_rate)
+        self._last_expected_server_time_us = target_server_time_us + frame_duration_us
+
+        # Apply drift correction (ESP32-style)
+        correction_frames_to_apply = 0
+        single_frame_duration_us = int(1_000_000 / self._format.sample_rate)
+
+        if self._drift_error_us > self._HARD_SYNC_THRESHOLD_US:
+            # Lagging behind - insert silence to slow down
+            max_correction = frames // 4  # Limit to 25% of buffer
+            silence_frames = min(self._drift_error_us // single_frame_duration_us, max_correction)
+            correction_frames_to_apply = silence_frames
+            logger.debug("Hard sync: inserting %d silence frames", silence_frames)
+
+        elif self._drift_error_us < -self._HARD_SYNC_THRESHOLD_US:
+            # Ahead of schedule - skip frames to speed up
+            max_correction = frames // 4
+            skip_frames = min(-self._drift_error_us // single_frame_duration_us, max_correction)
+            correction_frames_to_apply = -skip_frames
+            logger.debug("Hard sync: skipping %d audio frames", skip_frames)
+
+        elif abs(self._drift_error_us) > self._SOFT_SYNC_THRESHOLD_US:
+            # Small drift - accumulate fractional correction
+            self._correction_frames += self._drift_error_us / single_frame_duration_us
+            if abs(self._correction_frames) >= 1.0:
+                # Apply one frame correction
+                correction_frames_to_apply = int(self._correction_frames)
+                self._correction_frames -= correction_frames_to_apply
+                logger.debug("Soft sync: applying %d frame correction", correction_frames_to_apply)
+
+        return correction_frames_to_apply
+
+    def _fill_audio_buffer(
+        self,
+        outdata: Any,
+        frames: int,
+        target_server_time_us: int,
+        correction_frames: int,
+    ) -> None:
+        """Fill output buffer with audio data, applying drift correction."""
+        assert self._format is not None
+        bytes_needed = frames * self._format.frame_size
+        output_buffer = memoryview(outdata).cast("B")
+        bytes_written = 0
+        frames_to_skip = max(0, -correction_frames)  # Skip if negative correction
+
+        try:
+            # Apply positive correction: insert silence at beginning
+            if correction_frames > 0:
+                silence_bytes = correction_frames * self._format.frame_size
+                silence_bytes = min(silence_bytes, bytes_needed)
+                output_buffer[bytes_written : bytes_written + silence_bytes] = (
+                    b"\x00" * silence_bytes
+                )
+                bytes_written += silence_bytes
+
+            while bytes_written < bytes_needed:
+                # Try to get next chunk (non-blocking)
+                if self._queue.empty():
+                    # Underrun - fill rest with silence
+                    silence_bytes = bytes_needed - bytes_written
+                    output_buffer[bytes_written : bytes_written + silence_bytes] = (
+                        b"\x00" * silence_bytes
+                    )
+                    logger.debug("Audio underrun: filled %d bytes with silence", silence_bytes)
+                    break
+
+                _priority, _counter, chunk = self._queue.get_nowait()
+
+                # Check if this chunk is too late (more than 200ms behind target)
+                chunk_lateness_us = target_server_time_us - chunk.server_timestamp_us
+                if chunk_lateness_us > 200_000:
+                    logger.debug("Dropping late chunk (behind by %d us)", chunk_lateness_us)
+                    continue
+
+                # Apply negative correction: skip frames from chunk
+                chunk_data = chunk.audio_data
+                if frames_to_skip > 0:
+                    skip_bytes = frames_to_skip * self._format.frame_size
+                    if skip_bytes >= len(chunk_data):
+                        # Skip entire chunk
+                        frames_to_skip -= len(chunk_data) // self._format.frame_size
+                        continue
+                    # Skip partial chunk
+                    chunk_data = chunk_data[skip_bytes:]
+                    frames_to_skip = 0
+
+                # Copy chunk data to output buffer
+                bytes_to_copy = min(len(chunk_data), bytes_needed - bytes_written)
+                output_buffer[bytes_written : bytes_written + bytes_to_copy] = chunk_data[
+                    :bytes_to_copy
+                ]
+                bytes_written += bytes_to_copy
+
+        except Exception:  # pragma: no cover - error handling
+            logger.exception("Error in audio callback")
+            # Fill rest with silence on error
+            if bytes_written < bytes_needed:
+                silence_bytes = bytes_needed - bytes_written
+                output_buffer[bytes_written : bytes_written + silence_bytes] = (
+                    b"\x00" * silence_bytes
+                )
 
     def submit(self, server_timestamp_us: int, payload: bytes) -> None:
         """
         Queue an audio payload for playback.
+
+        The callback will pull chunks from the queue when needed.
 
         Args:
             server_timestamp_us: Server timestamp when this audio should play.
@@ -159,7 +339,7 @@ class AudioPlayer:
             )
             return
 
-        # Store server timestamp so we can recompute client time later
+        # Store server timestamp for priority queue ordering
         self._counter += 1
         chunk = _QueuedChunk(
             server_timestamp_us=server_timestamp_us,
@@ -168,69 +348,6 @@ class AudioPlayer:
         )
         # Use server timestamp for priority queue ordering
         self._queue.put_nowait((server_timestamp_us, self._counter, chunk))
-        self.start()
-
-    async def _write_audio(self, payload: bytes) -> None:
-        """Write audio data to the output stream."""
-        if not self._audio_available:
-            return
-        stream = self._stream
-        if stream is None:
-            return
-        await self._loop.run_in_executor(None, stream.write, payload)
-
-    async def _run(self) -> None:
-        """Process queued audio chunks in the main playback loop."""
-        try:
-            while True:
-                _priority, _counter, chunk = await self._queue.get()
-                if self._closed:
-                    break
-
-                # Wait until play time, continuously recomputing from server timestamp
-                await self._wait_until_server_time(chunk.server_timestamp_us)
-                await self._write_audio(chunk.audio_data)
-        except asyncio.CancelledError:  # pragma: no cover - cancellation path
-            pass
-        finally:
-            self._close_stream()
-
-    async def _wait_until_server_time(self, server_timestamp_us: int) -> None:
-        """
-        Wait until a server timestamp should play, continuously recomputing.
-
-        This continuously recomputes the client play time from the server timestamp
-        during the wait loop, tracking time filter updates in real-time to prevent drift.
-
-        Accounts for output latency: we wait until (play_time - latency) so that
-        by the time the audio actually plays (after buffering), it's at the right time.
-        """
-        while True:
-            # Continuously recompute play time with current time filter state
-            play_at_us = self._compute_client_time(server_timestamp_us)
-
-            # Compensate for output latency - submit earlier so it plays at the right time
-            write_at_us = play_at_us - self._output_latency_us
-
-            now_us = self._now_us()
-            delta = write_at_us - now_us
-
-            # Drop chunks that are too late
-            if delta < -200_000:
-                logger.debug("Dropping stale audio chunk (late by %d us)", -delta)
-                return
-
-            # If we're close enough, write immediately
-            if delta <= self._PREPLAY_MARGIN_US:
-                break
-
-            # Sleep briefly, then recompute (tracking time filter changes)
-            sleep_time = max((delta - self._PREPLAY_MARGIN_US) / 1_000_000, 0.0)
-            await asyncio.sleep(min(sleep_time, 0.1))
-
-    def _now_us(self) -> int:
-        """Get current time in microseconds."""
-        return int(self._loop.time() * 1_000_000)
 
     def _close_stream(self) -> None:
         """Close the audio output stream."""
