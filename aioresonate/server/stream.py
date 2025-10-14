@@ -335,7 +335,7 @@ class PlayerState:
 
     config: ClientStreamConfig
     """Client streaming configuration."""
-    pipeline_key: AudioFormat
+    audio_format: AudioFormat
     """Format key for pipeline lookup."""
     queue: deque[PreparedChunkState] = field(default_factory=deque)
     """Chunks queued for delivery."""
@@ -447,8 +447,8 @@ class Streamer:
         start_payloads: dict[str, StreamStartPlayer] = {}
 
         for client_cfg in clients:
-            pipeline_key = client_cfg.target_format
-            pipeline: PipelineState | None = self._pipelines.get(pipeline_key)
+            audio_format = client_cfg.target_format
+            pipeline: PipelineState | None = self._pipelines.get(audio_format)
             if pipeline is None:
                 # Create new pipeline for this format
                 source_spec = self._channel
@@ -479,20 +479,20 @@ class Streamer:
                     encoder=encoder,
                     codec_header_b64=codec_header_b64,
                 )
-                self._pipelines[pipeline_key] = pipeline
+                self._pipelines[audio_format] = pipeline
 
             pipeline.subscribers.append(client_cfg.client_id)
 
             old_player = self._players.get(client_cfg.client_id)
 
             # Reuse existing player if format unchanged
-            if old_player and old_player.pipeline_key == pipeline_key:
+            if old_player and old_player.audio_format == audio_format:
                 old_player.config = client_cfg
                 new_players[client_cfg.client_id] = old_player
                 continue
 
             # Format changed - clean up old queue refcounts
-            if old_player and old_player.pipeline_key != pipeline_key:
+            if old_player and old_player.audio_format != audio_format:
                 for chunk in old_player.queue:
                     chunk.refcount -= 1
                 old_player.queue.clear()
@@ -513,7 +513,7 @@ class Streamer:
 
             player_state = PlayerState(
                 config=client_cfg,
-                pipeline_key=pipeline_key,
+                audio_format=audio_format,
                 buffer_tracker=buffer_tracker,
                 join_time_us=join_time_us,
             )
@@ -742,7 +742,7 @@ class Streamer:
         """Remove chunk from player queue and clean up pipeline if fully consumed."""
         player_state.queue.popleft()
         chunk.refcount -= 1
-        pipeline = self._pipelines[player_state.pipeline_key]
+        pipeline = self._pipelines[player_state.audio_format]
         if chunk.refcount == 0 and pipeline.prepared and pipeline.prepared[0] is chunk:
             pipeline.prepared.popleft()
 
@@ -809,7 +809,7 @@ class Streamer:
             return
 
         join_time_us = player_state.join_time_us
-        pipeline = self._pipelines[player_state.pipeline_key]
+        pipeline = self._pipelines[player_state.audio_format]
 
         # Determine the coverage range we need to fill
         first_queued_start_us = player_state.queue[0].start_time_us if player_state.queue else None
