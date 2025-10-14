@@ -293,13 +293,15 @@ class AudioPlayer:
         """
         assert self._format is not None
 
-        # Initialize playback position from first chunk
+        # Initialize playback position to what DAC wants RIGHT NOW
+        # This syncs us to the CURRENT Kalman mapping, not the old one from when chunk was created
         if self._playback_position_server_us is None:
-            self._playback_position_server_us = chunk.server_timestamp_us
+            self._playback_position_server_us = target_server_time_us
             logger.info(
-                "Initialized playback position to %d us (DAC wants %d us)",
+                "Initialized playback position to %d us (DAC target, chunk was %d us, delta=%d us)",
                 self._playback_position_server_us,
-                target_server_time_us,
+                chunk.server_timestamp_us,
+                chunk.server_timestamp_us - target_server_time_us,
             )
 
         # Check if this chunk matches our playback position
