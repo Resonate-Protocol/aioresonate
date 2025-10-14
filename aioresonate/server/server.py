@@ -6,7 +6,7 @@ import socket
 from collections.abc import Callable, Coroutine
 from dataclasses import dataclass
 
-from aiohttp import ClientConnectionError, ClientWSTimeout, web
+from aiohttp import ClientConnectionError, ClientResponseError, ClientWSTimeout, web
 from aiohttp.client import ClientSession
 from zeroconf import InterfaceChoice, IPVersion, ServiceStateChange, Zeroconf
 from zeroconf.asyncio import AsyncServiceBrowser, AsyncServiceInfo, AsyncZeroconf
@@ -218,8 +218,8 @@ class ResonateServer:
                     break
                 except TimeoutError:
                     logger.debug("Connection task for %s timed out", url)
-                except ClientConnectionError:
-                    logger.debug("Connection task for %s failed", url)
+                except (ClientConnectionError, ClientResponseError) as err:
+                    logger.debug("Connection task for %s failed: %s", url, err)
 
                 if backoff >= max_backoff:
                     break
