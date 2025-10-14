@@ -325,6 +325,8 @@ class PipelineState:
     """Whether pipeline has been flushed."""
     source_read_position: int = 0
     """Position in source buffer for this pipeline."""
+    next_chunk_start_us: int | None = None
+    """Next output chunk start timestamp, initialized from first source chunk."""
 
 
 @dataclass
@@ -721,9 +723,11 @@ class Streamer:
                     # Skip packets with invalid duration from encoder flush
                     if not packet.duration or packet.duration <= 0:
                         continue
-                    # Calculate timestamps for flushed packet
+                    # Calculate timestamps for each flushed packet from its duration
                     start_us, end_us = self._calculate_chunk_timestamps(pipeline, packet.duration)
                     self._handle_encoded_packet(pipeline, packet, start_us, end_us)
+                    # Advance next_chunk_start_us for each flushed packet
+                    pipeline.next_chunk_start_us = end_us
             pipeline.flushed = True
 
     def reset(self) -> None:
@@ -1135,6 +1139,10 @@ class Streamer:
             pipeline: The pipeline to process through.
             source_chunk: The source PCM chunk to process.
         """
+        # Initialize next_chunk_start_us from first source chunk
+        if pipeline.next_chunk_start_us is None and not pipeline.buffer:
+            pipeline.next_chunk_start_us = source_chunk.start_time_us
+
         frame = av.AudioFrame(
             format=pipeline.channel.av_format,
             layout=pipeline.channel.av_layout,
@@ -1156,6 +1164,8 @@ class Streamer:
     ) -> tuple[int, int]:
         """Calculate start and end timestamps for a chunk.
 
+        Uses the pipeline's next_chunk_start_us to maintain alignment with source timestamps.
+
         Args:
             pipeline: The pipeline producing the chunk.
             sample_count: Number of samples in the chunk.
@@ -1163,13 +1173,12 @@ class Streamer:
         Returns:
             Tuple of (start_us, end_us) timestamps.
         """
-        start_samples = pipeline.samples_produced
-        start_us = self._play_start_time_us + int(
-            start_samples * 1_000_000 / pipeline.target_format.sample_rate
-        )
-        end_us = self._play_start_time_us + int(
-            (start_samples + sample_count) * 1_000_000 / pipeline.target_format.sample_rate
-        )
+        if pipeline.next_chunk_start_us is None:
+            raise RuntimeError("Pipeline next_chunk_start_us not initialized")
+
+        start_us = pipeline.next_chunk_start_us
+        duration_us = int(sample_count * 1_000_000 / pipeline.target_format.sample_rate)
+        end_us = start_us + duration_us
         return start_us, end_us
 
     def _drain_pipeline_buffer(
@@ -1204,30 +1213,31 @@ class Streamer:
             chunk = bytes(pipeline.buffer[:chunk_size])
             del pipeline.buffer[:chunk_size]
 
-            # Calculate timestamps for this chunk
-            start_us, end_us = self._calculate_chunk_timestamps(pipeline, sample_count)
-
             if pipeline.encoder is None:
+                # PCM path: calculate timestamps from input sample count
+                start_us, end_us = self._calculate_chunk_timestamps(pipeline, sample_count)
                 self._publish_chunk(pipeline, chunk, sample_count, start_us, end_us)
+                # Advance next_chunk_start_us for the next chunk
+                pipeline.next_chunk_start_us = end_us
             else:
-                self._encode_and_publish(pipeline, chunk, sample_count, start_us, end_us)
+                # Encoder path: let encoder calculate timestamps from output packets
+                self._encode_and_publish(pipeline, chunk, sample_count)
 
     def _encode_and_publish(
         self,
         pipeline: PipelineState,
         chunk: bytes,
         sample_count: int,
-        start_us: int,
-        end_us: int,
     ) -> None:
         """Encode a PCM chunk and publish the resulting packets.
+
+        The encoder may buffer input and produce 0, 1, or multiple output packets.
+        Timestamps are calculated from each output packet's duration.
 
         Args:
             pipeline: The pipeline containing the encoder.
             chunk: Raw PCM audio data to encode.
             sample_count: Number of samples in the chunk.
-            start_us: Start timestamp in microseconds.
-            end_us: End timestamp in microseconds.
         """
         if pipeline.encoder is None:
             raise RuntimeError("Encoder not configured for this pipeline")
@@ -1239,10 +1249,16 @@ class Streamer:
         frame.sample_rate = pipeline.target_format.sample_rate
         frame.planes[0].update(chunk)
         packets = pipeline.encoder.encode(frame)
-        if len(packets) != 1:
-            raise RuntimeError(f"Expected exactly 1 packet from encoder, got {len(packets)}")
-        packet = packets[0]
-        self._handle_encoded_packet(pipeline, packet, start_us, end_us)
+
+        # Encoder may produce 0 or more packets
+        for packet in packets:
+            if not packet.duration or packet.duration <= 0:
+                raise ValueError(f"Invalid packet duration: {packet.duration!r}")
+            # Calculate timestamps from output packet duration
+            start_us, end_us = self._calculate_chunk_timestamps(pipeline, packet.duration)
+            self._handle_encoded_packet(pipeline, packet, start_us, end_us)
+            # Advance next_chunk_start_us for each packet produced
+            pipeline.next_chunk_start_us = end_us
 
     def _handle_encoded_packet(
         self,
@@ -1259,8 +1275,8 @@ class Streamer:
             start_us: Start timestamp in microseconds.
             end_us: End timestamp in microseconds.
         """
-        if not packet.duration or packet.duration <= 0:
-            raise ValueError(f"Invalid packet duration: {packet.duration!r}")
+        assert packet.duration is not None
+        assert packet.duration > 0
         chunk_data = bytes(packet)
         self._publish_chunk(pipeline, chunk_data, packet.duration, start_us, end_us)
 
