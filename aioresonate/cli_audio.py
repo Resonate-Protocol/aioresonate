@@ -77,6 +77,7 @@ class AudioPlayer:
         self._stream: _AudioStreamProto | None = None
         self._closed = False
         self._audio_available = _sounddevice is not None
+        self._output_latency_us = 0
         if not self._audio_available:
             logger.warning("sounddevice is not installed. Audio playback will be disabled.")
 
@@ -101,11 +102,18 @@ class AudioPlayer:
                 blocksize=0,
             )
             stream.start()
+
+            # Get output latency to compensate for sounddevice buffering
+            latency_s = stream.latency
+            self._output_latency_us = int(latency_s * 1_000_000)
+            logger.info("Audio output latency: %.1f ms", latency_s * 1000)
+
             self._stream = cast("_AudioStreamProto", stream)
         except Exception:  # pragma: no cover - backend failure
             logger.exception("Failed to open audio output stream")
             self._stream = None
             self._audio_available = False
+            self._output_latency_us = 0
 
     def start(self) -> None:
         """Start the background playback task."""
@@ -193,19 +201,26 @@ class AudioPlayer:
 
         This continuously recomputes the client play time from the server timestamp
         during the wait loop, tracking time filter updates in real-time to prevent drift.
+
+        Accounts for output latency: we wait until (play_time - latency) so that
+        by the time the audio actually plays (after buffering), it's at the right time.
         """
         while True:
             # Continuously recompute play time with current time filter state
             play_at_us = self._compute_client_time(server_timestamp_us)
+
+            # Compensate for output latency - submit earlier so it plays at the right time
+            write_at_us = play_at_us - self._output_latency_us
+
             now_us = self._now_us()
-            delta = play_at_us - now_us
+            delta = write_at_us - now_us
 
             # Drop chunks that are too late
             if delta < -200_000:
                 logger.debug("Dropping stale audio chunk (late by %d us)", -delta)
                 return
 
-            # If we're close enough, play immediately
+            # If we're close enough, write immediately
             if delta <= self._PREPLAY_MARGIN_US:
                 break
 
