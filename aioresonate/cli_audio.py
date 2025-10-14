@@ -129,7 +129,9 @@ class AudioPlayer:
             )
 
             # Get output latency for logging (no longer used for compensation)
-            latency_s = stream.latency
+            # RawStream returns (input_latency, output_latency) tuple
+            latency = stream.latency
+            latency_s = latency[1] if isinstance(latency, tuple) else latency
             self._output_latency_us = int(latency_s * 1_000_000)
             logger.info("Audio output latency: %.1f ms (managed by callback)", latency_s * 1000)
 
