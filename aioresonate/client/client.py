@@ -82,6 +82,8 @@ class ResonateClient:
         static_delay_ms: float = 0.0,
     ) -> None:
         """Create a new Resonate client instance."""
+        ## remove typing from here, and add with docs and typing to the class itself
+        ## check if they all needed or some can be removed
         self._client_id = client_id
         self._client_name = client_name
         self._explicit_roles = list(roles) if roles is not None else None
@@ -519,6 +521,7 @@ class ResonateClient:
             except Exception:
                 logger.exception("Error in audio chunk callback %s", callback)
 
+    ## I think this method is not even used, check all methods for dead code
     def _compute_play_time(self, server_timestamp_us: int) -> int:
         if self._time_filter.is_synchronized:
             play_time = self._time_filter.compute_client_time(server_timestamp_us)

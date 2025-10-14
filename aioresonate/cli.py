@@ -164,6 +164,7 @@ async def _discover_server(discovery_timeout: float) -> str | None:
 
     listener = _Listener()
     async with AsyncZeroconf() as zeroconf:
+        ## dont use Any! proper typing
         browser = AsyncServiceBrowser(zeroconf.zeroconf, SERVICE_TYPE, cast("Any", listener))
         try:
             return await asyncio.wait_for(listener.result, discovery_timeout)
@@ -191,6 +192,9 @@ def _create_audio_chunk_handler(
     first_sync_message_printed: bool = False
     dropped_chunks: int = 0
 
+    ## refactor so server timestamp conversion if handled by the client library, and not the cli,
+    ## use loop time instead as a base measure since its monotonic. the client library should do the
+    ## hard work, to make apps like the cli as simple as possible
     def handle_audio_chunk(server_timestamp_us: int, audio_data: bytes, fmt: PCMFormat) -> None:
         """Handle incoming audio chunks."""
         nonlocal audio_player, current_format, sync_ready, first_sync_message_printed
@@ -239,6 +243,7 @@ def _create_audio_chunk_handler(
                 return client._time_filter.compute_server_time(adjusted_client_time)  # noqa: SLF001
 
             loop = asyncio.get_running_loop()
+            ## fix lsp error
             audio_player = AudioPlayer(loop, compute_play_time, compute_server_time)
             audio_player.set_format(fmt)
             current_format = fmt
@@ -263,6 +268,7 @@ def _create_stream_handlers(
         A tuple of (stream_start_handler, stream_end_handler).
     """
 
+    ## dont use Any when possible
     def handle_stream_start(_message: Any) -> None:
         """Handle stream start by clearing stale audio chunks."""
         audio_player = get_audio_player()
@@ -325,6 +331,7 @@ async def main_async(argv: Sequence[str] | None = None) -> int:
 
     _print_instructions()
 
+    ## ctrl c to quit is not working, need to spam ctrl c to quit
     keyboard_task = asyncio.create_task(_keyboard_loop(client, state, get_audio_player))
 
     try:

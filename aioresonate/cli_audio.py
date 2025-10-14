@@ -9,6 +9,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Final, Protocol, cast
 
+## make this a hard dependency and use proper imports, add to pyproject.toml if not already there
 try:
     import sounddevice as _sounddevice
 except ImportError:  # pragma: no cover - optional dependency
@@ -35,10 +36,12 @@ class _AudioStreamProto(Protocol):
 class _QueuedChunk:
     """Represents a queued audio chunk with timing information."""
 
+    ## timestamp when the chunk should start to be output by the dac
     server_timestamp_us: int
     """Original server timestamp for this chunk."""
     audio_data: bytes
     """Raw PCM audio bytes."""
+    ## this is not needed? we receive chunks in order, so regular queue is fine
     counter: int
     """Sequence counter for priority queue ordering."""
 
@@ -75,6 +78,7 @@ class AudioPlayer:
             compute_server_time: Function that converts client timestamps to server
                 timestamps (inverse of compute_client_time).
         """
+        ## remove typing from here, and add with docs and typing to the class itself
         self._loop = loop
         self._compute_client_time = compute_client_time
         self._compute_server_time = compute_server_time
@@ -101,6 +105,7 @@ class AudioPlayer:
         # Track current playback position in server timeline
         self._playback_position_server_us: int | None = None
 
+        ## sounddevice should be a hard dependency
         if not self._audio_available:
             logger.warning("sounddevice is not installed. Audio playback will be disabled.")
 
@@ -123,6 +128,7 @@ class AudioPlayer:
         self._stream_started = False
         self._first_real_chunk = True
 
+        ## here again
         assert _sounddevice is not None  # for mypy
         dtype = "int16"
         try:
@@ -135,6 +141,7 @@ class AudioPlayer:
                 callback=self._audio_callback,
             )
 
+            ## then remove it if its just for logging
             # Get output latency for logging (no longer used for compensation)
             # RawStream returns (input_latency, output_latency) tuple
             latency = stream.latency
@@ -239,6 +246,7 @@ class AudioPlayer:
         frame_duration_us = int((frames * 1_000_000) / self._format.sample_rate)
         self._last_expected_server_time_us = target_server_time_us + frame_duration_us
 
+        ## re-enable drift correction! if not already handled anywhere else. if not remove all this
         # TODO: Re-enable drift correction after basic playback works
         # For now, just measure but don't correct
         return 0
@@ -267,6 +275,7 @@ class AudioPlayer:
             self._last_expected_server_time_us = chunk.server_timestamp_us
             logger.debug("Initialized timing from first chunk at %d us", chunk.server_timestamp_us)
 
+        ## same here as above
         # TODO: Re-enable lateness check after basic playback works
         # For now, just play all chunks in order
 
