@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import math
 from collections.abc import Awaitable, Callable, Sequence
 from contextlib import suppress
 from dataclasses import dataclass
@@ -46,7 +45,7 @@ from aioresonate.models.player import (
 )
 from aioresonate.models.types import MediaCommand, PlayerStateType, Roles, ServerMessage
 
-from .audio import AudioPlayer, PCMFormat
+from .audio import PCMFormat
 from .time_sync import ResonateTimeFilter
 
 logger = logging.getLogger(__name__)
@@ -55,6 +54,8 @@ MetadataCallback = Callable[[SessionUpdatePayload], Awaitable[None] | None]
 GroupUpdateCallback = Callable[[GroupUpdateServerPayload], Awaitable[None] | None]
 StreamStartCallback = Callable[[StreamStartMessage], Awaitable[None] | None]
 StreamEndCallback = Callable[[], Awaitable[None] | None]
+# Callback for audio chunks: (server_timestamp_us, audio_data, format)
+AudioChunkCallback = Callable[[int, bytes, PCMFormat], Awaitable[None] | None]
 
 
 @dataclass(slots=True)
@@ -96,12 +97,12 @@ class ResonateClient:
         self._time_filter = ResonateTimeFilter()
         self._static_delay_us = 0
         self.set_static_delay_ms(static_delay_ms)
-        self._audio_player: AudioPlayer | None = None
         self._server_info: ServerInfo | None = None
         self._metadata_callbacks: list[MetadataCallback] = []
         self._group_callbacks: list[GroupUpdateCallback] = []
         self._stream_start_callbacks: list[StreamStartCallback] = []
         self._stream_end_callbacks: list[StreamEndCallback] = []
+        self._audio_chunk_callbacks: list[AudioChunkCallback] = []
         self._server_hello_event: asyncio.Event | None = None
         self._connected = False
         self._current_player: StreamStartPlayer | None = None
@@ -122,11 +123,6 @@ class ResonateClient:
     def connected(self) -> bool:
         """Return True if the client currently has an active connection."""
         return self._connected and self._ws is not None and not self._ws.closed
-
-    @property
-    def audio_available(self) -> bool:
-        """Return True if audio playback is available."""
-        return bool(self._audio_player and self._audio_player.audio_available)
 
     @property
     def static_delay_ms(self) -> float:
@@ -155,7 +151,6 @@ class ResonateClient:
         logger.info("Connecting to Resonate server at %s", url)
         self._ws = await self._session.ws_connect(url, heartbeat=30)
         self._connected = True
-        self._audio_player = AudioPlayer(self._loop)
 
         self._reader_task = self._loop.create_task(self._reader_loop())
         await self._send_client_hello()
@@ -189,9 +184,6 @@ class ResonateClient:
         if self._ws is not None:
             await self._ws.close()
             self._ws = None
-        if self._audio_player is not None:
-            await self._audio_player.stop()
-            self._audio_player = None
         if self._owns_session and self._session is not None:
             await self._session.close()
             self._session = None
@@ -267,6 +259,21 @@ class ResonateClient:
     def add_stream_end_listener(self, callback: StreamEndCallback) -> None:
         """Register a callback invoked when a stream ends."""
         self._stream_end_callbacks.append(callback)
+
+    def add_audio_chunk_listener(self, callback: AudioChunkCallback) -> None:
+        """
+        Register a callback invoked when audio chunks are received.
+
+        The callback receives:
+        - server_timestamp_us: Server timestamp when this audio should play
+        - audio_data: Raw PCM audio bytes
+        - format: PCMFormat describing the audio format
+
+        The callback is responsible for converting server_timestamp_us to client
+        time using the time filter (accessible via client._time_filter.compute_client_time)
+        and applying any additional delay.
+        """
+        self._audio_chunk_callbacks.append(callback)
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -478,8 +485,6 @@ class ResonateClient:
 
     async def _handle_stream_end(self) -> None:
         logger.info("Stream ended")
-        if self._audio_player is not None:
-            self._audio_player.clear()
         self._current_player = None
         self._current_pcm_format = None
         await self._notify_stream_end()
@@ -493,29 +498,29 @@ class ResonateClient:
         await self._notify_callbacks(self._group_callbacks, payload)
 
     def _configure_audio_output(self, pcm_format: PCMFormat) -> None:
+        """Store the current audio format for use in callbacks."""
         self._current_pcm_format = pcm_format
-        if self._audio_player is None:
-            return
-        self._audio_player.clear()
-        self._audio_player.set_format(pcm_format)
-        self._audio_player.start()
 
     async def _handle_audio_chunk(self, timestamp_us: int, payload: bytes) -> None:
-        if self._audio_player is None or not self._audio_player.audio_available:
+        """Handle incoming audio chunk and notify callbacks."""
+        if not self._audio_chunk_callbacks:
             return
         if self._current_pcm_format is None:
             logger.debug("Dropping audio chunk without format")
             return
 
-        play_at_us = self._compute_play_time(timestamp_us)
-        now_us = self._now_us()
-        if play_at_us < now_us - 200_000:
-            logger.debug("Dropping stale audio chunk (late by %d us)", now_us - play_at_us)
-            return
-        self._audio_player.submit(play_at_us, payload)
+        # Pass server timestamp directly to callbacks - they handle time conversion
+        # to allow for dynamic time base updates
+        for callback in self._audio_chunk_callbacks:
+            try:
+                result = callback(timestamp_us, payload, self._current_pcm_format)
+                if asyncio.iscoroutine(result):
+                    await result
+            except Exception:
+                logger.exception("Error in audio chunk callback %s", callback)
 
     def _compute_play_time(self, server_timestamp_us: int) -> int:
-        if self._time_filter._count >= 2 and not math.isinf(self._time_filter._offset_covariance):  # noqa: SLF001
+        if self._time_filter.is_synchronized:
             play_time = self._time_filter.compute_client_time(server_timestamp_us)
             return play_time + self._static_delay_us
         # Fallback: add a conservative delay if time sync isn't ready yet
@@ -558,9 +563,7 @@ class ResonateClient:
             pass
 
     def _compute_time_sync_interval(self) -> float:
-        if not (
-            self._time_filter._count >= 2 and not math.isinf(self._time_filter._offset_covariance)  # noqa: SLF001
-        ):
+        if not self._time_filter.is_synchronized:
             return 0.2
         error = self._time_filter.error
         if error < 1_000:

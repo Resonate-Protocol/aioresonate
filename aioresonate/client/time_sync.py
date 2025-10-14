@@ -5,7 +5,6 @@ Time synchronization utilities for Resonate clients.
 """
 
 # ruff: noqa: ERA001
-
 from __future__ import annotations
 
 import math
@@ -263,6 +262,21 @@ class ResonateTimeFilter:
         self._drift_covariance = 0.0
 
         self._current_time_element = TimeElement()
+
+    @property
+    def count(self) -> int:
+        """Return the number of time sync measurements processed."""
+        return self._count
+
+    @property
+    def is_synchronized(self) -> bool:
+        """
+        Return True if time synchronization is ready for use.
+
+        Time sync is considered ready when at least 2 measurements have been
+        collected and the offset covariance is finite (not infinite).
+        """
+        return self._count >= 2 and not math.isinf(self._offset_covariance)
 
     @property
     def error(self) -> int:
