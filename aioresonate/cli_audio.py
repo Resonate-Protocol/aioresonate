@@ -101,6 +101,9 @@ class AudioPlayer:
         # Track first chunk timestamp for synchronized stream start
         self._first_chunk_timestamp_us: int | None = None
 
+        # Track current playback position in server timeline
+        self._playback_position_server_us: int | None = None
+
         if not self._audio_available:
             logger.warning("sounddevice is not installed. Audio playback will be disabled.")
 
@@ -171,6 +174,8 @@ class AudioPlayer:
         self._current_chunk_offset = 0
         # Reset stream start tracking
         self._first_chunk_timestamp_us = None
+        # Reset playback position
+        self._playback_position_server_us = None
 
     def _audio_callback(
         self,
@@ -275,6 +280,64 @@ class AudioPlayer:
         self._current_chunk = chunk
         return 0
 
+    def _check_and_prepare_chunk(
+        self, chunk: _QueuedChunk, target_server_time_us: int
+    ) -> tuple[bool, bool]:
+        """
+        Check if chunk matches playback position and apply drift correction.
+
+        Returns:
+            (should_play, should_wait) tuple:
+            - should_play: True if chunk should be played now
+            - should_wait: True if chunk is in future (fill silence and keep it)
+        """
+        assert self._format is not None
+
+        # Initialize playback position from first chunk
+        if self._playback_position_server_us is None:
+            self._playback_position_server_us = chunk.server_timestamp_us
+            logger.info(
+                "Initialized playback position to %d us (DAC wants %d us)",
+                self._playback_position_server_us,
+                target_server_time_us,
+            )
+
+        # Check if this chunk matches our playback position
+        chunk_delta_us = chunk.server_timestamp_us - self._playback_position_server_us
+
+        # Measure drift: compare playback position to target (what DAC wants)
+        drift_us = self._playback_position_server_us - target_server_time_us
+        if abs(drift_us) > 5000:  # Log drift > 5ms
+            logger.debug(
+                "Playback drift: %d us (position=%d, target=%d)",
+                drift_us,
+                self._playback_position_server_us,
+                target_server_time_us,
+            )
+
+        # Apply drift correction by adjusting playback position
+        if abs(drift_us) > 50_000:  # Hard sync at >50ms
+            logger.info("Hard sync: adjusting position by %d us", -drift_us)
+            self._playback_position_server_us = target_server_time_us
+            chunk_delta_us = chunk.server_timestamp_us - self._playback_position_server_us
+        elif abs(drift_us) > 10_000:  # Gentle correction at >10ms
+            # Nudge position by 10% of error
+            correction_us = int(drift_us * 0.1)
+            self._playback_position_server_us -= correction_us
+
+        # Drop chunks that are too old (>100ms behind)
+        if chunk_delta_us < -100_000:
+            logger.debug("Dropping old chunk: %d us behind position", -chunk_delta_us)
+            return (False, False)
+
+        # If chunk is in the future, wait for it
+        if chunk_delta_us > 50_000:
+            logger.debug("Chunk is %d us in future, waiting", chunk_delta_us)
+            return (False, True)
+
+        # Chunk is ready to play
+        return (True, False)
+
     def _fill_audio_buffer(
         self,
         outdata: Any,
@@ -282,7 +345,7 @@ class AudioPlayer:
         target_server_time_us: int,
         correction_frames: int,  # noqa: ARG002 - unused temporarily
     ) -> None:
-        """Fill output buffer with audio data, applying drift correction."""
+        """Fill output buffer with audio data, using timestamp-based chunk selection."""
         assert self._format is not None
         bytes_needed = frames * self._format.frame_size
         output_buffer = memoryview(outdata).cast("B")
@@ -293,21 +356,39 @@ class AudioPlayer:
                 # Get current chunk or pull new one
                 if self._current_chunk is None:
                     if self._queue.empty():
-                        # Underrun - fill rest with silence
+                        # No chunks available - fill with silence
                         silence_bytes = bytes_needed - bytes_written
                         output_buffer[bytes_written : bytes_written + silence_bytes] = (
                             b"\x00" * silence_bytes
                         )
-                        if not self._first_real_chunk:
-                            logger.debug(
-                                "Audio underrun: filled %d bytes with silence", silence_bytes
-                            )
+                        logger.debug("Buffer underrun: no chunks available")
                         break
 
-                    # Pull next chunk (ignoring corrections for now)
-                    self._get_next_chunk(target_server_time_us, 0)
-                    if self._current_chunk is None:
-                        continue  # Shouldn't happen, but handle gracefully
+                    # Get next chunk from queue
+                    _priority, _counter, chunk = self._queue.get_nowait()
+
+                    # Check if chunk is ready to play
+                    should_play, should_wait = self._check_and_prepare_chunk(
+                        chunk, target_server_time_us
+                    )
+
+                    if should_wait:
+                        # Chunk is in future, keep it and fill silence
+                        self._current_chunk = chunk
+                        self._current_chunk_offset = 0
+                        silence_bytes = bytes_needed - bytes_written
+                        output_buffer[bytes_written : bytes_written + silence_bytes] = (
+                            b"\x00" * silence_bytes
+                        )
+                        break
+
+                    if not should_play:
+                        # Chunk was dropped (too old), get next one
+                        continue
+
+                    # Chunk is ready to play
+                    self._current_chunk = chunk
+                    self._current_chunk_offset = 0
 
                 # Copy from current chunk starting at offset
                 chunk_data = self._current_chunk.audio_data
@@ -320,8 +401,16 @@ class AudioPlayer:
                 bytes_written += bytes_to_copy
                 self._current_chunk_offset += bytes_to_copy
 
-                # If chunk is exhausted, clear it so we pull next one
+                # If chunk is exhausted, clear it and update playback position
                 if self._current_chunk_offset >= len(chunk_data):
+                    # Update playback position based on chunk duration
+                    if self._playback_position_server_us is not None:
+                        chunk_frames = len(chunk_data) // self._format.frame_size
+                        chunk_duration_us = int(
+                            (chunk_frames * 1_000_000) / self._format.sample_rate
+                        )
+                        self._playback_position_server_us += chunk_duration_us
+
                     self._current_chunk = None
                     self._current_chunk_offset = 0
 
