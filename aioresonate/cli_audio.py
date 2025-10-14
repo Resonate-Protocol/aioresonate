@@ -91,6 +91,8 @@ class AudioPlayer:
         self._drift_error_us = 0
         self._correction_frames = 0.0
         self._callback_lock = threading.Lock()
+        self._stream_started = False
+        self._first_real_chunk = True  # Flag to initialize timing from first chunk
 
         if not self._audio_available:
             logger.warning("sounddevice is not installed. Audio playback will be disabled.")
@@ -111,18 +113,20 @@ class AudioPlayer:
         self._last_expected_server_time_us = None
         self._drift_error_us = 0
         self._correction_frames = 0.0
+        self._stream_started = False
+        self._first_real_chunk = True
 
         assert _sounddevice is not None  # for mypy
         dtype = "int16"
         try:
             # Use callback-based stream for true timing feedback
+            # Note: Don't start yet - wait for audio to be buffered
             stream = _sounddevice.RawStream(
                 samplerate=pcm_format.sample_rate,
                 channels=pcm_format.channels,
                 dtype=dtype,
                 callback=self._audio_callback,
             )
-            stream.start()
 
             # Get output latency for logging (no longer used for compensation)
             latency_s = stream.latency
@@ -152,6 +156,7 @@ class AudioPlayer:
         self._last_expected_server_time_us = None
         self._drift_error_us = 0
         self._correction_frames = 0.0
+        self._first_real_chunk = True
 
     def _audio_callback(
         self,
@@ -200,6 +205,10 @@ class AudioPlayer:
         """
         assert self._format is not None
 
+        # Don't measure drift until we've started playing real audio
+        if self._first_real_chunk:
+            return 0
+
         # Measure drift if we have a previous reference
         if self._last_expected_server_time_us is not None:
             # Calculate how much time passed in the audio stream
@@ -212,7 +221,7 @@ class AudioPlayer:
             if abs(self._drift_error_us) > 1000:  # Log if > 1ms
                 logger.debug("Drift error: %d us", self._drift_error_us)
 
-        # Update expected time for next callback
+        # Update expected time for next callback (will be overridden by first chunk)
         frame_duration_us = int((frames * 1_000_000) / self._format.sample_rate)
         self._last_expected_server_time_us = target_server_time_us + frame_duration_us
 
@@ -277,10 +286,22 @@ class AudioPlayer:
                     output_buffer[bytes_written : bytes_written + silence_bytes] = (
                         b"\x00" * silence_bytes
                     )
-                    logger.debug("Audio underrun: filled %d bytes with silence", silence_bytes)
+                    # Only log underruns after we've started playing real audio
+                    if not self._first_real_chunk:
+                        logger.debug("Audio underrun: filled %d bytes with silence", silence_bytes)
                     break
 
                 _priority, _counter, chunk = self._queue.get_nowait()
+
+                # Initialize timing from first real chunk
+                if self._first_real_chunk:
+                    self._first_real_chunk = False
+                    # Set expected time based on this chunk, not previous silence
+                    # This synchronizes our timing with the actual audio stream
+                    self._last_expected_server_time_us = chunk.server_timestamp_us
+                    logger.debug(
+                        "Initialized timing from first chunk at %d us", chunk.server_timestamp_us
+                    )
 
                 # Check if this chunk is too late (more than 200ms behind target)
                 chunk_lateness_us = target_server_time_us - chunk.server_timestamp_us
@@ -348,6 +369,12 @@ class AudioPlayer:
         )
         # Use server timestamp for priority queue ordering
         self._queue.put_nowait((server_timestamp_us, self._counter, chunk))
+
+        # Start stream after buffering minimum audio (reduces initial underruns)
+        if not self._stream_started and self._queue.qsize() >= 3 and self._stream is not None:
+            self._stream.start()
+            self._stream_started = True
+            logger.debug("Stream started after buffering %d chunks", self._queue.qsize())
 
     def _close_stream(self) -> None:
         """Close the audio output stream."""
