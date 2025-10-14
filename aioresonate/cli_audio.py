@@ -98,6 +98,9 @@ class AudioPlayer:
         self._current_chunk: _QueuedChunk | None = None
         self._current_chunk_offset = 0
 
+        # Track first chunk timestamp for synchronized stream start
+        self._first_chunk_timestamp_us: int | None = None
+
         if not self._audio_available:
             logger.warning("sounddevice is not installed. Audio playback will be disabled.")
 
@@ -166,6 +169,8 @@ class AudioPlayer:
         # Reset partial chunk tracking
         self._current_chunk = None
         self._current_chunk_offset = 0
+        # Reset stream start tracking
+        self._first_chunk_timestamp_us = None
 
     def _audio_callback(
         self,
@@ -365,11 +370,31 @@ class AudioPlayer:
         # Use server timestamp for priority queue ordering
         self._queue.put_nowait((server_timestamp_us, self._counter, chunk))
 
-        # Start stream after buffering minimum audio (reduces initial underruns)
-        if not self._stream_started and self._queue.qsize() >= 3 and self._stream is not None:
-            self._stream.start()
-            self._stream_started = True
-            logger.debug("Stream started after buffering %d chunks", self._queue.qsize())
+        # Track the first chunk's timestamp (for synchronized start)
+        if self._first_chunk_timestamp_us is None:
+            self._first_chunk_timestamp_us = server_timestamp_us
+
+        # Start stream when we have audio AND the first chunk is ready to play
+        if (
+            not self._stream_started
+            and self._queue.qsize() >= 3
+            and self._stream is not None
+            and self._first_chunk_timestamp_us is not None
+        ):
+            # Check if first chunk should be playing now
+            first_chunk_client_time_us = self._compute_client_time(self._first_chunk_timestamp_us)
+            now_us = int(self._loop.time() * 1_000_000)
+            time_until_play_us = first_chunk_client_time_us - now_us
+
+            # Start if first chunk should play within next 50ms (allows for startup latency)
+            if time_until_play_us < 50_000:
+                self._stream.start()
+                self._stream_started = True
+                logger.info(
+                    "Stream started with %d chunks buffered (first chunk ready in %d us)",
+                    self._queue.qsize(),
+                    time_until_play_us,
+                )
 
     def _close_stream(self) -> None:
         """Close the audio output stream."""
