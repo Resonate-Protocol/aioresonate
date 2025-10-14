@@ -6,13 +6,14 @@ import argparse
 import asyncio
 import logging
 import sys
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Any, cast
 
 from zeroconf.asyncio import AsyncServiceBrowser, AsyncZeroconf
 
-from aioresonate.client import ResonateClient
+from aioresonate.cli_audio import AudioPlayer
+from aioresonate.client import PCMFormat, ResonateClient
 from aioresonate.models.controller import GroupUpdateServerPayload
 from aioresonate.models.core import SessionUpdatePayload
 from aioresonate.models.metadata import SessionUpdateMetadata
@@ -172,6 +173,109 @@ async def _discover_server(discovery_timeout: float) -> str | None:
             await browser.async_cancel()
 
 
+def _create_audio_chunk_handler(
+    client: ResonateClient,
+) -> tuple[
+    Callable[[int, bytes, PCMFormat], None],
+    Callable[[], AudioPlayer | None],
+]:
+    """
+    Create an audio chunk handler and accessor for the audio player.
+
+    Returns:
+        A tuple of (handler_function, get_audio_player_function).
+    """
+    audio_player: AudioPlayer | None = None
+    current_format: PCMFormat | None = None
+    sync_ready: bool = False
+    first_sync_message_printed: bool = False
+    dropped_chunks: int = 0
+
+    def handle_audio_chunk(server_timestamp_us: int, audio_data: bytes, fmt: PCMFormat) -> None:
+        """Handle incoming audio chunks."""
+        nonlocal audio_player, current_format, sync_ready, first_sync_message_printed
+        nonlocal dropped_chunks
+
+        # Check if time sync is ready - critical for accurate playback timing
+        was_sync_ready = sync_ready
+        sync_ready = client._time_filter.is_synchronized  # noqa: SLF001
+
+        # Print message when sync becomes ready
+        if sync_ready and not was_sync_ready:
+            if dropped_chunks > 0:
+                logger.info("Time sync ready after dropping %d early chunks", dropped_chunks)
+                _print_event(
+                    f"Time sync ready (dropped {dropped_chunks} early chunks), starting playback"
+                )
+            else:
+                logger.info("Time sync ready")
+                _print_event("Time sync ready, starting playback")
+            dropped_chunks = 0
+
+        # Drop chunks if sync is not ready - prevents desync on initial connection
+        if not sync_ready:
+            dropped_chunks += 1
+            if not first_sync_message_printed:
+                logger.debug("Waiting for time sync to converge before playing audio...")
+                _print_event("Waiting for time synchronization...")
+                first_sync_message_printed = True
+            return
+
+        # Initialize or reconfigure audio player if format changed
+        if audio_player is None or current_format != fmt:
+            if audio_player is not None:
+                audio_player.clear()
+
+            # Create a time conversion function that includes static delay
+            def compute_play_time(server_ts: int) -> int:
+                client_time = client._time_filter.compute_client_time(server_ts)  # noqa: SLF001
+                return client_time + client._static_delay_us  # noqa: SLF001
+
+            loop = asyncio.get_running_loop()
+            audio_player = AudioPlayer(loop, compute_play_time)
+            audio_player.set_format(fmt)
+            audio_player.start()
+            current_format = fmt
+
+        # Submit audio chunk with server timestamp (AudioPlayer will compute client play time)
+        if audio_player is not None:
+            audio_player.submit(server_timestamp_us, audio_data)
+
+    def get_audio_player() -> AudioPlayer | None:
+        return audio_player
+
+    return handle_audio_chunk, get_audio_player
+
+
+def _create_stream_handlers(
+    get_audio_player: Callable[[], AudioPlayer | None],
+) -> tuple[Callable[[Any], None], Callable[[], None]]:
+    """
+    Create stream start/end handlers that clear audio queue.
+
+    Returns:
+        A tuple of (stream_start_handler, stream_end_handler).
+    """
+
+    def handle_stream_start(_message: Any) -> None:
+        """Handle stream start by clearing stale audio chunks."""
+        audio_player = get_audio_player()
+        if audio_player is not None:
+            audio_player.clear()
+            logger.debug("Cleared audio queue on stream start")
+        _print_event("Stream started")
+
+    def handle_stream_end() -> None:
+        """Handle stream end by clearing audio queue to prevent desync on resume."""
+        audio_player = get_audio_player()
+        if audio_player is not None:
+            audio_player.clear()
+            logger.debug("Cleared audio queue on stream end")
+        _print_event("Stream ended")
+
+    return handle_stream_start, handle_stream_end
+
+
 async def main_async(argv: Sequence[str] | None = None) -> int:
     """Entry point executing the asynchronous CLI workflow."""
     args = parse_args(list(argv) if argv is not None else None)
@@ -184,10 +288,15 @@ async def main_async(argv: Sequence[str] | None = None) -> int:
         static_delay_ms=args.static_delay_ms,
     )
 
+    # Create audio and stream handlers
+    handle_audio_chunk, get_audio_player = _create_audio_chunk_handler(client)
+    handle_stream_start, handle_stream_end = _create_stream_handlers(get_audio_player)
+
     client.add_metadata_listener(lambda payload: _handle_session_update(state, payload))
     client.add_group_update_listener(lambda payload: _handle_group_update(state, payload))
-    client.add_stream_start_listener(lambda _message: _print_event("Stream started"))
-    client.add_stream_end_listener(lambda: _print_event("Stream ended"))
+    client.add_stream_start_listener(handle_stream_start)
+    client.add_stream_end_listener(handle_stream_end)
+    client.add_audio_chunk_listener(handle_audio_chunk)
 
     url = args.url
     if url is None:
@@ -204,18 +313,22 @@ async def main_async(argv: Sequence[str] | None = None) -> int:
         await client.disconnect()
         return 1
 
-    if not client.audio_available:
+    audio_player = get_audio_player()
+    if audio_player is None or not audio_player.audio_available:
         _print_event("Audio playback disabled (sounddevice not installed)")
 
     _print_instructions()
 
-    keyboard_task = asyncio.create_task(_keyboard_loop(client, state))
+    keyboard_task = asyncio.create_task(_keyboard_loop(client, state, get_audio_player))
 
     try:
         await keyboard_task
     except asyncio.CancelledError:  # pragma: no cover - cancellation path
         pass
     finally:
+        audio_player = get_audio_player()
+        if audio_player is not None:
+            await audio_player.stop()
         await client.disconnect()
 
     return 0
@@ -247,7 +360,11 @@ async def _handle_group_update(state: CLIState, payload: GroupUpdateServerPayloa
         _print_event("Muted" if payload.muted else "Unmuted")
 
 
-async def _keyboard_loop(client: ResonateClient, state: CLIState) -> None:
+async def _keyboard_loop(
+    client: ResonateClient,
+    state: CLIState,
+    get_audio_player: Callable[[], AudioPlayer | None],
+) -> None:
     loop = asyncio.get_running_loop()
     while True:
         line = await loop.run_in_executor(None, sys.stdin.readline)
@@ -280,7 +397,7 @@ async def _keyboard_loop(client: ResonateClient, state: CLIState) -> None:
         elif command_lower == "toggle":
             await _toggle_play_pause(client, state)
         elif keyword == "delay":
-            _handle_delay_command(client, parts)
+            _handle_delay_command(client, parts, get_audio_player)
         else:
             _print_event("Unknown command")
 
@@ -318,7 +435,11 @@ async def _toggle_mute(client: ResonateClient, state: CLIState) -> None:
     await client.send_group_command(MediaCommand.MUTE, mute=target)
 
 
-def _handle_delay_command(client: ResonateClient, parts: list[str]) -> None:
+def _handle_delay_command(
+    client: ResonateClient,
+    parts: list[str],
+    get_audio_player: Callable[[], AudioPlayer | None],
+) -> None:
     """Process delay commands from the keyboard loop."""
     if not parts or parts[0].lower() != "delay":
         return
@@ -334,6 +455,11 @@ def _handle_delay_command(client: ResonateClient, parts: list[str]) -> None:
         if parts[1] == "-":
             delta = -delta
         client.set_static_delay_ms(client.static_delay_ms + delta)
+        # Clear audio queue to prevent desync from chunks with stale timing
+        audio_player = get_audio_player()
+        if audio_player is not None:
+            audio_player.clear()
+            logger.debug("Cleared audio queue after delay change")
         _print_event(f"Static delay: {client.static_delay_ms:.1f} ms")
         return
     if len(parts) == 2:
@@ -343,6 +469,11 @@ def _handle_delay_command(client: ResonateClient, parts: list[str]) -> None:
             _print_event("Invalid delay value")
             return
         client.set_static_delay_ms(value)
+        # Clear audio queue to prevent desync from chunks with stale timing
+        audio_player = get_audio_player()
+        if audio_player is not None:
+            audio_player.clear()
+            logger.debug("Cleared audio queue after delay change")
         _print_event(f"Static delay: {client.static_delay_ms:.1f} ms")
         return
     _print_event("Usage: delay [<ms>|+ <ms>|- <ms>]")
