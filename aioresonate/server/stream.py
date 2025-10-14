@@ -721,7 +721,9 @@ class Streamer:
                     # Skip packets with invalid duration from encoder flush
                     if not packet.duration or packet.duration <= 0:
                         continue
-                    self._handle_encoded_packet(pipeline, packet)
+                    # Calculate timestamps for flushed packet
+                    start_us, end_us = self._calculate_chunk_timestamps(pipeline, packet.duration)
+                    self._handle_encoded_packet(pipeline, packet, start_us, end_us)
             pipeline.flushed = True
 
     def reset(self) -> None:
@@ -1115,8 +1117,7 @@ class Streamer:
             source_chunk = self._source_buffer[pipeline.source_read_position]
             self._process_source_pcm(
                 pipeline,
-                source_chunk.pcm_data,
-                source_chunk.sample_count,
+                source_chunk,
             )
             pipeline.source_read_position += 1
             any_work = True
@@ -1126,29 +1127,50 @@ class Streamer:
     def _process_source_pcm(
         self,
         pipeline: PipelineState,
-        source_pcm: bytes,
-        sample_count: int,
+        source_chunk: SourceChunk,
     ) -> None:
         """Process source PCM data through the pipeline's resampler.
 
         Args:
             pipeline: The pipeline to process through.
-            source_pcm: Raw PCM audio data from the source.
-            sample_count: Number of samples in the source PCM data.
+            source_chunk: The source PCM chunk to process.
         """
         frame = av.AudioFrame(
             format=pipeline.channel.av_format,
             layout=pipeline.channel.av_layout,
-            samples=sample_count,
+            samples=source_chunk.sample_count,
         )
         frame.sample_rate = pipeline.channel.audio_format.sample_rate
-        frame.planes[0].update(source_pcm)
+        frame.planes[0].update(source_chunk.pcm_data)
         out_frames = pipeline.resampler.resample(frame)
         for out_frame in out_frames:
             expected = pipeline.target_frame_stride * out_frame.samples
             pcm_bytes = bytes(out_frame.planes[0])[:expected]
             pipeline.buffer.extend(pcm_bytes)
         self._drain_pipeline_buffer(pipeline, force_flush=False)
+
+    def _calculate_chunk_timestamps(
+        self,
+        pipeline: PipelineState,
+        sample_count: int,
+    ) -> tuple[int, int]:
+        """Calculate start and end timestamps for a chunk.
+
+        Args:
+            pipeline: The pipeline producing the chunk.
+            sample_count: Number of samples in the chunk.
+
+        Returns:
+            Tuple of (start_us, end_us) timestamps.
+        """
+        start_samples = pipeline.samples_produced
+        start_us = self._play_start_time_us + int(
+            start_samples * 1_000_000 / pipeline.target_format.sample_rate
+        )
+        end_us = self._play_start_time_us + int(
+            (start_samples + sample_count) * 1_000_000 / pipeline.target_format.sample_rate
+        )
+        return start_us, end_us
 
     def _drain_pipeline_buffer(
         self,
@@ -1160,6 +1182,7 @@ class Streamer:
 
         Extracts complete chunks from the pipeline buffer and either publishes them
         directly (for PCM) or encodes them first (for compressed codecs).
+        Calculates timestamps based on the pipeline's current sample position.
 
         Args:
             pipeline: The pipeline whose buffer to drain.
@@ -1180,16 +1203,22 @@ class Streamer:
             chunk_size = sample_count * frame_stride
             chunk = bytes(pipeline.buffer[:chunk_size])
             del pipeline.buffer[:chunk_size]
+
+            # Calculate timestamps for this chunk
+            start_us, end_us = self._calculate_chunk_timestamps(pipeline, sample_count)
+
             if pipeline.encoder is None:
-                self._publish_chunk(pipeline, chunk, sample_count)
+                self._publish_chunk(pipeline, chunk, sample_count, start_us, end_us)
             else:
-                self._encode_and_publish(pipeline, chunk, sample_count)
+                self._encode_and_publish(pipeline, chunk, sample_count, start_us, end_us)
 
     def _encode_and_publish(
         self,
         pipeline: PipelineState,
         chunk: bytes,
         sample_count: int,
+        start_us: int,
+        end_us: int,
     ) -> None:
         """Encode a PCM chunk and publish the resulting packets.
 
@@ -1197,6 +1226,8 @@ class Streamer:
             pipeline: The pipeline containing the encoder.
             chunk: Raw PCM audio data to encode.
             sample_count: Number of samples in the chunk.
+            start_us: Start timestamp in microseconds.
+            end_us: End timestamp in microseconds.
         """
         if pipeline.encoder is None:
             raise RuntimeError("Encoder not configured for this pipeline")
@@ -1208,46 +1239,52 @@ class Streamer:
         frame.sample_rate = pipeline.target_format.sample_rate
         frame.planes[0].update(chunk)
         packets = pipeline.encoder.encode(frame)
-        for packet in packets:
-            self._handle_encoded_packet(pipeline, packet)
+        if len(packets) != 1:
+            raise RuntimeError(f"Expected exactly 1 packet from encoder, got {len(packets)}")
+        packet = packets[0]
+        self._handle_encoded_packet(pipeline, packet, start_us, end_us)
 
-    def _handle_encoded_packet(self, pipeline: PipelineState, packet: av.Packet) -> None:
+    def _handle_encoded_packet(
+        self,
+        pipeline: PipelineState,
+        packet: av.Packet,
+        start_us: int,
+        end_us: int,
+    ) -> None:
         """Handle an encoded packet by publishing it as a chunk.
 
         Args:
             pipeline: The pipeline that produced the packet.
             packet: The encoded audio packet from the encoder.
+            start_us: Start timestamp in microseconds.
+            end_us: End timestamp in microseconds.
         """
         if not packet.duration or packet.duration <= 0:
             raise ValueError(f"Invalid packet duration: {packet.duration!r}")
         chunk_data = bytes(packet)
-        self._publish_chunk(pipeline, chunk_data, packet.duration)
+        self._publish_chunk(pipeline, chunk_data, packet.duration, start_us, end_us)
 
     def _publish_chunk(
         self,
         pipeline: PipelineState,
         audio_data: bytes,
         sample_count: int,
+        start_us: int,
+        end_us: int,
     ) -> None:
         """Create a PreparedChunkState and queue it for all subscribers.
 
-        Calculates timestamps based on sample position and queues the chunk
-        for delivery to all clients subscribed to this pipeline.
+        Queues the chunk for delivery to all clients subscribed to this pipeline.
 
         Args:
             pipeline: The pipeline publishing the chunk.
             audio_data: The encoded or PCM audio data.
             sample_count: Number of samples in the chunk.
+            start_us: Start timestamp in microseconds.
+            end_us: End timestamp in microseconds.
         """
         if not pipeline.subscribers or sample_count <= 0:
             return
-        start_samples = pipeline.samples_produced
-        start_us = self._play_start_time_us + int(
-            start_samples * 1_000_000 / pipeline.target_format.sample_rate
-        )
-        end_us = self._play_start_time_us + int(
-            (start_samples + sample_count) * 1_000_000 / pipeline.target_format.sample_rate
-        )
 
         chunk = PreparedChunkState(
             data=audio_data,
