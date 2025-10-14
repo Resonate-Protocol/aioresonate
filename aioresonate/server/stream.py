@@ -718,6 +718,9 @@ class Streamer:
             if pipeline.encoder is not None:
                 packets = pipeline.encoder.encode(None)
                 for packet in packets:
+                    # Skip packets with invalid duration from encoder flush
+                    if not packet.duration or packet.duration <= 0:
+                        continue
                     self._handle_encoded_packet(pipeline, packet)
             pipeline.flushed = True
 
