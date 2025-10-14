@@ -234,36 +234,15 @@ class AudioPlayer:
         frame_duration_us = int((frames * 1_000_000) / self._format.sample_rate)
         self._last_expected_server_time_us = target_server_time_us + frame_duration_us
 
-        # Apply drift correction (ESP32-style)
-        correction_frames_to_apply = 0
-        single_frame_duration_us = int(1_000_000 / self._format.sample_rate)
+        # TODO: Re-enable drift correction after basic playback works
+        # For now, just measure but don't correct
+        return 0
 
-        if self._drift_error_us > self._HARD_SYNC_THRESHOLD_US:
-            # Lagging behind - insert silence to slow down
-            max_correction = frames // 4  # Limit to 25% of buffer
-            silence_frames = min(self._drift_error_us // single_frame_duration_us, max_correction)
-            correction_frames_to_apply = silence_frames
-            logger.debug("Hard sync: inserting %d silence frames", silence_frames)
-
-        elif self._drift_error_us < -self._HARD_SYNC_THRESHOLD_US:
-            # Ahead of schedule - skip frames to speed up
-            max_correction = frames // 4
-            skip_frames = min(-self._drift_error_us // single_frame_duration_us, max_correction)
-            correction_frames_to_apply = -skip_frames
-            logger.debug("Hard sync: skipping %d audio frames", skip_frames)
-
-        elif abs(self._drift_error_us) > self._SOFT_SYNC_THRESHOLD_US:
-            # Small drift - accumulate fractional correction
-            self._correction_frames += self._drift_error_us / single_frame_duration_us
-            if abs(self._correction_frames) >= 1.0:
-                # Apply one frame correction
-                correction_frames_to_apply = int(self._correction_frames)
-                self._correction_frames -= correction_frames_to_apply
-                logger.debug("Soft sync: applying %d frame correction", correction_frames_to_apply)
-
-        return correction_frames_to_apply
-
-    def _get_next_chunk(self, target_server_time_us: int, frames_to_skip: int) -> int:
+    def _get_next_chunk(
+        self,
+        target_server_time_us: int,  # noqa: ARG002 - unused temporarily
+        frames_to_skip: int,
+    ) -> int:
         """
         Pull next chunk from queue and prepare it for playback.
 
@@ -283,52 +262,28 @@ class AudioPlayer:
             self._last_expected_server_time_us = chunk.server_timestamp_us
             logger.debug("Initialized timing from first chunk at %d us", chunk.server_timestamp_us)
 
-        # Check if this chunk is too late (more than 200ms behind target)
-        chunk_lateness_us = target_server_time_us - chunk.server_timestamp_us
-        if chunk_lateness_us > 200_000:
-            logger.debug("Dropping late chunk (behind by %d us)", chunk_lateness_us)
-            return frames_to_skip  # Don't set current_chunk, try next
+        # TODO: Re-enable lateness check after basic playback works
+        # For now, just play all chunks in order
 
-        # Apply negative correction: skip frames at start of new chunk
-        if frames_to_skip > 0:
-            skip_bytes = frames_to_skip * self._format.frame_size
-            chunk_frames = len(chunk.audio_data) // self._format.frame_size
-            if frames_to_skip >= chunk_frames:
-                # Skip entire chunk
-                return frames_to_skip - chunk_frames
-            # Skip partial chunk - set offset to skip position
-            self._current_chunk_offset = skip_bytes
-            frames_to_skip = 0
-        else:
-            self._current_chunk_offset = 0
-
+        # Don't apply corrections for now
+        self._current_chunk_offset = 0
         self._current_chunk = chunk
-        return frames_to_skip
+        return 0
 
     def _fill_audio_buffer(
         self,
         outdata: Any,
         frames: int,
         target_server_time_us: int,
-        correction_frames: int,
+        correction_frames: int,  # noqa: ARG002 - unused temporarily
     ) -> None:
         """Fill output buffer with audio data, applying drift correction."""
         assert self._format is not None
         bytes_needed = frames * self._format.frame_size
         output_buffer = memoryview(outdata).cast("B")
         bytes_written = 0
-        frames_to_skip = max(0, -correction_frames)
 
         try:
-            # Apply positive correction: insert silence at beginning
-            if correction_frames > 0:
-                silence_bytes = correction_frames * self._format.frame_size
-                silence_bytes = min(silence_bytes, bytes_needed)
-                output_buffer[bytes_written : bytes_written + silence_bytes] = (
-                    b"\x00" * silence_bytes
-                )
-                bytes_written += silence_bytes
-
             while bytes_written < bytes_needed:
                 # Get current chunk or pull new one
                 if self._current_chunk is None:
@@ -344,9 +299,10 @@ class AudioPlayer:
                             )
                         break
 
-                    frames_to_skip = self._get_next_chunk(target_server_time_us, frames_to_skip)
+                    # Pull next chunk (ignoring corrections for now)
+                    self._get_next_chunk(target_server_time_us, 0)
                     if self._current_chunk is None:
-                        continue  # Chunk was dropped, try next
+                        continue  # Shouldn't happen, but handle gracefully
 
                 # Copy from current chunk starting at offset
                 chunk_data = self._current_chunk.audio_data
