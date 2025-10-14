@@ -179,49 +179,37 @@ class AudioPlayer:
                 if self._closed:
                     break
 
-                # Initial play time estimate for coarse waiting
-                play_at_us = self._compute_client_time(chunk.server_timestamp_us)
-
-                # Check if chunk is too late
-                now_us = self._now_us()
-                if play_at_us < now_us - 200_000:
-                    logger.debug("Dropping stale audio chunk (late by %d us)", now_us - play_at_us)
-                    continue
-
-                await self._wait_until(play_at_us)
-
-                # Recompute play time just before playing to account for time filter updates
-                # during the wait. This prevents gradual desync as the Kalman filter
-                # continuously refines offset/drift estimates.
-                play_at_us = self._compute_client_time(chunk.server_timestamp_us)
-                now_us = self._now_us()
-
-                # Final check: if chunk became stale during wait, drop it
-                if play_at_us < now_us - 200_000:
-                    logger.debug(
-                        "Dropping chunk that became stale during wait (late by %d us)",
-                        now_us - play_at_us,
-                    )
-                    continue
-
-                # Short wait for any remaining time after recomputation
-                remaining_us = play_at_us - now_us
-                if remaining_us > 0:
-                    await asyncio.sleep(remaining_us / 1_000_000)
-
+                # Wait until play time, continuously recomputing from server timestamp
+                await self._wait_until_server_time(chunk.server_timestamp_us)
                 await self._write_audio(chunk.audio_data)
         except asyncio.CancelledError:  # pragma: no cover - cancellation path
             pass
         finally:
             self._close_stream()
 
-    async def _wait_until(self, play_at_us: int) -> None:
-        """Wait until the specified play time, with periodic polling."""
+    async def _wait_until_server_time(self, server_timestamp_us: int) -> None:
+        """
+        Wait until a server timestamp should play, continuously recomputing.
+
+        This continuously recomputes the client play time from the server timestamp
+        during the wait loop, tracking time filter updates in real-time to prevent drift.
+        """
         while True:
+            # Continuously recompute play time with current time filter state
+            play_at_us = self._compute_client_time(server_timestamp_us)
             now_us = self._now_us()
             delta = play_at_us - now_us
+
+            # Drop chunks that are too late
+            if delta < -200_000:
+                logger.debug("Dropping stale audio chunk (late by %d us)", -delta)
+                return
+
+            # If we're close enough, play immediately
             if delta <= self._PREPLAY_MARGIN_US:
                 break
+
+            # Sleep briefly, then recompute (tracking time filter changes)
             sleep_time = max((delta - self._PREPLAY_MARGIN_US) / 1_000_000, 0.0)
             await asyncio.sleep(min(sleep_time, 0.1))
 
