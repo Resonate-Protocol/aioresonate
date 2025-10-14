@@ -533,7 +533,6 @@ class ResonateGroup:
                 return active
 
         if not active:
-            logger.debug("stop called but no active stream task")
             return False
 
         logger.debug(
