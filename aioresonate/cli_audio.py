@@ -94,6 +94,10 @@ class AudioPlayer:
         self._stream_started = False
         self._first_real_chunk = True  # Flag to initialize timing from first chunk
 
+        # Partial chunk tracking (to avoid discarding partial chunks)
+        self._current_chunk: _QueuedChunk | None = None
+        self._current_chunk_offset = 0
+
         if not self._audio_available:
             logger.warning("sounddevice is not installed. Audio playback will be disabled.")
 
@@ -159,6 +163,9 @@ class AudioPlayer:
         self._drift_error_us = 0
         self._correction_frames = 0.0
         self._first_real_chunk = True
+        # Reset partial chunk tracking
+        self._current_chunk = None
+        self._current_chunk_offset = 0
 
     def _audio_callback(
         self,
@@ -256,6 +263,48 @@ class AudioPlayer:
 
         return correction_frames_to_apply
 
+    def _get_next_chunk(self, target_server_time_us: int, frames_to_skip: int) -> int:
+        """
+        Pull next chunk from queue and prepare it for playback.
+
+        Returns:
+            Updated frames_to_skip count after processing this chunk.
+        """
+        assert self._format is not None
+
+        if self._queue.empty():
+            return frames_to_skip
+
+        _priority, _counter, chunk = self._queue.get_nowait()
+
+        # Initialize timing from first real chunk
+        if self._first_real_chunk:
+            self._first_real_chunk = False
+            self._last_expected_server_time_us = chunk.server_timestamp_us
+            logger.debug("Initialized timing from first chunk at %d us", chunk.server_timestamp_us)
+
+        # Check if this chunk is too late (more than 200ms behind target)
+        chunk_lateness_us = target_server_time_us - chunk.server_timestamp_us
+        if chunk_lateness_us > 200_000:
+            logger.debug("Dropping late chunk (behind by %d us)", chunk_lateness_us)
+            return frames_to_skip  # Don't set current_chunk, try next
+
+        # Apply negative correction: skip frames at start of new chunk
+        if frames_to_skip > 0:
+            skip_bytes = frames_to_skip * self._format.frame_size
+            chunk_frames = len(chunk.audio_data) // self._format.frame_size
+            if frames_to_skip >= chunk_frames:
+                # Skip entire chunk
+                return frames_to_skip - chunk_frames
+            # Skip partial chunk - set offset to skip position
+            self._current_chunk_offset = skip_bytes
+            frames_to_skip = 0
+        else:
+            self._current_chunk_offset = 0
+
+        self._current_chunk = chunk
+        return frames_to_skip
+
     def _fill_audio_buffer(
         self,
         outdata: Any,
@@ -268,7 +317,7 @@ class AudioPlayer:
         bytes_needed = frames * self._format.frame_size
         output_buffer = memoryview(outdata).cast("B")
         bytes_written = 0
-        frames_to_skip = max(0, -correction_frames)  # Skip if negative correction
+        frames_to_skip = max(0, -correction_frames)
 
         try:
             # Apply positive correction: insert silence at beginning
@@ -281,54 +330,39 @@ class AudioPlayer:
                 bytes_written += silence_bytes
 
             while bytes_written < bytes_needed:
-                # Try to get next chunk (non-blocking)
-                if self._queue.empty():
-                    # Underrun - fill rest with silence
-                    silence_bytes = bytes_needed - bytes_written
-                    output_buffer[bytes_written : bytes_written + silence_bytes] = (
-                        b"\x00" * silence_bytes
-                    )
-                    # Only log underruns after we've started playing real audio
-                    if not self._first_real_chunk:
-                        logger.debug("Audio underrun: filled %d bytes with silence", silence_bytes)
-                    break
+                # Get current chunk or pull new one
+                if self._current_chunk is None:
+                    if self._queue.empty():
+                        # Underrun - fill rest with silence
+                        silence_bytes = bytes_needed - bytes_written
+                        output_buffer[bytes_written : bytes_written + silence_bytes] = (
+                            b"\x00" * silence_bytes
+                        )
+                        if not self._first_real_chunk:
+                            logger.debug(
+                                "Audio underrun: filled %d bytes with silence", silence_bytes
+                            )
+                        break
 
-                _priority, _counter, chunk = self._queue.get_nowait()
+                    frames_to_skip = self._get_next_chunk(target_server_time_us, frames_to_skip)
+                    if self._current_chunk is None:
+                        continue  # Chunk was dropped, try next
 
-                # Initialize timing from first real chunk
-                if self._first_real_chunk:
-                    self._first_real_chunk = False
-                    # Set expected time based on this chunk, not previous silence
-                    # This synchronizes our timing with the actual audio stream
-                    self._last_expected_server_time_us = chunk.server_timestamp_us
-                    logger.debug(
-                        "Initialized timing from first chunk at %d us", chunk.server_timestamp_us
-                    )
+                # Copy from current chunk starting at offset
+                chunk_data = self._current_chunk.audio_data
+                remaining_in_chunk = len(chunk_data) - self._current_chunk_offset
+                bytes_to_copy = min(remaining_in_chunk, bytes_needed - bytes_written)
 
-                # Check if this chunk is too late (more than 200ms behind target)
-                chunk_lateness_us = target_server_time_us - chunk.server_timestamp_us
-                if chunk_lateness_us > 200_000:
-                    logger.debug("Dropping late chunk (behind by %d us)", chunk_lateness_us)
-                    continue
-
-                # Apply negative correction: skip frames from chunk
-                chunk_data = chunk.audio_data
-                if frames_to_skip > 0:
-                    skip_bytes = frames_to_skip * self._format.frame_size
-                    if skip_bytes >= len(chunk_data):
-                        # Skip entire chunk
-                        frames_to_skip -= len(chunk_data) // self._format.frame_size
-                        continue
-                    # Skip partial chunk
-                    chunk_data = chunk_data[skip_bytes:]
-                    frames_to_skip = 0
-
-                # Copy chunk data to output buffer
-                bytes_to_copy = min(len(chunk_data), bytes_needed - bytes_written)
                 output_buffer[bytes_written : bytes_written + bytes_to_copy] = chunk_data[
-                    :bytes_to_copy
+                    self._current_chunk_offset : self._current_chunk_offset + bytes_to_copy
                 ]
                 bytes_written += bytes_to_copy
+                self._current_chunk_offset += bytes_to_copy
+
+                # If chunk is exhausted, clear it so we pull next one
+                if self._current_chunk_offset >= len(chunk_data):
+                    self._current_chunk = None
+                    self._current_chunk_offset = 0
 
         except Exception:  # pragma: no cover - error handling
             logger.exception("Error in audio callback")
@@ -338,6 +372,9 @@ class AudioPlayer:
                 output_buffer[bytes_written : bytes_written + silence_bytes] = (
                     b"\x00" * silence_bytes
                 )
+            # Reset partial chunk state on error
+            self._current_chunk = None
+            self._current_chunk_offset = 0
 
     def submit(self, server_timestamp_us: int, payload: bytes) -> None:
         """
