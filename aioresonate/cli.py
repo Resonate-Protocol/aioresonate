@@ -226,15 +226,21 @@ def _create_audio_chunk_handler(
             if audio_player is not None:
                 audio_player.clear()
 
-            # Create a time conversion function that includes static delay
+            # Create time conversion functions that include static delay
             def compute_play_time(server_ts: int) -> int:
+                """Convert server timestamp to client play time (with static delay)."""
                 client_time = client._time_filter.compute_client_time(server_ts)  # noqa: SLF001
                 return client_time + client._static_delay_us  # noqa: SLF001
 
+            def compute_server_time(client_ts: int) -> int:
+                """Convert client timestamp to server timestamp (inverse of compute_play_time)."""
+                # Remove static delay first, then convert to server time
+                adjusted_client_time = client_ts - client._static_delay_us  # noqa: SLF001
+                return client._time_filter.compute_server_time(adjusted_client_time)  # noqa: SLF001
+
             loop = asyncio.get_running_loop()
-            audio_player = AudioPlayer(loop, compute_play_time)
+            audio_player = AudioPlayer(loop, compute_play_time, compute_server_time)
             audio_player.set_format(fmt)
-            audio_player.start()
             current_format = fmt
 
         # Submit audio chunk with server timestamp (AudioPlayer will compute client play time)
