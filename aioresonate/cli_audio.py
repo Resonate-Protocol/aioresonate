@@ -179,7 +179,7 @@ class AudioPlayer:
                 if self._closed:
                     break
 
-                # Recompute play time using current time filter state
+                # Initial play time estimate for coarse waiting
                 play_at_us = self._compute_client_time(chunk.server_timestamp_us)
 
                 # Check if chunk is too late
@@ -189,6 +189,26 @@ class AudioPlayer:
                     continue
 
                 await self._wait_until(play_at_us)
+
+                # Recompute play time just before playing to account for time filter updates
+                # during the wait. This prevents gradual desync as the Kalman filter
+                # continuously refines offset/drift estimates.
+                play_at_us = self._compute_client_time(chunk.server_timestamp_us)
+                now_us = self._now_us()
+
+                # Final check: if chunk became stale during wait, drop it
+                if play_at_us < now_us - 200_000:
+                    logger.debug(
+                        "Dropping chunk that became stale during wait (late by %d us)",
+                        now_us - play_at_us,
+                    )
+                    continue
+
+                # Short wait for any remaining time after recomputation
+                remaining_us = play_at_us - now_us
+                if remaining_us > 0:
+                    await asyncio.sleep(remaining_us / 1_000_000)
+
                 await self._write_audio(chunk.audio_data)
         except asyncio.CancelledError:  # pragma: no cover - cancellation path
             pass
