@@ -1076,12 +1076,18 @@ class Streamer:
             if not force_flush and available_samples < pipeline.chunk_samples:
                 break
 
-            sample_count = (
-                available_samples if force_flush else min(available_samples, pipeline.chunk_samples)
-            )
-            chunk_size = sample_count * frame_stride
-            chunk = bytes(temp_buffer[:chunk_size])
-            del temp_buffer[:chunk_size]
+            # Extract data to fit sample count
+            sample_count = pipeline.chunk_samples
+            if force_flush and available_samples < pipeline.chunk_samples:
+                # Pad incomplete chunk with zeros to reach full chunk_samples
+                audio_data_bytes = available_samples * frame_stride
+                padding_bytes = (sample_count - available_samples) * frame_stride
+                chunk = bytes(temp_buffer[:audio_data_bytes]) + bytes(padding_bytes)
+                del temp_buffer[:audio_data_bytes]
+            else:
+                chunk_size = sample_count * frame_stride
+                chunk = bytes(temp_buffer[:chunk_size])
+                del temp_buffer[:chunk_size]
 
             if temp_encoder is None:
                 # PCM - collect directly
@@ -1206,12 +1212,19 @@ class Streamer:
             available_samples = len(pipeline.buffer) // frame_stride
             if not force_flush and available_samples < pipeline.chunk_samples:
                 break
-            sample_count = (
-                available_samples if force_flush else min(available_samples, pipeline.chunk_samples)
-            )
-            chunk_size = sample_count * frame_stride
-            chunk = bytes(pipeline.buffer[:chunk_size])
-            del pipeline.buffer[:chunk_size]
+
+            # Extract data to fit sample count
+            sample_count = pipeline.chunk_samples
+            if force_flush and available_samples < pipeline.chunk_samples:
+                # Pad incomplete chunk with zeros to reach full chunk_samples
+                audio_data_bytes = available_samples * frame_stride
+                padding_bytes = (sample_count - available_samples) * frame_stride
+                chunk = bytes(pipeline.buffer[:audio_data_bytes]) + bytes(padding_bytes)
+                del pipeline.buffer[:audio_data_bytes]
+            else:
+                chunk_size = sample_count * frame_stride
+                chunk = bytes(pipeline.buffer[:chunk_size])
+                del pipeline.buffer[:chunk_size]
 
             if pipeline.encoder is None:
                 # PCM path: calculate timestamps from input sample count
