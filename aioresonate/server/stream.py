@@ -604,6 +604,20 @@ class Streamer:
             (start_samples + sample_count) * 1_000_000 / self._channel.audio_format.sample_rate
         )
 
+        # Check if this chunk would be stale (arriving too late to stream)
+        now_us = int(self._loop.time() * 1_000_000)
+        min_send_margin_us = 1_000_000  # 1s margin for network + client processing
+        if start_us < now_us + min_send_margin_us:
+            # Adjust timing globally (this modifies _play_start_time_us and all existing chunks)
+            self._adjust_timing_for_stale_chunk(now_us, start_us)
+            # Recalculate timestamps after adjustment
+            start_us = self._play_start_time_us + int(
+                start_samples * 1_000_000 / self._channel.audio_format.sample_rate
+            )
+            end_us = self._play_start_time_us + int(
+                (start_samples + sample_count) * 1_000_000 / self._channel.audio_format.sample_rate
+            )
+
         # Create and buffer the source chunk
         source_chunk = SourceChunk(
             pcm_data=chunk,
@@ -626,6 +640,68 @@ class Streamer:
             return buffer_duration_us < self._source_buffer_target_duration_us
 
         return True
+
+    def _adjust_timing_for_stale_chunk(self, now_us: int, chunk_start_us: int) -> None:
+        """Adjust timing when a stale chunk is detected.
+
+        Args:
+            now_us: Current time in microseconds.
+            chunk_start_us: Start time of the stale chunk.
+        """
+        min_send_margin_us = 1_000_000  # Must match constant in prepare()
+        target_buffer_us = self._source_buffer_target_duration_us  # 5 seconds for web players
+
+        # Calculate current buffer depth (from now to end of buffer)
+        current_buffer_us = 0
+        if self._source_buffer:
+            # Buffer depth is from now to the end of the last buffered chunk
+            last_chunk_end = self._source_buffer[-1].end_time_us
+            current_buffer_us = max(0, last_chunk_end - now_us)
+
+        # Calculate minimum adjustment needed to give this chunk proper headroom
+        headroom_shortfall_us = (now_us + min_send_margin_us) - chunk_start_us
+
+        # Determine total adjustment based on buffer status
+        if current_buffer_us >= target_buffer_us:
+            # We already have enough buffer, just ensure headroom
+            timing_adjustment_us = headroom_shortfall_us
+            logger.warning(
+                "Adjusting timing: chunk needs %.3fs more headroom, "
+                "already have %.3fs buffer (adjusting %.3fs)",
+                headroom_shortfall_us / 1_000_000,
+                current_buffer_us / 1_000_000,
+                timing_adjustment_us / 1_000_000,
+            )
+        else:
+            # Need to build buffer to target level
+            buffer_shortfall_us = target_buffer_us - current_buffer_us
+            # Use the larger of headroom need and buffer need
+            timing_adjustment_us = max(headroom_shortfall_us, buffer_shortfall_us)
+            logger.warning(
+                "Adjusting timing: chunk needs %.3fs headroom, have %.3fs buffer, "
+                "target %.3fs buffer (adjusting %.3fs)",
+                headroom_shortfall_us / 1_000_000,
+                current_buffer_us / 1_000_000,
+                target_buffer_us / 1_000_000,
+                timing_adjustment_us / 1_000_000,
+            )
+
+        # Adjust timing forward
+        self._play_start_time_us += timing_adjustment_us
+
+        # Update source buffer chunk timestamps
+        for source_chunk in self._source_buffer:
+            source_chunk.start_time_us += timing_adjustment_us
+            source_chunk.end_time_us += timing_adjustment_us
+
+        # Update pipeline timestamps and prepared chunks
+        for pipeline in self._pipelines.values():
+            if pipeline.next_chunk_start_us is not None:
+                pipeline.next_chunk_start_us += timing_adjustment_us
+            # Update timestamps of already-prepared chunks to prevent cascading adjustments
+            for prepared_chunk in pipeline.prepared:
+                prepared_chunk.start_time_us += timing_adjustment_us
+                prepared_chunk.end_time_us += timing_adjustment_us
 
     async def send(self) -> None:
         """Send prepared audio to all clients.
