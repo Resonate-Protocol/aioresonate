@@ -411,6 +411,18 @@ class Streamer:
         self._players = {}
         self._source_buffer = deque()
 
+    def _cleanup_consumed_chunks(self, pipeline: PipelineState) -> None:
+        """Clean up consumed chunks from a pipeline.
+
+        Note: consumed chunks (refcount == 0) can only appear as a contiguous block
+        at the front since chunks are consumed in FIFO order.
+
+        Args:
+            pipeline: The pipeline to clean up consumed chunks from.
+        """
+        while pipeline.prepared and pipeline.prepared[0].refcount == 0:
+            pipeline.prepared.popleft()
+
     def configure(
         self,
         *,
@@ -496,6 +508,9 @@ class Streamer:
                 for chunk in old_player.queue:
                     chunk.refcount -= 1
                 old_player.queue.clear()
+                # Clean up consumed chunks from old pipeline
+                if old_pipeline := self._pipelines.get(old_player.audio_format):
+                    self._cleanup_consumed_chunks(old_pipeline)
 
             # Create new player or reconfigure existing one
             buffer_tracker = (
@@ -554,6 +569,9 @@ class Streamer:
                 for chunk in old_player.queue:
                     chunk.refcount -= 1
                 old_player.queue.clear()
+                # Clean up consumed chunks from old pipeline
+                if old_pipeline := self._pipelines.get(old_player.audio_format):
+                    self._cleanup_consumed_chunks(old_pipeline)
 
         # Replace players dict
         self._players = new_players
