@@ -1306,8 +1306,7 @@ class Streamer:
             start_us: Start timestamp in microseconds.
             end_us: End timestamp in microseconds.
         """
-        assert packet.duration is not None
-        assert packet.duration > 0
+        assert packet.duration is not None  # For type checking
         chunk_data = bytes(packet)
         self._publish_chunk(pipeline, chunk_data, packet.duration, start_us, end_us)
 
