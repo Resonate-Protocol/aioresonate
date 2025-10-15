@@ -533,7 +533,6 @@ class ResonateGroup:
                 return active
 
         if not active:
-            logger.debug("stop called but no active stream task")
             return False
 
         logger.debug(
@@ -801,7 +800,6 @@ class ResonateGroup:
             client: The client to remove from this group.
         """
         if client not in self._clients:
-            logger.debug("client %s not in group, skipping removal", client.client_id)
             return
         logger.debug("removing %s from group with members: %s", client.client_id, self._clients)
         if len(self._clients) == 1:

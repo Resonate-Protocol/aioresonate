@@ -325,6 +325,8 @@ class PipelineState:
     """Whether pipeline has been flushed."""
     source_read_position: int = 0
     """Position in source buffer for this pipeline."""
+    next_chunk_start_us: int | None = None
+    """Next output chunk start timestamp, initialized from first source chunk."""
 
 
 @dataclass
@@ -333,7 +335,7 @@ class PlayerState:
 
     config: ClientStreamConfig
     """Client streaming configuration."""
-    pipeline_key: AudioFormat
+    audio_format: AudioFormat
     """Format key for pipeline lookup."""
     queue: deque[PreparedChunkState] = field(default_factory=deque)
     """Chunks queued for delivery."""
@@ -409,6 +411,18 @@ class Streamer:
         self._players = {}
         self._source_buffer = deque()
 
+    def _cleanup_consumed_chunks(self, pipeline: PipelineState) -> None:
+        """Clean up consumed chunks from a pipeline.
+
+        Note: consumed chunks (refcount == 0) can only appear as a contiguous block
+        at the front since chunks are consumed in FIFO order.
+
+        Args:
+            pipeline: The pipeline to clean up consumed chunks from.
+        """
+        while pipeline.prepared and pipeline.prepared[0].refcount == 0:
+            pipeline.prepared.popleft()
+
     def configure(
         self,
         *,
@@ -445,8 +459,8 @@ class Streamer:
         start_payloads: dict[str, StreamStartPlayer] = {}
 
         for client_cfg in clients:
-            pipeline_key = client_cfg.target_format
-            pipeline: PipelineState | None = self._pipelines.get(pipeline_key)
+            audio_format = client_cfg.target_format
+            pipeline: PipelineState | None = self._pipelines.get(audio_format)
             if pipeline is None:
                 # Create new pipeline for this format
                 source_spec = self._channel
@@ -477,23 +491,26 @@ class Streamer:
                     encoder=encoder,
                     codec_header_b64=codec_header_b64,
                 )
-                self._pipelines[pipeline_key] = pipeline
+                self._pipelines[audio_format] = pipeline
 
             pipeline.subscribers.append(client_cfg.client_id)
 
             old_player = self._players.get(client_cfg.client_id)
 
             # Reuse existing player if format unchanged
-            if old_player and old_player.pipeline_key == pipeline_key:
+            if old_player and old_player.audio_format == audio_format:
                 old_player.config = client_cfg
                 new_players[client_cfg.client_id] = old_player
                 continue
 
             # Format changed - clean up old queue refcounts
-            if old_player and old_player.pipeline_key != pipeline_key:
+            if old_player and old_player.audio_format != audio_format:
                 for chunk in old_player.queue:
                     chunk.refcount -= 1
                 old_player.queue.clear()
+                # Clean up consumed chunks from old pipeline
+                if old_pipeline := self._pipelines.get(old_player.audio_format):
+                    self._cleanup_consumed_chunks(old_pipeline)
 
             # Create new player or reconfigure existing one
             buffer_tracker = (
@@ -511,7 +528,7 @@ class Streamer:
 
             player_state = PlayerState(
                 config=client_cfg,
-                pipeline_key=pipeline_key,
+                audio_format=audio_format,
                 buffer_tracker=buffer_tracker,
                 join_time_us=join_time_us,
             )
@@ -552,6 +569,9 @@ class Streamer:
                 for chunk in old_player.queue:
                     chunk.refcount -= 1
                 old_player.queue.clear()
+                # Clean up consumed chunks from old pipeline
+                if old_pipeline := self._pipelines.get(old_player.audio_format):
+                    self._cleanup_consumed_chunks(old_pipeline)
 
         # Replace players dict
         self._players = new_players
@@ -718,7 +738,14 @@ class Streamer:
             if pipeline.encoder is not None:
                 packets = pipeline.encoder.encode(None)
                 for packet in packets:
-                    self._handle_encoded_packet(pipeline, packet)
+                    # Skip packets with invalid duration from encoder flush
+                    if not packet.duration or packet.duration <= 0:
+                        continue
+                    # Calculate timestamps for each flushed packet from its duration
+                    start_us, end_us = self._calculate_chunk_timestamps(pipeline, packet.duration)
+                    self._handle_encoded_packet(pipeline, packet, start_us, end_us)
+                    # Advance next_chunk_start_us for each flushed packet
+                    pipeline.next_chunk_start_us = end_us
             pipeline.flushed = True
 
     def reset(self) -> None:
@@ -733,7 +760,7 @@ class Streamer:
         """Remove chunk from player queue and clean up pipeline if fully consumed."""
         player_state.queue.popleft()
         chunk.refcount -= 1
-        pipeline = self._pipelines[player_state.pipeline_key]
+        pipeline = self._pipelines[player_state.audio_format]
         if chunk.refcount == 0 and pipeline.prepared and pipeline.prepared[0] is chunk:
             pipeline.prepared.popleft()
 
@@ -800,7 +827,7 @@ class Streamer:
             return
 
         join_time_us = player_state.join_time_us
-        pipeline = self._pipelines[player_state.pipeline_key]
+        pipeline = self._pipelines[player_state.audio_format]
 
         # Determine the coverage range we need to fill
         first_queued_start_us = player_state.queue[0].start_time_us if player_state.queue else None
@@ -1067,12 +1094,18 @@ class Streamer:
             if not force_flush and available_samples < pipeline.chunk_samples:
                 break
 
-            sample_count = (
-                available_samples if force_flush else min(available_samples, pipeline.chunk_samples)
-            )
-            chunk_size = sample_count * frame_stride
-            chunk = bytes(temp_buffer[:chunk_size])
-            del temp_buffer[:chunk_size]
+            # Extract data to fit sample count
+            sample_count = pipeline.chunk_samples
+            if force_flush and available_samples < pipeline.chunk_samples:
+                # Pad incomplete chunk with zeros to reach full chunk_samples
+                audio_data_bytes = available_samples * frame_stride
+                padding_bytes = (sample_count - available_samples) * frame_stride
+                chunk = bytes(temp_buffer[:audio_data_bytes]) + bytes(padding_bytes)
+                del temp_buffer[:audio_data_bytes]
+            else:
+                chunk_size = sample_count * frame_stride
+                chunk = bytes(temp_buffer[:chunk_size])
+                del temp_buffer[:chunk_size]
 
             if temp_encoder is None:
                 # PCM - collect directly
@@ -1112,8 +1145,7 @@ class Streamer:
             source_chunk = self._source_buffer[pipeline.source_read_position]
             self._process_source_pcm(
                 pipeline,
-                source_chunk.pcm_data,
-                source_chunk.sample_count,
+                source_chunk,
             )
             pipeline.source_read_position += 1
             any_work = True
@@ -1123,29 +1155,55 @@ class Streamer:
     def _process_source_pcm(
         self,
         pipeline: PipelineState,
-        source_pcm: bytes,
-        sample_count: int,
+        source_chunk: SourceChunk,
     ) -> None:
         """Process source PCM data through the pipeline's resampler.
 
         Args:
             pipeline: The pipeline to process through.
-            source_pcm: Raw PCM audio data from the source.
-            sample_count: Number of samples in the source PCM data.
+            source_chunk: The source PCM chunk to process.
         """
+        # Initialize next_chunk_start_us from first source chunk
+        if pipeline.next_chunk_start_us is None and not pipeline.buffer:
+            pipeline.next_chunk_start_us = source_chunk.start_time_us
+
         frame = av.AudioFrame(
             format=pipeline.channel.av_format,
             layout=pipeline.channel.av_layout,
-            samples=sample_count,
+            samples=source_chunk.sample_count,
         )
         frame.sample_rate = pipeline.channel.audio_format.sample_rate
-        frame.planes[0].update(source_pcm)
+        frame.planes[0].update(source_chunk.pcm_data)
         out_frames = pipeline.resampler.resample(frame)
         for out_frame in out_frames:
             expected = pipeline.target_frame_stride * out_frame.samples
             pcm_bytes = bytes(out_frame.planes[0])[:expected]
             pipeline.buffer.extend(pcm_bytes)
         self._drain_pipeline_buffer(pipeline, force_flush=False)
+
+    def _calculate_chunk_timestamps(
+        self,
+        pipeline: PipelineState,
+        sample_count: int,
+    ) -> tuple[int, int]:
+        """Calculate start and end timestamps for a chunk.
+
+        Uses the pipeline's next_chunk_start_us to maintain alignment with source timestamps.
+
+        Args:
+            pipeline: The pipeline producing the chunk.
+            sample_count: Number of samples in the chunk.
+
+        Returns:
+            Tuple of (start_us, end_us) timestamps.
+        """
+        if pipeline.next_chunk_start_us is None:
+            raise RuntimeError("Pipeline next_chunk_start_us not initialized")
+
+        start_us = pipeline.next_chunk_start_us
+        duration_us = int(sample_count * 1_000_000 / pipeline.target_format.sample_rate)
+        end_us = start_us + duration_us
+        return start_us, end_us
 
     def _drain_pipeline_buffer(
         self,
@@ -1157,6 +1215,7 @@ class Streamer:
 
         Extracts complete chunks from the pipeline buffer and either publishes them
         directly (for PCM) or encodes them first (for compressed codecs).
+        Calculates timestamps based on the pipeline's current sample position.
 
         Args:
             pipeline: The pipeline whose buffer to drain.
@@ -1171,15 +1230,28 @@ class Streamer:
             available_samples = len(pipeline.buffer) // frame_stride
             if not force_flush and available_samples < pipeline.chunk_samples:
                 break
-            sample_count = (
-                available_samples if force_flush else min(available_samples, pipeline.chunk_samples)
-            )
-            chunk_size = sample_count * frame_stride
-            chunk = bytes(pipeline.buffer[:chunk_size])
-            del pipeline.buffer[:chunk_size]
-            if pipeline.encoder is None:
-                self._publish_chunk(pipeline, chunk, sample_count)
+
+            # Extract data to fit sample count
+            sample_count = pipeline.chunk_samples
+            if force_flush and available_samples < pipeline.chunk_samples:
+                # Pad incomplete chunk with zeros to reach full chunk_samples
+                audio_data_bytes = available_samples * frame_stride
+                padding_bytes = (sample_count - available_samples) * frame_stride
+                chunk = bytes(pipeline.buffer[:audio_data_bytes]) + bytes(padding_bytes)
+                del pipeline.buffer[:audio_data_bytes]
             else:
+                chunk_size = sample_count * frame_stride
+                chunk = bytes(pipeline.buffer[:chunk_size])
+                del pipeline.buffer[:chunk_size]
+
+            if pipeline.encoder is None:
+                # PCM path: calculate timestamps from input sample count
+                start_us, end_us = self._calculate_chunk_timestamps(pipeline, sample_count)
+                self._publish_chunk(pipeline, chunk, sample_count, start_us, end_us)
+                # Advance next_chunk_start_us for the next chunk
+                pipeline.next_chunk_start_us = end_us
+            else:
+                # Encoder path: let encoder calculate timestamps from output packets
                 self._encode_and_publish(pipeline, chunk, sample_count)
 
     def _encode_and_publish(
@@ -1189,6 +1261,9 @@ class Streamer:
         sample_count: int,
     ) -> None:
         """Encode a PCM chunk and publish the resulting packets.
+
+        The encoder may buffer input and produce 0, 1, or multiple output packets.
+        Timestamps are calculated from each output packet's duration.
 
         Args:
             pipeline: The pipeline containing the encoder.
@@ -1205,46 +1280,57 @@ class Streamer:
         frame.sample_rate = pipeline.target_format.sample_rate
         frame.planes[0].update(chunk)
         packets = pipeline.encoder.encode(frame)
-        for packet in packets:
-            self._handle_encoded_packet(pipeline, packet)
 
-    def _handle_encoded_packet(self, pipeline: PipelineState, packet: av.Packet) -> None:
+        # Encoder may produce 0 or more packets
+        for packet in packets:
+            if not packet.duration or packet.duration <= 0:
+                raise ValueError(f"Invalid packet duration: {packet.duration!r}")
+            # Calculate timestamps from output packet duration
+            start_us, end_us = self._calculate_chunk_timestamps(pipeline, packet.duration)
+            self._handle_encoded_packet(pipeline, packet, start_us, end_us)
+            # Advance next_chunk_start_us for each packet produced
+            pipeline.next_chunk_start_us = end_us
+
+    def _handle_encoded_packet(
+        self,
+        pipeline: PipelineState,
+        packet: av.Packet,
+        start_us: int,
+        end_us: int,
+    ) -> None:
         """Handle an encoded packet by publishing it as a chunk.
 
         Args:
             pipeline: The pipeline that produced the packet.
             packet: The encoded audio packet from the encoder.
+            start_us: Start timestamp in microseconds.
+            end_us: End timestamp in microseconds.
         """
-        if not packet.duration or packet.duration <= 0:
-            raise ValueError(f"Invalid packet duration: {packet.duration!r}")
+        assert packet.duration is not None  # For type checking
         chunk_data = bytes(packet)
-        self._publish_chunk(pipeline, chunk_data, packet.duration)
+        self._publish_chunk(pipeline, chunk_data, packet.duration, start_us, end_us)
 
     def _publish_chunk(
         self,
         pipeline: PipelineState,
         audio_data: bytes,
         sample_count: int,
+        start_us: int,
+        end_us: int,
     ) -> None:
         """Create a PreparedChunkState and queue it for all subscribers.
 
-        Calculates timestamps based on sample position and queues the chunk
-        for delivery to all clients subscribed to this pipeline.
+        Queues the chunk for delivery to all clients subscribed to this pipeline.
 
         Args:
             pipeline: The pipeline publishing the chunk.
             audio_data: The encoded or PCM audio data.
             sample_count: Number of samples in the chunk.
+            start_us: Start timestamp in microseconds.
+            end_us: End timestamp in microseconds.
         """
         if not pipeline.subscribers or sample_count <= 0:
             return
-        start_samples = pipeline.samples_produced
-        start_us = self._play_start_time_us + int(
-            start_samples * 1_000_000 / pipeline.target_format.sample_rate
-        )
-        end_us = self._play_start_time_us + int(
-            (start_samples + sample_count) * 1_000_000 / pipeline.target_format.sample_rate
-        )
 
         chunk = PreparedChunkState(
             data=audio_data,
