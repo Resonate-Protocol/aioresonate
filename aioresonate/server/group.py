@@ -279,7 +279,7 @@ class ResonateGroup:
 
         return end_time_us
 
-    async def _run_streamer(
+    async def _run_streamer(  # noqa: PLR0915
         self,
         streamer: Streamer,
         media_stream: MediaStream,
@@ -287,6 +287,7 @@ class ResonateGroup:
         """Consume media channels, distribute via streamer, and return end timestamp."""
         last_end_us = self._play_start_time_us or int(self._server.loop.time() * 1_000_000)
         cancelled = False
+        just_started = True
 
         try:
             while True:
@@ -339,6 +340,18 @@ class ResonateGroup:
                         )
                         client.send_message(message)
                     continue
+
+                if just_started:
+                    try:
+                        while streamer.prepare(
+                            await anext(media_stream.source), during_initial_buffering=True
+                        ):
+                            # Pre-fill the initial buffer
+                            pass
+                    except StopAsyncIteration:
+                        # Source exhausted, exit loop
+                        break
+                    just_started = False
 
                 try:
                     chunk = await anext(media_stream.source)
