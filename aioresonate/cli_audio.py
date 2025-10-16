@@ -21,14 +21,10 @@ logger = logging.getLogger(__name__)
 class _QueuedChunk:
     """Represents a queued audio chunk with timing information."""
 
-    ## timestamp when the chunk should start to be output by the dac
     server_timestamp_us: int
-    """Original server timestamp for this chunk."""
+    """Server timestamp when this chunk should start playing."""
     audio_data: bytes
     """Raw PCM audio bytes."""
-    ## this is not needed? we receive chunks in order, so regular queue is fine
-    counter: int
-    """Sequence counter for priority queue ordering."""
 
 
 class AudioPlayer:
@@ -69,8 +65,7 @@ class AudioPlayer:
         self._compute_client_time = compute_client_time
         self._compute_server_time = compute_server_time
         self._format: PCMFormat | None = None
-        self._queue: asyncio.PriorityQueue[tuple[int, int, _QueuedChunk]] = asyncio.PriorityQueue()
-        self._counter = 0
+        self._queue: asyncio.Queue[_QueuedChunk] = asyncio.Queue()
         self._stream: sounddevice.RawStream | None = None
         self._closed = False
         self._output_latency_us = 0
@@ -233,7 +228,7 @@ class AudioPlayer:
         if self._queue.empty():
             return frames_to_skip
 
-        _priority, _counter, chunk = self._queue.get_nowait()
+        chunk = self._queue.get_nowait()
 
         # Initialize timing from first real chunk
         if self._first_real_chunk:
@@ -337,7 +332,7 @@ class AudioPlayer:
                         break
 
                     # Get next chunk from queue
-                    _priority, _counter, chunk = self._queue.get_nowait()
+                    chunk = self._queue.get_nowait()
 
                     # Check if chunk is ready to play
                     should_play, should_wait = self._check_and_prepare_chunk(
@@ -421,15 +416,12 @@ class AudioPlayer:
             )
             return
 
-        # Store server timestamp for priority queue ordering
-        self._counter += 1
+        # Queue chunk for playback (chunks arrive in order)
         chunk = _QueuedChunk(
             server_timestamp_us=server_timestamp_us,
             audio_data=payload,
-            counter=self._counter,
         )
-        # Use server timestamp for priority queue ordering
-        self._queue.put_nowait((server_timestamp_us, self._counter, chunk))
+        self._queue.put_nowait(chunk)
 
         # Start stream immediately when we have enough chunks buffered
         # The callback will initialize position to current DAC time for perfect sync
