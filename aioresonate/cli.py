@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import signal
 import sys
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
@@ -317,14 +318,24 @@ async def main_async(argv: Sequence[str] | None = None) -> int:
 
     _print_instructions()
 
-    ## ctrl c to quit is not working, need to spam ctrl c to quit
     keyboard_task = asyncio.create_task(_keyboard_loop(client, state, get_audio_player))
+
+    # Set up signal handler for graceful shutdown on Ctrl+C
+    loop = asyncio.get_running_loop()
+
+    def signal_handler() -> None:
+        logger.debug("Received interrupt signal, shutting down...")
+        keyboard_task.cancel()
+
+    loop.add_signal_handler(signal.SIGINT, signal_handler)
 
     try:
         await keyboard_task
     except asyncio.CancelledError:  # pragma: no cover - cancellation path
-        pass
+        logger.debug("Keyboard task cancelled")
     finally:
+        # Remove signal handler
+        loop.remove_signal_handler(signal.SIGINT)
         audio_player = get_audio_player()
         if audio_player is not None:
             await audio_player.stop()
@@ -365,40 +376,45 @@ async def _keyboard_loop(
     get_audio_player: Callable[[], AudioPlayer | None],
 ) -> None:
     loop = asyncio.get_running_loop()
-    while True:
-        line = await loop.run_in_executor(None, sys.stdin.readline)
-        if line == "":  # EOF
-            break
-        raw_line = line.strip()
-        if not raw_line:
-            continue
-        parts = raw_line.split()
-        command_lower = raw_line.lower()
-        keyword = parts[0].lower()
-        if command_lower in {"quit", "exit", "q"}:
-            break
-        if command_lower in {"play", "p"}:
-            await _send_media_command(client, state, MediaCommand.PLAY)
-        elif command_lower in {"pause", "space"}:
-            await _send_media_command(client, state, MediaCommand.PAUSE)
-        elif command_lower in {"stop", "s"}:
-            await _send_media_command(client, state, MediaCommand.STOP)
-        elif command_lower in {"next", "n"}:
-            await _send_media_command(client, state, MediaCommand.NEXT)
-        elif command_lower in {"previous", "prev", "b"}:
-            await _send_media_command(client, state, MediaCommand.PREVIOUS)
-        elif command_lower in {"vol+", "volume+", "+"}:
-            await _change_volume(client, state, 5)
-        elif command_lower in {"vol-", "volume-", "-"}:
-            await _change_volume(client, state, -5)
-        elif command_lower in {"mute", "m"}:
-            await _toggle_mute(client, state)
-        elif command_lower == "toggle":
-            await _toggle_play_pause(client, state)
-        elif keyword == "delay":
-            _handle_delay_command(client, parts, get_audio_player)
-        else:
-            _print_event("Unknown command")
+    try:
+        while True:
+            line = await loop.run_in_executor(None, sys.stdin.readline)
+            if line == "":  # EOF
+                break
+            raw_line = line.strip()
+            if not raw_line:
+                continue
+            parts = raw_line.split()
+            command_lower = raw_line.lower()
+            keyword = parts[0].lower()
+            if command_lower in {"quit", "exit", "q"}:
+                break
+            if command_lower in {"play", "p"}:
+                await _send_media_command(client, state, MediaCommand.PLAY)
+            elif command_lower in {"pause", "space"}:
+                await _send_media_command(client, state, MediaCommand.PAUSE)
+            elif command_lower in {"stop", "s"}:
+                await _send_media_command(client, state, MediaCommand.STOP)
+            elif command_lower in {"next", "n"}:
+                await _send_media_command(client, state, MediaCommand.NEXT)
+            elif command_lower in {"previous", "prev", "b"}:
+                await _send_media_command(client, state, MediaCommand.PREVIOUS)
+            elif command_lower in {"vol+", "volume+", "+"}:
+                await _change_volume(client, state, 5)
+            elif command_lower in {"vol-", "volume-", "-"}:
+                await _change_volume(client, state, -5)
+            elif command_lower in {"mute", "m"}:
+                await _toggle_mute(client, state)
+            elif command_lower == "toggle":
+                await _toggle_play_pause(client, state)
+            elif keyword == "delay":
+                _handle_delay_command(client, parts, get_audio_player)
+            else:
+                _print_event("Unknown command")
+    except asyncio.CancelledError:
+        # Graceful shutdown on Ctrl+C
+        logger.debug("Keyboard loop cancelled, exiting gracefully")
+        raise
 
 
 async def _send_media_command(
@@ -494,11 +510,7 @@ def _print_instructions() -> None:
 
 def main() -> int:
     """Run the CLI client."""
-    try:
-        return asyncio.run(main_async(sys.argv[1:]))
-    except KeyboardInterrupt:  # pragma: no cover - signal handling
-        print()  # noqa: T201
-        return 0
+    return asyncio.run(main_async(sys.argv[1:]))
 
 
 if __name__ == "__main__":  # pragma: no cover - CLI entry
