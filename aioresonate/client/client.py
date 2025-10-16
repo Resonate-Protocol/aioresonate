@@ -77,7 +77,28 @@ class ServerInfo:
 
 
 class ResonateClient:
-    """Async Resonate client capable of handling playback and metadata."""
+    """
+    Async Resonate client capable of handling playback and metadata.
+
+    Attributes:
+        _client_id: Unique identifier for this client.
+        _client_name: Human-readable name for this client.
+        _explicit_roles: Optional list of roles this client supports (CONTROLLER,
+            PLAYER, METADATA). If None, defaults to all roles.
+        _explicit_player_support: Optional custom player capabilities. If None,
+            defaults to PCM support with standard sample rates.
+        _explicit_metadata_support: Optional custom metadata capabilities. If None,
+            defaults to basic metadata support.
+        _session: Optional aiohttp ClientSession for WebSocket connection. If None,
+            a session is created and owned by this client.
+    """
+
+    _client_id: str
+    _client_name: str
+    _explicit_roles: list[Roles] | None
+    _explicit_player_support: ClientHelloPlayerSupport | None
+    _explicit_metadata_support: ClientHelloMetadataSupport | None
+    _session: ClientSession | None
 
     def __init__(
         self,
@@ -90,9 +111,23 @@ class ResonateClient:
         session: ClientSession | None = None,
         static_delay_ms: float = 0.0,
     ) -> None:
-        """Create a new Resonate client instance."""
-        ## remove typing from here, and add with docs and typing to the class itself
-        ## check if they all needed or some can be removed
+        """
+        Create a new Resonate client instance.
+
+        Args:
+            client_id: Unique identifier for this client.
+            client_name: Human-readable name for this client.
+            roles: Optional sequence of roles this client supports. If None,
+                defaults to [CONTROLLER, PLAYER, METADATA].
+            player_support: Optional custom player capabilities. If None, defaults
+                to PCM support with standard sample rates.
+            metadata_support: Optional custom metadata capabilities. If None,
+                defaults to basic metadata support.
+            session: Optional aiohttp ClientSession. If None, a session is created
+                and managed by this client.
+            static_delay_ms: Static playback delay in milliseconds applied after
+                clock synchronization. Defaults to 0.0.
+        """
         self._client_id = client_id
         self._client_name = client_name
         self._explicit_roles = list(roles) if roles is not None else None
