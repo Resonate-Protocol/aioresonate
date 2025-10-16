@@ -601,21 +601,12 @@ class Streamer:
 
         # Calculate timestamps for this chunk
         start_samples = self._source_samples_produced
-        start_us = self._play_start_time_us + int(
-            start_samples * 1_000_000 / self._channel.audio_format.sample_rate
-        )
-        end_us = self._play_start_time_us + int(
-            (start_samples + sample_count) * 1_000_000 / self._channel.audio_format.sample_rate
-        )
 
-        # Check if this chunk would be stale (arriving too late to stream)
-        now_us = int(self._loop.time() * 1_000_000)
-        if start_us < now_us + self._min_send_margin_us:
-            # Adjust timing globally (this modifies _play_start_time_us and all existing chunks)
-            self._adjust_timing_for_stale_chunk(
-                now_us, start_us, during_initial_buffering=during_initial_buffering
-            )
-            # Recalculate timestamps after adjustment
+        # Check and adjust for stale chunks (skip during initial buffering)
+        if not during_initial_buffering:
+            start_us, end_us = self._check_and_adjust_for_stale_chunk(start_samples, sample_count)
+        else:
+            # During initial buffering, just calculate timestamps without stale detection
             start_us = self._play_start_time_us + int(
                 start_samples * 1_000_000 / self._channel.audio_format.sample_rate
             )
@@ -646,16 +637,48 @@ class Streamer:
 
         return True
 
-    def _adjust_timing_for_stale_chunk(
-        self, now_us: int, chunk_start_us: int, *, during_initial_buffering: bool = False
-    ) -> None:
+    def _check_and_adjust_for_stale_chunk(
+        self, start_samples: int, sample_count: int
+    ) -> tuple[int, int]:
+        """Check if the next chunk would be stale and adjust timing if needed.
+
+        Args:
+            start_samples: Sample position where the chunk starts.
+            sample_count: Number of samples in the chunk.
+
+        Returns:
+            Tuple of (start_us, end_us) timestamps after any adjustments.
+        """
+        if self._channel is None:
+            raise RuntimeError("Channel not configured")
+
+        # Calculate initial timestamps
+        start_us = self._play_start_time_us + int(
+            start_samples * 1_000_000 / self._channel.audio_format.sample_rate
+        )
+
+        # Check if this chunk would be stale
+        now_us = int(self._loop.time() * 1_000_000)
+        if start_us < now_us + self._min_send_margin_us:
+            # Adjust timing globally
+            self._adjust_timing_for_stale_chunk(now_us, start_us)
+            # Recalculate timestamps after adjustment
+            start_us = self._play_start_time_us + int(
+                start_samples * 1_000_000 / self._channel.audio_format.sample_rate
+            )
+
+        end_us = self._play_start_time_us + int(
+            (start_samples + sample_count) * 1_000_000 / self._channel.audio_format.sample_rate
+        )
+
+        return start_us, end_us
+
+    def _adjust_timing_for_stale_chunk(self, now_us: int, chunk_start_us: int) -> None:
         """Adjust timing when a stale chunk is detected.
 
         Args:
             now_us: Current time in microseconds.
             chunk_start_us: Start time of the stale chunk.
-            during_initial_buffering: True when filling initial buffer, which skips
-                building the full 5-second target buffer and only ensures minimum headroom.
         """
         target_buffer_us = self._source_buffer_target_duration_us
 
@@ -670,8 +693,8 @@ class Streamer:
         headroom_shortfall_us = (now_us + self._min_send_margin_us) - chunk_start_us
 
         # Determine total adjustment based on buffer status
-        if current_buffer_us >= target_buffer_us or during_initial_buffering:
-            # We already have enough buffer OR we're doing initial fill - just ensure headroom
+        if current_buffer_us >= target_buffer_us:
+            # We already have enough buffer, just ensure headroom
             timing_adjustment_us = headroom_shortfall_us
             logger.debug(
                 "Adjusting timing: chunk needs %.3fs more headroom, "
