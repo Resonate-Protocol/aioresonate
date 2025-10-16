@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import threading
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Final
@@ -79,12 +78,6 @@ class AudioPlayer:
         self._queue: asyncio.Queue[_QueuedChunk] = asyncio.Queue()
         self._stream: sounddevice.RawStream | None = None
         self._closed = False
-
-        # Drift tracking for feedback control
-        self._last_expected_server_time_us: int | None = None
-        self._drift_error_us = 0
-        self._correction_frames = 0.0
-        self._callback_lock = threading.Lock()
         self._stream_started = False
         self._first_real_chunk = True  # Flag to initialize timing from first chunk
 
@@ -100,10 +93,7 @@ class AudioPlayer:
         self._format = pcm_format
         self._close_stream()
 
-        # Reset drift tracking on format change
-        self._last_expected_server_time_us = None
-        self._drift_error_us = 0
-        self._correction_frames = 0.0
+        # Reset state on format change
         self._stream_started = False
         self._first_real_chunk = True
 
@@ -129,15 +119,10 @@ class AudioPlayer:
                 self._queue.get_nowait()
             except asyncio.QueueEmpty:  # pragma: no cover - race condition guard
                 break
-        # Reset drift tracking
-        self._last_expected_server_time_us = None
-        self._drift_error_us = 0
-        self._correction_frames = 0.0
+        # Reset playback state
         self._first_real_chunk = True
-        # Reset partial chunk tracking
         self._current_chunk = None
         self._current_chunk_offset = 0
-        # Reset playback position
         self._playback_position_server_us = None
 
     def _audio_callback(
@@ -172,78 +157,9 @@ class AudioPlayer:
         # Convert to server timestamp - what should be playing at this DAC time
         target_server_time_us = self._compute_server_time(dac_time_us)
 
-        # Measure and correct drift
-        correction_frames = self._measure_and_correct_drift(frames, target_server_time_us)
-
         # Fill the output buffer
-        self._fill_audio_buffer(outdata, frames, target_server_time_us, correction_frames)
-
-    def _measure_and_correct_drift(self, frames: int, target_server_time_us: int) -> int:
-        """
-        Measure drift and compute correction frames needed.
-
-        Returns:
-            Number of frames to correct (positive = insert silence, negative = skip audio).
-        """
-        assert self._format is not None
-
-        # Don't measure drift until we've started playing real audio
-        if self._first_real_chunk:
-            return 0
-
-        # Measure drift if we have a previous reference
-        if self._last_expected_server_time_us is not None:
-            # Calculate how much time passed in the audio stream
-            frame_duration_us = int((frames * 1_000_000) / self._format.sample_rate)
-            expected_server_time_us = self._last_expected_server_time_us + frame_duration_us
-
-            # Drift = how far off we are from expected
-            self._drift_error_us = target_server_time_us - expected_server_time_us
-
-            if abs(self._drift_error_us) > 1000:  # Log if > 1ms
-                logger.debug("Drift error: %d us", self._drift_error_us)
-
-        # Update expected time for next callback (will be overridden by first chunk)
-        frame_duration_us = int((frames * 1_000_000) / self._format.sample_rate)
-        self._last_expected_server_time_us = target_server_time_us + frame_duration_us
-
-        ## re-enable drift correction! if not already handled anywhere else. if not remove all this
-        # TODO: Re-enable drift correction after basic playback works
-        # For now, just measure but don't correct
-        return 0
-
-    def _get_next_chunk(
-        self,
-        target_server_time_us: int,  # noqa: ARG002 - unused temporarily
-        frames_to_skip: int,
-    ) -> int:
-        """
-        Pull next chunk from queue and prepare it for playback.
-
-        Returns:
-            Updated frames_to_skip count after processing this chunk.
-        """
-        assert self._format is not None
-
-        if self._queue.empty():
-            return frames_to_skip
-
-        chunk = self._queue.get_nowait()
-
-        # Initialize timing from first real chunk
-        if self._first_real_chunk:
-            self._first_real_chunk = False
-            self._last_expected_server_time_us = chunk.server_timestamp_us
-            logger.debug("Initialized timing from first chunk at %d us", chunk.server_timestamp_us)
-
-        ## same here as above
-        # TODO: Re-enable lateness check after basic playback works
-        # For now, just play all chunks in order
-
-        # Don't apply corrections for now
-        self._current_chunk_offset = 0
-        self._current_chunk = chunk
-        return 0
+        # Drift correction is handled in _check_and_prepare_chunk()
+        self._fill_audio_buffer(outdata, frames, target_server_time_us)
 
     def _check_and_prepare_chunk(
         self, chunk: _QueuedChunk, target_server_time_us: int
@@ -283,11 +199,11 @@ class AudioPlayer:
             )
 
         # Apply drift correction by adjusting playback position
-        if abs(drift_us) > 50_000:  # Hard sync at >50ms
+        if abs(drift_us) > self._HARD_SYNC_THRESHOLD_US:  # Hard sync at >50ms
             logger.info("Hard sync: adjusting position by %d us", -drift_us)
             self._playback_position_server_us = target_server_time_us
             chunk_delta_us = chunk.server_timestamp_us - self._playback_position_server_us
-        elif abs(drift_us) > 10_000:  # Gentle correction at >10ms
+        elif abs(drift_us) > self._SOFT_SYNC_THRESHOLD_US:  # Gentle correction at >10ms
             # Nudge position by 10% of error
             correction_us = int(drift_us * 0.1)
             self._playback_position_server_us -= correction_us
@@ -310,7 +226,6 @@ class AudioPlayer:
         outdata: memoryview,
         frames: int,
         target_server_time_us: int,
-        correction_frames: int,  # noqa: ARG002 - unused temporarily
     ) -> None:
         """Fill output buffer with audio data, using timestamp-based chunk selection."""
         assert self._format is not None
