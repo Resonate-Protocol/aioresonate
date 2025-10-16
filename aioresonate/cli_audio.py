@@ -34,6 +34,14 @@ class AudioPlayer:
     This player accepts audio chunks with server timestamps and dynamically
     computes playback times using a time synchronization function. This allows
     for accurate synchronization even when the time base changes during playback.
+
+    Attributes:
+        _loop: The asyncio event loop used for scheduling.
+        _compute_client_time: Function that converts server timestamps to client
+            timestamps (monotonic loop time), accounting for clock drift, offset,
+            and static delay.
+        _compute_server_time: Function that converts client timestamps (monotonic
+            loop time) to server timestamps (inverse of _compute_client_time).
     """
 
     _PREPLAY_MARGIN_US: Final[int] = 1_000
@@ -42,6 +50,10 @@ class AudioPlayer:
     # Drift correction thresholds (from ESP32 implementation)
     _HARD_SYNC_THRESHOLD_US: Final[int] = 50_000  # 50ms - aggressive correction
     _SOFT_SYNC_THRESHOLD_US: Final[int] = 10_000  # 10ms - gentle correction
+
+    _loop: asyncio.AbstractEventLoop
+    _compute_client_time: Callable[[int], int]
+    _compute_server_time: Callable[[int], int]
 
     def __init__(
         self,
@@ -60,7 +72,6 @@ class AudioPlayer:
             compute_server_time: Function that converts client timestamps (monotonic
                 loop time) to server timestamps (inverse of compute_client_time).
         """
-        ## remove typing from here, and add with docs and typing to the class itself
         self._loop = loop
         self._compute_client_time = compute_client_time
         self._compute_server_time = compute_server_time
