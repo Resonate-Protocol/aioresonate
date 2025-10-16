@@ -8,7 +8,7 @@ from collections.abc import Awaitable, Callable, Sequence
 from contextlib import suppress
 from dataclasses import dataclass
 from types import TracebackType
-from typing import Any, Self
+from typing import Protocol, Self, TypeVar
 
 from aiohttp import ClientSession, ClientWebSocketResponse, WSMessage, WSMsgType
 
@@ -49,6 +49,15 @@ from .audio import PCMFormat
 from .time_sync import ResonateTimeFilter
 
 logger = logging.getLogger(__name__)
+
+_T = TypeVar("_T")
+
+
+class _HasToJson(Protocol):
+    """Protocol for objects that can be serialized to JSON."""
+
+    def to_json(self) -> str: ...
+
 
 MetadataCallback = Callable[[SessionUpdatePayload], Awaitable[None] | None]
 GroupUpdateCallback = Callable[[GroupUpdateServerPayload], Awaitable[None] | None]
@@ -327,10 +336,10 @@ class ResonateClient:
             self._pending_time_message = False
             raise
 
-    async def _send_json(self, message: Any) -> None:
+    async def _send_json(self, message: _HasToJson) -> None:
         if not self._ws:
             raise RuntimeError("WebSocket is not connected")
-        payload = message.to_json() if hasattr(message, "to_json") else str(message)
+        payload = message.to_json()
         async with self._send_lock:
             await self._ws.send_str(payload)
 
@@ -531,8 +540,8 @@ class ResonateClient:
 
     async def _notify_callbacks(
         self,
-        callbacks: list[Callable[[Any], Awaitable[None] | None]],
-        payload: Any,
+        callbacks: list[Callable[[_T], Awaitable[None] | None]],
+        payload: _T,
     ) -> None:
         for callback in callbacks:
             try:

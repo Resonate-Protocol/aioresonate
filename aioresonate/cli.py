@@ -8,14 +8,17 @@ import logging
 import sys
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
-from typing import Any, cast
+from typing import TYPE_CHECKING, cast
+
+if TYPE_CHECKING:
+    from zeroconf import ServiceListener
 
 from zeroconf.asyncio import AsyncServiceBrowser, AsyncZeroconf
 
 from aioresonate.cli_audio import AudioPlayer
 from aioresonate.client import PCMFormat, ResonateClient
 from aioresonate.models.controller import GroupUpdateServerPayload
-from aioresonate.models.core import SessionUpdatePayload
+from aioresonate.models.core import SessionUpdatePayload, StreamStartMessage
 from aioresonate.models.metadata import SessionUpdateMetadata
 from aioresonate.models.types import MediaCommand, PlaybackStateType, UndefinedField
 
@@ -164,8 +167,9 @@ async def _discover_server(discovery_timeout: float) -> str | None:
 
     listener = _Listener()
     async with AsyncZeroconf() as zeroconf:
-        ## dont use Any! proper typing
-        browser = AsyncServiceBrowser(zeroconf.zeroconf, SERVICE_TYPE, cast("Any", listener))
+        browser = AsyncServiceBrowser(
+            zeroconf.zeroconf, SERVICE_TYPE, cast("ServiceListener", listener)
+        )
         try:
             return await asyncio.wait_for(listener.result, discovery_timeout)
         except TimeoutError:
@@ -260,7 +264,7 @@ def _create_audio_chunk_handler(
 
 def _create_stream_handlers(
     get_audio_player: Callable[[], AudioPlayer | None],
-) -> tuple[Callable[[Any], None], Callable[[], None]]:
+) -> tuple[Callable[[StreamStartMessage], None], Callable[[], None]]:
     """
     Create stream start/end handlers that clear audio queue.
 
@@ -268,8 +272,7 @@ def _create_stream_handlers(
         A tuple of (stream_start_handler, stream_end_handler).
     """
 
-    ## dont use Any when possible
-    def handle_stream_start(_message: Any) -> None:
+    def handle_stream_start(_message: StreamStartMessage) -> None:
         """Handle stream start by clearing stale audio chunks."""
         audio_player = get_audio_player()
         if audio_player is not None:
@@ -325,9 +328,7 @@ async def main_async(argv: Sequence[str] | None = None) -> int:
         await client.disconnect()
         return 1
 
-    audio_player = get_audio_player()
-    if audio_player is None or not audio_player.audio_available:
-        _print_event("Audio playback disabled (sounddevice not installed)")
+    # Audio player will be created when first audio chunk arrives
 
     _print_instructions()
 

@@ -7,29 +7,14 @@ import logging
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Final, Protocol, cast
+from typing import Final
 
-## make this a hard dependency and use proper imports, add to pyproject.toml if not already there
-try:
-    import sounddevice as _sounddevice
-except ImportError:  # pragma: no cover - optional dependency
-    _sounddevice = None
+import sounddevice
+from sounddevice import CallbackFlags
 
 from aioresonate.client import PCMFormat
 
 logger = logging.getLogger(__name__)
-
-
-class _AudioStreamProto(Protocol):
-    """Subset of methods used from the sounddevice RawOutputStream."""
-
-    def start(self) -> None: ...
-
-    def write(self, data: bytes) -> Any: ...
-
-    def stop(self) -> None: ...
-
-    def close(self) -> None: ...
 
 
 @dataclass(slots=True)
@@ -85,9 +70,8 @@ class AudioPlayer:
         self._format: PCMFormat | None = None
         self._queue: asyncio.PriorityQueue[tuple[int, int, _QueuedChunk]] = asyncio.PriorityQueue()
         self._counter = 0
-        self._stream: _AudioStreamProto | None = None
+        self._stream: sounddevice.RawStream | None = None
         self._closed = False
-        self._audio_available = _sounddevice is not None
         self._output_latency_us = 0
 
         # Drift tracking for feedback control
@@ -105,20 +89,9 @@ class AudioPlayer:
         # Track current playback position in server timeline
         self._playback_position_server_us: int | None = None
 
-        ## sounddevice should be a hard dependency
-        if not self._audio_available:
-            logger.warning("sounddevice is not installed. Audio playback will be disabled.")
-
-    @property
-    def audio_available(self) -> bool:
-        """Return True if an audio backend is available."""
-        return self._audio_available
-
     def set_format(self, pcm_format: PCMFormat) -> None:
         """Configure the audio output format."""
         self._format = pcm_format
-        if not self._audio_available:
-            return
         self._close_stream()
 
         # Reset drift tracking on format change
@@ -128,33 +101,25 @@ class AudioPlayer:
         self._stream_started = False
         self._first_real_chunk = True
 
-        ## here again
-        assert _sounddevice is not None  # for mypy
         dtype = "int16"
-        try:
-            # Use callback-based stream for true timing feedback
-            # Note: Don't start yet - wait for audio to be buffered
-            stream = _sounddevice.RawStream(
-                samplerate=pcm_format.sample_rate,
-                channels=pcm_format.channels,
-                dtype=dtype,
-                callback=self._audio_callback,
-            )
+        # Use callback-based stream for true timing feedback
+        # Note: Don't start yet - wait for audio to be buffered
+        stream = sounddevice.RawStream(
+            samplerate=pcm_format.sample_rate,
+            channels=pcm_format.channels,
+            dtype=dtype,
+            callback=self._audio_callback,
+        )
 
-            ## then remove it if its just for logging
-            # Get output latency for logging (no longer used for compensation)
-            # RawStream returns (input_latency, output_latency) tuple
-            latency = stream.latency
-            latency_s = latency[1] if isinstance(latency, tuple) else latency
-            self._output_latency_us = int(latency_s * 1_000_000)
-            logger.info("Audio output latency: %.1f ms (managed by callback)", latency_s * 1000)
+        ## then remove it if its just for logging
+        # Get output latency for logging (no longer used for compensation)
+        # RawStream returns (input_latency, output_latency) tuple
+        latency = stream.latency
+        latency_s = latency[1] if isinstance(latency, tuple) else latency
+        self._output_latency_us = int(latency_s * 1_000_000)
+        logger.info("Audio output latency: %.1f ms (managed by callback)", latency_s * 1000)
 
-            self._stream = cast("_AudioStreamProto", stream)
-        except Exception:  # pragma: no cover - backend failure
-            logger.exception("Failed to open audio output stream")
-            self._stream = None
-            self._audio_available = False
-            self._output_latency_us = 0
+        self._stream = stream
 
     async def stop(self) -> None:
         """Stop playback and release resources."""
@@ -181,11 +146,11 @@ class AudioPlayer:
 
     def _audio_callback(
         self,
-        indata: Any,  # noqa: ARG002 - unused but required by signature
-        outdata: Any,
+        indata: memoryview,  # noqa: ARG002 - unused but required by signature
+        outdata: memoryview,
         frames: int,
-        time: Any,
-        status: Any,
+        time: sounddevice.CallbackTimeInfo,
+        status: CallbackFlags,
     ) -> None:
         """
         Audio callback invoked by sounddevice when output buffer needs filling.
@@ -346,7 +311,7 @@ class AudioPlayer:
 
     def _fill_audio_buffer(
         self,
-        outdata: Any,
+        outdata: memoryview,
         frames: int,
         target_server_time_us: int,
         correction_frames: int,  # noqa: ARG002 - unused temporarily
@@ -475,7 +440,7 @@ class AudioPlayer:
     def _close_stream(self) -> None:
         """Close the audio output stream."""
         stream = self._stream
-        if stream is not None and self._audio_available:
+        if stream is not None:
             try:
                 stream.stop()
                 stream.close()

@@ -19,6 +19,7 @@ dependencies = [
   "mashumaro>=3.14",
   "orjson>=3.10.0",
   "pillow>=11.0.0",
+  "sounddevice>=0.4.6",
   "zeroconf>=0.147",
 ]
 
@@ -41,9 +42,6 @@ test = [
   "syrupy==5.0.0",
   "tomli==2.3.0",
   "ruff==0.14.0",
-]
-cli = [
-  "sounddevice>=0.4.6",
 ]
 
 [project.scripts]
