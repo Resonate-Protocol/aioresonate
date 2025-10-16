@@ -673,7 +673,7 @@ class Streamer:
         if current_buffer_us >= target_buffer_us or during_initial_buffering:
             # We already have enough buffer OR we're doing initial fill - just ensure headroom
             timing_adjustment_us = headroom_shortfall_us
-            logger.warning(
+            logger.debug(
                 "Adjusting timing: chunk needs %.3fs more headroom, "
                 "already have %.3fs buffer (adjusting %.3fs)",
                 headroom_shortfall_us / 1_000_000,
@@ -685,7 +685,7 @@ class Streamer:
             buffer_shortfall_us = target_buffer_us - current_buffer_us
             # Use the larger of headroom need and buffer need
             timing_adjustment_us = max(headroom_shortfall_us, buffer_shortfall_us)
-            logger.warning(
+            logger.debug(
                 "Adjusting timing: chunk needs %.3fs headroom, have %.3fs buffer, "
                 "target %.3fs buffer (adjusting %.3fs)",
                 headroom_shortfall_us / 1_000_000,
