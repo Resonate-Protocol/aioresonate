@@ -397,6 +397,8 @@ class Streamer:
     """Total number of samples added to the source buffer (used for timestamp calculation)."""
     _source_buffer_target_duration_us: int = 5_000_000
     """Target duration for source buffer in microseconds."""
+    _min_send_margin_us: int = 1_000_000
+    """Minimum time margin before playback for stale chunk detection (1 second)."""
 
     def __init__(
         self,
@@ -578,11 +580,13 @@ class Streamer:
 
         return start_payloads
 
-    def prepare(self, chunk: bytes) -> bool:
+    def prepare(self, chunk: bytes, *, during_initial_buffering: bool = False) -> bool:
         """Buffer raw PCM data and process through pipelines.
 
         Args:
             chunk: Raw PCM audio data to buffer.
+            during_initial_buffering: True when filling initial buffer on startup,
+                which skips building full 5-second buffer during timing adjustments.
 
         Returns:
             True if more data is wanted (buffer duration < target), False otherwise.
@@ -606,10 +610,11 @@ class Streamer:
 
         # Check if this chunk would be stale (arriving too late to stream)
         now_us = int(self._loop.time() * 1_000_000)
-        min_send_margin_us = 1_000_000  # 1s margin for network + client processing
-        if start_us < now_us + min_send_margin_us:
+        if start_us < now_us + self._min_send_margin_us:
             # Adjust timing globally (this modifies _play_start_time_us and all existing chunks)
-            self._adjust_timing_for_stale_chunk(now_us, start_us)
+            self._adjust_timing_for_stale_chunk(
+                now_us, start_us, during_initial_buffering=during_initial_buffering
+            )
             # Recalculate timestamps after adjustment
             start_us = self._play_start_time_us + int(
                 start_samples * 1_000_000 / self._channel.audio_format.sample_rate
@@ -641,15 +646,18 @@ class Streamer:
 
         return True
 
-    def _adjust_timing_for_stale_chunk(self, now_us: int, chunk_start_us: int) -> None:
+    def _adjust_timing_for_stale_chunk(
+        self, now_us: int, chunk_start_us: int, *, during_initial_buffering: bool = False
+    ) -> None:
         """Adjust timing when a stale chunk is detected.
 
         Args:
             now_us: Current time in microseconds.
             chunk_start_us: Start time of the stale chunk.
+            during_initial_buffering: True when filling initial buffer, which skips
+                building the full 5-second target buffer and only ensures minimum headroom.
         """
-        min_send_margin_us = 1_000_000  # Must match constant in prepare()
-        target_buffer_us = self._source_buffer_target_duration_us  # 5 seconds for web players
+        target_buffer_us = self._source_buffer_target_duration_us
 
         # Calculate current buffer depth (from now to end of buffer)
         current_buffer_us = 0
@@ -659,13 +667,13 @@ class Streamer:
             current_buffer_us = max(0, last_chunk_end - now_us)
 
         # Calculate minimum adjustment needed to give this chunk proper headroom
-        headroom_shortfall_us = (now_us + min_send_margin_us) - chunk_start_us
+        headroom_shortfall_us = (now_us + self._min_send_margin_us) - chunk_start_us
 
         # Determine total adjustment based on buffer status
-        if current_buffer_us >= target_buffer_us:
-            # We already have enough buffer, just ensure headroom
+        if current_buffer_us >= target_buffer_us or during_initial_buffering:
+            # We already have enough buffer OR we're doing initial fill - just ensure headroom
             timing_adjustment_us = headroom_shortfall_us
-            logger.warning(
+            logger.debug(
                 "Adjusting timing: chunk needs %.3fs more headroom, "
                 "already have %.3fs buffer (adjusting %.3fs)",
                 headroom_shortfall_us / 1_000_000,
@@ -677,7 +685,7 @@ class Streamer:
             buffer_shortfall_us = target_buffer_us - current_buffer_us
             # Use the larger of headroom need and buffer need
             timing_adjustment_us = max(headroom_shortfall_us, buffer_shortfall_us)
-            logger.warning(
+            logger.debug(
                 "Adjusting timing: chunk needs %.3fs headroom, have %.3fs buffer, "
                 "target %.3fs buffer (adjusting %.3fs)",
                 headroom_shortfall_us / 1_000_000,
