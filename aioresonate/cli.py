@@ -232,7 +232,6 @@ def _create_audio_chunk_handler(
                 audio_player.clear()
 
             loop = asyncio.get_running_loop()
-            ## fix lsp error
             # Use client's public time conversion methods (based on monotonic loop time)
             audio_player = AudioPlayer(loop, client.compute_play_time, client.compute_server_time)
             audio_player.set_format(fmt)
