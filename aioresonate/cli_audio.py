@@ -79,7 +79,6 @@ class AudioPlayer:
         self._queue: asyncio.Queue[_QueuedChunk] = asyncio.Queue()
         self._stream: sounddevice.RawStream | None = None
         self._closed = False
-        self._output_latency_us = 0
 
         # Drift tracking for feedback control
         self._last_expected_server_time_us: int | None = None
@@ -111,22 +110,12 @@ class AudioPlayer:
         dtype = "int16"
         # Use callback-based stream for true timing feedback
         # Note: Don't start yet - wait for audio to be buffered
-        stream = sounddevice.RawStream(
+        self._stream = sounddevice.RawStream(
             samplerate=pcm_format.sample_rate,
             channels=pcm_format.channels,
             dtype=dtype,
             callback=self._audio_callback,
         )
-
-        ## then remove it if its just for logging
-        # Get output latency for logging (no longer used for compensation)
-        # RawStream returns (input_latency, output_latency) tuple
-        latency = stream.latency
-        latency_s = latency[1] if isinstance(latency, tuple) else latency
-        self._output_latency_us = int(latency_s * 1_000_000)
-        logger.info("Audio output latency: %.1f ms (managed by callback)", latency_s * 1000)
-
-        self._stream = stream
 
     async def stop(self) -> None:
         """Stop playback and release resources."""
