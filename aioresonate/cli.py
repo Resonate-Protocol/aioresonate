@@ -196,9 +196,6 @@ def _create_audio_chunk_handler(
     first_sync_message_printed: bool = False
     dropped_chunks: int = 0
 
-    ## refactor so server timestamp conversion if handled by the client library, and not the cli,
-    ## use loop time instead as a base measure since its monotonic. the client library should do the
-    ## hard work, to make apps like the cli as simple as possible
     def handle_audio_chunk(server_timestamp_us: int, audio_data: bytes, fmt: PCMFormat) -> None:
         """Handle incoming audio chunks."""
         nonlocal audio_player, current_format, sync_ready, first_sync_message_printed
@@ -234,21 +231,10 @@ def _create_audio_chunk_handler(
             if audio_player is not None:
                 audio_player.clear()
 
-            # Create time conversion functions that include static delay
-            def compute_play_time(server_ts: int) -> int:
-                """Convert server timestamp to client play time (with static delay)."""
-                client_time = client._time_filter.compute_client_time(server_ts)  # noqa: SLF001
-                return client_time + client._static_delay_us  # noqa: SLF001
-
-            def compute_server_time(client_ts: int) -> int:
-                """Convert client timestamp to server timestamp (inverse of compute_play_time)."""
-                # Remove static delay first, then convert to server time
-                adjusted_client_time = client_ts - client._static_delay_us  # noqa: SLF001
-                return client._time_filter.compute_server_time(adjusted_client_time)  # noqa: SLF001
-
             loop = asyncio.get_running_loop()
             ## fix lsp error
-            audio_player = AudioPlayer(loop, compute_play_time, compute_server_time)
+            # Use client's public time conversion methods (based on monotonic loop time)
+            audio_player = AudioPlayer(loop, client.compute_play_time, client.compute_server_time)
             audio_player.set_format(fmt)
             current_format = fmt
 

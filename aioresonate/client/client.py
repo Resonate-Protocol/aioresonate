@@ -280,9 +280,10 @@ class ResonateClient:
         - audio_data: Raw PCM audio bytes
         - format: PCMFormat describing the audio format
 
-        The callback is responsible for converting server_timestamp_us to client
-        time using the time filter (accessible via client._time_filter.compute_client_time)
-        and applying any additional delay.
+        To convert server timestamps to client play time (monotonic loop time),
+        use the compute_play_time() and compute_server_time() methods provided
+        by this client instance. These handle time synchronization and static delay
+        automatically.
         """
         self._audio_chunk_callbacks.append(callback)
 
@@ -530,13 +531,43 @@ class ResonateClient:
             except Exception:
                 logger.exception("Error in audio chunk callback %s", callback)
 
-    ## I think this method is not even used, check all methods for dead code
-    def _compute_play_time(self, server_timestamp_us: int) -> int:
+    def compute_play_time(self, server_timestamp_us: int) -> int:
+        """
+        Convert server timestamp to client play time with static delay applied.
+
+        This method converts a server timestamp to the equivalent client timestamp
+        (based on monotonic loop time) and adds the configured static delay.
+        Use this to determine when audio should be played on the client.
+
+        Args:
+            server_timestamp_us: Server timestamp in microseconds.
+
+        Returns:
+            Client play time in microseconds (monotonic loop time + static delay).
+        """
         if self._time_filter.is_synchronized:
-            play_time = self._time_filter.compute_client_time(server_timestamp_us)
-            return play_time + self._static_delay_us
+            client_time = self._time_filter.compute_client_time(server_timestamp_us)
+            return client_time + self._static_delay_us
         # Fallback: add a conservative delay if time sync isn't ready yet
         return self._now_us() + 500_000 + self._static_delay_us
+
+    def compute_server_time(self, client_timestamp_us: int) -> int:
+        """
+        Convert client timestamp to server timestamp with static delay removed.
+
+        This is the inverse of compute_play_time. It converts a client timestamp
+        (monotonic loop time) to the equivalent server timestamp, removing the
+        static delay first.
+
+        Args:
+            client_timestamp_us: Client timestamp in microseconds (monotonic loop time).
+
+        Returns:
+            Server timestamp in microseconds.
+        """
+        # Remove static delay first, then convert to server time
+        adjusted_client_time = client_timestamp_us - self._static_delay_us
+        return self._time_filter.compute_server_time(adjusted_client_time)
 
     async def _notify_callbacks(
         self,

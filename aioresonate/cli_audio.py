@@ -59,9 +59,10 @@ class AudioPlayer:
         Args:
             loop: The asyncio event loop to use for scheduling.
             compute_client_time: Function that converts server timestamps to client
-                timestamps, accounting for clock drift and offset.
-            compute_server_time: Function that converts client timestamps to server
-                timestamps (inverse of compute_client_time).
+                timestamps (monotonic loop time), accounting for clock drift, offset,
+                and static delay.
+            compute_server_time: Function that converts client timestamps (monotonic
+                loop time) to server timestamps (inverse of compute_client_time).
         """
         ## remove typing from here, and add with docs and typing to the class itself
         self._loop = loop
