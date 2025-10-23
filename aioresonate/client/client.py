@@ -333,7 +333,7 @@ class ResonateClient:
             player_support = self._explicit_player_support or ClientHelloPlayerSupport(
                 support_codecs=["pcm"],
                 support_channels=[2, 1],
-                support_sample_rates=[48_000, 44_100],
+                support_sample_rates=[44_100],
                 support_bit_depth=[16],
                 buffer_capacity=1_000_000,
             )
