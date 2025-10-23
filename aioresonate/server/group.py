@@ -227,7 +227,7 @@ class ResonateGroup:
 
         for player in group_players:
             client = player.client
-            player_format = player.determine_optimal_format(media_stream.main_stream[1])
+            player_format = player.determine_optimal_format(media_stream.main_channel[1])
             self._player_formats[client.client_id] = player_format
 
         streamer = Streamer(
@@ -250,7 +250,7 @@ class ResonateGroup:
             )
 
         start_payloads = streamer.configure(
-            audio_format=media_stream.main_stream[1],
+            audio_format=media_stream.main_channel[1],
             clients=client_configs,
         )
         self._streamer = streamer
@@ -297,7 +297,7 @@ class ResonateGroup:
         last_end_us = self._play_start_time_us or int(self._server.loop.time() * 1_000_000)
         cancelled = False
         just_started = True
-        source = media_stream.main_stream[0]
+        main_channel_source = media_stream.main_channel[0]
 
         try:
             while True:
@@ -353,7 +353,9 @@ class ResonateGroup:
 
                 if just_started:
                     try:
-                        while streamer.prepare(await anext(source), during_initial_buffering=True):
+                        while streamer.prepare(
+                            await anext(main_channel_source), during_initial_buffering=True
+                        ):
                             # Pre-fill the initial buffer
                             pass
                     except StopAsyncIteration:
@@ -362,7 +364,7 @@ class ResonateGroup:
                     just_started = False
 
                 try:
-                    chunk = await anext(source)
+                    chunk = await anext(main_channel_source)
                 except StopAsyncIteration:
                     # Source exhausted, exit loop
                     break
@@ -418,7 +420,7 @@ class ResonateGroup:
             )
         self._stream_commands.put_nowait(
             _StreamerReconfigureCommand(
-                audio_format=self._media_stream.main_stream[1],
+                audio_format=self._media_stream.main_channel[1],
                 client_configs=client_configs,
             )
         )
@@ -596,7 +598,7 @@ class ResonateGroup:
 
         if self._media_stream is not None:
             with suppress(Exception):
-                await self._media_stream.main_stream[0].aclose()
+                await self._media_stream.main_channel[0].aclose()
         self._media_stream = None
         self._stream_commands = None
 
@@ -897,7 +899,7 @@ class ResonateGroup:
             logger.debug("Joining client %s to current stream", client.client_id)
             if client.check_role(Roles.PLAYER):
                 player_format = client.require_player.determine_optimal_format(
-                    self._media_stream.main_stream[1]
+                    self._media_stream.main_channel[1]
                 )
                 self._player_formats[client.client_id] = player_format
                 self._reconfigure_streamer()

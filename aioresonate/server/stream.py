@@ -352,58 +352,53 @@ class MediaStream:
     Container for audio stream with optional per-device DSP support.
 
     Provides a main audio source used for visualization and playback. Optionally,
-    implementations can override player_stream() to provide device-specific streams
-    for individual DSP processing chains. If player_stream returns None, the main
-    stream is used as fallback.
+    implementations can override player_channel() to provide device-specific channels
+    for individual DSP processing chains. If player_channel returns None, the main
+    channel is used as fallback.
     """
 
-    _main_stream_source: AsyncGenerator[bytes, None]
+    _main_channel_source: AsyncGenerator[bytes, None]
     """
     Main audio source generator yielding PCM bytes.
 
-    Used for visualization, and as fallback when player_stream() returns None.
+    Used for visualization, and as fallback when player_channel() returns None.
     """
-    _main_stream_format: AudioFormat
-    """Audio format of the main_stream()."""
+    _main_channel_format: AudioFormat
+    """Audio format of the main_channel()."""
 
     def __init__(
         self,
         *,
-        main_stream_source: AsyncGenerator[bytes, None],
-        main_stream_format: AudioFormat,
+        main_channel_source: AsyncGenerator[bytes, None],
+        main_channel_format: AudioFormat,
     ) -> None:
-        """Initialise the media stream with audio source and format for main_stream()."""
-        self._main_stream_source = main_stream_source
-        self._main_stream_format = main_stream_format
+        """Initialise the media stream with audio source and format for main_channel()."""
+        self._main_channel_source = main_channel_source
+        self._main_channel_format = main_channel_format
 
     @property
-    def main_stream(self) -> tuple[AsyncGenerator[bytes, None], AudioFormat]:
+    def main_channel(self) -> tuple[AsyncGenerator[bytes, None], AudioFormat]:
         """Return the main audio source generator and its audio format."""
-        return self._main_stream_source, self._main_stream_format
+        return self._main_channel_source, self._main_channel_format
 
-    def player_stream(
+    def player_channel(
         self,
         player_id: str,
         preferred_format: AudioFormat | None = None,
         position_us: int = 0,
     ) -> tuple[AsyncGenerator[bytes, None], AudioFormat, int] | None:
         """
-        Get a player-specific audio stream.
+        Get a player-specific audio channel (time-synchronized with main channel).
 
         Args:
-            player_id: Identifier for the player requesting the stream.
-            preferred_format: The player's preferred native format for the stream.
-                The implementation may return a different format; the library
-                will handle any necessary conversion.
-            position_us: Position in microseconds relative to the main_stream start.
-                Used for late-joining players to sync with the main stream.
+            player_id: Identifier for the player requesting the channel.
+            preferred_format: The player's preferred native format.
+            position_us: Position in microseconds relative to main_channel start.
 
         Returns:
-            A tuple of (audio generator, audio format, actual position in microseconds)
-            or None if unavailable. The actual position may differ from the requested
-            position if the implementation can only provide streams at specific
-            boundaries (e.g., chunk boundaries). If None, the main_stream is used
-            as fallback.
+            Tuple of (generator, format, actual_position_us) or None for fallback.
+            The actual_position_us may differ from requested position_us if the
+            implementation can only provide channels at specific boundaries.
         """
         _ = (player_id, preferred_format, position_us)
         return None
