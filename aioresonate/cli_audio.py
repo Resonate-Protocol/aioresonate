@@ -76,7 +76,7 @@ class AudioPlayer:
         self._compute_server_time = compute_server_time
         self._format: PCMFormat | None = None
         self._queue: asyncio.Queue[_QueuedChunk] = asyncio.Queue()
-        self._stream: sounddevice.RawStream | None = None
+        self._stream: sounddevice.RawOutputStream | None = None
         self._closed = False
         self._stream_started = False
         self._first_real_chunk = True  # Flag to initialize timing from first chunk
@@ -98,9 +98,9 @@ class AudioPlayer:
         self._first_real_chunk = True
 
         dtype = "int16"
-        # Use callback-based stream for true timing feedback
+        # Use callback-based output stream for true timing feedback
         # Note: Don't start yet - wait for audio to be buffered
-        self._stream = sounddevice.RawStream(
+        self._stream = sounddevice.RawOutputStream(
             samplerate=pcm_format.sample_rate,
             channels=pcm_format.channels,
             dtype=dtype,
@@ -127,7 +127,6 @@ class AudioPlayer:
 
     def _audio_callback(
         self,
-        indata: memoryview,  # noqa: ARG002 - unused but required by signature
         outdata: memoryview,
         frames: int,
         time: sounddevice.CallbackTimeInfo,
@@ -139,7 +138,6 @@ class AudioPlayer:
         This implements closed-loop feedback control similar to ESP32's speaker callback.
 
         Args:
-            indata: Input data (unused for output-only stream).
             outdata: Output buffer to fill with audio data.
             frames: Number of frames requested.
             time: Timing information including outputBufferDacTime.
