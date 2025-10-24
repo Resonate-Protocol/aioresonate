@@ -53,9 +53,6 @@ resonate-cli = "aioresonate.cli:main"
 [tool.ruff]
 fix = true
 show-fixes = true
-exclude = [
-  "esphome-resonate-implementation",
-]
 
 line-length = 100
 target-version = "py312"
@@ -75,7 +72,6 @@ max-statements = 50
 platform = "linux"
 python_version = "3.12"
 follow_imports = "normal"
-exclude = "esphome-resonate-implementation"
 
 # suppress errors about unsatisfied imports
 ignore_missing_imports = true
