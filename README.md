@@ -57,5 +57,4 @@ This client is highly experimental and has many limitations:
 
 - Does not recover when it loses connection to the server
 - Slowly drifts out of sync over time
-- Audible sound glitches occasionally and when playback starts
 - Only tested on Linux

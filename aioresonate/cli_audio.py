@@ -172,21 +172,38 @@ class AudioPlayer:
         """
         assert self._format is not None
 
-        # Initialize playback position to what DAC wants RIGHT NOW
-        # This syncs us to the CURRENT Kalman mapping, not the old one from when chunk was created
+        # Initialize playback position to avoid drift during startup
         if self._playback_position_server_us is None:
-            self._playback_position_server_us = target_server_time_us
+            chunk_delta_us = chunk.server_timestamp_us - target_server_time_us
+            # If chunk is too far in future (>100ms), initialize to chunk start to avoid
+            # position drifting while waiting. This handles cases where DAC has large buffering.
+            if chunk_delta_us > 100_000:
+                self._playback_position_server_us = chunk.server_timestamp_us
+            else:
+                self._playback_position_server_us = target_server_time_us
             logger.info(
-                "Initialized playback position to %d us (DAC target, chunk was %d us, delta=%d us)",
+                "Initialized playback position to %d us (DAC=%d us, chunk=%d us, delta=%d us)",
                 self._playback_position_server_us,
+                target_server_time_us,
                 chunk.server_timestamp_us,
-                chunk.server_timestamp_us - target_server_time_us,
+                chunk_delta_us,
             )
 
         # Check if this chunk matches our playback position
         chunk_delta_us = chunk.server_timestamp_us - self._playback_position_server_us
 
+        # If chunk is in the future, wait for it (don't apply drift correction while waiting)
+        if chunk_delta_us > 50_000:
+            logger.debug("Chunk is %d us in future, waiting", chunk_delta_us)
+            return (False, True)
+
+        # Drop chunks that are too old (>100ms behind)
+        if chunk_delta_us < -100_000:
+            logger.debug("Dropping old chunk: %d us behind position", -chunk_delta_us)
+            return (False, False)
+
         # Measure drift: compare playback position to target (what DAC wants)
+        # Only apply drift correction when we're actively consuming chunks
         drift_us = self._playback_position_server_us - target_server_time_us
         if abs(drift_us) > 5000:  # Log drift > 5ms
             logger.debug(
@@ -200,21 +217,10 @@ class AudioPlayer:
         if abs(drift_us) > self._HARD_SYNC_THRESHOLD_US:  # Hard sync at >50ms
             logger.info("Hard sync: adjusting position by %d us", -drift_us)
             self._playback_position_server_us = target_server_time_us
-            chunk_delta_us = chunk.server_timestamp_us - self._playback_position_server_us
         elif abs(drift_us) > self._SOFT_SYNC_THRESHOLD_US:  # Gentle correction at >10ms
             # Nudge position by 10% of error
             correction_us = int(drift_us * 0.1)
             self._playback_position_server_us -= correction_us
-
-        # Drop chunks that are too old (>100ms behind)
-        if chunk_delta_us < -100_000:
-            logger.debug("Dropping old chunk: %d us behind position", -chunk_delta_us)
-            return (False, False)
-
-        # If chunk is in the future, wait for it
-        if chunk_delta_us > 50_000:
-            logger.debug("Chunk is %d us in future, waiting", chunk_delta_us)
-            return (False, True)
 
         # Chunk is ready to play
         return (True, False)
