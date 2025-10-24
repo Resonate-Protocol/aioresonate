@@ -10,11 +10,54 @@ For a WIP reference implementation of a server using this library, see [Music As
 
 ## CLI Client
 
-Install the optional CLI dependencies and run the bundled client:
+> **Note:** The CLI client will be moved to a separate repository in the future.
 
-```
-pip install "aioresonate[cli]"
-resonate-cli --url ws://localhost:1789/resonate
+This repository also includes a highly experimental CLI client for testing and development purposes.
+You can install and run it by:
+
+1. Cloning this repository:
+```bash
+git clone https://github.com/Resonate-Protocol/aioresonate.git
+cd aioresonate
 ```
 
-The CLI streams audio (requires `sounddevice`) and offers simple keyboard commands for playback and volume control. The CLI discovers Resonate servers via mDNS (service `_resonate-server._tcp.local.`) by default; override with `--url` to connect directly. Use `--static-delay-ms <ms>` to add extra playback latency if your device needs additional buffering, and type `delay` commands in the terminal to inspect or tweak the value while running.
+2. Installing the package with CLI dependencies:
+```
+pip install --user ".[cli]"
+```
+(The `.[cli]` installs the `resonate-cli` command)
+
+3. Running the CLI:
+```
+resonate-cli
+```
+
+4. Uninstalling the package:
+```
+pip uninstall aioresonate
+```
+
+The CLI client will automatically connect to a Resonate server on your local network and be available for playback.
+
+### Client Identification
+
+If you want to run multiple CLI clients simultaneously, each must have a unique identifier:
+
+```bash
+resonate-cli --id my-client-1 --name "Kitchen"
+resonate-cli --id my-client-2 --name "Bedroom"
+```
+
+- `--id`: A unique identifier for this client (required if running multiple instances)
+- `--name`: A friendly name displayed on the server (optional)
+
+### Limitations & Known Issues
+
+This client is highly experimental and has many limitations:
+
+- Reads the microphone input while open (does not actually use it)
+- Closing it requires spamming Ctrl-C
+- Does not recover when it loses connection to the server
+- Slowly drifts out of sync over time
+- Audible sound glitches occasionally and when playback starts
+- Only tested on Linux
