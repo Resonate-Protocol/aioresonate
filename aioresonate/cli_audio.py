@@ -221,6 +221,15 @@ class AudioPlayer:
         # Chunk is ready to play
         return (True, False)
 
+    def _advance_playback_position(self, duration_bytes: int) -> None:
+        """Advance playback position by the duration of bytes filled/consumed."""
+        if self._playback_position_server_us is None:
+            return
+        assert self._format is not None
+        frames = duration_bytes // self._format.frame_size
+        duration_us = int((frames * 1_000_000) / self._format.sample_rate)
+        self._playback_position_server_us += duration_us
+
     def _fill_audio_buffer(
         self,
         outdata: memoryview,
@@ -243,6 +252,7 @@ class AudioPlayer:
                         output_buffer[bytes_written : bytes_written + silence_bytes] = (
                             b"\x00" * silence_bytes
                         )
+                        self._advance_playback_position(silence_bytes)
                         logger.debug("Buffer underrun: no chunks available")
                         break
 
@@ -262,6 +272,7 @@ class AudioPlayer:
                         output_buffer[bytes_written : bytes_written + silence_bytes] = (
                             b"\x00" * silence_bytes
                         )
+                        self._advance_playback_position(silence_bytes)
                         break
 
                     if not should_play:
@@ -285,14 +296,7 @@ class AudioPlayer:
 
                 # If chunk is exhausted, clear it and update playback position
                 if self._current_chunk_offset >= len(chunk_data):
-                    # Update playback position based on chunk duration
-                    if self._playback_position_server_us is not None:
-                        chunk_frames = len(chunk_data) // self._format.frame_size
-                        chunk_duration_us = int(
-                            (chunk_frames * 1_000_000) / self._format.sample_rate
-                        )
-                        self._playback_position_server_us += chunk_duration_us
-
+                    self._advance_playback_position(len(chunk_data))
                     self._current_chunk = None
                     self._current_chunk_offset = 0
 
@@ -304,6 +308,7 @@ class AudioPlayer:
                 output_buffer[bytes_written : bytes_written + silence_bytes] = (
                     b"\x00" * silence_bytes
                 )
+                self._advance_playback_position(silence_bytes)
             # Reset partial chunk state on error
             self._current_chunk = None
             self._current_chunk_offset = 0
