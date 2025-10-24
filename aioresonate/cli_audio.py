@@ -120,6 +120,7 @@ class AudioPlayer:
             except asyncio.QueueEmpty:  # pragma: no cover - race condition guard
                 break
         # Reset playback state
+        self._stream_started = False
         self._first_real_chunk = True
         self._current_chunk = None
         self._current_chunk_offset = 0
