@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, cast
 if TYPE_CHECKING:
     from zeroconf import ServiceListener
 
+import aioconsole
 from zeroconf.asyncio import AsyncServiceBrowser, AsyncZeroconf
 
 from aioresonate.cli_audio import AudioPlayer
@@ -375,11 +376,11 @@ async def _keyboard_loop(
     state: CLIState,
     get_audio_player: Callable[[], AudioPlayer | None],
 ) -> None:
-    loop = asyncio.get_running_loop()
     try:
         while True:
-            line = await loop.run_in_executor(None, sys.stdin.readline)
-            if line == "":  # EOF
+            try:
+                line = await aioconsole.ainput()
+            except EOFError:
                 break
             raw_line = line.strip()
             if not raw_line:

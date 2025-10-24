@@ -56,7 +56,6 @@ resonate-cli --id my-client-2 --name "Bedroom"
 This client is highly experimental and has many limitations:
 
 - Reads the microphone input while open (does not actually use it)
-- Closing it requires spamming Ctrl-C
 - Does not recover when it loses connection to the server
 - Slowly drifts out of sync over time
 - Audible sound glitches occasionally and when playback starts
