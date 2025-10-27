@@ -1,4 +1,6 @@
-"""Audio playback for the Resonate CLI."""
+"""Audio playback for the Resonate CLI."""  ### expand a bit
+
+### rename phase error to sync_error across this file
 
 from __future__ import annotations
 
@@ -17,7 +19,7 @@ from aioresonate.client import PCMFormat
 logger = logging.getLogger(__name__)
 
 
-@dataclass(slots=True)
+@dataclass(slots=True)  ### remove slots=True
 class _QueuedChunk:
     """Represents a queued audio chunk with timing information."""
 
@@ -76,6 +78,7 @@ class AudioPlayer:
             compute_server_time: Function that converts client timestamps (monotonic
                 loop time) to server timestamps (inverse of compute_client_time).
         """
+        ### check that all propeties here are defined in the class, and init there to if simply possible (like = 0), add 1 line doc comment to each, then you can also remove # comments here if already described in """
         self._loop = loop
         self._compute_client_time = compute_client_time
         self._compute_server_time = compute_server_time
@@ -148,7 +151,8 @@ class AudioPlayer:
         self._stream_started = False
         self._first_real_chunk = True
 
-        dtype = "int16"
+        dtype = "int16"  ### inline this to reduce LOC
+        ### remove or move these explanation to reduce LOC
         # Use low latency for accurate playback timing
         # With early chunk arrival (5+ seconds), we can use aggressive low-latency settings
         blocksize = 2048  # ~46ms at 44.1kHz - balance between latency and stability
@@ -174,6 +178,7 @@ class AudioPlayer:
                 self._queue.get_nowait()
             except asyncio.QueueEmpty:
                 break
+        ### verify again that we havent missed anything, maybe move up near __init__?
         # Reset playback state
         self._first_real_chunk = True
         self._current_chunk = None
@@ -241,6 +246,7 @@ class AudioPlayer:
         try:
             # Pre-start gating: fill silence until scheduled start time
             if self._waiting_for_start:
+                ### combine these two gating methods into one to reduce LOC
                 if self._scheduled_start_dac_time_us is not None:
                     bytes_written = self._handle_dac_gating(
                         output_buffer, bytes_written, frames, time
@@ -250,6 +256,7 @@ class AudioPlayer:
                         output_buffer, bytes_written, frames
                     )
 
+            ### combine these two ifs above and below to save LOC, or note if not possible due to the gating methods changing the var
             # If we're still waiting for start after gating above, output silence only
             if self._waiting_for_start:
                 if bytes_written < bytes_needed:
@@ -257,6 +264,7 @@ class AudioPlayer:
                     self._fill_silence(output_buffer, bytes_written, silence_bytes)
                     bytes_written += silence_bytes
             else:
+                ### remove dead code in this block if possible
                 # Simple drift control based on buffer depth (disabled for heavy actions)
                 target_buffer_us = int(self._compute_minimum_buffer_duration())
                 current_remaining_us = 0
@@ -344,6 +352,7 @@ class AudioPlayer:
             self._current_chunk_offset = 0
 
     def _update_playback_position_from_dac(self, time: Any) -> None:
+        ### lets inline this (to reduce LOC and latency)
         """Store DAC timing from audio callback.
 
         The actual loop time is filled in later from the async context
@@ -353,6 +362,7 @@ class AudioPlayer:
             dac_time_us = int(time.outputBufferDacTime * 1_000_000)
             # Store DAC time; loop time (0) will be filled in from async context
             self._dac_loop_calibrations.append((dac_time_us, 0))
+            ### remove this if and log
             if len(self._dac_loop_calibrations) == 1:
                 logger.debug("First DAC timestamp captured: %d", dac_time_us)
         except (AttributeError, TypeError):
@@ -456,6 +466,7 @@ class AudioPlayer:
                 self._advance_finished_chunk()
 
     def _calibrate_dac_loop_mapping(self) -> None:
+        ### remove ↔ symbol in this file
         """Calibrate DAC↔Loop time mapping from async context.
 
         Called from submit() which runs in event loop thread, allowing safe
@@ -590,6 +601,7 @@ class AudioPlayer:
         submit() takes care of out-of-order chunks, so we use a fixed
         base buffer with the audio callback providing actual playback position.
         """
+        ### make this just a constant and make docs a lot more brief to reduce LOC
         # Base buffer: 200ms to start playback quickly while maintaining stability
         # With chunks arriving 5+ seconds early, we can afford aggressive buffering
         return 200_000
@@ -695,6 +707,8 @@ class AudioPlayer:
         """
         if self._format is None or self._format.sample_rate <= 0:
             return
+
+        ### make the setting for max corrections a constant, and simpler to configure
 
         # Smooth the error to avoid reacting to jitter
         self._smooth_phase_error(error_us)
