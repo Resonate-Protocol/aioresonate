@@ -7,7 +7,7 @@ import asyncio
 import logging
 import signal
 import sys
-from collections.abc import Callable, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, cast
 
@@ -223,60 +223,87 @@ class ServiceDiscovery:
         self._listener = None
 
 
-async def _sleep_interruptible(duration: float, keyboard_task: asyncio.Task[None]) -> bool:
-    """Sleep with keyboard interrupt support. Return True if interrupted."""
-    remaining = duration
-    while remaining > 0 and not keyboard_task.done():
-        await asyncio.sleep(min(0.5, remaining))
-        remaining -= 0.5
-    return keyboard_task.done()
+class ConnectionManager:
+    """Manages connection state and reconnection logic with exponential backoff."""
 
+    def __init__(
+        self,
+        discovery: ServiceDiscovery,
+        keyboard_task: asyncio.Task[None],
+        max_backoff: float = 300.0,
+    ) -> None:
+        """Initialize the connection manager."""
+        self._discovery = discovery
+        self._keyboard_task = keyboard_task
+        self._error_backoff = 1.0
+        self._max_backoff = max_backoff
+        self._last_attempted_url = ""
 
-def _should_reset_backoff(current_url: str | None, last_attempted_url: str) -> bool:
-    """Check if URL changed, indicating server came back online."""
-    return bool(current_url and current_url != last_attempted_url)
+    async def sleep_interruptible(self, duration: float) -> bool:
+        """Sleep with keyboard interrupt support.
 
+        Returns True if interrupted by keyboard, False if completed normally.
+        """
+        remaining = duration
+        while remaining > 0 and not self._keyboard_task.done():
+            await asyncio.sleep(min(0.5, remaining))
+            remaining -= 0.5
+        return self._keyboard_task.done()
 
-def _update_backoff_and_url(
-    current_url: str | None,
-    last_attempted_url: str,
-    error_backoff: float,
-    max_backoff: float,
-) -> tuple[str | None, str, float]:
-    """Update URL and backoff based on discovery.
+    def set_last_attempted_url(self, url: str) -> None:
+        """Record the URL that was last attempted."""
+        self._last_attempted_url = url
 
-    Returns (new_url, new_last_attempted, new_backoff).
-    """
-    if _should_reset_backoff(current_url, last_attempted_url):
-        logger.info("Server URL changed to %s, reconnecting immediately", current_url)
-        assert current_url is not None
-        return current_url, current_url, 1.0
-    return None, last_attempted_url, min(error_backoff * 2, max_backoff)
+    def reset_backoff(self) -> None:
+        """Reset backoff to initial value after successful connection."""
+        self._error_backoff = 1.0
 
+    def should_reset_backoff(self, current_url: str | None) -> bool:
+        """Check if URL changed, indicating server came back online."""
+        return bool(current_url and current_url != self._last_attempted_url)
 
-async def _handle_error_backoff(error_backoff: float, keyboard_task: asyncio.Task[None]) -> bool:
-    """Sleep for error backoff with keyboard interrupt support.
+    def update_backoff_and_url(self, current_url: str | None) -> tuple[str | None, float]:
+        """Update URL and backoff based on discovery.
 
-    Returns True if interrupted by keyboard, False if completed normally.
-    """
-    _print_event(f"Connection error, retrying in {error_backoff:.0f}s...")
-    return await _sleep_interruptible(error_backoff, keyboard_task)
+        Returns (new_url, new_backoff).
+        """
+        if self.should_reset_backoff(current_url):
+            logger.info("Server URL changed to %s, reconnecting immediately", current_url)
+            assert current_url is not None
+            self._last_attempted_url = current_url
+            self._error_backoff = 1.0
+            return current_url, 1.0
+        self._error_backoff = min(self._error_backoff * 2, self._max_backoff)
+        return None, self._error_backoff
 
+    def get_error_backoff(self) -> float:
+        """Get the current error backoff duration."""
+        return self._error_backoff
 
-async def _wait_for_server_reappear(
-    discovery: ServiceDiscovery, keyboard_task: asyncio.Task[None]
-) -> str | None:
-    """Wait for server to reappear on the network.
+    def increase_backoff(self) -> None:
+        """Increase the backoff duration for the next retry."""
+        self._error_backoff = min(self._error_backoff * 2, self._max_backoff)
 
-    Returns the new URL if server reappears, None if interrupted.
-    """
-    logger.info("Server offline, waiting for rediscovery...")
-    _print_event("Waiting for server...")
+    async def handle_error_backoff(self) -> bool:
+        """Sleep for error backoff with keyboard interrupt support.
 
-    while not (new_url := discovery.current_url()) and not keyboard_task.done():  # noqa: ASYNC110
-        await asyncio.sleep(1.0)
+        Returns True if interrupted by keyboard, False if completed normally.
+        """
+        _print_event(f"Connection error, retrying in {self._error_backoff:.0f}s...")
+        return await self.sleep_interruptible(self._error_backoff)
 
-    return new_url
+    async def wait_for_server_reappear(self) -> str | None:
+        """Wait for server to reappear on the network.
+
+        Returns the new URL if server reappears, None if interrupted.
+        """
+        logger.info("Server offline, waiting for rediscovery...")
+        _print_event("Waiting for server...")
+
+        while not (new_url := self._discovery.current_url()) and not self._keyboard_task.done():  # noqa: ASYNC110
+            await asyncio.sleep(1.0)
+
+        return new_url
 
 
 async def _connection_loop(
@@ -300,18 +327,17 @@ async def _connection_loop(
         initial_url: Initial server URL.
         keyboard_task: Keyboard input task to monitor.
     """
+    manager = ConnectionManager(discovery, keyboard_task)
     url = initial_url
-    last_attempted_url = url
-    error_backoff = 1.0
-    max_backoff = 300.0  # 5 minutes
+    manager.set_last_attempted_url(url)
 
     while not keyboard_task.done():
         try:
             await client.connect(url)
             logger.info("Connected to %s", url)
             _print_event(f"Connected to {url}")
-            error_backoff = 1.0  # Reset backoff on successful connect
-            last_attempted_url = url
+            manager.reset_backoff()
+            manager.set_last_attempted_url(url)
 
             # Wait for disconnect or keyboard exit
             while client.connected and not keyboard_task.done():  # noqa: ASYNC110
@@ -335,7 +361,7 @@ async def _connection_loop(
 
             # Wait for server to reappear if it's gone
             if not new_url:
-                new_url = await _wait_for_server_reappear(discovery, keyboard_task)
+                new_url = await manager.wait_for_server_reappear()
                 if keyboard_task.done():
                     break
 
@@ -347,25 +373,25 @@ async def _connection_loop(
         except (TimeoutError, OSError, ClientError) as e:
             # Network-related errors - log cleanly
             logger.debug(
-                "Connection error (%s), retrying in %.0fs", type(e).__name__, error_backoff
+                "Connection error (%s), retrying in %.0fs",
+                type(e).__name__,
+                manager.get_error_backoff(),
             )
 
-            if await _handle_error_backoff(error_backoff, keyboard_task):
+            if await manager.handle_error_backoff():
                 break
 
             # Check if URL changed while sleeping
             current_url = discovery.current_url()
-            new_url, last_attempted_url, error_backoff = _update_backoff_and_url(
-                current_url, last_attempted_url, error_backoff, max_backoff
-            )
+            new_url, _ = manager.update_backoff_and_url(current_url)
             if new_url:
                 url = new_url
         except Exception:
             # Unexpected errors - log with full traceback
             logger.exception("Unexpected error during connection")
             _print_event("Unexpected error occurred")
-            await asyncio.sleep(error_backoff)
-            error_backoff = min(error_backoff * 2, max_backoff)
+            await asyncio.sleep(manager.get_error_backoff())
+            manager.increase_backoff()
 
 
 class AudioStreamHandler:
@@ -507,9 +533,7 @@ async def main_async(argv: Sequence[str] | None = None) -> int:
         _print_instructions()
 
         # Create and start keyboard task
-        keyboard_task = asyncio.create_task(
-            _keyboard_loop(client, state, audio_handler.get_audio_player)
-        )
+        keyboard_task = asyncio.create_task(_keyboard_loop(client, state, audio_handler))
 
         # Set up signal handler for graceful shutdown on Ctrl+C
         loop = asyncio.get_running_loop()
@@ -565,128 +589,146 @@ async def _handle_group_update(state: CLIState, payload: GroupUpdateServerPayloa
         _print_event("Muted" if payload.muted else "Unmuted")
 
 
+class CommandHandler:
+    """Parses and executes user commands from the keyboard."""
+
+    def __init__(
+        self,
+        client: ResonateClient,
+        state: CLIState,
+        audio_handler: AudioStreamHandler,
+    ) -> None:
+        """Initialize the command handler."""
+        self._client = client
+        self._state = state
+        self._audio_handler = audio_handler
+
+    async def execute(self, line: str) -> bool:
+        """
+        Parse and execute a command.
+
+        Returns True if the user wants to quit, False otherwise.
+        """
+        raw_line = line.strip()
+        if not raw_line:
+            return False
+
+        parts = raw_line.split()
+        command_lower = raw_line.lower()
+        keyword = parts[0].lower()
+
+        if command_lower in {"quit", "exit", "q"}:
+            return True
+        if command_lower in {"play", "p"}:
+            await self._send_media_command(MediaCommand.PLAY)
+        elif command_lower in {"pause", "space"}:
+            await self._send_media_command(MediaCommand.PAUSE)
+        elif command_lower in {"stop", "s"}:
+            await self._send_media_command(MediaCommand.STOP)
+        elif command_lower in {"next", "n"}:
+            await self._send_media_command(MediaCommand.NEXT)
+        elif command_lower in {"previous", "prev", "b"}:
+            await self._send_media_command(MediaCommand.PREVIOUS)
+        elif command_lower in {"vol+", "volume+", "+"}:
+            await self._change_volume(5)
+        elif command_lower in {"vol-", "volume-", "-"}:
+            await self._change_volume(-5)
+        elif command_lower in {"mute", "m"}:
+            await self._toggle_mute()
+        elif command_lower == "toggle":
+            await self._toggle_play_pause()
+        elif keyword == "delay":
+            self._handle_delay_command(parts)
+        else:
+            _print_event("Unknown command")
+
+        return False
+
+    async def _send_media_command(self, command: MediaCommand) -> None:
+        """Send a media command with validation."""
+        if command not in self._state.supported_commands:
+            _print_event(f"Server does not support {command.value}")
+            return
+        await self._client.send_group_command(command)
+
+    async def _toggle_play_pause(self) -> None:
+        """Toggle between play and pause."""
+        if self._state.playback_state == PlaybackStateType.PLAYING:
+            await self._send_media_command(MediaCommand.PAUSE)
+        else:
+            await self._send_media_command(MediaCommand.PLAY)
+
+    async def _change_volume(self, delta: int) -> None:
+        """Adjust volume by delta."""
+        if MediaCommand.VOLUME not in self._state.supported_commands:
+            _print_event("Server does not support volume control")
+            return
+        current = self._state.volume if self._state.volume is not None else 50
+        target = max(0, min(100, current + delta))
+        await self._client.send_group_command(MediaCommand.VOLUME, volume=target)
+
+    async def _toggle_mute(self) -> None:
+        """Toggle mute state."""
+        if MediaCommand.MUTE not in self._state.supported_commands:
+            _print_event("Server does not support mute control")
+            return
+        target = not bool(self._state.muted)
+        await self._client.send_group_command(MediaCommand.MUTE, mute=target)
+
+    def _handle_delay_command(self, parts: list[str]) -> None:
+        """Process delay commands."""
+        if len(parts) == 1:
+            _print_event(f"Static delay: {self._client.static_delay_ms:.1f} ms")
+            return
+        if len(parts) == 3 and parts[1] in {"+", "-"}:
+            try:
+                delta = float(parts[2])
+            except ValueError:
+                _print_event("Invalid delay value")
+                return
+            if parts[1] == "-":
+                delta = -delta
+            self._client.set_static_delay_ms(self._client.static_delay_ms + delta)
+            # Clear audio queue to prevent desync from chunks with stale timing
+            if self._audio_handler.audio_player is not None:
+                self._audio_handler.audio_player.clear()
+                logger.debug("Cleared audio queue after delay change")
+            _print_event(f"Static delay: {self._client.static_delay_ms:.1f} ms")
+            return
+        if len(parts) == 2:
+            try:
+                value = float(parts[1])
+            except ValueError:
+                _print_event("Invalid delay value")
+                return
+            self._client.set_static_delay_ms(value)
+            # Clear audio queue to prevent desync from chunks with stale timing
+            if self._audio_handler.audio_player is not None:
+                self._audio_handler.audio_player.clear()
+                logger.debug("Cleared audio queue after delay change")
+            _print_event(f"Static delay: {self._client.static_delay_ms:.1f} ms")
+            return
+        _print_event("Usage: delay [<ms>|+ <ms>|- <ms>]")
+
+
 async def _keyboard_loop(
     client: ResonateClient,
     state: CLIState,
-    get_audio_player: Callable[[], AudioPlayer | None],
+    audio_handler: AudioStreamHandler,
 ) -> None:
+    handler = CommandHandler(client, state, audio_handler)
     try:
         while True:
             try:
                 line = await aioconsole.ainput()
             except EOFError:
                 break
-            raw_line = line.strip()
-            if not raw_line:
-                continue
-            parts = raw_line.split()
-            command_lower = raw_line.lower()
-            keyword = parts[0].lower()
-            if command_lower in {"quit", "exit", "q"}:
+            if await handler.execute(line):
                 break
-            if command_lower in {"play", "p"}:
-                await _send_media_command(client, state, MediaCommand.PLAY)
-            elif command_lower in {"pause", "space"}:
-                await _send_media_command(client, state, MediaCommand.PAUSE)
-            elif command_lower in {"stop", "s"}:
-                await _send_media_command(client, state, MediaCommand.STOP)
-            elif command_lower in {"next", "n"}:
-                await _send_media_command(client, state, MediaCommand.NEXT)
-            elif command_lower in {"previous", "prev", "b"}:
-                await _send_media_command(client, state, MediaCommand.PREVIOUS)
-            elif command_lower in {"vol+", "volume+", "+"}:
-                await _change_volume(client, state, 5)
-            elif command_lower in {"vol-", "volume-", "-"}:
-                await _change_volume(client, state, -5)
-            elif command_lower in {"mute", "m"}:
-                await _toggle_mute(client, state)
-            elif command_lower == "toggle":
-                await _toggle_play_pause(client, state)
-            elif keyword == "delay":
-                _handle_delay_command(client, parts, get_audio_player)
-            else:
-                _print_event("Unknown command")
     except asyncio.CancelledError:
         # Graceful shutdown on Ctrl+C
         logger.debug("Keyboard loop cancelled, exiting gracefully")
         raise
-
-
-async def _send_media_command(
-    client: ResonateClient, state: CLIState, command: MediaCommand
-) -> None:
-    if command not in state.supported_commands:
-        _print_event(f"Server does not support {command.value}")
-        return
-    await client.send_group_command(command)
-
-
-async def _toggle_play_pause(client: ResonateClient, state: CLIState) -> None:
-    if state.playback_state == PlaybackStateType.PLAYING:
-        await _send_media_command(client, state, MediaCommand.PAUSE)
-    else:
-        await _send_media_command(client, state, MediaCommand.PLAY)
-
-
-async def _change_volume(client: ResonateClient, state: CLIState, delta: int) -> None:
-    if MediaCommand.VOLUME not in state.supported_commands:
-        _print_event("Server does not support volume control")
-        return
-    current = state.volume if state.volume is not None else 50
-    target = max(0, min(100, current + delta))
-    await client.send_group_command(MediaCommand.VOLUME, volume=target)
-
-
-async def _toggle_mute(client: ResonateClient, state: CLIState) -> None:
-    if MediaCommand.MUTE not in state.supported_commands:
-        _print_event("Server does not support mute control")
-        return
-    target = not bool(state.muted)
-    await client.send_group_command(MediaCommand.MUTE, mute=target)
-
-
-def _handle_delay_command(
-    client: ResonateClient,
-    parts: list[str],
-    get_audio_player: Callable[[], AudioPlayer | None],
-) -> None:
-    """Process delay commands from the keyboard loop."""
-    if not parts or parts[0].lower() != "delay":
-        return
-    if len(parts) == 1:
-        _print_event(f"Static delay: {client.static_delay_ms:.1f} ms")
-        return
-    if len(parts) == 3 and parts[1] in {"+", "-"}:
-        try:
-            delta = float(parts[2])
-        except ValueError:
-            _print_event("Invalid delay value")
-            return
-        if parts[1] == "-":
-            delta = -delta
-        client.set_static_delay_ms(client.static_delay_ms + delta)
-        # Clear audio queue to prevent desync from chunks with stale timing
-        audio_player = get_audio_player()
-        if audio_player is not None:
-            audio_player.clear()
-            logger.debug("Cleared audio queue after delay change")
-        _print_event(f"Static delay: {client.static_delay_ms:.1f} ms")
-        return
-    if len(parts) == 2:
-        try:
-            value = float(parts[1])
-        except ValueError:
-            _print_event("Invalid delay value")
-            return
-        client.set_static_delay_ms(value)
-        # Clear audio queue to prevent desync from chunks with stale timing
-        audio_player = get_audio_player()
-        if audio_player is not None:
-            audio_player.clear()
-            logger.debug("Cleared audio queue after delay change")
-        _print_event(f"Static delay: {client.static_delay_ms:.1f} ms")
-        return
-    _print_event("Usage: delay [<ms>|+ <ms>|- <ms>]")
 
 
 def _print_event(message: str) -> None:
