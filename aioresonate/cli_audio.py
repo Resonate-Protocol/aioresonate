@@ -335,8 +335,9 @@ class AudioPlayer:
                         # Discard one input frame to speed up
                         _ = self._read_one_input_frame()
                         self._frames_until_next_drop = self._drop_every_n_frames
-
-                    if do_insert and not do_drop:
+                        # Output last frame without reading a new one
+                        frame_bytes = self._last_output_frame
+                    elif do_insert:
                         # Duplicate last output frame to slow down
                         frame_bytes = self._last_output_frame
                         self._frames_until_next_insert = self._insert_every_n_frames
