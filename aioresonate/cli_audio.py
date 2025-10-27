@@ -43,16 +43,14 @@ class AudioPlayer:
             loop time) to server timestamps (inverse of _compute_client_time).
     """
 
-    _PREPLAY_MARGIN_US: Final[int] = 1_000
-    """Microseconds before target play time to wake up for final scheduling."""
-
-    # Drift correction thresholds (from ESP32 implementation)
-    _HARD_SYNC_THRESHOLD_US: Final[int] = 50_000  # 50ms - aggressive correction
-    _SOFT_SYNC_THRESHOLD_US: Final[int] = 10_000  # 10ms - gentle correction
-
     _loop: asyncio.AbstractEventLoop
     _compute_client_time: Callable[[int], int]
     _compute_server_time: Callable[[int], int]
+
+    _MIN_CHUNKS_TO_START: Final[int] = 16
+    """Minimum chunks buffered before starting playback to absorb network jitter."""
+    _MIN_CHUNKS_TO_MAINTAIN: Final[int] = 8
+    """Minimum chunks to maintain during playback to avoid underruns."""
 
     def __init__(
         self,
@@ -85,8 +83,15 @@ class AudioPlayer:
         self._current_chunk: _QueuedChunk | None = None
         self._current_chunk_offset = 0
 
-        # Track current playback position in server timeline
-        self._playback_position_server_us: int | None = None
+        # Track expected next chunk timestamp for intelligent gap/overlap handling
+        self._expected_next_timestamp: int | None = None
+
+        # Underrun tracking
+        self._underrun_count = 0
+        self._last_buffer_warning_us = 0
+
+        # Track queued audio duration instead of just item count
+        self._queued_duration_us = 0
 
     def set_format(self, pcm_format: PCMFormat) -> None:
         """Configure the audio output format."""
@@ -98,13 +103,17 @@ class AudioPlayer:
         self._first_real_chunk = True
 
         dtype = "int16"
-        # Use callback-based output stream for true timing feedback
-        # Note: Don't start yet - wait for audio to be buffered
+        # Use callback-based output stream with larger blocksize to reduce callback frequency
+        # Larger blocksize = fewer callbacks requesting data = more time to buffer chunks
+        # Default blocksize is device-dependent; use a larger fixed size for stability
+        blocksize = 4096  # ~92ms at 44.1kHz - gives plenty of time for network chunks to arrive
         self._stream = sounddevice.RawOutputStream(
             samplerate=pcm_format.sample_rate,
             channels=pcm_format.channels,
             dtype=dtype,
+            blocksize=blocksize,
             callback=self._audio_callback,
+            latency="high",  # Use high latency to give more buffering time
         )
 
     async def stop(self) -> None:
@@ -123,24 +132,24 @@ class AudioPlayer:
         self._first_real_chunk = True
         self._current_chunk = None
         self._current_chunk_offset = 0
-        self._playback_position_server_us = None
+        self._expected_next_timestamp = None
+        self._underrun_count = 0
+        self._queued_duration_us = 0
 
     def _audio_callback(
         self,
         outdata: memoryview,
         frames: int,
-        time: sounddevice.CallbackTimeInfo,
+        _time: sounddevice.CallbackTimeInfo,
         status: CallbackFlags,
     ) -> None:
         """
         Audio callback invoked by sounddevice when output buffer needs filling.
 
-        This implements closed-loop feedback control similar to ESP32's speaker callback.
-
         Args:
             outdata: Output buffer to fill with audio data.
             frames: Number of frames requested.
-            time: Timing information including outputBufferDacTime.
+            _time: Timing information (unused, kept for sounddevice API).
             status: Status flags (underrun, overflow, etc.).
         """
         if status:
@@ -148,90 +157,21 @@ class AudioPlayer:
 
         assert self._format is not None
 
-        # Get DAC time - when this audio will actually play
-        dac_time_s = time.outputBufferDacTime
-        dac_time_us = int(dac_time_s * 1_000_000)
-
-        # Convert to server timestamp - what should be playing at this DAC time
-        target_server_time_us = self._compute_server_time(dac_time_us)
-
-        # Fill the output buffer
-        # Drift correction is handled in _check_and_prepare_chunk()
-        self._fill_audio_buffer(outdata, frames, target_server_time_us)
-
-    def _check_and_prepare_chunk(
-        self, chunk: _QueuedChunk, target_server_time_us: int
-    ) -> tuple[bool, bool]:
-        """
-        Check if chunk matches playback position and apply drift correction.
-
-        Returns:
-            (should_play, should_wait) tuple:
-            - should_play: True if chunk should be played now
-            - should_wait: True if chunk is in future (fill silence and keep it)
-        """
-        assert self._format is not None
-
-        # Initialize playback position to avoid drift during startup
-        if self._playback_position_server_us is None:
-            chunk_delta_us = chunk.server_timestamp_us - target_server_time_us
-            # If chunk is too far in future (>100ms), initialize to chunk start to avoid
-            # position drifting while waiting. This handles cases where DAC has large buffering.
-            if chunk_delta_us > 100_000:
-                self._playback_position_server_us = chunk.server_timestamp_us
-            else:
-                self._playback_position_server_us = target_server_time_us
-            logger.info(
-                "Initialized playback position to %d us (DAC=%d us, chunk=%d us, delta=%d us)",
-                self._playback_position_server_us,
-                target_server_time_us,
-                chunk.server_timestamp_us,
-                chunk_delta_us,
-            )
-
-        # Check if this chunk matches our playback position
-        chunk_delta_us = chunk.server_timestamp_us - self._playback_position_server_us
-
-        # If chunk is in the future, wait for it (don't apply drift correction while waiting)
-        if chunk_delta_us > 50_000:
-            logger.debug("Chunk is %d us in future, waiting", chunk_delta_us)
-            return (False, True)
-
-        # Drop chunks that are too old (>100ms behind)
-        if chunk_delta_us < -100_000:
-            logger.debug("Dropping old chunk: %d us behind position", -chunk_delta_us)
-            return (False, False)
-
-        # Measure drift: compare playback position to target (what DAC wants)
-        # Only apply drift correction when we're actively consuming chunks
-        drift_us = self._playback_position_server_us - target_server_time_us
-        if abs(drift_us) > 5000:  # Log drift > 5ms
-            logger.debug(
-                "Playback drift: %d us (position=%d, target=%d)",
-                drift_us,
-                self._playback_position_server_us,
-                target_server_time_us,
-            )
-
-        # Apply drift correction by adjusting playback position
-        if abs(drift_us) > self._HARD_SYNC_THRESHOLD_US:  # Hard sync at >50ms
-            logger.info("Hard sync: adjusting position by %d us", -drift_us)
-            self._playback_position_server_us = target_server_time_us
-        elif abs(drift_us) > self._SOFT_SYNC_THRESHOLD_US:  # Gentle correction at >10ms
-            # Nudge position by 10% of error
-            correction_us = int(drift_us * 0.1)
-            self._playback_position_server_us -= correction_us
-
-        # Chunk is ready to play
-        return (True, False)
+        # Fill the output buffer with next chunks from queue
+        # The queue is already continuous (gaps filled in submit())
+        self._fill_audio_buffer(outdata, frames)
 
     def _fill_audio_buffer(
         self,
         outdata: memoryview,
         frames: int,
-        target_server_time_us: int,
     ) -> None:
-        """Fill output buffer with audio data, using timestamp-based chunk selection."""
+        """
+        Fill output buffer with audio data from queue.
+
+        Since submit() already ensured continuous audio with gap filling,
+        we just consume chunks in order without timestamp-based selection.
+        """
         assert self._format is not None
         bytes_needed = frames * self._format.frame_size
         output_buffer = memoryview(outdata).cast("B")
@@ -241,38 +181,34 @@ class AudioPlayer:
             while bytes_written < bytes_needed:
                 # Get current chunk or pull new one
                 if self._current_chunk is None:
+                    queue_size = self._queue.qsize()
+                    buffer_ms = self._queued_duration_us / 1_000
+
+                    # Check for buffer depletion - warn if less than 100ms of audio remains
+                    if buffer_ms < 100:
+                        logger.error(
+                            "Critical low buffer: %.1f ms (min 100ms) - underflow imminent. "
+                            "Queue: %d chunks",
+                            buffer_ms,
+                            queue_size,
+                        )
+
                     if self._queue.empty():
-                        # No chunks available - fill with silence
+                        # No chunks available - fill with silence (underrun)
+                        self._underrun_count += 1
                         silence_bytes = bytes_needed - bytes_written
                         output_buffer[bytes_written : bytes_written + silence_bytes] = (
                             b"\x00" * silence_bytes
                         )
-                        logger.debug("Buffer underrun: no chunks available")
+                        logger.error(
+                            "Buffer underrun #%d: filling %d bytes with silence",
+                            self._underrun_count,
+                            silence_bytes,
+                        )
                         break
 
-                    # Get next chunk from queue
+                    # Get next chunk from queue (already continuous from submit())
                     chunk = self._queue.get_nowait()
-
-                    # Check if chunk is ready to play
-                    should_play, should_wait = self._check_and_prepare_chunk(
-                        chunk, target_server_time_us
-                    )
-
-                    if should_wait:
-                        # Chunk is in future, keep it and fill silence
-                        self._current_chunk = chunk
-                        self._current_chunk_offset = 0
-                        silence_bytes = bytes_needed - bytes_written
-                        output_buffer[bytes_written : bytes_written + silence_bytes] = (
-                            b"\x00" * silence_bytes
-                        )
-                        break
-
-                    if not should_play:
-                        # Chunk was dropped (too old), get next one
-                        continue
-
-                    # Chunk is ready to play
                     self._current_chunk = chunk
                     self._current_chunk_offset = 0
 
@@ -287,16 +223,12 @@ class AudioPlayer:
                 bytes_written += bytes_to_copy
                 self._current_chunk_offset += bytes_to_copy
 
-                # If chunk is exhausted, clear it and update playback position
+                # If chunk is exhausted, clear it
                 if self._current_chunk_offset >= len(chunk_data):
-                    # Update playback position based on chunk duration
-                    if self._playback_position_server_us is not None:
-                        chunk_frames = len(chunk_data) // self._format.frame_size
-                        chunk_duration_us = int(
-                            (chunk_frames * 1_000_000) / self._format.sample_rate
-                        )
-                        self._playback_position_server_us += chunk_duration_us
-
+                    # Chunk consumed - update duration tracking
+                    chunk_frames = len(chunk_data) // self._format.frame_size
+                    chunk_duration_us = (chunk_frames * 1_000_000) // self._format.sample_rate
+                    self._queued_duration_us = max(0, self._queued_duration_us - chunk_duration_us)
                     self._current_chunk = None
                     self._current_chunk_offset = 0
 
@@ -314,9 +246,9 @@ class AudioPlayer:
 
     def submit(self, server_timestamp_us: int, payload: bytes) -> None:
         """
-        Queue an audio payload for playback.
+        Queue an audio payload for playback, intelligently handling gaps and overlaps.
 
-        The callback will pull chunks from the queue when needed.
+        Fills gaps with silence and trims overlaps to ensure a continuous stream.
 
         Args:
             server_timestamp_us: Server timestamp when this audio should play.
@@ -335,19 +267,74 @@ class AudioPlayer:
             )
             return
 
-        # Queue chunk for playback (chunks arrive in order)
-        chunk = _QueuedChunk(
-            server_timestamp_us=server_timestamp_us,
-            audio_data=payload,
-        )
-        self._queue.put_nowait(chunk)
+        # Calculate chunk duration in microseconds
+        chunk_frames = len(payload) // self._format.frame_size
+        chunk_duration_us = (chunk_frames * 1_000_000) // self._format.sample_rate
 
-        # Start stream immediately when we have enough chunks buffered
-        # The callback will initialize position to current DAC time for perfect sync
-        if not self._stream_started and self._queue.qsize() >= 3 and self._stream is not None:
-            self._stream.start()
-            self._stream_started = True
-            logger.info("Stream started with %d chunks buffered", self._queue.qsize())
+        # Initialize expected next timestamp on first chunk
+        if self._expected_next_timestamp is None:
+            self._expected_next_timestamp = server_timestamp_us
+        # Handle gap: insert silence to fill the gap
+        elif server_timestamp_us > self._expected_next_timestamp:
+            gap_us = server_timestamp_us - self._expected_next_timestamp
+            gap_frames = (gap_us * self._format.sample_rate) // 1_000_000
+            silence_bytes = gap_frames * self._format.frame_size
+            silence = b"\x00" * silence_bytes
+            self._queue.put_nowait(
+                _QueuedChunk(
+                    server_timestamp_us=self._expected_next_timestamp,
+                    audio_data=silence,
+                )
+            )
+            logger.info("Gap detected: %d us, inserted %d bytes of silence", gap_us, silence_bytes)
+            self._expected_next_timestamp = server_timestamp_us
+
+        # Handle overlap: trim the start of the chunk
+        elif server_timestamp_us < self._expected_next_timestamp:
+            overlap_us = self._expected_next_timestamp - server_timestamp_us
+            overlap_frames = (overlap_us * self._format.sample_rate) // 1_000_000
+            trim_bytes = overlap_frames * self._format.frame_size
+            if trim_bytes < len(payload):
+                payload = payload[trim_bytes:]
+                server_timestamp_us = self._expected_next_timestamp
+                logger.info("Overlap detected: %d us, trimmed %d bytes", overlap_us, trim_bytes)
+            else:
+                # Entire chunk is overlap, skip it
+                logger.info("Overlap detected: %d us, skipped entire chunk", overlap_us)
+                return
+
+        # Queue the chunk
+        if len(payload) > 0:
+            chunk = _QueuedChunk(
+                server_timestamp_us=server_timestamp_us,
+                audio_data=payload,
+            )
+            self._queue.put_nowait(chunk)
+            # Track duration of queued audio
+            self._queued_duration_us += chunk_duration_us
+
+        # Update expected position for next chunk
+        self._expected_next_timestamp = server_timestamp_us + chunk_duration_us
+
+        # Start stream when we have enough audio duration buffered (not just item count)
+        # Need at least 500ms of audio to survive network jitter
+        min_duration_us = 500_000  # 500ms of audio
+        queue_size = self._queue.qsize()
+        if self._queued_duration_us >= min_duration_us and not self._stream_started:
+            if self._stream is not None:
+                self._stream.start()
+                self._stream_started = True
+                logger.info(
+                    "Stream started with %d chunks, %.1f seconds of audio buffered",
+                    queue_size,
+                    self._queued_duration_us / 1_000_000,
+                )
+        elif not self._stream_started:
+            logger.debug(
+                "Buffering... %.1f/%.1f seconds of audio",
+                self._queued_duration_us / 1_000_000,
+                min_duration_us / 1_000_000,
+            )
 
     def _close_stream(self) -> None:
         """Close the audio output stream."""
