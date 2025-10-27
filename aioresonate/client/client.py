@@ -114,12 +114,12 @@ class ResonateClient:
     """Unique identifier for this client."""
     _client_name: str
     """Human-readable name for this client."""
-    _explicit_roles: list[Roles] | None
-    """Optional list of roles this client supports."""
-    _explicit_player_support: ClientHelloPlayerSupport | None
-    """Optional custom player capabilities."""
-    _explicit_metadata_support: ClientHelloMetadataSupport | None
-    """Optional custom metadata capabilities."""
+    _roles: list[Roles]
+    """List of roles this client supports."""
+    _player_support: ClientHelloPlayerSupport | None
+    """Player capabilities (only set if PLAYER role is supported)."""
+    _metadata_support: ClientHelloMetadataSupport | None
+    """Metadata capabilities (only set if METADATA role is supported)."""
     _session: ClientSession | None
     """Optional aiohttp ClientSession for WebSocket connection."""
 
@@ -160,8 +160,8 @@ class ResonateClient:
         self,
         client_id: str,
         client_name: str,
+        roles: Sequence[Roles],
         *,
-        roles: Sequence[Roles] | None = None,
         player_support: ClientHelloPlayerSupport | None = None,
         metadata_support: ClientHelloMetadataSupport | None = None,
         session: ClientSession | None = None,
@@ -173,22 +173,41 @@ class ResonateClient:
         Args:
             client_id: Unique identifier for this client.
             client_name: Human-readable name for this client.
-            roles: Optional sequence of roles this client supports. If None,
-                defaults to [CONTROLLER, PLAYER, METADATA].
-            player_support: Optional custom player capabilities. If None, defaults
-                to PCM support with standard sample rates.
-            metadata_support: Optional custom metadata capabilities. If None,
-                defaults to basic metadata support.
+            roles: Sequence of roles this client supports. Must include PLAYER
+                if player_support is provided; must include METADATA if
+                metadata_support is provided.
+            player_support: Custom player capabilities. Required if PLAYER role
+                is specified; raises ValueError if missing.
+            metadata_support: Custom metadata capabilities. Required if METADATA
+                role is specified; raises ValueError if missing.
             session: Optional aiohttp ClientSession. If None, a session is created
                 and managed by this client.
             static_delay_ms: Static playback delay in milliseconds applied after
                 clock synchronization. Defaults to 0.0.
+
+        Raises:
+            ValueError: If PLAYER in roles but player_support is None, or if
+                METADATA in roles but metadata_support is None.
         """
         self._client_id = client_id
         self._client_name = client_name
-        self._explicit_roles = list(roles) if roles is not None else None
-        self._explicit_player_support = player_support
-        self._explicit_metadata_support = metadata_support
+        self._roles = list(roles)
+
+        # Validate and store player support
+        if Roles.PLAYER in self._roles:
+            if player_support is None:
+                raise ValueError("player_support is required when PLAYER role is specified")
+            self._player_support = player_support
+        else:
+            self._player_support = None
+
+        # Validate and store metadata support
+        if Roles.METADATA in self._roles:
+            if metadata_support is None:
+                raise ValueError("metadata_support is required when METADATA role is specified")
+            self._metadata_support = metadata_support
+        else:
+            self._metadata_support = None
         self._session = session
         self._owns_session = session is None
         self._send_lock = asyncio.Lock()
@@ -363,33 +382,13 @@ class ResonateClient:
         self._audio_chunk_callbacks.append(callback)
 
     def _build_client_hello(self) -> ClientHelloMessage:
-        roles = self._explicit_roles or [Roles.CONTROLLER, Roles.PLAYER, Roles.METADATA]
-
-        player_support = None
-        if Roles.PLAYER in roles:
-            player_support = self._explicit_player_support or ClientHelloPlayerSupport(
-                support_codecs=["pcm"],
-                support_channels=[2, 1],
-                support_sample_rates=[44_100],
-                support_bit_depth=[16],
-                buffer_capacity=1_000_000,
-            )
-
-        metadata_support = None
-        if Roles.METADATA in roles:
-            metadata_support = self._explicit_metadata_support or ClientHelloMetadataSupport(
-                support_picture_formats=[],
-                media_width=None,
-                media_height=None,
-            )
-
         payload = ClientHelloPayload(
             client_id=self._client_id,
             name=self._client_name,
             version=1,
-            supported_roles=list(roles),
-            player_support=player_support,
-            metadata_support=metadata_support,
+            supported_roles=self._roles,
+            player_support=self._player_support,
+            metadata_support=self._metadata_support,
         )
         return ClientHelloMessage(payload=payload)
 
