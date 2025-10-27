@@ -9,6 +9,7 @@ import signal
 import sys
 from collections.abc import Sequence
 from dataclasses import dataclass, field
+from functools import partial
 from typing import TYPE_CHECKING, cast
 
 if TYPE_CHECKING:
@@ -343,24 +344,16 @@ async def _connection_loop(
             manager.reset_backoff()
             manager.set_last_attempted_url(url)
 
-            # Wait for disconnect or keyboard exit using asyncio.wait()
-            async def _monitor_connection() -> None:
-                """Monitor connection status.
-
-                Polling is necessary here since client.connected is a property
-                without async event notifications.
-                """
-                while client.connected:  # noqa: ASYNC110
-                    await asyncio.sleep(0.5)
-
-            monitor_task = asyncio.create_task(_monitor_connection())
+            # Wait for disconnect or keyboard exit
+            disconnect_event: asyncio.Event = asyncio.Event()
+            client.set_disconnect_listener(partial(asyncio.Event.set, disconnect_event))
             done, _ = await asyncio.wait(
-                {keyboard_task, monitor_task},
+                {keyboard_task, asyncio.create_task(disconnect_event.wait())},
                 return_when=asyncio.FIRST_COMPLETED,
             )
 
+            client.set_disconnect_listener(None)
             if keyboard_task in done:
-                monitor_task.cancel()
                 break
 
             # Connection dropped

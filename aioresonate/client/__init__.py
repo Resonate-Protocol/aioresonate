@@ -2,6 +2,7 @@
 
 from .client import (
     AudioChunkCallback,
+    DisconnectCallback,
     GroupUpdateCallback,
     MetadataCallback,
     PCMFormat,
@@ -14,6 +15,7 @@ from .time_sync import ResonateTimeFilter
 
 __all__ = [
     "AudioChunkCallback",
+    "DisconnectCallback",
     "GroupUpdateCallback",
     "MetadataCallback",
     "PCMFormat",

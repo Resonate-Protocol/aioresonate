@@ -87,6 +87,9 @@ StreamEndCallback = Callable[[], Awaitable[None] | None]
 # Callback invoked with (server_timestamp_us, audio_data, format) when audio chunks arrive.
 AudioChunkCallback = Callable[[int, bytes, PCMFormat], Awaitable[None] | None]
 
+# Callback invoked when the client disconnects from the server.
+DisconnectCallback = Callable[[], Awaitable[None] | None]
+
 
 @dataclass(slots=True)
 class ServerInfo:
@@ -164,6 +167,8 @@ class ResonateClient:
     """Callback invoked when a stream ends."""
     _audio_chunk_callback: AudioChunkCallback | None = None
     """Callback invoked when audio chunks are received."""
+    _disconnect_callback: DisconnectCallback | None = None
+    """Callback invoked when the client disconnects."""
 
     def __init__(
         self,
@@ -304,6 +309,9 @@ class ResonateClient:
         self._current_pcm_format = None
         self._current_player = None
 
+        # Notify disconnect callback
+        await self._notify_disconnect_callback()
+
     async def send_player_state(
         self,
         *,
@@ -364,6 +372,10 @@ class ResonateClient:
         automatically.
         """
         self._audio_chunk_callback = callback
+
+    def set_disconnect_listener(self, callback: DisconnectCallback | None) -> None:
+        """Set or clear (if None) the callback invoked when the client disconnects."""
+        self._disconnect_callback = callback
 
     def is_time_synchronized(self) -> bool:
         """Return whether time synchronization with the server has converged."""
@@ -657,6 +669,16 @@ class ResonateClient:
                 await result
         except Exception:
             logger.exception("Error in stream end callback %s", self._stream_end_callback)
+
+    async def _notify_disconnect_callback(self) -> None:
+        if self._disconnect_callback is None:
+            return
+        try:
+            result = self._disconnect_callback()
+            if asyncio.iscoroutine(result):
+                await result
+        except Exception:
+            logger.exception("Error in disconnect callback %s", self._disconnect_callback)
 
     async def _time_sync_loop(self) -> None:
         try:
