@@ -126,7 +126,7 @@ class AudioPlayer:
         while not self._queue.empty():
             try:
                 self._queue.get_nowait()
-            except asyncio.QueueEmpty:  # pragma: no cover - race condition guard
+            except asyncio.QueueEmpty:
                 break
         # Reset playback state
         self._first_real_chunk = True
@@ -155,23 +155,6 @@ class AudioPlayer:
         if status:
             logger.debug("Audio callback status: %s", status)
 
-        assert self._format is not None
-
-        # Fill the output buffer with next chunks from queue
-        # The queue is already continuous (gaps filled in submit())
-        self._fill_audio_buffer(outdata, frames)
-
-    def _fill_audio_buffer(
-        self,
-        outdata: memoryview,
-        frames: int,
-    ) -> None:
-        """
-        Fill output buffer with audio data from queue.
-
-        Since submit() already ensured continuous audio with gap filling,
-        we just consume chunks in order without timestamp-based selection.
-        """
         assert self._format is not None
         bytes_needed = frames * self._format.frame_size
         output_buffer = memoryview(outdata).cast("B")
@@ -232,7 +215,7 @@ class AudioPlayer:
                     self._current_chunk = None
                     self._current_chunk_offset = 0
 
-        except Exception:  # pragma: no cover - error handling
+        except Exception:
             logger.exception("Error in audio callback")
             # Fill rest with silence on error
             if bytes_written < bytes_needed:
@@ -343,6 +326,6 @@ class AudioPlayer:
             try:
                 stream.stop()
                 stream.close()
-            except Exception:  # pragma: no cover - backend failure
+            except Exception:
                 logger.exception("Failed to close audio output stream")
         self._stream = None
