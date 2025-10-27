@@ -72,11 +72,19 @@ class PCMFormat:
         return self.channels * (self.bit_depth // 8)
 
 
+# Callback invoked when session metadata updates are received.
 MetadataCallback = Callable[[SessionUpdatePayload], Awaitable[None] | None]
+
+# Callback invoked when group state updates are received.
 GroupUpdateCallback = Callable[[GroupUpdateServerPayload], Awaitable[None] | None]
+
+# Callback invoked when audio streaming begins.
 StreamStartCallback = Callable[[StreamStartMessage], Awaitable[None] | None]
+
+# Callback invoked when audio streaming ends.
 StreamEndCallback = Callable[[], Awaitable[None] | None]
-# Callback for audio chunks: (server_timestamp_us, audio_data, format)
+
+# Callback invoked with (server_timestamp_us, audio_data, format) when audio chunks arrive.
 AudioChunkCallback = Callable[[int, bytes, PCMFormat], Awaitable[None] | None]
 
 
@@ -91,19 +99,11 @@ class ServerInfo:
 
 class ResonateClient:
     """
-    Async Resonate client capable of handling playback and metadata.
+    Async Resonate client for handling playback and metadata.
 
-    Attributes:
-        _client_id: Unique identifier for this client.
-        _client_name: Human-readable name for this client.
-        _explicit_roles: Optional list of roles this client supports (CONTROLLER,
-            PLAYER, METADATA). If None, defaults to all roles.
-        _explicit_player_support: Optional custom player capabilities. If None,
-            defaults to PCM support with standard sample rates.
-        _explicit_metadata_support: Optional custom metadata capabilities. If None,
-            defaults to basic metadata support.
-        _session: Optional aiohttp ClientSession for WebSocket connection. If None,
-            a session is created and owned by this client.
+    The client must be created within an async context and requires explicit
+    role specification. Player and metadata support configs are required if
+    their respective roles are enabled.
     """
 
     _client_id: str
@@ -139,6 +139,10 @@ class ResonateClient:
 
     _static_delay_us: int = 0
     """Static playback delay in microseconds."""
+    _send_lock: asyncio.Lock
+    """Lock for serializing WebSocket message sends."""
+    _time_filter: ResonateTimeFilter
+    """Kalman filter for time synchronization."""
 
     _current_player: StreamStartPlayer | None = None
     """Current active player configuration."""
@@ -273,7 +277,7 @@ class ResonateClient:
     async def disconnect(self) -> None:
         """Disconnect from the server and release resources."""
         self._connected = False
-        current_task = asyncio.current_task(loop=self._loop) if self._loop else None
+        current_task = asyncio.current_task(loop=self._loop)
 
         if self._time_task is not None and self._time_task is not current_task:
             self._time_task.cancel()
@@ -394,7 +398,7 @@ class ResonateClient:
         try:
             async for msg in self._ws:
                 await self._handle_ws_message(msg)
-        except asyncio.CancelledError:  # pragma: no cover - cancellation path
+        except asyncio.CancelledError:
             pass
         except Exception:
             logger.exception("WebSocket reader encountered an error")
@@ -658,7 +662,7 @@ class ResonateClient:
                 except Exception:
                     logger.exception("Failed to send time sync message")
                 await asyncio.sleep(self._compute_time_sync_interval())
-        except asyncio.CancelledError:  # pragma: no cover - cancellation path
+        except asyncio.CancelledError:
             pass
 
     def _compute_time_sync_interval(self) -> float:
