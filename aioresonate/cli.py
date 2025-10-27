@@ -15,6 +15,7 @@ if TYPE_CHECKING:
     from zeroconf import ServiceListener
 
 import aioconsole
+from aiohttp import ClientError
 from zeroconf.asyncio import AsyncServiceBrowser, AsyncZeroconf
 
 from aioresonate.cli_audio import AudioPlayer
@@ -105,12 +106,6 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="Logging level to use",
     )
     parser.add_argument(
-        "--discover-timeout",
-        type=float,
-        default=5.0,
-        help="Seconds to wait for mDNS discovery before giving up",
-    )
-    parser.add_argument(
         "--static-delay-ms",
         type=float,
         default=0.0,
@@ -135,9 +130,19 @@ class _ServiceDiscoveryListener:
     """Listens for Resonate server advertisements via mDNS."""
 
     def __init__(self, loop: asyncio.AbstractEventLoop) -> None:
-        self.result: asyncio.Future[str] = loop.create_future()
-        self.tasks: set[asyncio.Task[None]] = set()
         self._loop = loop
+        self._current_url: str | None = None
+        self._first_result: asyncio.Future[str] = loop.create_future()
+        self.tasks: set[asyncio.Task[None]] = set()
+
+    @property
+    def current_url(self) -> str | None:
+        """Get the current discovered server URL, or None if no servers."""
+        return self._current_url
+
+    async def wait_for_first(self) -> str:
+        """Wait for the first server to be discovered."""
+        return await self._first_result
 
     async def _process_service_info(
         self, zeroconf: AsyncZeroconf, service_type: str, name: str
@@ -151,12 +156,13 @@ class _ServiceDiscoveryListener:
             return
         host = addresses[0]
         url = _build_service_url(host, info.port, info.properties)
-        if not self.result.done():
-            self.result.set_result(url)
+        self._current_url = url
+
+        # Signal first server discovery
+        if not self._first_result.done():
+            self._first_result.set_result(url)
 
     def _schedule(self, zeroconf: AsyncZeroconf, service_type: str, name: str) -> None:
-        if self.result.done():
-            return
         task = self._loop.create_task(self._process_service_info(zeroconf, service_type, name))
         self.tasks.add(task)
         task.add_done_callback(self.tasks.discard)
@@ -168,7 +174,8 @@ class _ServiceDiscoveryListener:
         self._schedule(zeroconf, service_type, name)
 
     def remove_service(self, _zeroconf: AsyncZeroconf, _service_type: str, _name: str) -> None:
-        return
+        """Handle service removal (server offline)."""
+        self._current_url = None
 
 
 class ServiceDiscovery:
@@ -180,16 +187,8 @@ class ServiceDiscovery:
         self._browser: AsyncServiceBrowser | None = None
         self._zeroconf: AsyncZeroconf | None = None
 
-    async def discover_first(self, discovery_timeout: float) -> str | None:
-        """
-        Discover the first available Resonate server.
-
-        Args:
-            discovery_timeout: Seconds to wait for discovery.
-
-        Returns:
-            WebSocket URL of the server, or None if discovery timed out.
-        """
+    async def start(self) -> None:
+        """Start continuous discovery (keeps running until stop() is called)."""
         loop = asyncio.get_running_loop()
         self._listener = _ServiceDiscoveryListener(loop)
         self._zeroconf = AsyncZeroconf()
@@ -199,12 +198,19 @@ class ServiceDiscovery:
             self._browser = AsyncServiceBrowser(
                 self._zeroconf.zeroconf, SERVICE_TYPE, cast("ServiceListener", self._listener)
             )
-            return await asyncio.wait_for(self._listener.result, discovery_timeout)
-        except TimeoutError:
-            return None
         except Exception:
             await self.stop()
             raise
+
+    async def wait_for_first_server(self) -> str:
+        """Wait indefinitely for the first server to be discovered."""
+        if self._listener is None:
+            raise RuntimeError("Discovery not started. Call start() first.")
+        return await self._listener.wait_for_first()
+
+    def current_url(self) -> str | None:
+        """Get the current discovered server URL, or None if no servers."""
+        return self._listener.current_url if self._listener else None
 
     async def stop(self) -> None:
         """Stop discovery and clean up resources."""
@@ -217,13 +223,149 @@ class ServiceDiscovery:
         self._listener = None
 
 
-async def _discover_server(discovery_timeout: float) -> str | None:
-    """Discover a Resonate server via mDNS."""
-    discovery = ServiceDiscovery()
-    try:
-        return await discovery.discover_first(discovery_timeout)
-    finally:
-        await discovery.stop()
+async def _sleep_interruptible(duration: float, keyboard_task: asyncio.Task[None]) -> bool:
+    """Sleep with keyboard interrupt support. Return True if interrupted."""
+    remaining = duration
+    while remaining > 0 and not keyboard_task.done():
+        await asyncio.sleep(min(0.5, remaining))
+        remaining -= 0.5
+    return keyboard_task.done()
+
+
+def _should_reset_backoff(current_url: str | None, last_attempted_url: str) -> bool:
+    """Check if URL changed, indicating server came back online."""
+    return bool(current_url and current_url != last_attempted_url)
+
+
+def _update_backoff_and_url(
+    current_url: str | None,
+    last_attempted_url: str,
+    error_backoff: float,
+    max_backoff: float,
+) -> tuple[str | None, str, float]:
+    """Update URL and backoff based on discovery.
+
+    Returns (new_url, new_last_attempted, new_backoff).
+    """
+    if _should_reset_backoff(current_url, last_attempted_url):
+        logger.info("Server URL changed to %s, reconnecting immediately", current_url)
+        assert current_url is not None
+        return current_url, current_url, 1.0
+    return None, last_attempted_url, min(error_backoff * 2, max_backoff)
+
+
+async def _handle_error_backoff(error_backoff: float, keyboard_task: asyncio.Task[None]) -> bool:
+    """Sleep for error backoff with keyboard interrupt support.
+
+    Returns True if interrupted by keyboard, False if completed normally.
+    """
+    _print_event(f"Connection error, retrying in {error_backoff:.0f}s...")
+    return await _sleep_interruptible(error_backoff, keyboard_task)
+
+
+async def _wait_for_server_reappear(
+    discovery: ServiceDiscovery, keyboard_task: asyncio.Task[None]
+) -> str | None:
+    """Wait for server to reappear on the network.
+
+    Returns the new URL if server reappears, None if interrupted.
+    """
+    logger.info("Server offline, waiting for rediscovery...")
+    _print_event("Waiting for server...")
+
+    while not (new_url := discovery.current_url()) and not keyboard_task.done():  # noqa: ASYNC110
+        await asyncio.sleep(1.0)
+
+    return new_url
+
+
+async def _connection_loop(
+    client: ResonateClient,
+    discovery: ServiceDiscovery,
+    audio_handler: AudioStreamHandler,
+    initial_url: str,
+    keyboard_task: asyncio.Task[None],
+) -> None:
+    """
+    Run the connection loop with automatic reconnection on disconnect.
+
+    Connects to the server, waits for disconnect, cleans up, then retries
+    only if the server is visible via mDNS. Reconnects immediately when
+    server reappears. Uses exponential backoff (up to 5 min) for errors.
+
+    Args:
+        client: Resonate client instance.
+        discovery: Service discovery manager.
+        audio_handler: Audio stream handler.
+        initial_url: Initial server URL.
+        keyboard_task: Keyboard input task to monitor.
+    """
+    url = initial_url
+    last_attempted_url = url
+    error_backoff = 1.0
+    max_backoff = 300.0  # 5 minutes
+
+    while not keyboard_task.done():
+        try:
+            await client.connect(url)
+            logger.info("Connected to %s", url)
+            _print_event(f"Connected to {url}")
+            error_backoff = 1.0  # Reset backoff on successful connect
+            last_attempted_url = url
+
+            # Wait for disconnect or keyboard exit
+            while client.connected and not keyboard_task.done():  # noqa: ASYNC110
+                await asyncio.sleep(0.5)
+
+            if keyboard_task.done():
+                break
+
+            # Connection dropped
+            logger.info("Connection lost")
+            _print_event("Connection lost")
+
+            # Clean up audio state
+            if audio_handler.audio_player is not None:
+                await audio_handler.audio_player.stop()
+                audio_handler.audio_player = None
+            audio_handler.reset_sync_state()
+
+            # Update URL from discovery
+            new_url = discovery.current_url()
+
+            # Wait for server to reappear if it's gone
+            if not new_url:
+                new_url = await _wait_for_server_reappear(discovery, keyboard_task)
+                if keyboard_task.done():
+                    break
+
+            # Use the discovered URL
+            if new_url:
+                url = new_url
+            _print_event(f"Reconnecting to {url}...")
+
+        except (TimeoutError, OSError, ClientError) as e:
+            # Network-related errors - log cleanly
+            logger.debug(
+                "Connection error (%s), retrying in %.0fs", type(e).__name__, error_backoff
+            )
+
+            if await _handle_error_backoff(error_backoff, keyboard_task):
+                break
+
+            # Check if URL changed while sleeping
+            current_url = discovery.current_url()
+            new_url, last_attempted_url, error_backoff = _update_backoff_and_url(
+                current_url, last_attempted_url, error_backoff, max_backoff
+            )
+            if new_url:
+                url = new_url
+        except Exception:
+            # Unexpected errors - log with full traceback
+            logger.exception("Unexpected error during connection")
+            _print_event("Unexpected error occurred")
+            await asyncio.sleep(error_backoff)
+            error_backoff = min(error_backoff * 2, max_backoff)
 
 
 class AudioStreamHandler:
@@ -301,6 +443,12 @@ class AudioStreamHandler:
         """Get the current audio player instance."""
         return self.audio_player
 
+    def reset_sync_state(self) -> None:
+        """Reset time synchronization state."""
+        self._sync_ready = False
+        self._first_sync_message_printed = False
+        self._dropped_chunks = 0
+
 
 async def main_async(argv: Sequence[str] | None = None) -> int:
     """Entry point executing the asynchronous CLI workflow."""
@@ -327,57 +475,66 @@ async def main_async(argv: Sequence[str] | None = None) -> int:
         static_delay_ms=args.static_delay_ms,
     )
 
-    # Create audio and stream handlers
-    audio_handler = AudioStreamHandler(client)
+    # Start service discovery
+    discovery = ServiceDiscovery()
+    await discovery.start()
 
-    client.set_metadata_listener(lambda payload: _handle_session_update(state, payload))
-    client.set_group_update_listener(lambda payload: _handle_group_update(state, payload))
-    client.set_stream_start_listener(audio_handler.on_stream_start)
-    client.set_stream_end_listener(audio_handler.on_stream_end)
-    client.set_audio_chunk_listener(audio_handler.on_audio_chunk)
-
-    url = args.url
-    if url is None:
-        url = await _discover_server(args.discover_timeout)
+    try:
+        # Get initial server URL
+        url = args.url
         if url is None:
-            logger.error("Failed to discover a Resonate server via mDNS")
-            return 1
-        logger.info("Discovered Resonate server at %s", url)
+            logger.info("Waiting for mDNS discovery of Resonate server...")
+            _print_event("Searching for Resonate server...")
+            try:
+                url = await discovery.wait_for_first_server()
+                logger.info("Discovered Resonate server at %s", url)
+                _print_event(f"Found server at {url}")
+            except Exception:
+                logger.exception("Failed to discover server")
+                return 1
 
-    try:
-        await client.connect(url)
-    except Exception:  # pragma: no cover - network failure path
-        logger.exception("Failed to connect to %s", url)
-        await client.disconnect()
-        return 1
+        # Create audio and stream handlers
+        audio_handler = AudioStreamHandler(client)
 
-    # Audio player will be created when first audio chunk arrives
+        client.set_metadata_listener(lambda payload: _handle_session_update(state, payload))
+        client.set_group_update_listener(lambda payload: _handle_group_update(state, payload))
+        client.set_stream_start_listener(audio_handler.on_stream_start)
+        client.set_stream_end_listener(audio_handler.on_stream_end)
+        client.set_audio_chunk_listener(audio_handler.on_audio_chunk)
 
-    _print_instructions()
+        # Audio player will be created when first audio chunk arrives
 
-    keyboard_task = asyncio.create_task(
-        _keyboard_loop(client, state, audio_handler.get_audio_player)
-    )
+        _print_instructions()
 
-    # Set up signal handler for graceful shutdown on Ctrl+C
-    loop = asyncio.get_running_loop()
+        # Create and start keyboard task
+        keyboard_task = asyncio.create_task(
+            _keyboard_loop(client, state, audio_handler.get_audio_player)
+        )
 
-    def signal_handler() -> None:
-        logger.debug("Received interrupt signal, shutting down...")
-        keyboard_task.cancel()
+        # Set up signal handler for graceful shutdown on Ctrl+C
+        loop = asyncio.get_running_loop()
 
-    loop.add_signal_handler(signal.SIGINT, signal_handler)
+        def signal_handler() -> None:
+            logger.debug("Received interrupt signal, shutting down...")
+            keyboard_task.cancel()
 
-    try:
-        await keyboard_task
-    except asyncio.CancelledError:  # pragma: no cover - cancellation path
-        logger.debug("Keyboard task cancelled")
+        loop.add_signal_handler(signal.SIGINT, signal_handler)
+
+        try:
+            # Run connection loop with auto-reconnect
+            await _connection_loop(client, discovery, audio_handler, url, keyboard_task)
+        except asyncio.CancelledError:  # pragma: no cover - cancellation path
+            logger.debug("Connection loop cancelled")
+        finally:
+            # Remove signal handler
+            loop.remove_signal_handler(signal.SIGINT)
+            if audio_handler.audio_player is not None:
+                await audio_handler.audio_player.stop()
+            await client.disconnect()
+
     finally:
-        # Remove signal handler
-        loop.remove_signal_handler(signal.SIGINT)
-        if audio_handler.audio_player is not None:
-            await audio_handler.audio_player.stop()
-        await client.disconnect()
+        # Stop discovery
+        await discovery.stop()
 
     return 0
 
