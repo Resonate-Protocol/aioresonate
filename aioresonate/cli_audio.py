@@ -199,7 +199,7 @@ class AudioPlayer:
         self._frames_inserted_since_log = 0
         self._frames_dropped_since_log = 0
 
-    def _audio_callback(
+    def _audio_callback(  # noqa: C901, PLR0912, PLR0915
         self,
         outdata: memoryview,
         frames: int,
@@ -293,7 +293,7 @@ class AudioPlayer:
                     bytes_written += silence_bytes
             else:
                 # Simple drift control based on buffer depth (disabled for heavy actions)
-                target_buffer_us = self._compute_minimum_buffer_duration()
+                target_buffer_us = int(self._compute_minimum_buffer_duration())
                 current_remaining_us = 0
                 if self._current_chunk is not None:
                     rem_bytes = len(self._current_chunk.audio_data) - self._current_chunk_offset
@@ -305,10 +305,10 @@ class AudioPlayer:
 
                 # Large jump handling after start: prefer doing nothing to avoid pitch
                 # Determine extra frames to consume this callback (very conservative)
-                CONTROL_GAIN = 0.0  # disable pitchy drop/dup by default
+                control_gain = 0.0  # disable pitchy drop/dup by default
                 max_adjust = 0
-                consume_extra = int(
-                    (delta_us * self._format.sample_rate / 1_000_000.0) * CONTROL_GAIN
+                consume_extra: int = int(
+                    (delta_us * self._format.sample_rate / 1_000_000.0) * control_gain
                 )
                 if consume_extra > max_adjust:
                     consume_extra = max_adjust
@@ -349,11 +349,12 @@ class AudioPlayer:
                         self._frames_inserted_since_log += 1
                     else:
                         # Normal read
-                        frame_bytes = self._read_one_input_frame()
-                        if frame_bytes is None:
+                        read_frame = self._read_one_input_frame()
+                        if read_frame is None:
                             frame_bytes = self._last_output_frame
                         else:
-                            self._last_output_frame = frame_bytes
+                            frame_bytes = read_frame
+                            self._last_output_frame = read_frame
 
                     # Decrement cadence counters
                     if self._frames_until_next_insert > 0:
@@ -440,7 +441,7 @@ class AudioPlayer:
         return frame
 
     def _advance_finished_chunk(self) -> None:
-        """Called when current chunk is fully consumed to update durations/state."""
+        """Update durations and state when current chunk is fully consumed."""
         assert self._format is not None
         if self._current_chunk is None:
             return
@@ -499,7 +500,7 @@ class AudioPlayer:
             return
 
         # Get most recent DAC time from callback
-        dac_time_us, loop_time_old_us = self._dac_loop_calibrations[-1]
+        dac_time_us, _loop_time_old_us = self._dac_loop_calibrations[-1]
 
         # Get current loop time (safe to call from async)
         loop_time_us = int(self._loop.time() * 1_000_000)
@@ -519,7 +520,7 @@ class AudioPlayer:
             # Use raw estimate without smoothing
             self._last_known_playback_position_us = estimated_position
         except Exception:
-            pass
+            logger.exception("Failed to estimate playback position")
 
         # If we haven't set the DAC-anchored start yet, approximate it now
         if self._scheduled_start_dac_time_us is None and self._scheduled_start_loop_time_us:
@@ -534,6 +535,7 @@ class AudioPlayer:
                     self._scheduled_start_dac_time_us = est_dac
             except Exception:
                 # Fall back to mapping 1:1 when estimation fails
+                logger.exception("Failed to estimate DAC start time")
                 self._scheduled_start_dac_time_us = self._scheduled_start_loop_time_us
 
     def _estimate_dac_time_for_server_timestamp(self, server_timestamp_us: int) -> int:
@@ -569,7 +571,7 @@ class AudioPlayer:
             # Clamp to sane bounds to avoid wild extrapolation
             dac_per_loop = max(0.999, min(1.001, dac_per_loop))
 
-        return int(round(dac_ref_us + (loop_time_us - loop_ref_us) * dac_per_loop))
+        return round(dac_ref_us + (loop_time_us - loop_ref_us) * dac_per_loop)
 
     def _estimate_loop_time_for_dac_time(self, dac_time_us: int) -> int:
         """Estimate loop time corresponding to a DAC time using recent calibrations."""
@@ -585,7 +587,7 @@ class AudioPlayer:
         if dac_prev_us and (dac_ref_us != dac_prev_us):
             loop_per_dac = (loop_ref_us - loop_prev_us) / (dac_ref_us - dac_prev_us)
             loop_per_dac = max(0.999, min(1.001, loop_per_dac))
-        return int(round(loop_ref_us + (dac_time_us - dac_ref_us) * loop_per_dac))
+        return round(loop_ref_us + (dac_time_us - dac_ref_us) * loop_per_dac)
 
     def _get_current_playback_position_us(self) -> int:
         """Get the current playback position in server timestamp space."""
@@ -599,7 +601,7 @@ class AudioPlayer:
             "dac_samples_recorded": len(self._dac_loop_calibrations),
         }
 
-    def _log_chunk_timing(self, server_timestamp_us: int) -> None:
+    def _log_chunk_timing(self, _server_timestamp_us: int) -> None:
         """Log phase error and buffer status for debugging sync issues."""
         if self._phase_error_ema_init:
             now_us = int(self._loop.time() * 1_000_000)
@@ -651,20 +653,20 @@ class AudioPlayer:
         abs_err = abs(self._phase_error_ema_us)
 
         # Deadband where we do nothing
-        DEADBAND_US = 2_000  # 2 ms
-        if abs_err <= DEADBAND_US:
+        deadband_us = 2_000  # 2 ms
+        if abs_err <= deadband_us:
             self._insert_every_n_frames = 0
             self._drop_every_n_frames = 0
             return
 
         # Re-anchor only if error is very large and cooldown has elapsed
-        REANCHOR_THRESHOLD_US = 120_000  # 120 ms
-        REANCHOR_COOLDOWN_US = 5_000_000  # 5 seconds
+        reanchor_threshold_us = 120_000  # 120 ms
+        reanchor_cooldown_us = 5_000_000  # 5 seconds
         now_loop_us = int(self._loop.time() * 1_000_000)
         if (
-            abs_err > REANCHOR_THRESHOLD_US
+            abs_err > reanchor_threshold_us
             and not self._waiting_for_start
-            and now_loop_us - self._last_reanchor_loop_time_us > REANCHOR_COOLDOWN_US
+            and now_loop_us - self._last_reanchor_loop_time_us > reanchor_cooldown_us
         ):
             logger.info("Phase error %.1f ms too large; re-anchoring", abs_err / 1000.0)
             # Reset cadence
@@ -678,17 +680,17 @@ class AudioPlayer:
             return
 
         # Convert error to equivalent frames
-        frames_error = int(round(abs_err * self._format.sample_rate / 1_000_000.0))
+        frames_error = round(abs_err * self._format.sample_rate / 1_000_000.0)
 
-        # Aim to correct within roughly 4 seconds with a max of ~50 corrections/s
-        TARGET_SECONDS = 4.0
-        max_corrections_per_sec = 50.0
+        # Aim to correct within roughly 2 seconds with a max of ~100 corrections/s
+        target_seconds = 2.0
+        max_corrections_per_sec = 100.0
         desired_corrections_per_sec = min(
-            max_corrections_per_sec, frames_error / max(TARGET_SECONDS, 1.0)
+            max_corrections_per_sec, frames_error / max(target_seconds, 1.0)
         )
 
         interval_frames = int(self._format.sample_rate / max(desired_corrections_per_sec, 1.0))
-        interval_frames = max(512, interval_frames)  # at least ~12 ms between corrections
+        interval_frames = max(256, interval_frames)  # at least ~6 ms between corrections
 
         if self._phase_error_ema_us > 0:
             # We are behind (DAC ahead) -> drop to catch up
@@ -699,7 +701,7 @@ class AudioPlayer:
             self._insert_every_n_frames = interval_frames
             self._drop_every_n_frames = 0
 
-    def submit(self, server_timestamp_us: int, payload: bytes) -> None:
+    def submit(self, server_timestamp_us: int, payload: bytes) -> None:  # noqa: PLR0915
         """
         Queue an audio payload for playback, intelligently handling gaps and overlaps.
 
@@ -732,6 +734,7 @@ class AudioPlayer:
             try:
                 self._scheduled_start_loop_time_us = self._compute_client_time(server_timestamp_us)
             except Exception:
+                logger.exception("Failed to compute client time for start")
                 self._scheduled_start_loop_time_us = int(self._loop.time() * 1_000_000)
             # Best-effort DAC schedule; refined later as calibrations accumulate
             est_dac = self._estimate_dac_time_for_server_timestamp(server_timestamp_us)
@@ -755,7 +758,7 @@ class AudioPlayer:
                     )
                     self._scheduled_start_dac_time_us = est_dac if est_dac else None
             except Exception:
-                pass
+                logger.exception("Failed to update start time")
 
         # If we started too early due to fallback mapping, re-anchor once sync improves
         elif not self._waiting_for_start and self._early_start_suspect and not self._has_reanchored:
@@ -766,6 +769,7 @@ class AudioPlayer:
             try:
                 loop_start_now = self._compute_client_time(server_timestamp_us)
             except Exception:
+                logger.exception("Failed to compute loop start time")
                 loop_start_now = None
 
             if est_dac or (loop_start_now is not None and loop_start_now - now_us > 1_000_000):
@@ -777,6 +781,7 @@ class AudioPlayer:
                         server_timestamp_us
                     )
                 except Exception:
+                    logger.exception("Failed to compute client time during re-anchor")
                     self._scheduled_start_loop_time_us = now_us
                 est_dac2 = self._estimate_dac_time_for_server_timestamp(server_timestamp_us)
                 self._scheduled_start_dac_time_us = est_dac2 if est_dac2 else None
