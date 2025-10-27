@@ -226,102 +226,80 @@ async def _discover_server(discovery_timeout: float) -> str | None:
         await discovery.stop()
 
 
-def _create_audio_chunk_handler(
-    client: ResonateClient,
-) -> tuple[
-    Callable[[int, bytes, PCMFormat], None],
-    Callable[[], AudioPlayer | None],
-]:
-    """
-    Create an audio chunk handler and accessor for the audio player.
+class AudioStreamHandler:
+    """Manages audio playback state and stream lifecycle."""
 
-    Returns:
-        A tuple of (handler_function, get_audio_player_function).
-    """
-    audio_player: AudioPlayer | None = None
-    current_format: PCMFormat | None = None
-    sync_ready: bool = False
-    first_sync_message_printed: bool = False
-    dropped_chunks: int = 0
+    def __init__(self, client: ResonateClient) -> None:
+        """Initialize the audio stream handler."""
+        self._client = client
+        self.audio_player: AudioPlayer | None = None
+        self._current_format: PCMFormat | None = None
+        self._sync_ready = False
+        self._first_sync_message_printed = False
+        self._dropped_chunks = 0
 
-    def handle_audio_chunk(server_timestamp_us: int, audio_data: bytes, fmt: PCMFormat) -> None:
-        """Handle incoming audio chunks."""
-        nonlocal audio_player, current_format, sync_ready, first_sync_message_printed
-        nonlocal dropped_chunks
-
+    def on_audio_chunk(self, server_timestamp_us: int, audio_data: bytes, fmt: PCMFormat) -> None:
+        """Handle incoming audio chunks with time sync validation."""
         # Check if time sync is ready - critical for accurate playback timing
-        was_sync_ready = sync_ready
-        sync_ready = client.is_time_synchronized()
+        was_sync_ready = self._sync_ready
+        self._sync_ready = self._client.is_time_synchronized()
 
         # Print message when sync becomes ready
-        if sync_ready and not was_sync_ready:
-            if dropped_chunks > 0:
-                logger.info("Time sync ready after dropping %d early chunks", dropped_chunks)
+        if self._sync_ready and not was_sync_ready:
+            if self._dropped_chunks > 0:
+                logger.info("Time sync ready after dropping %d early chunks", self._dropped_chunks)
                 _print_event(
-                    f"Time sync ready (dropped {dropped_chunks} early chunks), starting playback"
+                    f"Time sync ready (dropped {self._dropped_chunks} early chunks), "
+                    "starting playback"
                 )
             else:
                 logger.info("Time sync ready")
                 _print_event("Time sync ready, starting playback")
-            dropped_chunks = 0
+            self._dropped_chunks = 0
 
         # Drop chunks if sync is not ready - prevents desync on initial connection
-        if not sync_ready:
-            dropped_chunks += 1
-            if not first_sync_message_printed:
+        if not self._sync_ready:
+            self._dropped_chunks += 1
+            if not self._first_sync_message_printed:
                 logger.debug("Waiting for time sync to converge before playing audio...")
                 _print_event("Waiting for time synchronization...")
-                first_sync_message_printed = True
+                self._first_sync_message_printed = True
             return
 
         # Initialize or reconfigure audio player if format changed
-        if audio_player is None or current_format != fmt:
-            if audio_player is not None:
-                audio_player.clear()
+        if self.audio_player is None or self._current_format != fmt:
+            if self.audio_player is not None:
+                self.audio_player.clear()
 
             loop = asyncio.get_running_loop()
             # Use client's public time conversion methods (based on monotonic loop time)
-            audio_player = AudioPlayer(loop, client.compute_play_time, client.compute_server_time)
-            audio_player.set_format(fmt)
-            current_format = fmt
+            self.audio_player = AudioPlayer(
+                loop, self._client.compute_play_time, self._client.compute_server_time
+            )
+            self.audio_player.set_format(fmt)
+            self._current_format = fmt
 
         # Submit audio chunk with server timestamp (AudioPlayer will compute client play time)
-        if audio_player is not None:
-            audio_player.submit(server_timestamp_us, audio_data)
+        if self.audio_player is not None:
+            self.audio_player.submit(server_timestamp_us, audio_data)
 
-    def get_audio_player() -> AudioPlayer | None:
-        return audio_player
-
-    return handle_audio_chunk, get_audio_player
-
-
-def _create_stream_handlers(
-    get_audio_player: Callable[[], AudioPlayer | None],
-) -> tuple[Callable[[StreamStartMessage], None], Callable[[], None]]:
-    """
-    Create stream start/end handlers that clear audio queue.
-
-    Returns:
-        A tuple of (stream_start_handler, stream_end_handler).
-    """
-
-    def handle_stream_start(_message: StreamStartMessage) -> None:
+    def on_stream_start(self, _message: StreamStartMessage) -> None:
         """Handle stream start by clearing stale audio chunks."""
-        audio_player = get_audio_player()
-        if audio_player is not None:
-            audio_player.clear()
+        if self.audio_player is not None:
+            self.audio_player.clear()
             logger.debug("Cleared audio queue on stream start")
         _print_event("Stream started")
 
-    def handle_stream_end() -> None:
+    def on_stream_end(self) -> None:
         """Handle stream end by clearing audio queue to prevent desync on resume."""
-        audio_player = get_audio_player()
-        if audio_player is not None:
-            audio_player.clear()
+        if self.audio_player is not None:
+            self.audio_player.clear()
             logger.debug("Cleared audio queue on stream end")
         _print_event("Stream ended")
 
-    return handle_stream_start, handle_stream_end
+    def get_audio_player(self) -> AudioPlayer | None:
+        """Get the current audio player instance."""
+        return self.audio_player
 
 
 async def main_async(argv: Sequence[str] | None = None) -> int:
@@ -350,14 +328,13 @@ async def main_async(argv: Sequence[str] | None = None) -> int:
     )
 
     # Create audio and stream handlers
-    handle_audio_chunk, get_audio_player = _create_audio_chunk_handler(client)
-    handle_stream_start, handle_stream_end = _create_stream_handlers(get_audio_player)
+    audio_handler = AudioStreamHandler(client)
 
     client.set_metadata_listener(lambda payload: _handle_session_update(state, payload))
     client.set_group_update_listener(lambda payload: _handle_group_update(state, payload))
-    client.set_stream_start_listener(handle_stream_start)
-    client.set_stream_end_listener(handle_stream_end)
-    client.set_audio_chunk_listener(handle_audio_chunk)
+    client.set_stream_start_listener(audio_handler.on_stream_start)
+    client.set_stream_end_listener(audio_handler.on_stream_end)
+    client.set_audio_chunk_listener(audio_handler.on_audio_chunk)
 
     url = args.url
     if url is None:
@@ -378,7 +355,9 @@ async def main_async(argv: Sequence[str] | None = None) -> int:
 
     _print_instructions()
 
-    keyboard_task = asyncio.create_task(_keyboard_loop(client, state, get_audio_player))
+    keyboard_task = asyncio.create_task(
+        _keyboard_loop(client, state, audio_handler.get_audio_player)
+    )
 
     # Set up signal handler for graceful shutdown on Ctrl+C
     loop = asyncio.get_running_loop()
@@ -396,9 +375,8 @@ async def main_async(argv: Sequence[str] | None = None) -> int:
     finally:
         # Remove signal handler
         loop.remove_signal_handler(signal.SIGINT)
-        audio_player = get_audio_player()
-        if audio_player is not None:
-            await audio_player.stop()
+        if audio_handler.audio_player is not None:
+            await audio_handler.audio_player.stop()
         await client.disconnect()
 
     return 0
