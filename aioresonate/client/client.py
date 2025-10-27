@@ -111,11 +111,50 @@ class ResonateClient:
     """
 
     _client_id: str
+    """Unique identifier for this client."""
     _client_name: str
+    """Human-readable name for this client."""
     _explicit_roles: list[Roles] | None
+    """Optional list of roles this client supports."""
     _explicit_player_support: ClientHelloPlayerSupport | None
+    """Optional custom player capabilities."""
     _explicit_metadata_support: ClientHelloMetadataSupport | None
+    """Optional custom metadata capabilities."""
     _session: ClientSession | None
+    """Optional aiohttp ClientSession for WebSocket connection."""
+
+    _loop: asyncio.AbstractEventLoop | None = None
+    """Event loop for this client."""
+    _ws: ClientWebSocketResponse | None = None
+    """WebSocket connection to the server."""
+    _owns_session: bool
+    """Whether this client owns and should close the session."""
+    _connected: bool = False
+    """Whether the client is currently connected."""
+    _server_info: ServerInfo | None = None
+    """Information about the connected server."""
+    _server_hello_event: asyncio.Event | None = None
+    """Event signaled when server hello is received."""
+
+    _reader_task: asyncio.Task[None] | None = None
+    """Background task reading messages from server."""
+    _time_task: asyncio.Task[None] | None = None
+    """Background task for time synchronization."""
+
+    _static_delay_us: int = 0
+    """Static playback delay in microseconds."""
+    _pending_time_message: bool = False
+    """Whether a time sync message is awaiting response."""
+
+    _current_player: StreamStartPlayer | None = None
+    """Current active player configuration."""
+    _current_pcm_format: PCMFormat | None = None
+    """Current PCM audio format for active stream."""
+
+    _group_state: GroupUpdateServerPayload | None = None
+    """Latest group state received from server."""
+    _session_state: SessionUpdatePayload | None = None
+    """Latest session state received from server."""
 
     def __init__(
         self,
@@ -152,31 +191,15 @@ class ResonateClient:
         self._explicit_metadata_support = metadata_support
         self._session = session
         self._owns_session = session is None
-        self._loop: asyncio.AbstractEventLoop | None = None
-        self._ws: ClientWebSocketResponse | None = None
-        self._reader_task: asyncio.Task[None] | None = None
-        self._time_task: asyncio.Task[None] | None = None
         self._send_lock = asyncio.Lock()
         self._time_filter = ResonateTimeFilter()
-        self._static_delay_us = 0
         self.set_static_delay_ms(static_delay_ms)
-        self._server_info: ServerInfo | None = None
         self._metadata_callbacks: list[MetadataCallback] = []
         self._group_callbacks: list[GroupUpdateCallback] = []
         self._stream_start_callbacks: list[StreamStartCallback] = []
         self._stream_end_callbacks: list[StreamEndCallback] = []
         self._audio_chunk_callbacks: list[AudioChunkCallback] = []
-        self._server_hello_event: asyncio.Event | None = None
-        self._connected = False
-        self._current_player: StreamStartPlayer | None = None
-        self._current_pcm_format: PCMFormat | None = None
-        self._group_state: GroupUpdateServerPayload | None = None
-        self._session_state: SessionUpdatePayload | None = None
-        self._pending_time_message = False
 
-    # ---------------------------------------------------------------------
-    # Public API
-    # ---------------------------------------------------------------------
     @property
     def server_info(self) -> ServerInfo | None:
         """Return information about the connected server, if available."""
@@ -339,9 +362,6 @@ class ResonateClient:
         """
         self._audio_chunk_callbacks.append(callback)
 
-    # ------------------------------------------------------------------
-    # Internal helpers
-    # ------------------------------------------------------------------
     def _build_client_hello(self) -> ClientHelloMessage:
         roles = self._explicit_roles or [Roles.CONTROLLER, Roles.PLAYER, Roles.METADATA]
 
