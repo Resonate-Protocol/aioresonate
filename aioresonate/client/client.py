@@ -294,6 +294,7 @@ class ResonateClient:
             self._session = None
         self._time_filter.reset()
         self._server_info = None
+        self._server_hello_event = None
         self._group_state = None
         self._session_state = None
         self._current_pcm_format = None
