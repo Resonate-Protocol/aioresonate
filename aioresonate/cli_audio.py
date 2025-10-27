@@ -130,6 +130,8 @@ class AudioPlayer:
         self._phase_error_ema_init: bool = False
         self._last_reanchor_loop_time_us: int = 0
         self._last_phase_error_log_us: int = 0  # Rate limit phase error logging
+        self._frames_inserted_since_log: int = 0  # Track inserts for logging
+        self._frames_dropped_since_log: int = 0  # Track drops for logging
 
     def set_format(self, pcm_format: PCMFormat) -> None:
         """Configure the audio output format."""
@@ -194,6 +196,8 @@ class AudioPlayer:
         self._phase_error_ema_init = False
         self._last_reanchor_loop_time_us = 0
         self._last_phase_error_log_us = 0
+        self._frames_inserted_since_log = 0
+        self._frames_dropped_since_log = 0
 
     def _audio_callback(
         self,
@@ -335,12 +339,14 @@ class AudioPlayer:
                         # Discard one input frame to speed up
                         _ = self._read_one_input_frame()
                         self._frames_until_next_drop = self._drop_every_n_frames
+                        self._frames_dropped_since_log += 1
                         # Output last frame without reading a new one
                         frame_bytes = self._last_output_frame
                     elif do_insert:
                         # Duplicate last output frame to slow down
                         frame_bytes = self._last_output_frame
                         self._frames_until_next_insert = self._insert_every_n_frames
+                        self._frames_inserted_since_log += 1
                     else:
                         # Normal read
                         frame_bytes = self._read_one_input_frame()
@@ -508,7 +514,10 @@ class AudioPlayer:
             loop_at_dac_us = self._estimate_loop_time_for_dac_time(dac_time_us)
             if loop_at_dac_us == 0:
                 loop_at_dac_us = loop_time_us
-            self._last_known_playback_position_us = self._compute_server_time(loop_at_dac_us)
+            estimated_position = self._compute_server_time(loop_at_dac_us)
+
+            # Use raw estimate without smoothing
+            self._last_known_playback_position_us = estimated_position
         except Exception:
             pass
 
@@ -597,10 +606,15 @@ class AudioPlayer:
             if now_us - self._last_phase_error_log_us >= 1_000_000:
                 self._last_phase_error_log_us = now_us
                 logger.debug(
-                    "Phase error: %.1f ms, buffer: %.2f s",
+                    "Phase error: %.1f ms, buffer: %.2f s, inserted: %d, dropped: %d",
                     self._phase_error_ema_us / 1000.0,
                     self._queued_duration_us / 1_000_000,
+                    self._frames_inserted_since_log,
+                    self._frames_dropped_since_log,
                 )
+                # Reset counters for next logging period
+                self._frames_inserted_since_log = 0
+                self._frames_dropped_since_log = 0
 
     def _compute_minimum_buffer_duration(self) -> float:
         """Compute minimum buffer duration needed for network jitter.
