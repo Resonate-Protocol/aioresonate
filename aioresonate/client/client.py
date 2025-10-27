@@ -121,7 +121,7 @@ class ResonateClient:
     _session: ClientSession | None
     """Optional aiohttp ClientSession for WebSocket connection."""
 
-    _loop: asyncio.AbstractEventLoop | None = None
+    _loop: asyncio.AbstractEventLoop
     """Event loop for this client."""
     _ws: ClientWebSocketResponse | None = None
     """WebSocket connection to the server."""
@@ -217,6 +217,7 @@ class ResonateClient:
             self._metadata_support = None
         self._session = session
         self._owns_session = session is None
+        self._loop = asyncio.get_running_loop()
         self._send_lock = asyncio.Lock()
         self._time_filter = ResonateTimeFilter()
         self.set_static_delay_ms(static_delay_ms)
@@ -250,7 +251,6 @@ class ResonateClient:
             logger.debug("Already connected")
             return
 
-        self._loop = asyncio.get_running_loop()
         if self._session is None:
             self._session = ClientSession()
         self._server_hello_event = asyncio.Event()
@@ -676,8 +676,7 @@ class ResonateClient:
         return 0.2
 
     def _now_us(self) -> int:
-        loop = self._loop or asyncio.get_running_loop()
-        return int(loop.time() * 1_000_000)
+        return int(self._loop.time() * 1_000_000)
 
     async def __aenter__(self) -> Self:
         """Enter the async context manager returning this instance."""
