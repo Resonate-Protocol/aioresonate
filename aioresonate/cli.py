@@ -206,7 +206,7 @@ def _create_audio_chunk_handler(
 
         # Check if time sync is ready - critical for accurate playback timing
         was_sync_ready = sync_ready
-        sync_ready = client._time_filter.is_synchronized  # noqa: SLF001
+        sync_ready = client.is_time_synchronized()
 
         # Print message when sync becomes ready
         if sync_ready and not was_sync_ready:

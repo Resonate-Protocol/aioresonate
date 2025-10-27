@@ -365,6 +365,10 @@ class ResonateClient:
         """
         self._audio_chunk_callback = callback
 
+    def is_time_synchronized(self) -> bool:
+        """Return whether time synchronization with the server has converged."""
+        return self._time_filter.is_synchronized
+
     def _build_client_hello(self) -> ClientHelloMessage:
         payload = ClientHelloPayload(
             client_id=self._client_id,
