@@ -39,8 +39,6 @@ from aioresonate.models.player import (
     ClientHelloPlayerSupport,
     PlayerUpdateMessage,
     PlayerUpdatePayload,
-    StreamRequestFormatMessage,
-    StreamRequestFormatPayload,
     StreamStartPlayer,
 )
 from aioresonate.models.types import MediaCommand, PlayerStateType, Roles, ServerMessage
@@ -330,26 +328,6 @@ class ResonateClient:
         message = GroupCommandClientMessage(payload=payload)
         await self._send_message(message.to_json())
 
-    async def request_stream_format_change(
-        self,
-        *,
-        codec: str | None = None,
-        sample_rate: int | None = None,
-        channels: int | None = None,
-        bit_depth: int | None = None,
-    ) -> None:
-        """Request a different stream format from the server."""
-        if not self.connected:
-            raise RuntimeError("Client is not connected")
-        payload = StreamRequestFormatPayload(
-            codec=codec,
-            sample_rate=sample_rate,
-            channels=channels,
-            bit_depth=bit_depth,
-        )
-        message = StreamRequestFormatMessage(payload=payload)
-        await self._send_message(message.to_json())
-
     def add_metadata_listener(self, callback: MetadataCallback) -> None:
         """Register a callback invoked on session/update messages."""
         self._metadata_callbacks.append(callback)
@@ -519,8 +497,7 @@ class ResonateClient:
             return
 
         if player.codec != "pcm":
-            logger.error("Unsupported codec '%s' - requesting PCM fallback", player.codec)
-            await self.request_stream_format_change(codec="pcm")
+            logger.error("Unsupported codec '%s' - only PCM is supported", player.codec)
             return
 
         pcm_format = PCMFormat(
@@ -549,8 +526,7 @@ class ResonateClient:
 
         codec = player_update.codec or self._current_player.codec
         if codec != "pcm":
-            logger.error("Unsupported codec update '%s'", codec)
-            await self.request_stream_format_change(codec="pcm")
+            logger.error("Unsupported codec update '%s' - only PCM is supported", codec)
             return
 
         sample_rate = player_update.sample_rate or self._current_player.sample_rate
