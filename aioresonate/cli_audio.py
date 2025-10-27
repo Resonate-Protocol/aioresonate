@@ -113,7 +113,7 @@ class AudioPlayer:
             dtype=dtype,
             blocksize=blocksize,
             callback=self._audio_callback,
-            latency="high",  # Use high latency to give more buffering time
+            latency=1.0,  # 1 second latency to allow buffering
         )
 
     async def stop(self) -> None:
