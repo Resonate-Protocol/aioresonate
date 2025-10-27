@@ -119,66 +119,111 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-async def _discover_server(discovery_timeout: float) -> str | None:
-    """Discover a Resonate server via mDNS."""
-    loop = asyncio.get_running_loop()
+def _build_service_url(host: str, port: int, properties: dict[bytes, bytes | None]) -> str:
+    """Construct WebSocket URL from mDNS service info."""
+    path_raw = properties.get(b"path")
+    path = path_raw.decode("utf-8", "ignore") if isinstance(path_raw, bytes) else DEFAULT_PATH
+    if not path:
+        path = DEFAULT_PATH
+    if not path.startswith("/"):
+        path = "/" + path
+    host_fmt = f"[{host}]" if ":" in host else host
+    return f"ws://{host_fmt}:{port}{path}"
 
-    class _Listener:
-        def __init__(self) -> None:
-            self.result: asyncio.Future[str] = loop.create_future()
-            self.tasks: set[asyncio.Task[None]] = set()
 
-        def _schedule(self, zeroconf: AsyncZeroconf, service_type: str, name: str) -> None:
-            if self.result.done():
-                return
+class _ServiceDiscoveryListener:
+    """Listens for Resonate server advertisements via mDNS."""
 
-            async def process() -> None:
-                info = await zeroconf.async_get_service_info(service_type, name)
-                if info is None:
-                    return
-                addresses = info.parsed_addresses()
-                if not addresses:
-                    return
-                host = addresses[0]
-                path_raw = info.properties.get(b"path")
-                path = (
-                    path_raw.decode("utf-8", "ignore")
-                    if isinstance(path_raw, bytes)
-                    else DEFAULT_PATH
-                )
-                if not path:
-                    path = DEFAULT_PATH
-                if not path.startswith("/"):
-                    path = "/" + path
-                host_fmt = f"[{host}]" if ":" in host else host
-                url = f"ws://{host_fmt}:{info.port}{path}"
-                if not self.result.done():
-                    self.result.set_result(url)
+    def __init__(self, loop: asyncio.AbstractEventLoop) -> None:
+        self.result: asyncio.Future[str] = loop.create_future()
+        self.tasks: set[asyncio.Task[None]] = set()
+        self._loop = loop
 
-            task = loop.create_task(process())
-            self.tasks.add(task)
-            task.add_done_callback(self.tasks.discard)
-
-        def add_service(self, zeroconf: AsyncZeroconf, service_type: str, name: str) -> None:
-            self._schedule(zeroconf, service_type, name)
-
-        def update_service(self, zeroconf: AsyncZeroconf, service_type: str, name: str) -> None:
-            self._schedule(zeroconf, service_type, name)
-
-        def remove_service(self, _zeroconf: AsyncZeroconf, _service_type: str, _name: str) -> None:
+    async def _process_service_info(
+        self, zeroconf: AsyncZeroconf, service_type: str, name: str
+    ) -> None:
+        """Extract and construct WebSocket URL from service info."""
+        info = await zeroconf.async_get_service_info(service_type, name)
+        if info is None or info.port is None:
             return
+        addresses = info.parsed_addresses()
+        if not addresses:
+            return
+        host = addresses[0]
+        url = _build_service_url(host, info.port, info.properties)
+        if not self.result.done():
+            self.result.set_result(url)
 
-    listener = _Listener()
-    async with AsyncZeroconf() as zeroconf:
-        browser = AsyncServiceBrowser(
-            zeroconf.zeroconf, SERVICE_TYPE, cast("ServiceListener", listener)
-        )
+    def _schedule(self, zeroconf: AsyncZeroconf, service_type: str, name: str) -> None:
+        if self.result.done():
+            return
+        task = self._loop.create_task(self._process_service_info(zeroconf, service_type, name))
+        self.tasks.add(task)
+        task.add_done_callback(self.tasks.discard)
+
+    def add_service(self, zeroconf: AsyncZeroconf, service_type: str, name: str) -> None:
+        self._schedule(zeroconf, service_type, name)
+
+    def update_service(self, zeroconf: AsyncZeroconf, service_type: str, name: str) -> None:
+        self._schedule(zeroconf, service_type, name)
+
+    def remove_service(self, _zeroconf: AsyncZeroconf, _service_type: str, _name: str) -> None:
+        return
+
+
+class ServiceDiscovery:
+    """Manages continuous discovery of Resonate servers via mDNS."""
+
+    def __init__(self) -> None:
+        """Initialize the service discovery manager."""
+        self._listener: _ServiceDiscoveryListener | None = None
+        self._browser: AsyncServiceBrowser | None = None
+        self._zeroconf: AsyncZeroconf | None = None
+
+    async def discover_first(self, discovery_timeout: float) -> str | None:
+        """
+        Discover the first available Resonate server.
+
+        Args:
+            discovery_timeout: Seconds to wait for discovery.
+
+        Returns:
+            WebSocket URL of the server, or None if discovery timed out.
+        """
+        loop = asyncio.get_running_loop()
+        self._listener = _ServiceDiscoveryListener(loop)
+        self._zeroconf = AsyncZeroconf()
+        await self._zeroconf.__aenter__()
+
         try:
-            return await asyncio.wait_for(listener.result, discovery_timeout)
+            self._browser = AsyncServiceBrowser(
+                self._zeroconf.zeroconf, SERVICE_TYPE, cast("ServiceListener", self._listener)
+            )
+            return await asyncio.wait_for(self._listener.result, discovery_timeout)
         except TimeoutError:
             return None
-        finally:
-            await browser.async_cancel()
+        except Exception:
+            await self.stop()
+            raise
+
+    async def stop(self) -> None:
+        """Stop discovery and clean up resources."""
+        if self._browser:
+            await self._browser.async_cancel()
+            self._browser = None
+        if self._zeroconf:
+            await self._zeroconf.__aexit__(None, None, None)
+            self._zeroconf = None
+        self._listener = None
+
+
+async def _discover_server(discovery_timeout: float) -> str | None:
+    """Discover a Resonate server via mDNS."""
+    discovery = ServiceDiscovery()
+    try:
+        return await discovery.discover_first(discovery_timeout)
+    finally:
+        await discovery.stop()
 
 
 def _create_audio_chunk_handler(
