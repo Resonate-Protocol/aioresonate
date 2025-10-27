@@ -52,6 +52,12 @@ class AudioPlayer:
     """Minimum chunks buffered before starting playback to absorb network jitter."""
     _MIN_CHUNKS_TO_MAINTAIN: Final[int] = 8
     """Minimum chunks to maintain during playback to avoid underruns."""
+    _MICROSECONDS_PER_SECOND: Final[int] = 1_000_000
+    """Conversion factor for time calculations."""
+    _DAC_PER_LOOP_MIN: Final[float] = 0.999
+    """Minimum DAC-to-loop time ratio to prevent wild extrapolation."""
+    _DAC_PER_LOOP_MAX: Final[float] = 1.001
+    """Maximum DAC-to-loop time ratio to prevent wild extrapolation."""
 
     def __init__(
         self,
@@ -199,7 +205,7 @@ class AudioPlayer:
         self._frames_inserted_since_log = 0
         self._frames_dropped_since_log = 0
 
-    def _audio_callback(  # noqa: C901, PLR0912, PLR0915
+    def _audio_callback(  # noqa: PLR0915
         self,
         outdata: memoryview,
         frames: int,
@@ -233,63 +239,22 @@ class AudioPlayer:
         bytes_written = 0
 
         try:
-            # Pre-start gating: fill silence until scheduled start time in DAC domain
+            # Pre-start gating: fill silence until scheduled start time
             if self._waiting_for_start:
                 if self._scheduled_start_dac_time_us is not None:
-                    try:
-                        dac_now_us = int(time.outputBufferDacTime * 1_000_000)
-                    except (AttributeError, TypeError):
-                        dac_now_us = 0
-
-                    if dac_now_us > 0:
-                        delta_us = self._scheduled_start_dac_time_us - dac_now_us
-                        if delta_us > 0:
-                            frames_until_start = int(
-                                (delta_us * self._format.sample_rate + 999_999) // 1_000_000
-                            )
-                            frames_to_silence = min(frames_until_start, frames)
-                            silence_bytes = frames_to_silence * self._format.frame_size
-                            if silence_bytes > 0:
-                                output_buffer[:silence_bytes] = b"\x00" * silence_bytes
-                                bytes_written += silence_bytes
-                        elif delta_us < 0:
-                            # Late: fast-forward by dropping input frames, unless we suspect
-                            # we anchored before sync matured; in that case, keep waiting.
-                            if self._early_start_suspect and not self._has_reanchored:
-                                pass
-                            else:
-                                frames_to_drop = int(
-                                    ((-delta_us) * self._format.sample_rate + 999_999) // 1_000_000
-                                )
-                                self._skip_input_frames(frames_to_drop)
-                                self._waiting_for_start = False
-                        # If we've reached/overrun the scheduled time, arm playback
-                        if dac_now_us >= self._scheduled_start_dac_time_us:
-                            self._waiting_for_start = False
+                    bytes_written = self._handle_dac_gating(
+                        output_buffer, bytes_written, frames, time
+                    )
                 elif self._scheduled_start_loop_time_us is not None:
-                    loop_now_us = int(self._loop.time() * 1_000_000)
-                    delta_us = self._scheduled_start_loop_time_us - loop_now_us
-                    if delta_us > 0:
-                        frames_until_start = int(
-                            (delta_us * self._format.sample_rate + 999_999) // 1_000_000
-                        )
-                        frames_to_silence = min(frames_until_start, frames)
-                        silence_bytes = frames_to_silence * self._format.frame_size
-                        if silence_bytes > 0:
-                            output_buffer[:silence_bytes] = b"\x00" * silence_bytes
-                            bytes_written += silence_bytes
-                    else:
-                        # For loop-time gating, do not drop input when late; keep waiting
-                        # until we can map to DAC time or schedule updates in submit().
-                        pass
+                    bytes_written = self._handle_loop_time_gating(
+                        output_buffer, bytes_written, frames
+                    )
 
             # If we're still waiting for start after gating above, output silence only
             if self._waiting_for_start:
                 if bytes_written < bytes_needed:
                     silence_bytes = bytes_needed - bytes_written
-                    output_buffer[bytes_written : bytes_written + silence_bytes] = (
-                        b"\x00" * silence_bytes
-                    )
+                    self._fill_silence(output_buffer, bytes_written, silence_bytes)
                     bytes_written += silence_bytes
             else:
                 # Simple drift control based on buffer depth (disabled for heavy actions)
@@ -569,7 +534,7 @@ class AudioPlayer:
         if loop_prev_us and dac_prev_us and (loop_ref_us != loop_prev_us):
             dac_per_loop = (dac_ref_us - dac_prev_us) / (loop_ref_us - loop_prev_us)
             # Clamp to sane bounds to avoid wild extrapolation
-            dac_per_loop = max(0.999, min(1.001, dac_per_loop))
+            dac_per_loop = max(self._DAC_PER_LOOP_MIN, min(self._DAC_PER_LOOP_MAX, dac_per_loop))
 
         return round(dac_ref_us + (loop_time_us - loop_ref_us) * dac_per_loop)
 
@@ -586,7 +551,7 @@ class AudioPlayer:
         loop_per_dac = 1.0
         if dac_prev_us and (dac_ref_us != dac_prev_us):
             loop_per_dac = (loop_ref_us - loop_prev_us) / (dac_ref_us - dac_prev_us)
-            loop_per_dac = max(0.999, min(1.001, loop_per_dac))
+            loop_per_dac = max(self._DAC_PER_LOOP_MIN, min(self._DAC_PER_LOOP_MAX, loop_per_dac))
         return round(loop_ref_us + (dac_time_us - dac_ref_us) * loop_per_dac)
 
     def _get_current_playback_position_us(self) -> int:
@@ -629,6 +594,97 @@ class AudioPlayer:
         # With chunks arriving 5+ seconds early, we can afford aggressive buffering
         return 200_000
 
+    def _smooth_phase_error(self, error_us: int) -> None:
+        """Update EMA smoothed phase error to avoid reacting to jitter."""
+        if not self._phase_error_ema_init:
+            self._phase_error_ema_us = float(error_us)
+            self._phase_error_ema_init = True
+        else:
+            alpha = 0.90  # allow fresher error information for quicker response
+            self._phase_error_ema_us = alpha * self._phase_error_ema_us + (1.0 - alpha) * float(
+                error_us
+            )
+
+    def _fill_silence(self, output_buffer: memoryview, offset: int, num_bytes: int) -> None:
+        """Fill output buffer range with silence."""
+        if num_bytes > 0:
+            output_buffer[offset : offset + num_bytes] = b"\x00" * num_bytes
+
+    def _compute_and_set_loop_start(self, server_timestamp_us: int) -> None:
+        """Compute and set scheduled start time from server timestamp."""
+        try:
+            self._scheduled_start_loop_time_us = self._compute_client_time(server_timestamp_us)
+        except Exception:
+            logger.exception("Failed to compute client time for start")
+            self._scheduled_start_loop_time_us = int(
+                self._loop.time() * self._MICROSECONDS_PER_SECOND
+            )
+
+    def _handle_dac_gating(
+        self, output_buffer: memoryview, bytes_written: int, frames: int, time: Any
+    ) -> int:
+        """Handle DAC-time based pre-start gating. Returns bytes written."""
+        assert self._format is not None
+        try:
+            dac_now_us = int(time.outputBufferDacTime * self._MICROSECONDS_PER_SECOND)
+        except (AttributeError, TypeError):
+            dac_now_us = 0
+
+        if dac_now_us <= 0:
+            return bytes_written
+
+        assert self._scheduled_start_dac_time_us is not None
+        delta_us = self._scheduled_start_dac_time_us - dac_now_us
+
+        if delta_us > 0:
+            # Not yet time to start: fill with silence
+            frames_until_start = int(
+                (delta_us * self._format.sample_rate + 999_999) // self._MICROSECONDS_PER_SECOND
+            )
+            frames_to_silence = min(frames_until_start, frames)
+            silence_bytes = frames_to_silence * self._format.frame_size
+            self._fill_silence(output_buffer, bytes_written, silence_bytes)
+            bytes_written += silence_bytes
+        elif delta_us < 0:
+            # Late: fast-forward by dropping input frames, unless we suspect
+            # we anchored before sync matured; in that case, keep waiting.
+            if not (self._early_start_suspect and not self._has_reanchored):
+                frames_to_drop = int(
+                    ((-delta_us) * self._format.sample_rate + 999_999)
+                    // self._MICROSECONDS_PER_SECOND
+                )
+                self._skip_input_frames(frames_to_drop)
+                self._waiting_for_start = False
+
+        # If we've reached/overrun the scheduled time, arm playback
+        if dac_now_us >= self._scheduled_start_dac_time_us:
+            self._waiting_for_start = False
+
+        return bytes_written
+
+    def _handle_loop_time_gating(
+        self, output_buffer: memoryview, bytes_written: int, frames: int
+    ) -> int:
+        """Handle loop-time based pre-start gating. Returns bytes written."""
+        assert self._format is not None
+        assert self._scheduled_start_loop_time_us is not None
+
+        loop_now_us = int(self._loop.time() * self._MICROSECONDS_PER_SECOND)
+        delta_us = self._scheduled_start_loop_time_us - loop_now_us
+
+        if delta_us > 0:
+            frames_until_start = int(
+                (delta_us * self._format.sample_rate + 999_999) // self._MICROSECONDS_PER_SECOND
+            )
+            frames_to_silence = min(frames_until_start, frames)
+            silence_bytes = frames_to_silence * self._format.frame_size
+            self._fill_silence(output_buffer, bytes_written, silence_bytes)
+            bytes_written += silence_bytes
+        # For loop-time gating, do not drop input when late; keep waiting
+        # until we can map to DAC time or schedule updates in submit().
+
+        return bytes_written
+
     def _update_correction_schedule(self, error_us: int) -> None:
         """Plan occasional sample drop/insert to correct phase drift.
 
@@ -641,14 +697,7 @@ class AudioPlayer:
             return
 
         # Smooth the error to avoid reacting to jitter
-        if not self._phase_error_ema_init:
-            self._phase_error_ema_us = float(error_us)
-            self._phase_error_ema_init = True
-        else:
-            alpha = 0.90  # allow fresher error information for quicker response
-            self._phase_error_ema_us = alpha * self._phase_error_ema_us + (1.0 - alpha) * float(
-                error_us
-            )
+        self._smooth_phase_error(error_us)
 
         abs_err = abs(self._phase_error_ema_us)
 
@@ -682,15 +731,15 @@ class AudioPlayer:
         # Convert error to equivalent frames
         frames_error = round(abs_err * self._format.sample_rate / 1_000_000.0)
 
-        # Aim to correct within roughly 2 seconds with a max of ~100 corrections/s
-        target_seconds = 2.0
-        max_corrections_per_sec = 100.0
+        # Aim to correct within roughly 1 second with a max of ~200 corrections/s
+        target_seconds = 1.0
+        max_corrections_per_sec = 200.0
         desired_corrections_per_sec = min(
             max_corrections_per_sec, frames_error / max(target_seconds, 1.0)
         )
 
         interval_frames = int(self._format.sample_rate / max(desired_corrections_per_sec, 1.0))
-        interval_frames = max(256, interval_frames)  # at least ~6 ms between corrections
+        interval_frames = max(128, interval_frames)  # at least ~3 ms between corrections
 
         if self._phase_error_ema_us > 0:
             # We are behind (DAC ahead) -> drop to catch up
@@ -731,11 +780,7 @@ class AudioPlayer:
 
         # On first real chunk, schedule start time aligned to server timeline
         if self._scheduled_start_loop_time_us is None:
-            try:
-                self._scheduled_start_loop_time_us = self._compute_client_time(server_timestamp_us)
-            except Exception:
-                logger.exception("Failed to compute client time for start")
-                self._scheduled_start_loop_time_us = int(self._loop.time() * 1_000_000)
+            self._compute_and_set_loop_start(server_timestamp_us)
             # Best-effort DAC schedule; refined later as calibrations accumulate
             est_dac = self._estimate_dac_time_for_server_timestamp(server_timestamp_us)
             # Only set DAC time when we can estimate it; otherwise use loop-based gating
@@ -743,8 +788,9 @@ class AudioPlayer:
             self._waiting_for_start = True
             self._first_server_timestamp_us = server_timestamp_us
             # If scheduled start is very near now, suspect unsynchronized fallback mapping
-            if self._scheduled_start_loop_time_us - now_us <= 700_000:
-                self._early_start_suspect = True
+            scheduled_start = self._scheduled_start_loop_time_us
+            if scheduled_start and scheduled_start - now_us <= 700_000:  # type: ignore[unreachable]
+                self._early_start_suspect = True  # type: ignore[unreachable]
 
         # While waiting to start, keep the scheduled loop start updated as time sync improves
         elif self._waiting_for_start and self._first_server_timestamp_us is not None:
@@ -776,13 +822,7 @@ class AudioPlayer:
                 # Clear current queue and reset timing; then continue to queue this chunk
                 logger.info("Re-anchoring playback after time sync matured")
                 self.clear()
-                try:
-                    self._scheduled_start_loop_time_us = self._compute_client_time(
-                        server_timestamp_us
-                    )
-                except Exception:
-                    logger.exception("Failed to compute client time during re-anchor")
-                    self._scheduled_start_loop_time_us = now_us
+                self._compute_and_set_loop_start(server_timestamp_us)
                 est_dac2 = self._estimate_dac_time_for_server_timestamp(server_timestamp_us)
                 self._scheduled_start_dac_time_us = est_dac2 if est_dac2 else None
                 self._waiting_for_start = True
