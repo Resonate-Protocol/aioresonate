@@ -300,10 +300,14 @@ class ConnectionManager:
         logger.info("Server offline, waiting for rediscovery...")
         _print_event("Waiting for server...")
 
-        while not (new_url := self._discovery.current_url()) and not self._keyboard_task.done():  # noqa: ASYNC110
+        # Poll for discovery or keyboard exit
+        while not self._keyboard_task.done():
+            new_url = self._discovery.current_url()
+            if new_url:
+                return new_url
             await asyncio.sleep(1.0)
 
-        return new_url
+        return None
 
 
 async def _connection_loop(
@@ -339,11 +343,24 @@ async def _connection_loop(
             manager.reset_backoff()
             manager.set_last_attempted_url(url)
 
-            # Wait for disconnect or keyboard exit
-            while client.connected and not keyboard_task.done():  # noqa: ASYNC110
-                await asyncio.sleep(0.5)
+            # Wait for disconnect or keyboard exit using asyncio.wait()
+            async def _monitor_connection() -> None:
+                """Monitor connection status.
 
-            if keyboard_task.done():
+                Polling is necessary here since client.connected is a property
+                without async event notifications.
+                """
+                while client.connected:  # noqa: ASYNC110
+                    await asyncio.sleep(0.5)
+
+            monitor_task = asyncio.create_task(_monitor_connection())
+            done, _ = await asyncio.wait(
+                {keyboard_task, monitor_task},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+
+            if keyboard_task in done:
+                monitor_task.cancel()
                 break
 
             # Connection dropped
@@ -547,7 +564,7 @@ async def main_async(argv: Sequence[str] | None = None) -> int:
         try:
             # Run connection loop with auto-reconnect
             await _connection_loop(client, discovery, audio_handler, url, keyboard_task)
-        except asyncio.CancelledError:  # pragma: no cover - cancellation path
+        except asyncio.CancelledError:
             logger.debug("Connection loop cancelled")
         finally:
             # Remove signal handler
@@ -750,5 +767,5 @@ def main() -> int:
     return asyncio.run(main_async(sys.argv[1:]))
 
 
-if __name__ == "__main__":  # pragma: no cover - CLI entry
+if __name__ == "__main__":
     raise SystemExit(main())
