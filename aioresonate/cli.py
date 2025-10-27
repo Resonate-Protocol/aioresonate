@@ -361,9 +361,7 @@ async def _connection_loop(
             _print_event("Connection lost")
 
             # Clean up audio state
-            if audio_handler.audio_player is not None:
-                await audio_handler.audio_player.stop()
-                audio_handler.audio_player = None
+            await audio_handler.cleanup()
 
             # Update URL from discovery
             new_url = discovery.current_url()
@@ -444,9 +442,16 @@ class AudioStreamHandler:
             logger.debug("Cleared audio queue on stream end")
         _print_event("Stream ended")
 
-    def get_audio_player(self) -> AudioPlayer | None:
-        """Get the current audio player instance."""
-        return self.audio_player
+    def clear_queue(self) -> None:
+        """Clear the audio queue to prevent desync."""
+        if self.audio_player is not None:
+            self.audio_player.clear()
+
+    async def cleanup(self) -> None:
+        """Stop audio player and clear resources."""
+        if self.audio_player is not None:
+            await self.audio_player.stop()
+            self.audio_player = None
 
 
 async def main_async(argv: Sequence[str] | None = None) -> int:
@@ -525,8 +530,7 @@ async def main_async(argv: Sequence[str] | None = None) -> int:
         finally:
             # Remove signal handler
             loop.remove_signal_handler(signal.SIGINT)
-            if audio_handler.audio_player is not None:
-                await audio_handler.audio_player.stop()
+            await audio_handler.cleanup()
             await client.disconnect()
 
     finally:
@@ -663,9 +667,8 @@ class CommandHandler:
                 delta = -delta
             self._client.set_static_delay_ms(self._client.static_delay_ms + delta)
             # Clear audio queue to prevent desync from chunks with stale timing
-            if self._audio_handler.audio_player is not None:
-                self._audio_handler.audio_player.clear()
-                logger.debug("Cleared audio queue after delay change")
+            self._audio_handler.clear_queue()
+            logger.debug("Cleared audio queue after delay change")
             _print_event(f"Static delay: {self._client.static_delay_ms:.1f} ms")
             return
         if len(parts) == 2:
@@ -676,9 +679,8 @@ class CommandHandler:
                 return
             self._client.set_static_delay_ms(value)
             # Clear audio queue to prevent desync from chunks with stale timing
-            if self._audio_handler.audio_player is not None:
-                self._audio_handler.audio_player.clear()
-                logger.debug("Cleared audio queue after delay change")
+            self._audio_handler.clear_queue()
+            logger.debug("Cleared audio queue after delay change")
             _print_event(f"Static delay: {self._client.static_delay_ms:.1f} ms")
             return
         _print_event("Usage: delay [<ms>|+ <ms>|- <ms>]")
