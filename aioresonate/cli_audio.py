@@ -129,6 +129,7 @@ class AudioPlayer:
         self._phase_error_ema_us: float = 0.0
         self._phase_error_ema_init: bool = False
         self._last_reanchor_loop_time_us: int = 0
+        self._last_phase_error_log_us: int = 0  # Rate limit phase error logging
 
     def set_format(self, pcm_format: PCMFormat) -> None:
         """Configure the audio output format."""
@@ -192,6 +193,7 @@ class AudioPlayer:
         self._phase_error_ema_us = 0.0
         self._phase_error_ema_init = False
         self._last_reanchor_loop_time_us = 0
+        self._last_phase_error_log_us = 0
 
     def _audio_callback(
         self,
@@ -494,13 +496,6 @@ class AudioPlayer:
         self._dac_loop_calibrations[-1] = (dac_time_us, loop_time_us)
         self._last_dac_calibration_time_us = loop_time_us
 
-        # Log calibration on first run (when loop_time_old_us was 0)
-        if loop_time_old_us == 0:
-            logger.debug(
-                "DAC↔Loop calibration established: DAC=%d, Loop=%d",
-                dac_time_us,
-                loop_time_us,
-            )
         # Update playback position in server time using latest calibration
         try:
             # Estimate the loop time that corresponds to the captured DAC time
@@ -592,11 +587,14 @@ class AudioPlayer:
     def _log_chunk_timing(self, server_timestamp_us: int) -> None:
         """Log phase error and buffer status for debugging sync issues."""
         if self._phase_error_ema_init:
-            logger.debug(
-                "Phase error: %.1f ms, buffer: %.2f s",
-                self._phase_error_ema_us / 1000.0,
-                self._queued_duration_us / 1_000_000,
-            )
+            now_us = int(self._loop.time() * 1_000_000)
+            if now_us - self._last_phase_error_log_us >= 1_000_000:
+                self._last_phase_error_log_us = now_us
+                logger.debug(
+                    "Phase error: %.1f ms, buffer: %.2f s",
+                    self._phase_error_ema_us / 1000.0,
+                    self._queued_duration_us / 1_000_000,
+                )
 
     def _compute_minimum_buffer_duration(self) -> float:
         """Compute minimum buffer duration needed for network jitter.
@@ -625,7 +623,7 @@ class AudioPlayer:
             self._phase_error_ema_us = float(error_us)
             self._phase_error_ema_init = True
         else:
-            alpha = 0.95  # allow fresher error information for quicker response
+            alpha = 0.90  # allow fresher error information for quicker response
             self._phase_error_ema_us = alpha * self._phase_error_ema_us + (1.0 - alpha) * float(
                 error_us
             )
@@ -633,7 +631,7 @@ class AudioPlayer:
         abs_err = abs(self._phase_error_ema_us)
 
         # Deadband where we do nothing
-        DEADBAND_US = 1_000  # 1 ms
+        DEADBAND_US = 2_000  # 2 ms
         if abs_err <= DEADBAND_US:
             self._insert_every_n_frames = 0
             self._drop_every_n_frames = 0
@@ -662,15 +660,15 @@ class AudioPlayer:
         # Convert error to equivalent frames
         frames_error = int(round(abs_err * self._format.sample_rate / 1_000_000.0))
 
-        # Aim to correct within roughly 2-3 seconds with a max of ~80 corrections/s
-        TARGET_SECONDS = 2.5
-        max_corrections_per_sec = 80.0
+        # Aim to correct within roughly 4 seconds with a max of ~50 corrections/s
+        TARGET_SECONDS = 4.0
+        max_corrections_per_sec = 50.0
         desired_corrections_per_sec = min(
             max_corrections_per_sec, frames_error / max(TARGET_SECONDS, 1.0)
         )
 
         interval_frames = int(self._format.sample_rate / max(desired_corrections_per_sec, 1.0))
-        interval_frames = max(256, interval_frames)  # at least ~6 ms between corrections
+        interval_frames = max(512, interval_frames)  # at least ~12 ms between corrections
 
         if self._phase_error_ema_us > 0:
             # We are behind (DAC ahead) -> drop to catch up
