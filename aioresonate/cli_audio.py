@@ -590,23 +590,13 @@ class AudioPlayer:
         }
 
     def _log_chunk_timing(self, server_timestamp_us: int) -> None:
-        """Log detailed timing for chunks (mostly for debugging latency).
-
-        Shows when chunk will play and current buffer status.
-        """
-        current_loop_time_us = int(self._loop.time() * 1_000_000)
-        estimated_loop_play_time_us = self._compute_client_time(server_timestamp_us)
-
-        if estimated_loop_play_time_us == 0:
-            return
-
-        latency_us = estimated_loop_play_time_us - current_loop_time_us
-
-        logger.debug(
-            "Chunk will play in %.1f ms, buffer: %.2f s",
-            latency_us / 1000.0,
-            self._queued_duration_us / 1_000_000,
-        )
+        """Log phase error and buffer status for debugging sync issues."""
+        if self._phase_error_ema_init:
+            logger.debug(
+                "Phase error: %.1f ms, buffer: %.2f s",
+                self._phase_error_ema_us / 1000.0,
+                self._queued_duration_us / 1_000_000,
+            )
 
     def _compute_minimum_buffer_duration(self) -> float:
         """Compute minimum buffer duration needed for network jitter.
