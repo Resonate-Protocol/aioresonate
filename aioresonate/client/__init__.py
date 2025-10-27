@@ -1,10 +1,10 @@
 """Public interface for the Resonate client package."""
 
-from .audio import PCMFormat
 from .client import (
     AudioChunkCallback,
     GroupUpdateCallback,
     MetadataCallback,
+    PCMFormat,
     ResonateClient,
     ServerInfo,
     StreamEndCallback,
