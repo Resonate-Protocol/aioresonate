@@ -141,8 +141,6 @@ class ResonateClient:
 
     _static_delay_us: int = 0
     """Static playback delay in microseconds."""
-    _pending_time_message: bool = False
-    """Whether a time sync message is awaiting response."""
 
     _current_player: StreamStartPlayer | None = None
     """Current active player configuration."""
@@ -303,7 +301,6 @@ class ResonateClient:
         self._session_state = None
         self._current_pcm_format = None
         self._current_player = None
-        self._pending_time_message = False
 
     async def send_player_state(
         self,
@@ -382,16 +379,11 @@ class ResonateClient:
         await self._send_message(hello.to_json())
 
     async def _send_time_message(self) -> None:
-        if self._pending_time_message or not self.connected:
+        if not self.connected:
             return
         now_us = self._now_us()
         message = ClientTimeMessage(payload=ClientTimePayload(client_transmitted=now_us))
-        self._pending_time_message = True
-        try:
-            await self._send_message(message.to_json())
-        except Exception:
-            self._pending_time_message = False
-            raise
+        await self._send_message(message.to_json())
 
     async def _send_message(self, payload: str) -> None:
         if not self._ws:
@@ -493,7 +485,6 @@ class ResonateClient:
             - (payload.server_transmitted - payload.server_received)
         ) / 2
         self._time_filter.update(round(offset), round(delay), now_us)
-        self._pending_time_message = False
 
     async def _handle_stream_start(self, message: StreamStartMessage) -> None:
         logger.info("Stream started")
