@@ -8,7 +8,7 @@ from collections.abc import Awaitable, Callable, Sequence
 from contextlib import suppress
 from dataclasses import dataclass
 from types import TracebackType
-from typing import Self, TypeVar
+from typing import Self
 
 from aiohttp import ClientSession, ClientWebSocketResponse, WSMessage, WSMsgType
 
@@ -74,9 +74,6 @@ class PCMFormat:
     def frame_size(self) -> int:
         """Return bytes per PCM frame."""
         return self.channels * (self.bit_depth // 8)
-
-
-_T = TypeVar("_T")
 
 
 MetadataCallback = Callable[[SessionUpdatePayload], Awaitable[None] | None]
@@ -557,11 +554,11 @@ class ResonateClient:
 
     async def _handle_session_update(self, payload: SessionUpdatePayload) -> None:
         self._session_state = payload
-        await self._notify_callbacks(self._metadata_callbacks, payload)
+        await self._notify_metadata_callbacks(payload)
 
     async def _handle_group_update(self, payload: GroupUpdateServerPayload) -> None:
         self._group_state = payload
-        await self._notify_callbacks(self._group_callbacks, payload)
+        await self._notify_group_callbacks(payload)
 
     def _configure_audio_output(self, pcm_format: PCMFormat) -> None:
         """Store the current audio format for use in callbacks."""
@@ -623,12 +620,17 @@ class ResonateClient:
         adjusted_client_time = client_timestamp_us - self._static_delay_us
         return self._time_filter.compute_server_time(adjusted_client_time)
 
-    async def _notify_callbacks(
-        self,
-        callbacks: list[Callable[[_T], Awaitable[None] | None]],
-        payload: _T,
-    ) -> None:
-        for callback in callbacks:
+    async def _notify_metadata_callbacks(self, payload: SessionUpdatePayload) -> None:
+        for callback in self._metadata_callbacks:
+            try:
+                result = callback(payload)
+                if asyncio.iscoroutine(result):
+                    await result
+            except Exception:
+                logger.exception("Error in client callback %s", callback)
+
+    async def _notify_group_callbacks(self, payload: GroupUpdateServerPayload) -> None:
+        for callback in self._group_callbacks:
             try:
                 result = callback(payload)
                 if asyncio.iscoroutine(result):
@@ -637,7 +639,13 @@ class ResonateClient:
                 logger.exception("Error in client callback %s", callback)
 
     async def _notify_stream_start(self, message: StreamStartMessage) -> None:
-        await self._notify_callbacks(self._stream_start_callbacks, message)
+        for callback in self._stream_start_callbacks:
+            try:
+                result = callback(message)
+                if asyncio.iscoroutine(result):
+                    await result
+            except Exception:
+                logger.exception("Error in client callback %s", callback)
 
     async def _notify_stream_end(self) -> None:
         for callback in self._stream_end_callbacks:
