@@ -8,7 +8,7 @@ from collections.abc import Awaitable, Callable, Sequence
 from contextlib import suppress
 from dataclasses import dataclass
 from types import TracebackType
-from typing import Protocol, Self, TypeVar
+from typing import Self, TypeVar
 
 from aiohttp import ClientSession, ClientWebSocketResponse, WSMessage, WSMsgType
 
@@ -77,12 +77,6 @@ class PCMFormat:
 
 
 _T = TypeVar("_T")
-
-
-class _HasToJson(Protocol):
-    """Protocol for objects that can be serialized to JSON."""
-
-    def to_json(self) -> str: ...
 
 
 MetadataCallback = Callable[[SessionUpdatePayload], Awaitable[None] | None]
@@ -280,7 +274,7 @@ class ResonateClient:
         message = PlayerUpdateMessage(
             payload=PlayerUpdatePayload(state=state, volume=volume, muted=muted)
         )
-        await self._send_json(message)
+        await self._send_json(message.to_json())
 
     async def send_group_command(
         self,
@@ -294,7 +288,7 @@ class ResonateClient:
             raise RuntimeError("Client is not connected")
         payload = GroupCommandClientPayload(command=command, volume=volume, mute=mute)
         message = GroupCommandClientMessage(payload=payload)
-        await self._send_json(message)
+        await self._send_json(message.to_json())
 
     async def request_stream_format_change(
         self,
@@ -314,7 +308,7 @@ class ResonateClient:
             bit_depth=bit_depth,
         )
         message = StreamRequestFormatMessage(payload=payload)
-        await self._send_json(message)
+        await self._send_json(message.to_json())
 
     def add_metadata_listener(self, callback: MetadataCallback) -> None:
         """Register a callback invoked on session/update messages."""
@@ -384,7 +378,7 @@ class ResonateClient:
 
     async def _send_client_hello(self) -> None:
         hello = self._build_client_hello()
-        await self._send_json(hello)
+        await self._send_json(hello.to_json())
 
     async def _send_time_message(self) -> None:
         if self._pending_time_message or not self.connected:
@@ -393,15 +387,14 @@ class ResonateClient:
         message = ClientTimeMessage(payload=ClientTimePayload(client_transmitted=now_us))
         self._pending_time_message = True
         try:
-            await self._send_json(message)
+            await self._send_json(message.to_json())
         except Exception:
             self._pending_time_message = False
             raise
 
-    async def _send_json(self, message: _HasToJson) -> None:
+    async def _send_json(self, payload: str) -> None:
         if not self._ws:
             raise RuntimeError("WebSocket is not connected")
-        payload = message.to_json()
         async with self._send_lock:
             await self._ws.send_str(payload)
 
