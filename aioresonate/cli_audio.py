@@ -61,6 +61,18 @@ class AudioPlayer:
     _DAC_PER_LOOP_MAX: Final[float] = 1.001
     """Maximum DAC-to-loop time ratio to prevent wild extrapolation."""
 
+    # Phase error correction: playback speed adjustment range
+    _MAX_SPEED_CORRECTION: Final[float] = 0.03
+    """Maximum playback speed deviation for phase correction (0.01 = ±1% speed variation)."""
+
+    # Phase error correction: secondary thresholds (rarely need adjustment)
+    _CORRECTION_DEADBAND_US: Final[int] = 2_000
+    """Phase error threshold below which no correction is applied (2 ms)."""
+    _REANCHOR_THRESHOLD_US: Final[int] = 120_000
+    """Phase error threshold above which re-anchoring is triggered (120 ms)."""
+    _REANCHOR_COOLDOWN_US: Final[int] = 5_000_000
+    """Minimum time between re-anchor events (5 seconds)."""
+
     def __init__(
         self,
         loop: asyncio.AbstractEventLoop,
@@ -301,43 +313,44 @@ class AudioPlayer:
                 if not self._last_output_frame:
                     self._last_output_frame = b"\x00" * frame_size
 
-                for _ in range(frames):
-                    do_drop = self._drop_every_n_frames > 0 and self._frames_until_next_drop <= 0
-                    do_insert = (
-                        self._insert_every_n_frames > 0 and self._frames_until_next_insert <= 0
-                    )
+                insert_interval = self._insert_every_n_frames
+                drop_interval = self._drop_every_n_frames
+                insert_counter = self._frames_until_next_insert
+                drop_counter = self._frames_until_next_drop
 
-                    # Prefer drop over insert if both trigger simultaneously
-                    if do_drop:
-                        # Discard one input frame to speed up
+                for _ in range(frames):
+                    # Decrement counters unconditionally
+                    insert_counter -= 1
+                    drop_counter -= 1
+
+                    # Single conditional path with early exit
+                    if drop_counter < 0 and drop_interval > 0:
+                        # Drop: discard input frame
                         _ = self._read_one_input_frame()
-                        self._frames_until_next_drop = self._drop_every_n_frames
+                        drop_counter = drop_interval
                         self._frames_dropped_since_log += 1
-                        # Output last frame without reading a new one
                         frame_bytes = self._last_output_frame
-                    elif do_insert:
-                        # Duplicate last output frame to slow down
-                        frame_bytes = self._last_output_frame
-                        self._frames_until_next_insert = self._insert_every_n_frames
+                    elif insert_counter < 0 and insert_interval > 0:
+                        # Insert: duplicate last frame
+                        insert_counter = insert_interval
                         self._frames_inserted_since_log += 1
+                        frame_bytes = self._last_output_frame
                     else:
-                        # Normal read
+                        # Normal: read new frame
                         read_frame = self._read_one_input_frame()
-                        if read_frame is None:
-                            frame_bytes = self._last_output_frame
-                        else:
-                            frame_bytes = read_frame
+                        frame_bytes = (
+                            read_frame if read_frame is not None else self._last_output_frame
+                        )
+                        if read_frame is not None:
                             self._last_output_frame = read_frame
 
-                    # Decrement cadence counters
-                    if self._frames_until_next_insert > 0:
-                        self._frames_until_next_insert -= 1
-                    if self._frames_until_next_drop > 0:
-                        self._frames_until_next_drop -= 1
-
-                    # Output a single frame
+                    # Output frame
                     output_buffer[bytes_written : bytes_written + frame_size] = frame_bytes
                     bytes_written += frame_size
+
+                # Write cadence state back
+                self._frames_until_next_insert = insert_counter
+                self._frames_until_next_drop = drop_counter
 
         except Exception:
             logger.exception("Error in audio callback")
@@ -583,10 +596,22 @@ class AudioPlayer:
             now_us = int(self._loop.time() * 1_000_000)
             if now_us - self._last_phase_error_log_us >= 1_000_000:
                 self._last_phase_error_log_us = now_us
+                # Calculate effective playback speed percentage
+                if self._format is not None:
+                    expected_frames = self._format.sample_rate
+                    actual_frames = (
+                        expected_frames
+                        + self._frames_inserted_since_log
+                        - self._frames_dropped_since_log
+                    )
+                    playback_speed_percent = (actual_frames / expected_frames) * 100.0
+                else:
+                    playback_speed_percent = 100.0
                 logger.debug(
-                    "Phase error: %.1f ms, buffer: %.2f s, inserted: %d, dropped: %d",
+                    "Phase error: %.1f ms, buffer: %.2f s, speed: %.2f%%, inserted: %d, dropped: %d",
                     self._phase_error_ema_us / 1000.0,
                     self._queued_duration_us / 1_000_000,
+                    playback_speed_percent,
                     self._frames_inserted_since_log,
                     self._frames_dropped_since_log,
                 )
@@ -708,28 +733,23 @@ class AudioPlayer:
         if self._format is None or self._format.sample_rate <= 0:
             return
 
-        ### make the setting for max corrections a constant, and simpler to configure
-
         # Smooth the error to avoid reacting to jitter
         self._smooth_phase_error(error_us)
 
         abs_err = abs(self._phase_error_ema_us)
 
-        # Deadband where we do nothing
-        deadband_us = 2_000  # 2 ms
-        if abs_err <= deadband_us:
+        # Do nothing within deadband
+        if abs_err <= self._CORRECTION_DEADBAND_US:
             self._insert_every_n_frames = 0
             self._drop_every_n_frames = 0
             return
 
         # Re-anchor only if error is very large and cooldown has elapsed
-        reanchor_threshold_us = 120_000  # 120 ms
-        reanchor_cooldown_us = 5_000_000  # 5 seconds
         now_loop_us = int(self._loop.time() * 1_000_000)
         if (
-            abs_err > reanchor_threshold_us
+            abs_err > self._REANCHOR_THRESHOLD_US
             and not self._waiting_for_start
-            and now_loop_us - self._last_reanchor_loop_time_us > reanchor_cooldown_us
+            and now_loop_us - self._last_reanchor_loop_time_us > self._REANCHOR_COOLDOWN_US
         ):
             logger.info("Phase error %.1f ms too large; re-anchoring", abs_err / 1000.0)
             # Reset cadence
@@ -742,18 +762,25 @@ class AudioPlayer:
             self.clear()
             return
 
-        # Convert error to equivalent frames
+        # Convert error to equivalent frames and plan correction cadence
         frames_error = round(abs_err * self._format.sample_rate / 1_000_000.0)
 
-        # Aim to correct within roughly 1 second with a max of ~200 corrections/s
-        target_seconds = 1.0
-        max_corrections_per_sec = 200.0
-        desired_corrections_per_sec = min(
-            max_corrections_per_sec, frames_error / max(target_seconds, 1.0)
-        )
+        # Maximum drop/insert interval based on allowed playback speed variation
+        # e.g., 0.01 speed correction = drop 1 frame per 100 frames
+        max_interval_frames = int(1.0 / max(self._MAX_SPEED_CORRECTION, 0.001))
 
-        interval_frames = int(self._format.sample_rate / max(desired_corrections_per_sec, 1.0))
-        interval_frames = max(128, interval_frames)  # at least ~3 ms between corrections
+        # Plan correction cadence to fix error within ~1 second
+        if frames_error > 0:
+            target_seconds = 1.0
+            desired_corrections_per_sec = min(
+                frames_error / target_seconds,
+                self._format.sample_rate / max_interval_frames,
+            )
+            interval_frames = int(self._format.sample_rate / max(desired_corrections_per_sec, 1.0))
+        else:
+            interval_frames = max_interval_frames
+
+        interval_frames = max(interval_frames, 1)
 
         if self._phase_error_ema_us > 0:
             # We are behind (DAC ahead) -> drop to catch up
