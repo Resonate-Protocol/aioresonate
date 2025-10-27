@@ -605,13 +605,17 @@ class AudioPlayer:
                         - self._frames_dropped_since_log
                     )
                     playback_speed_percent = (actual_frames / expected_frames) * 100.0
+                    normal_frames = expected_frames - self._frames_dropped_since_log
                 else:
                     playback_speed_percent = 100.0
+                    normal_frames = 0
                 logger.debug(
-                    "Phase error: %.1f ms, buffer: %.2f s, speed: %.2f%%, inserted: %d, dropped: %d",
+                    "Phase error: %.1f ms, buffer: %.2f s, speed: %.2f%%, "
+                    "played: %d, inserted: %d, dropped: %d",
                     self._phase_error_ema_us / 1000.0,
                     self._queued_duration_us / 1_000_000,
                     playback_speed_percent,
+                    normal_frames,
                     self._frames_inserted_since_log,
                     self._frames_dropped_since_log,
                 )
@@ -637,7 +641,7 @@ class AudioPlayer:
             self._phase_error_ema_us = float(error_us)
             self._phase_error_ema_init = True
         else:
-            alpha = 0.90  # allow fresher error information for quicker response
+            alpha = 0.60  # conservative smoothing to dampen oscillations
             self._phase_error_ema_us = alpha * self._phase_error_ema_us + (1.0 - alpha) * float(
                 error_us
             )
@@ -948,6 +952,7 @@ class AudioPlayer:
             if self._stream is not None:
                 self._stream.start()
                 self._stream_started = True
+                ### remove the checkmark symbol
                 logger.info(
                     "✓ Stream STARTED: %d chunks, %.2f seconds buffered, "
                     "ready to play (min required: %.2f s)",
