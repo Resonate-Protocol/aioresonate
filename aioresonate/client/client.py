@@ -7,8 +7,6 @@ import logging
 from collections.abc import Awaitable, Callable, Sequence
 from contextlib import suppress
 from dataclasses import dataclass
-from types import TracebackType
-from typing import Self
 
 from aiohttp import ClientSession, ClientWebSocketResponse, WSMessage, WSMsgType
 
@@ -677,16 +675,3 @@ class ResonateClient:
 
     def _now_us(self) -> int:
         return int(self._loop.time() * 1_000_000)
-
-    async def __aenter__(self) -> Self:
-        """Enter the async context manager returning this instance."""
-        return self
-
-    async def __aexit__(
-        self,
-        exc_type: type[BaseException] | None,
-        exc: BaseException | None,
-        tb: TracebackType | None,
-    ) -> None:
-        """Disconnect when leaving the async context manager."""
-        await self.disconnect()
