@@ -364,7 +364,6 @@ async def _connection_loop(
             if audio_handler.audio_player is not None:
                 await audio_handler.audio_player.stop()
                 audio_handler.audio_player = None
-            audio_handler.reset_sync_state()
 
             # Update URL from discovery
             new_url = discovery.current_url()
@@ -412,52 +411,22 @@ class AudioStreamHandler:
         self._client = client
         self.audio_player: AudioPlayer | None = None
         self._current_format: PCMFormat | None = None
-        self._sync_ready = False
-        self._first_sync_message_printed = False
-        self._dropped_chunks = 0
 
     def on_audio_chunk(self, server_timestamp_us: int, audio_data: bytes, fmt: PCMFormat) -> None:
-        """Handle incoming audio chunks with time sync validation."""
-        # Check if time sync is ready - critical for accurate playback timing
-        was_sync_ready = self._sync_ready
-        self._sync_ready = self._client.is_time_synchronized()
-
-        # Print message when sync becomes ready
-        if self._sync_ready and not was_sync_ready:
-            if self._dropped_chunks > 0:
-                logger.info("Time sync ready after dropping %d early chunks", self._dropped_chunks)
-                _print_event(
-                    f"Time sync ready (dropped {self._dropped_chunks} early chunks), "
-                    "starting playback"
-                )
-            else:
-                logger.info("Time sync ready")
-                _print_event("Time sync ready, starting playback")
-            self._dropped_chunks = 0
-
-        # Drop chunks if sync is not ready - prevents desync on initial connection
-        if not self._sync_ready:
-            self._dropped_chunks += 1
-            if not self._first_sync_message_printed:
-                logger.debug("Waiting for time sync to converge before playing audio...")
-                _print_event("Waiting for time synchronization...")
-                self._first_sync_message_printed = True
-            return
-
+        """Handle incoming audio chunks."""
         # Initialize or reconfigure audio player if format changed
         if self.audio_player is None or self._current_format != fmt:
             if self.audio_player is not None:
                 self.audio_player.clear()
 
             loop = asyncio.get_running_loop()
-            # Use client's public time conversion methods (based on monotonic loop time)
             self.audio_player = AudioPlayer(
                 loop, self._client.compute_play_time, self._client.compute_server_time
             )
             self.audio_player.set_format(fmt)
             self._current_format = fmt
 
-        # Submit audio chunk with server timestamp (AudioPlayer will compute client play time)
+        # Submit audio chunk - AudioPlayer handles timing
         if self.audio_player is not None:
             self.audio_player.submit(server_timestamp_us, audio_data)
 
@@ -478,12 +447,6 @@ class AudioStreamHandler:
     def get_audio_player(self) -> AudioPlayer | None:
         """Get the current audio player instance."""
         return self.audio_player
-
-    def reset_sync_state(self) -> None:
-        """Reset time synchronization state."""
-        self._sync_ready = False
-        self._first_sync_message_printed = False
-        self._dropped_chunks = 0
 
 
 async def main_async(argv: Sequence[str] | None = None) -> int:
