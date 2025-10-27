@@ -308,11 +308,11 @@ async def main_async(argv: Sequence[str] | None = None) -> int:
     handle_audio_chunk, get_audio_player = _create_audio_chunk_handler(client)
     handle_stream_start, handle_stream_end = _create_stream_handlers(get_audio_player)
 
-    client.add_metadata_listener(lambda payload: _handle_session_update(state, payload))
-    client.add_group_update_listener(lambda payload: _handle_group_update(state, payload))
-    client.add_stream_start_listener(handle_stream_start)
-    client.add_stream_end_listener(handle_stream_end)
-    client.add_audio_chunk_listener(handle_audio_chunk)
+    client.set_metadata_listener(lambda payload: _handle_session_update(state, payload))
+    client.set_group_update_listener(lambda payload: _handle_group_update(state, payload))
+    client.set_stream_start_listener(handle_stream_start)
+    client.set_stream_end_listener(handle_stream_end)
+    client.set_audio_chunk_listener(handle_audio_chunk)
 
     url = args.url
     if url is None:

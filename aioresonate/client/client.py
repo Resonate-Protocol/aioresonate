@@ -154,6 +154,17 @@ class ResonateClient:
     _session_state: SessionUpdatePayload | None = None
     """Latest session state received from server."""
 
+    _metadata_callback: MetadataCallback | None = None
+    """Callback invoked on session/update messages."""
+    _group_callback: GroupUpdateCallback | None = None
+    """Callback invoked on group/update messages."""
+    _stream_start_callback: StreamStartCallback | None = None
+    """Callback invoked when a stream starts."""
+    _stream_end_callback: StreamEndCallback | None = None
+    """Callback invoked when a stream ends."""
+    _audio_chunk_callback: AudioChunkCallback | None = None
+    """Callback invoked when audio chunks are received."""
+
     def __init__(
         self,
         client_id: str,
@@ -211,11 +222,6 @@ class ResonateClient:
         self._send_lock = asyncio.Lock()
         self._time_filter = ResonateTimeFilter()
         self.set_static_delay_ms(static_delay_ms)
-        self._metadata_callbacks: list[MetadataCallback] = []
-        self._group_callbacks: list[GroupUpdateCallback] = []
-        self._stream_start_callbacks: list[StreamStartCallback] = []
-        self._stream_end_callbacks: list[StreamEndCallback] = []
-        self._audio_chunk_callbacks: list[AudioChunkCallback] = []
 
     @property
     def server_info(self) -> ServerInfo | None:
@@ -328,25 +334,25 @@ class ResonateClient:
         message = GroupCommandClientMessage(payload=payload)
         await self._send_message(message.to_json())
 
-    def add_metadata_listener(self, callback: MetadataCallback) -> None:
-        """Register a callback invoked on session/update messages."""
-        self._metadata_callbacks.append(callback)
+    def set_metadata_listener(self, callback: MetadataCallback | None) -> None:
+        """Set or clear (if None) the callback invoked on session/update messages."""
+        self._metadata_callback = callback
 
-    def add_group_update_listener(self, callback: GroupUpdateCallback) -> None:
-        """Register a callback invoked on group/update messages."""
-        self._group_callbacks.append(callback)
+    def set_group_update_listener(self, callback: GroupUpdateCallback | None) -> None:
+        """Set or clear (if None) the callback invoked on group/update messages."""
+        self._group_callback = callback
 
-    def add_stream_start_listener(self, callback: StreamStartCallback) -> None:
-        """Register a callback invoked when a stream starts."""
-        self._stream_start_callbacks.append(callback)
+    def set_stream_start_listener(self, callback: StreamStartCallback | None) -> None:
+        """Set or clear (if None) the callback invoked when a stream starts."""
+        self._stream_start_callback = callback
 
-    def add_stream_end_listener(self, callback: StreamEndCallback) -> None:
-        """Register a callback invoked when a stream ends."""
-        self._stream_end_callbacks.append(callback)
+    def set_stream_end_listener(self, callback: StreamEndCallback | None) -> None:
+        """Set or clear (if None) the callback invoked when a stream ends."""
+        self._stream_end_callback = callback
 
-    def add_audio_chunk_listener(self, callback: AudioChunkCallback) -> None:
+    def set_audio_chunk_listener(self, callback: AudioChunkCallback | None) -> None:
         """
-        Register a callback invoked when audio chunks are received.
+        Set or clear (if None) the callback invoked when audio chunks are received.
 
         The callback receives:
         - server_timestamp_us: Server timestamp when this audio should play
@@ -358,7 +364,7 @@ class ResonateClient:
         by this client instance. These handle time synchronization and static delay
         automatically.
         """
-        self._audio_chunk_callbacks.append(callback)
+        self._audio_chunk_callback = callback
 
     def _build_client_hello(self) -> ClientHelloMessage:
         payload = ClientHelloPayload(
@@ -550,33 +556,32 @@ class ResonateClient:
 
     async def _handle_session_update(self, payload: SessionUpdatePayload) -> None:
         self._session_state = payload
-        await self._notify_metadata_callbacks(payload)
+        await self._notify_metadata_callback(payload)
 
     async def _handle_group_update(self, payload: GroupUpdateServerPayload) -> None:
         self._group_state = payload
-        await self._notify_group_callbacks(payload)
+        await self._notify_group_callback(payload)
 
     def _configure_audio_output(self, pcm_format: PCMFormat) -> None:
         """Store the current audio format for use in callbacks."""
         self._current_pcm_format = pcm_format
 
     async def _handle_audio_chunk(self, timestamp_us: int, payload: bytes) -> None:
-        """Handle incoming audio chunk and notify callbacks."""
-        if not self._audio_chunk_callbacks:
+        """Handle incoming audio chunk and notify callback."""
+        if self._audio_chunk_callback is None:
             return
         if self._current_pcm_format is None:
             logger.debug("Dropping audio chunk without format")
             return
 
-        # Pass server timestamp directly to callbacks - they handle time conversion
+        # Pass server timestamp directly to callback - it handles time conversion
         # to allow for dynamic time base updates
-        for callback in self._audio_chunk_callbacks:
-            try:
-                result = callback(timestamp_us, payload, self._current_pcm_format)
-                if asyncio.iscoroutine(result):
-                    await result
-            except Exception:
-                logger.exception("Error in audio chunk callback %s", callback)
+        try:
+            result = self._audio_chunk_callback(timestamp_us, payload, self._current_pcm_format)
+            if asyncio.iscoroutine(result):
+                await result
+        except Exception:
+            logger.exception("Error in audio chunk callback %s", self._audio_chunk_callback)
 
     def compute_play_time(self, server_timestamp_us: int) -> int:
         """
@@ -616,41 +621,45 @@ class ResonateClient:
         adjusted_client_time = client_timestamp_us - self._static_delay_us
         return self._time_filter.compute_server_time(adjusted_client_time)
 
-    async def _notify_metadata_callbacks(self, payload: SessionUpdatePayload) -> None:
-        for callback in self._metadata_callbacks:
-            try:
-                result = callback(payload)
-                if asyncio.iscoroutine(result):
-                    await result
-            except Exception:
-                logger.exception("Error in client callback %s", callback)
+    async def _notify_metadata_callback(self, payload: SessionUpdatePayload) -> None:
+        if self._metadata_callback is None:
+            return
+        try:
+            result = self._metadata_callback(payload)
+            if asyncio.iscoroutine(result):
+                await result
+        except Exception:
+            logger.exception("Error in metadata callback %s", self._metadata_callback)
 
-    async def _notify_group_callbacks(self, payload: GroupUpdateServerPayload) -> None:
-        for callback in self._group_callbacks:
-            try:
-                result = callback(payload)
-                if asyncio.iscoroutine(result):
-                    await result
-            except Exception:
-                logger.exception("Error in client callback %s", callback)
+    async def _notify_group_callback(self, payload: GroupUpdateServerPayload) -> None:
+        if self._group_callback is None:
+            return
+        try:
+            result = self._group_callback(payload)
+            if asyncio.iscoroutine(result):
+                await result
+        except Exception:
+            logger.exception("Error in group callback %s", self._group_callback)
 
     async def _notify_stream_start(self, message: StreamStartMessage) -> None:
-        for callback in self._stream_start_callbacks:
-            try:
-                result = callback(message)
-                if asyncio.iscoroutine(result):
-                    await result
-            except Exception:
-                logger.exception("Error in client callback %s", callback)
+        if self._stream_start_callback is None:
+            return
+        try:
+            result = self._stream_start_callback(message)
+            if asyncio.iscoroutine(result):
+                await result
+        except Exception:
+            logger.exception("Error in stream start callback %s", self._stream_start_callback)
 
     async def _notify_stream_end(self) -> None:
-        for callback in self._stream_end_callbacks:
-            try:
-                result = callback()
-                if asyncio.iscoroutine(result):
-                    await result
-            except Exception:
-                logger.exception("Error in stream end callback %s", callback)
+        if self._stream_end_callback is None:
+            return
+        try:
+            result = self._stream_end_callback()
+            if asyncio.iscoroutine(result):
+                await result
+        except Exception:
+            logger.exception("Error in stream end callback %s", self._stream_end_callback)
 
     async def _time_sync_loop(self) -> None:
         try:
