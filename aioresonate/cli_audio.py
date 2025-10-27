@@ -212,7 +212,12 @@ class AudioPlayer:
             status: Status flags (underrun, overflow, etc.).
         """
         if status:
-            logger.debug("Audio callback status: %s", status)
+            # Detect underflow and immediately re-anchor to avoid long desync
+            if status.input_underflow or status.output_underflow:
+                logger.warning("Audio underflow detected; re-anchoring playback")
+                self.clear()
+            else:
+                logger.debug("Audio callback status: %s", status)
 
         assert self._format is not None
 
