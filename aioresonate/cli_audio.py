@@ -160,6 +160,9 @@ class AudioPlayer:
         self._callback_time_total_us: int = 0  # Total callback time for averaging
         self._callback_count: int = 0  # Number of callbacks for averaging
 
+        # Thread-safe flag for deferred operations (audio thread → main thread)
+        self._clear_requested: bool = False
+
     def set_format(self, pcm_format: PCMFormat) -> None:
         """Configure the audio output format."""
         self._format = pcm_format
@@ -188,6 +191,9 @@ class AudioPlayer:
 
     def clear(self) -> None:
         """Drop all queued audio chunks."""
+        # Clear deferred operation flag
+        self._clear_requested = False
+
         while not self._queue.empty():
             try:
                 self._queue.get_nowait()
@@ -244,21 +250,23 @@ class AudioPlayer:
         """
         callback_start_us = int(self._loop.time() * 1_000_000)
 
-        if status:
-            # Detect underflow and immediately re-anchor to avoid long desync
-            if status.input_underflow or status.output_underflow:
-                logger.warning("Audio underflow detected; re-anchoring playback")
-                self.clear()
-            else:
-                logger.debug("Audio callback status: %s", status)
-
         assert self._format is not None
-
-        # Capture exact DAC output time and update playback position
-        self._update_playback_position_from_dac(time)
 
         bytes_needed = frames * self._format.frame_size
         output_buffer = memoryview(outdata).cast("B")
+
+        if status:
+            # Detect underflow and request re-anchor (processed by main thread)
+            if status.input_underflow or status.output_underflow:
+                logger.warning("Audio underflow detected; requesting re-anchor")
+                self._clear_requested = True
+                # Fill buffer with silence and return early to avoid glitches
+                self._fill_silence(output_buffer, 0, bytes_needed)
+                return
+            logger.debug("Audio callback status: %s", status)
+
+        # Capture exact DAC output time and update playback position
+        self._update_playback_position_from_dac(time)
         bytes_written = 0
 
         try:
@@ -843,6 +851,12 @@ class AudioPlayer:
             server_timestamp_us: Server timestamp when this audio should play.
             payload: Raw PCM audio bytes.
         """
+        # Handle deferred operations from audio thread
+        if self._clear_requested:
+            self._clear_requested = False
+            self.clear()
+            logger.info("Cleared audio queue after underflow (deferred from audio thread)")
+
         if self._format is None:
             logger.debug("Audio format missing; dropping audio chunk")
             return
