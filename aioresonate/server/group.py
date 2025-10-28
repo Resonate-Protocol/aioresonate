@@ -517,7 +517,7 @@ class ResonateGroup:
         self._client_art_formats.pop(client.client_id, None)
         client.send_message(StreamEndMessage())
 
-    async def stop(self, stop_time_us: int | None = None) -> bool:
+    async def stop(self, stop_time_us: int | None = None) -> bool:  # noqa: PLR0915
         """
         Stop playback for the group and clean up resources.
 
@@ -533,28 +533,46 @@ class ResonateGroup:
                 this method returns immediately.
 
         Returns:
-            bool: True if an active or scheduled stream was stopped (or scheduled to stop),
-            False if no stream was active.
+            bool: True if an active stream was stopped (or scheduled to stop),
+            False if no stream was active and no cleanup was required.
         """
+        # Cancel any existing scheduled stop first to prevent race conditions
+        if self._scheduled_stop_handle is not None:
+            logger.debug("Canceling previously scheduled stop in stop()")
+            self._scheduled_stop_handle.cancel()
+            self._scheduled_stop_handle = None
+
         active = self._stream_task is not None
+        needs_cleanup = self._current_state != PlaybackStateType.STOPPED
 
         if stop_time_us is not None:
             now_us = int(self._server.loop.time() * 1_000_000)
             if stop_time_us > now_us:
+                # Only schedule if there's something to stop or cleanup
+                if not active and not needs_cleanup:
+                    return False
+
                 delay = (stop_time_us - now_us) / 1_000_000
 
                 async def _delayed_stop() -> None:
+                    # Store handle locally to detect if it's been replaced
+                    handle = self._scheduled_stop_handle
                     try:
-                        await self.stop()
+                        await self.stop()  # This will clear _scheduled_stop_handle
                     except Exception:
                         logger.exception("Scheduled stop failed")
+                    finally:
+                        # Only clear if this handle is still current (e.g., stop() was interrupted
+                        # or a new stop was scheduled during the stop() call)
+                        if self._scheduled_stop_handle is handle:
+                            self._scheduled_stop_handle = None
 
-                self._server.loop.call_later(
+                self._scheduled_stop_handle = self._server.loop.call_later(
                     delay, lambda: self._server.loop.create_task(_delayed_stop())
                 )
-                return active
+                return active or needs_cleanup
 
-        if not active:
+        if not active and not needs_cleanup:
             return False
 
         logger.debug(
