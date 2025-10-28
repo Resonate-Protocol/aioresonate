@@ -10,35 +10,39 @@ For a WIP reference implementation of a server using this library, see [Music As
 
 ## CLI Client
 
-> **Note:** The CLI client will be moved to a separate repository in the future.
+> **Note:** The CLI client is currently included in the `aioresonate` library for development purposes. Once the Resonate Protocol stabilizes, it will be moved to a separate repository and package. This will require users to uninstall `aioresonate[cli]` and install the new CLI package separately.
 
-This repository also includes a highly experimental CLI client for testing and development purposes.
-You can install and run it by:
+This repository includes a highly experimental CLI client for testing and development purposes.
 
-1. Cloning this repository:
+### Installation
+
+Install from PyPI:
+```bash
+pip install "aioresonate[cli]"
+```
+
+<details>
+<summary>Install from source</summary>
+
 ```bash
 git clone https://github.com/Resonate-Protocol/aioresonate.git
 cd aioresonate
+pip install ".[cli]"
 ```
 
-2. Installing the package:
-```
-pip install --user .
-```
+</details>
 
-3. Running the CLI:
-```
+### Running the CLI
+
+```bash
 resonate-cli
-```
-
-4. Uninstalling the package:
-```
-pip uninstall aioresonate
 ```
 
 The CLI client will automatically connect to a Resonate server on your local network and be available for playback.
 
-### Client Identification
+### Configuration Options
+
+#### Client Identification
 
 If you want to run multiple CLI clients simultaneously, each must have a unique identifier:
 
@@ -50,10 +54,41 @@ resonate-cli --id my-client-2 --name "Bedroom"
 - `--id`: A unique identifier for this client (required if running multiple instances)
 - `--name`: A friendly name displayed on the server (optional)
 
+#### Adjusting Playback Delay
+
+The CLI supports adjusting playback delay to compensate for audio hardware latency or achieve better synchronization across devices.
+
+**Setting delay at startup:**
+```bash
+resonate-cli --static-delay-ms 150
+```
+
+**Adjusting delay in real-time:**
+While the client is running, you can use the `delay` command:
+- `delay` - Show current delay value
+- `delay <ms>` - Set absolute delay (e.g., `delay 200`)
+- `delay + <ms>` - Increase delay (e.g., `delay + 50`)
+- `delay - <ms>` - Decrease delay (e.g., `delay - 25`)
+
+Changing the delay clears the audio buffer to prevent desynchronization.
+
+#### Debugging & Troubleshooting
+
+If you experience synchronization issues or audio glitches, you can enable detailed logging to help diagnose the problem:
+
+```bash
+resonate-cli --log-level DEBUG
+```
+
+This provides detailed information about time synchronization. The output can be helpful when reporting issues.
+
 ### Limitations & Known Issues
 
-This client is highly experimental and has many limitations:
+This client is highly experimental and has several known limitations:
 
-- Does not recover when it loses connection to the server
-- Slowly drifts out of sync over time
-- Only tested on Linux
+- **Platform Support**: Only tested on Linux; macOS and Windows support untested
+- **Format Support**: Currently fixed to uncompressed 44.1kHz 16-bit stereo PCM
+- **Playback Start Glitches**: When starting playback, audio dropouts or pitch shifts may occur during initial synchronization
+- **Performance Requirements**: Low-powered devices may not keep up. While total CPU usage is very minimal, it currently requires low latency. This will be optimized in a future version
+- **CLI User Experience**: The CLI is pretty bare bones for now
+- **Configuration Persistence**: Settings are not persistently stored; delay must be reconfigured on each restart using the `--static-delay-ms` option
