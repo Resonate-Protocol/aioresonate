@@ -634,16 +634,23 @@ class AudioPlayer:
             now_us = int(self._loop.time() * 1_000_000)
             if now_us - self._last_sync_error_log_us >= 1_000_000:
                 self._last_sync_error_log_us = now_us
-                # Calculate effective playback speed percentage
+                # Calculate playback speed relative to source timeline.
+                # Drops skip source frames (track advances faster), inserts repeat
+                # frames (track advances slower). Reflect that in the speed metric.
                 if self._format is not None:
                     expected_frames = self._format.sample_rate
-                    actual_frames = (
+                    track_frames = (
                         expected_frames
-                        + self._frames_inserted_since_log
-                        - self._frames_dropped_since_log
+                        + self._frames_dropped_since_log
+                        - self._frames_inserted_since_log
                     )
-                    playback_speed_percent = (actual_frames / expected_frames) * 100.0
-                    normal_frames = expected_frames - self._frames_dropped_since_log
+                    playback_speed_percent = (track_frames / expected_frames) * 100.0
+                    # Distinct output frames rendered (for info):
+                    normal_frames = (
+                        expected_frames
+                        - self._frames_dropped_since_log
+                        + self._frames_inserted_since_log
+                    )
                 else:
                     playback_speed_percent = 100.0
                     normal_frames = 0
