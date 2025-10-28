@@ -12,7 +12,7 @@ import collections
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Final
+from typing import Final, Protocol
 
 import sounddevice
 from sounddevice import CallbackFlags
@@ -20,6 +20,17 @@ from sounddevice import CallbackFlags
 from aioresonate.client import PCMFormat
 
 logger = logging.getLogger(__name__)
+
+
+class AudioTimeInfo(Protocol):
+    """Protocol for audio timing information from sounddevice callback.
+
+    Provides DAC (Digital-to-Analog Converter) and other timing metrics
+    needed for precise playback synchronization.
+    """
+
+    outputBufferDacTime: float  # noqa: N815
+    """DAC time when the output buffer will be played (in seconds)."""
 
 
 @dataclass
@@ -253,7 +264,7 @@ class AudioPlayer:
         self,
         outdata: memoryview,
         frames: int,
-        time: Any,
+        time: AudioTimeInfo,
         status: CallbackFlags,
     ) -> None:
         """
@@ -398,7 +409,7 @@ class AudioPlayer:
         self._callback_time_total_us += callback_end_us - callback_start_us
         self._callback_count += 1
 
-    def _update_playback_position_from_dac(self, time: Any) -> None:
+    def _update_playback_position_from_dac(self, time: AudioTimeInfo) -> None:
         """Capture DAC and loop time simultaneously, update playback position.
 
         Note: loop.time() is thread-safe - it's a wrapper around time.monotonic(),
@@ -736,7 +747,11 @@ class AudioPlayer:
             )
 
     def _handle_start_gating(
-        self, output_buffer: memoryview, bytes_written: int, frames: int, time: Any | None = None
+        self,
+        output_buffer: memoryview,
+        bytes_written: int,
+        frames: int,
+        time: AudioTimeInfo | None = None,
     ) -> int:
         """Handle pre-start gating using DAC or loop time. Returns bytes written."""
         assert self._format is not None
