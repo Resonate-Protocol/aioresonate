@@ -21,11 +21,10 @@ git clone https://github.com/Resonate-Protocol/aioresonate.git
 cd aioresonate
 ```
 
-2. Installing the package with CLI dependencies:
+2. Installing the package:
 ```
-pip install --user ".[cli]"
+pip install --user .
 ```
-(The `.[cli]` installs the `resonate-cli` command)
 
 3. Running the CLI:
 ```
