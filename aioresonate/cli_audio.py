@@ -13,7 +13,7 @@ import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum, auto
-from typing import Final, Protocol
+from typing import Final, Protocol, cast
 
 import sounddevice
 from sounddevice import CallbackFlags
@@ -938,9 +938,10 @@ class AudioPlayer:
             self._playback_state = PlaybackState.WAITING_FOR_START
             self._first_server_timestamp_us = server_timestamp_us
             # If scheduled start is very near now, suspect unsynchronized fallback mapping
-            scheduled_start = self._scheduled_start_loop_time_us
-            if scheduled_start and scheduled_start - now_us <= self._EARLY_START_THRESHOLD_US:  # type: ignore[unreachable]
-                self._early_start_suspect = True  # type: ignore[unreachable]
+            # Cast: we just set this via _compute_and_set_loop_start so it's not None
+            scheduled_start = cast("int", self._scheduled_start_loop_time_us)
+            if scheduled_start - now_us <= self._EARLY_START_THRESHOLD_US:
+                self._early_start_suspect = True
 
         # While waiting to start, keep the scheduled loop start updated as time sync improves
         elif (
