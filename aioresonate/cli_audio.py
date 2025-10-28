@@ -441,6 +441,17 @@ class AudioPlayer:
             # time object may not have expected attributes in all backends
             logger.debug("Could not extract timing info from callback")
 
+    def _initialize_current_chunk(self) -> None:
+        """Load next chunk from queue and initialize read position.
+
+        Updates server timestamp cursor if needed.
+        """
+        self._current_chunk = self._queue.get_nowait()
+        self._current_chunk_offset = 0
+        # Initialize server cursor if needed
+        if self._server_ts_cursor_us == 0:
+            self._server_ts_cursor_us = self._current_chunk.server_timestamp_us
+
     def _read_one_input_frame(self) -> bytes | None:
         """Read and consume a single audio frame from the queue.
 
@@ -456,13 +467,10 @@ class AudioPlayer:
         if self._current_chunk is None:
             if self._queue.empty():
                 return None
-            self._current_chunk = self._queue.get_nowait()
-            self._current_chunk_offset = 0
-            # Initialize server cursor if needed
-            if self._server_ts_cursor_us == 0:
-                self._server_ts_cursor_us = self._current_chunk.server_timestamp_us
+            self._initialize_current_chunk()
 
         chunk = self._current_chunk
+        assert chunk is not None
         data = chunk.audio_data
         if self._current_chunk_offset >= len(data):
             # Should not happen, but guard
@@ -509,12 +517,10 @@ class AudioPlayer:
                     silence_bytes = total_bytes_needed - bytes_written
                     result[bytes_written:] = b"\x00" * silence_bytes
                     break
-                self._current_chunk = self._queue.get_nowait()
-                self._current_chunk_offset = 0
-                if self._server_ts_cursor_us == 0:
-                    self._server_ts_cursor_us = self._current_chunk.server_timestamp_us
+                self._initialize_current_chunk()
 
             # Calculate how much we can read from current chunk
+            assert self._current_chunk is not None
             chunk_data = self._current_chunk.audio_data
             available_bytes = len(chunk_data) - self._current_chunk_offset
             bytes_to_read = min(available_bytes, total_bytes_needed - bytes_written)
