@@ -65,12 +65,12 @@ class AudioPlayer:
     """Maximum DAC-to-loop time ratio to prevent wild extrapolation."""
 
     # Sync error correction: playback speed adjustment range
-    _MAX_SPEED_CORRECTION: Final[float] = 0.03
-    """Maximum playback speed deviation for sync correction (0.01 = ±1% speed variation)."""
+    _MAX_SPEED_CORRECTION: Final[float] = 0.02
+    """Maximum playback speed deviation for sync correction (0.02 = ±2% speed variation)."""
 
     # Sync error correction: secondary thresholds (rarely need adjustment)
-    _CORRECTION_DEADBAND_US: Final[int] = 2_000
-    """Sync error threshold below which no correction is applied (2 ms)."""
+    _CORRECTION_DEADBAND_US: Final[int] = 5_000
+    """Sync error threshold below which no correction is applied (5 ms)."""
     _REANCHOR_THRESHOLD_US: Final[int] = 120_000
     """Sync error threshold above which re-anchoring is triggered (120 ms)."""
     _REANCHOR_COOLDOWN_US: Final[int] = 5_000_000
@@ -685,7 +685,7 @@ class AudioPlayer:
             self._sync_error_ema_us = float(error_us)
             self._sync_error_ema_init = True
         else:
-            alpha = 0.60  # conservative smoothing to dampen oscillations
+            alpha = 0.50  # Heavier smoothing to avoid aggressive corrections
             self._sync_error_ema_us = alpha * self._sync_error_ema_us + (1.0 - alpha) * float(
                 error_us
             )
@@ -811,9 +811,9 @@ class AudioPlayer:
         # e.g., 0.01 speed correction = drop 1 frame per 100 frames
         max_interval_frames = int(1.0 / max(self._MAX_SPEED_CORRECTION, 0.001))
 
-        # Plan correction cadence to fix error within ~1 second
+        # Plan correction cadence to fix error within ~2 seconds
         if frames_error > 0:
-            target_seconds = 1.0
+            target_seconds = 2.0
             desired_corrections_per_sec = min(
                 frames_error / target_seconds,
                 self._format.sample_rate / max_interval_frames,
