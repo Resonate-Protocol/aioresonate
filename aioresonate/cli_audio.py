@@ -1,6 +1,9 @@
-"""Audio playback for the Resonate CLI."""  ### expand a bit
+"""Audio playback for the Resonate CLI with time synchronization.
 
-### rename phase error to sync_error across this file
+This module provides an AudioPlayer that handles time-synchronized audio playback
+with DAC-level timing precision. It manages buffering, scheduled start times,
+and sync error correction to maintain sync between server and client timelines.
+"""
 
 from __future__ import annotations
 
@@ -19,7 +22,7 @@ from aioresonate.client import PCMFormat
 logger = logging.getLogger(__name__)
 
 
-@dataclass(slots=True)  ### remove slots=True
+@dataclass
 class _QueuedChunk:
     """Represents a queued audio chunk with timing information."""
 
@@ -61,17 +64,19 @@ class AudioPlayer:
     _DAC_PER_LOOP_MAX: Final[float] = 1.001
     """Maximum DAC-to-loop time ratio to prevent wild extrapolation."""
 
-    # Phase error correction: playback speed adjustment range
+    # Sync error correction: playback speed adjustment range
     _MAX_SPEED_CORRECTION: Final[float] = 0.03
-    """Maximum playback speed deviation for phase correction (0.01 = ±1% speed variation)."""
+    """Maximum playback speed deviation for sync correction (0.01 = ±1% speed variation)."""
 
-    # Phase error correction: secondary thresholds (rarely need adjustment)
+    # Sync error correction: secondary thresholds (rarely need adjustment)
     _CORRECTION_DEADBAND_US: Final[int] = 2_000
-    """Phase error threshold below which no correction is applied (2 ms)."""
+    """Sync error threshold below which no correction is applied (2 ms)."""
     _REANCHOR_THRESHOLD_US: Final[int] = 120_000
-    """Phase error threshold above which re-anchoring is triggered (120 ms)."""
+    """Sync error threshold above which re-anchoring is triggered (120 ms)."""
     _REANCHOR_COOLDOWN_US: Final[int] = 5_000_000
     """Minimum time between re-anchor events (5 seconds)."""
+    _MIN_BUFFER_DURATION_US: Final[int] = 200_000
+    """Minimum buffer duration (200ms) to start playback and absorb network jitter."""
 
     def __init__(
         self,
@@ -90,7 +95,6 @@ class AudioPlayer:
             compute_server_time: Function that converts client timestamps (monotonic
                 loop time) to server timestamps (inverse of compute_client_time).
         """
-        ### check that all propeties here are defined in the class, and init there to if simply possible (like = 0), add 1 line doc comment to each, then you can also remove # comments here if already described in """
         self._loop = loop
         self._compute_client_time = compute_client_time
         self._compute_server_time = compute_server_time
@@ -139,18 +143,18 @@ class AudioPlayer:
         self._early_start_suspect: bool = False
         self._has_reanchored: bool = False
 
-        # Low-overhead drift/phase correction scheduling (sample drop/insert)
+        # Low-overhead drift/sync correction scheduling (sample drop/insert)
         self._insert_every_n_frames: int = 0
         self._drop_every_n_frames: int = 0
         self._frames_until_next_insert: int = 0
         self._frames_until_next_drop: int = 0
         self._last_output_frame: bytes = b""
 
-        # Phase error smoothing and re-anchor cooldown
-        self._phase_error_ema_us: float = 0.0
-        self._phase_error_ema_init: bool = False
+        # Sync error smoothing and re-anchor cooldown
+        self._sync_error_ema_us: float = 0.0
+        self._sync_error_ema_init: bool = False
         self._last_reanchor_loop_time_us: int = 0
-        self._last_phase_error_log_us: int = 0  # Rate limit phase error logging
+        self._last_sync_error_log_us: int = 0  # Rate limit sync error logging
         self._frames_inserted_since_log: int = 0  # Track inserts for logging
         self._frames_dropped_since_log: int = 0  # Track drops for logging
 
@@ -163,18 +167,15 @@ class AudioPlayer:
         self._stream_started = False
         self._first_real_chunk = True
 
-        dtype = "int16"  ### inline this to reduce LOC
-        ### remove or move these explanation to reduce LOC
-        # Use low latency for accurate playback timing
-        # With early chunk arrival (5+ seconds), we can use aggressive low-latency settings
-        blocksize = 2048  # ~46ms at 44.1kHz - balance between latency and stability
+        # Low latency settings for accurate playback (chunks arrive 5+ seconds early)
+        blocksize = 2048  # ~46ms at 44.1kHz
         self._stream = sounddevice.RawOutputStream(
             samplerate=pcm_format.sample_rate,
             channels=pcm_format.channels,
-            dtype=dtype,
+            dtype="int16",
             blocksize=blocksize,
             callback=self._audio_callback,
-            latency="low",  # Low latency for minimal device-induced delay
+            latency="low",
         )
         logger.info("Audio stream configured: blocksize=%d, latency=low", blocksize)
 
@@ -190,7 +191,6 @@ class AudioPlayer:
                 self._queue.get_nowait()
             except asyncio.QueueEmpty:
                 break
-        ### verify again that we havent missed anything, maybe move up near __init__?
         # Reset playback state
         self._first_real_chunk = True
         self._current_chunk = None
@@ -215,10 +215,10 @@ class AudioPlayer:
         self._frames_until_next_insert = 0
         self._frames_until_next_drop = 0
         self._last_output_frame = b""
-        self._phase_error_ema_us = 0.0
-        self._phase_error_ema_init = False
+        self._sync_error_ema_us = 0.0
+        self._sync_error_ema_init = False
         self._last_reanchor_loop_time_us = 0
-        self._last_phase_error_log_us = 0
+        self._last_sync_error_log_us = 0
         self._frames_inserted_since_log = 0
         self._frames_dropped_since_log = 0
 
@@ -258,51 +258,17 @@ class AudioPlayer:
         try:
             # Pre-start gating: fill silence until scheduled start time
             if self._waiting_for_start:
-                ### combine these two gating methods into one to reduce LOC
-                if self._scheduled_start_dac_time_us is not None:
-                    bytes_written = self._handle_dac_gating(
-                        output_buffer, bytes_written, frames, time
-                    )
-                elif self._scheduled_start_loop_time_us is not None:
-                    bytes_written = self._handle_loop_time_gating(
-                        output_buffer, bytes_written, frames
-                    )
+                bytes_written = self._handle_start_gating(
+                    output_buffer, bytes_written, frames, time
+                )
 
-            ### combine these two ifs above and below to save LOC, or note if not possible due to the gating methods changing the var
-            # If we're still waiting for start after gating above, output silence only
+            # If still waiting after gating, fill remaining buffer with silence
             if self._waiting_for_start:
                 if bytes_written < bytes_needed:
                     silence_bytes = bytes_needed - bytes_written
                     self._fill_silence(output_buffer, bytes_written, silence_bytes)
                     bytes_written += silence_bytes
             else:
-                ### remove dead code in this block if possible
-                # Simple drift control based on buffer depth (disabled for heavy actions)
-                target_buffer_us = int(self._compute_minimum_buffer_duration())
-                current_remaining_us = 0
-                if self._current_chunk is not None:
-                    rem_bytes = len(self._current_chunk.audio_data) - self._current_chunk_offset
-                    rem_frames = rem_bytes // self._format.frame_size
-                    current_remaining_us = (rem_frames * 1_000_000) // self._format.sample_rate
-
-                buffer_depth_us = self._queued_duration_us + current_remaining_us
-                delta_us = buffer_depth_us - target_buffer_us
-
-                # Large jump handling after start: prefer doing nothing to avoid pitch
-                # Determine extra frames to consume this callback (very conservative)
-                control_gain = 0.0  # disable pitchy drop/dup by default
-                max_adjust = 0
-                consume_extra: int = int(
-                    (delta_us * self._format.sample_rate / 1_000_000.0) * control_gain
-                )
-                if consume_extra > max_adjust:
-                    consume_extra = max_adjust
-                elif consume_extra < -max_adjust:
-                    consume_extra = -max_adjust
-
-                in_frames_target = frames + consume_extra
-                in_frames_target = max(in_frames_target, 0)
-
                 # Occasional sample drop/insert based on scheduled cadence
                 if self._frames_until_next_insert <= 0 and self._insert_every_n_frames > 0:
                     self._frames_until_next_insert = self._insert_every_n_frames
@@ -567,11 +533,11 @@ class AudioPlayer:
         }
 
     def _log_chunk_timing(self, _server_timestamp_us: int) -> None:
-        """Log phase error and buffer status for debugging sync issues."""
-        if self._phase_error_ema_init:
+        """Log sync error and buffer status for debugging sync issues."""
+        if self._sync_error_ema_init:
             now_us = int(self._loop.time() * 1_000_000)
-            if now_us - self._last_phase_error_log_us >= 1_000_000:
-                self._last_phase_error_log_us = now_us
+            if now_us - self._last_sync_error_log_us >= 1_000_000:
+                self._last_sync_error_log_us = now_us
                 # Calculate effective playback speed percentage
                 if self._format is not None:
                     expected_frames = self._format.sample_rate
@@ -586,9 +552,9 @@ class AudioPlayer:
                     playback_speed_percent = 100.0
                     normal_frames = 0
                 logger.debug(
-                    "Phase error: %.1f ms, buffer: %.2f s, speed: %.2f%%, "
+                    "Sync error: %.1f ms, buffer: %.2f s, speed: %.2f%%, "
                     "played: %d, inserted: %d, dropped: %d",
-                    self._phase_error_ema_us / 1000.0,
+                    self._sync_error_ema_us / 1000.0,
                     self._queued_duration_us / 1_000_000,
                     playback_speed_percent,
                     normal_frames,
@@ -599,26 +565,14 @@ class AudioPlayer:
                 self._frames_inserted_since_log = 0
                 self._frames_dropped_since_log = 0
 
-    def _compute_minimum_buffer_duration(self) -> float:
-        """Compute minimum buffer duration needed for network jitter.
-
-        Returns the minimum buffer duration. The gap/overlap handling in
-        submit() takes care of out-of-order chunks, so we use a fixed
-        base buffer with the audio callback providing actual playback position.
-        """
-        ### make this just a constant and make docs a lot more brief to reduce LOC
-        # Base buffer: 200ms to start playback quickly while maintaining stability
-        # With chunks arriving 5+ seconds early, we can afford aggressive buffering
-        return 200_000
-
-    def _smooth_phase_error(self, error_us: int) -> None:
-        """Update EMA smoothed phase error to avoid reacting to jitter."""
-        if not self._phase_error_ema_init:
-            self._phase_error_ema_us = float(error_us)
-            self._phase_error_ema_init = True
+    def _smooth_sync_error(self, error_us: int) -> None:
+        """Update EMA smoothed sync error to avoid reacting to jitter."""
+        if not self._sync_error_ema_init:
+            self._sync_error_ema_us = float(error_us)
+            self._sync_error_ema_init = True
         else:
             alpha = 0.60  # conservative smoothing to dampen oscillations
-            self._phase_error_ema_us = alpha * self._phase_error_ema_us + (1.0 - alpha) * float(
+            self._sync_error_ema_us = alpha * self._sync_error_ema_us + (1.0 - alpha) * float(
                 error_us
             )
 
@@ -637,21 +591,39 @@ class AudioPlayer:
                 self._loop.time() * self._MICROSECONDS_PER_SECOND
             )
 
-    def _handle_dac_gating(
-        self, output_buffer: memoryview, bytes_written: int, frames: int, time: Any
+    def _handle_start_gating(
+        self, output_buffer: memoryview, bytes_written: int, frames: int, time: Any | None = None
     ) -> int:
-        """Handle DAC-time based pre-start gating. Returns bytes written."""
+        """Handle pre-start gating using DAC or loop time. Returns bytes written."""
         assert self._format is not None
-        try:
-            dac_now_us = int(time.outputBufferDacTime * self._MICROSECONDS_PER_SECOND)
-        except (AttributeError, TypeError):
-            dac_now_us = 0
 
-        if dac_now_us <= 0:
+        # Try DAC-based gating first if time info available
+        use_dac_gating = False
+        dac_now_us = 0
+        if time is not None and self._scheduled_start_dac_time_us is not None:
+            try:
+                dac_now_us = int(time.outputBufferDacTime * self._MICROSECONDS_PER_SECOND)
+                if dac_now_us > 0:
+                    use_dac_gating = True
+            except (AttributeError, TypeError):
+                pass
+
+        if use_dac_gating:
+            # DAC-based gating: precise hardware timing
+            assert self._scheduled_start_dac_time_us is not None
+            delta_us = self._scheduled_start_dac_time_us - dac_now_us
+            target_time_us = self._scheduled_start_dac_time_us
+            current_time_us = dac_now_us
+            can_drop_frames = True  # DAC gating allows frame dropping when late
+        elif self._scheduled_start_loop_time_us is not None:
+            # Loop-based gating: fallback when DAC timing unavailable
+            loop_now_us = int(self._loop.time() * self._MICROSECONDS_PER_SECOND)
+            delta_us = self._scheduled_start_loop_time_us - loop_now_us
+            target_time_us = self._scheduled_start_loop_time_us
+            current_time_us = loop_now_us
+            can_drop_frames = False  # Loop gating waits for DAC calibration
+        else:
             return bytes_written
-
-        assert self._scheduled_start_dac_time_us is not None
-        delta_us = self._scheduled_start_dac_time_us - dac_now_us
 
         if delta_us > 0:
             # Not yet time to start: fill with silence
@@ -662,9 +634,8 @@ class AudioPlayer:
             silence_bytes = frames_to_silence * self._format.frame_size
             self._fill_silence(output_buffer, bytes_written, silence_bytes)
             bytes_written += silence_bytes
-        elif delta_us < 0:
-            # Late: fast-forward by dropping input frames, unless we suspect
-            # we anchored before sync matured; in that case, keep waiting.
+        elif delta_us < 0 and can_drop_frames:
+            # Late: fast-forward by dropping input frames (DAC gating only)
             if not (self._early_start_suspect and not self._has_reanchored):
                 frames_to_drop = int(
                     ((-delta_us) * self._format.sample_rate + 999_999)
@@ -674,36 +645,13 @@ class AudioPlayer:
                 self._waiting_for_start = False
 
         # If we've reached/overrun the scheduled time, arm playback
-        if dac_now_us >= self._scheduled_start_dac_time_us:
+        if current_time_us >= target_time_us:
             self._waiting_for_start = False
 
         return bytes_written
 
-    def _handle_loop_time_gating(
-        self, output_buffer: memoryview, bytes_written: int, frames: int
-    ) -> int:
-        """Handle loop-time based pre-start gating. Returns bytes written."""
-        assert self._format is not None
-        assert self._scheduled_start_loop_time_us is not None
-
-        loop_now_us = int(self._loop.time() * self._MICROSECONDS_PER_SECOND)
-        delta_us = self._scheduled_start_loop_time_us - loop_now_us
-
-        if delta_us > 0:
-            frames_until_start = int(
-                (delta_us * self._format.sample_rate + 999_999) // self._MICROSECONDS_PER_SECOND
-            )
-            frames_to_silence = min(frames_until_start, frames)
-            silence_bytes = frames_to_silence * self._format.frame_size
-            self._fill_silence(output_buffer, bytes_written, silence_bytes)
-            bytes_written += silence_bytes
-        # For loop-time gating, do not drop input when late; keep waiting
-        # until we can map to DAC time or schedule updates in submit().
-
-        return bytes_written
-
     def _update_correction_schedule(self, error_us: int) -> None:
-        """Plan occasional sample drop/insert to correct phase drift.
+        """Plan occasional sample drop/insert to correct sync drift.
 
         Positive error means DAC/server playback is ahead of our read cursor;
         schedule drops to catch up. Negative error means we're ahead; schedule
@@ -714,9 +662,9 @@ class AudioPlayer:
             return
 
         # Smooth the error to avoid reacting to jitter
-        self._smooth_phase_error(error_us)
+        self._smooth_sync_error(error_us)
 
-        abs_err = abs(self._phase_error_ema_us)
+        abs_err = abs(self._sync_error_ema_us)
 
         # Do nothing within deadband
         if abs_err <= self._CORRECTION_DEADBAND_US:
@@ -731,7 +679,7 @@ class AudioPlayer:
             and not self._waiting_for_start
             and now_loop_us - self._last_reanchor_loop_time_us > self._REANCHOR_COOLDOWN_US
         ):
-            logger.info("Phase error %.1f ms too large; re-anchoring", abs_err / 1000.0)
+            logger.info("Sync error %.1f ms too large; re-anchoring", abs_err / 1000.0)
             # Reset cadence
             self._insert_every_n_frames = 0
             self._drop_every_n_frames = 0
@@ -762,7 +710,7 @@ class AudioPlayer:
 
         interval_frames = max(interval_frames, 1)
 
-        if self._phase_error_ema_us > 0:
+        if self._sync_error_ema_us > 0:
             # We are behind (DAC ahead) -> drop to catch up
             self._drop_every_n_frames = interval_frames
             self._insert_every_n_frames = 0
@@ -848,10 +796,10 @@ class AudioPlayer:
                 self._has_reanchored = True
 
         # After calibration, if we have both a DAC-derived playback position and a
-        # server-timeline cursor, compute phase error and schedule micro-corrections.
+        # server-timeline cursor, compute sync error and schedule micro-corrections.
         if self._last_known_playback_position_us > 0 and self._server_ts_cursor_us > 0:
-            phase_error_us = self._last_known_playback_position_us - self._server_ts_cursor_us
-            self._update_correction_schedule(phase_error_us)
+            sync_error_us = self._last_known_playback_position_us - self._server_ts_cursor_us
+            self._update_correction_schedule(sync_error_us)
 
         # Log timing information (verbose, for debugging latency issues)
         self._log_chunk_timing(server_timestamp_us)
@@ -918,16 +866,15 @@ class AudioPlayer:
             self._expected_next_timestamp = server_timestamp_us + chunk_duration_us
 
         # Compute minimum buffer needed for network jitter
-        min_duration_us = self._compute_minimum_buffer_duration()
+        min_duration_us = self._MIN_BUFFER_DURATION_US
 
         queue_size = self._queue.qsize()
         if self._queued_duration_us >= min_duration_us and not self._stream_started:
             if self._stream is not None:
                 self._stream.start()
                 self._stream_started = True
-                ### remove the checkmark symbol
                 logger.info(
-                    "✓ Stream STARTED: %d chunks, %.2f seconds buffered, "
+                    "Stream STARTED: %d chunks, %.2f seconds buffered, "
                     "ready to play (min required: %.2f s)",
                     queue_size,
                     self._queued_duration_us / 1_000_000,
