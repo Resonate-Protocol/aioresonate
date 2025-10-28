@@ -78,6 +78,24 @@ class AudioPlayer:
     _MIN_BUFFER_DURATION_US: Final[int] = 200_000
     """Minimum buffer duration (200ms) to start playback and absorb network jitter."""
 
+    # Audio stream configuration
+    _BLOCKSIZE: Final[int] = 2048
+    """Audio block size (~46ms at 44.1kHz)."""
+
+    # Sync error EMA smoothing
+    _SYNC_ERROR_EMA_ALPHA: Final[float] = 0.50
+    """EMA smoothing factor for sync error (heavier smoothing to avoid aggressive corrections)."""
+
+    # Time synchronization thresholds
+    _EARLY_START_THRESHOLD_US: Final[int] = 700_000
+    """Threshold for detecting early start due to fallback mapping (700ms)."""
+    _START_TIME_UPDATE_THRESHOLD_US: Final[int] = 5_000
+    """Minimum threshold for updating start time to avoid churn (5ms)."""
+
+    # Sync correction planning
+    _CORRECTION_TARGET_SECONDS: Final[float] = 2.0
+    """Target window to fix sync error through micro-corrections (2 seconds)."""
+
     def __init__(
         self,
         loop: asyncio.AbstractEventLoop,
@@ -173,16 +191,15 @@ class AudioPlayer:
         self._first_real_chunk = True
 
         # Low latency settings for accurate playback (chunks arrive 5+ seconds early)
-        blocksize = 2048  # ~46ms at 44.1kHz
         self._stream = sounddevice.RawOutputStream(
             samplerate=pcm_format.sample_rate,
             channels=pcm_format.channels,
             dtype="int16",
-            blocksize=blocksize,
+            blocksize=self._BLOCKSIZE,
             callback=self._audio_callback,
             latency="low",
         )
-        logger.info("Audio stream configured: blocksize=%d, latency=low", blocksize)
+        logger.info("Audio stream configured: blocksize=%d, latency=low", self._BLOCKSIZE)
 
     async def stop(self) -> None:
         """Stop playback and release resources."""
@@ -693,10 +710,9 @@ class AudioPlayer:
             self._sync_error_ema_us = float(error_us)
             self._sync_error_ema_init = True
         else:
-            alpha = 0.50  # Heavier smoothing to avoid aggressive corrections
-            self._sync_error_ema_us = alpha * self._sync_error_ema_us + (1.0 - alpha) * float(
-                error_us
-            )
+            self._sync_error_ema_us = self._SYNC_ERROR_EMA_ALPHA * self._sync_error_ema_us + (
+                1.0 - self._SYNC_ERROR_EMA_ALPHA
+            ) * float(error_us)
 
     def _fill_silence(self, output_buffer: memoryview, offset: int, num_bytes: int) -> None:
         """Fill output buffer range with silence."""
@@ -819,11 +835,10 @@ class AudioPlayer:
         # e.g., 0.01 speed correction = drop 1 frame per 100 frames
         max_interval_frames = int(1.0 / max(self._MAX_SPEED_CORRECTION, 0.001))
 
-        # Plan correction cadence to fix error within ~2 seconds
+        # Plan correction cadence to fix error within target window
         if frames_error > 0:
-            target_seconds = 2.0
             desired_corrections_per_sec = min(
-                frames_error / target_seconds,
+                frames_error / self._CORRECTION_TARGET_SECONDS,
                 self._format.sample_rate / max_interval_frames,
             )
             interval_frames = int(self._format.sample_rate / max(desired_corrections_per_sec, 1.0))
@@ -883,15 +898,18 @@ class AudioPlayer:
             self._first_server_timestamp_us = server_timestamp_us
             # If scheduled start is very near now, suspect unsynchronized fallback mapping
             scheduled_start = self._scheduled_start_loop_time_us
-            if scheduled_start and scheduled_start - now_us <= 700_000:  # type: ignore[unreachable]
+            if scheduled_start and scheduled_start - now_us <= self._EARLY_START_THRESHOLD_US:  # type: ignore[unreachable]
                 self._early_start_suspect = True  # type: ignore[unreachable]
 
         # While waiting to start, keep the scheduled loop start updated as time sync improves
         elif self._waiting_for_start and self._first_server_timestamp_us is not None:
             try:
                 updated_loop_start = self._compute_client_time(self._first_server_timestamp_us)
-                # Only update if it moves significantly (> 5ms) to avoid churn
-                if abs(updated_loop_start - (self._scheduled_start_loop_time_us or 0)) > 5_000:
+                # Only update if it moves significantly to avoid churn
+                if (
+                    abs(updated_loop_start - (self._scheduled_start_loop_time_us or 0))
+                    > self._START_TIME_UPDATE_THRESHOLD_US
+                ):
                     self._scheduled_start_loop_time_us = updated_loop_start
                     est_dac = self._estimate_dac_time_for_server_timestamp(
                         self._first_server_timestamp_us
