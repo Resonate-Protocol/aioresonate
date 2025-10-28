@@ -12,6 +12,7 @@ import collections
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass
+from enum import Enum, auto
 from typing import Final, Protocol
 
 import sounddevice
@@ -31,6 +32,25 @@ class AudioTimeInfo(Protocol):
 
     outputBufferDacTime: float  # noqa: N815
     """DAC time when the output buffer will be played (in seconds)."""
+
+
+class PlaybackState(Enum):
+    """State machine for audio playback lifecycle.
+
+    Tracks the playback progression from initialization through active playback.
+    """
+
+    INITIALIZING = auto()
+    """Waiting for first audio chunk and sync info."""
+
+    WAITING_FOR_START = auto()
+    """Buffer filled, scheduled start time computed, awaiting start gate."""
+
+    PLAYING = auto()
+    """Audio actively playing with sync corrections."""
+
+    REANCHORING = auto()
+    """Sync error exceeded threshold, resetting and waiting to restart."""
 
 
 @dataclass
@@ -158,10 +178,13 @@ class AudioPlayer:
         self._last_dac_calibration_time_us: int = 0
         # Last loop time when we calibrated DAC-Loop mapping
 
+        # Playback state machine
+        self._playback_state: PlaybackState = PlaybackState.INITIALIZING
+        """Current playback state (INITIALIZING, WAITING_FOR_START, PLAYING, REANCHORING)."""
+
         # Scheduled start anchoring
         self._scheduled_start_loop_time_us: int | None = None
         self._scheduled_start_dac_time_us: int | None = None
-        self._waiting_for_start: bool = True
 
         # Server timeline cursor for the next input frame to be consumed
         self._server_ts_cursor_us: int = 0
@@ -228,6 +251,7 @@ class AudioPlayer:
             except asyncio.QueueEmpty:
                 break
         # Reset playback state
+        self._playback_state = PlaybackState.INITIALIZING
         self._first_real_chunk = True
         self._current_chunk = None
         self._current_chunk_offset = 0
@@ -240,7 +264,6 @@ class AudioPlayer:
         self._last_dac_calibration_time_us = 0
         self._scheduled_start_loop_time_us = None
         self._scheduled_start_dac_time_us = None
-        self._waiting_for_start = True
         self._server_ts_cursor_us = 0
         self._server_ts_cursor_remainder = 0
         self._first_server_timestamp_us = None
@@ -299,13 +322,13 @@ class AudioPlayer:
 
         try:
             # Pre-start gating: fill silence until scheduled start time
-            if self._waiting_for_start:
+            if self._playback_state == PlaybackState.WAITING_FOR_START:
                 bytes_written = self._handle_start_gating(
                     output_buffer, bytes_written, frames, time
                 )
 
             # If still waiting after gating, fill remaining buffer with silence
-            if self._waiting_for_start:
+            if self._playback_state == PlaybackState.WAITING_FOR_START:
                 if bytes_written < bytes_needed:
                     silence_bytes = bytes_needed - bytes_written
                     self._fill_silence(output_buffer, bytes_written, silence_bytes)
@@ -801,11 +824,11 @@ class AudioPlayer:
                     // self._MICROSECONDS_PER_SECOND
                 )
                 self._skip_input_frames(frames_to_drop)
-                self._waiting_for_start = False
+                self._playback_state = PlaybackState.PLAYING
 
         # If we've reached/overrun the scheduled time, arm playback
         if current_time_us >= target_time_us:
-            self._waiting_for_start = False
+            self._playback_state = PlaybackState.PLAYING
 
         return bytes_written
 
@@ -835,7 +858,7 @@ class AudioPlayer:
         now_loop_us = int(self._loop.time() * 1_000_000)
         if (
             abs_err > self._REANCHOR_THRESHOLD_US
-            and not self._waiting_for_start
+            and self._playback_state == PlaybackState.PLAYING
             and now_loop_us - self._last_reanchor_loop_time_us > self._REANCHOR_COOLDOWN_US
         ):
             logger.info("Sync error %.1f ms too large; re-anchoring", abs_err / 1000.0)
@@ -915,7 +938,7 @@ class AudioPlayer:
             est_dac = self._estimate_dac_time_for_server_timestamp(server_timestamp_us)
             # Only set DAC time when we can estimate it; otherwise use loop-based gating
             self._scheduled_start_dac_time_us = est_dac if est_dac else None
-            self._waiting_for_start = True
+            self._playback_state = PlaybackState.WAITING_FOR_START
             self._first_server_timestamp_us = server_timestamp_us
             # If scheduled start is very near now, suspect unsynchronized fallback mapping
             scheduled_start = self._scheduled_start_loop_time_us
@@ -923,7 +946,10 @@ class AudioPlayer:
                 self._early_start_suspect = True  # type: ignore[unreachable]
 
         # While waiting to start, keep the scheduled loop start updated as time sync improves
-        elif self._waiting_for_start and self._first_server_timestamp_us is not None:
+        elif (
+            self._playback_state == PlaybackState.WAITING_FOR_START
+            and self._first_server_timestamp_us is not None
+        ):
             try:
                 updated_loop_start = self._compute_client_time(self._first_server_timestamp_us)
                 # Only update if it moves significantly to avoid churn
@@ -940,7 +966,11 @@ class AudioPlayer:
                 logger.exception("Failed to update start time")
 
         # If we started too early due to fallback mapping, re-anchor once sync improves
-        elif not self._waiting_for_start and self._early_start_suspect and not self._has_reanchored:
+        elif (
+            self._playback_state == PlaybackState.PLAYING
+            and self._early_start_suspect
+            and not self._has_reanchored
+        ):
             # Heuristic: when DAC mapping becomes available or loop mapping pushes
             # the start > 1s into the future for current server timestamp, re-anchor.
             est_dac = self._estimate_dac_time_for_server_timestamp(server_timestamp_us)
@@ -958,7 +988,7 @@ class AudioPlayer:
                 self._compute_and_set_loop_start(server_timestamp_us)
                 est_dac2 = self._estimate_dac_time_for_server_timestamp(server_timestamp_us)
                 self._scheduled_start_dac_time_us = est_dac2 if est_dac2 else None
-                self._waiting_for_start = True
+                self._playback_state = PlaybackState.WAITING_FOR_START
                 self._first_server_timestamp_us = server_timestamp_us
                 self._has_reanchored = True
 
