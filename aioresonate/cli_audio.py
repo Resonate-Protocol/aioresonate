@@ -157,6 +157,8 @@ class AudioPlayer:
         self._last_sync_error_log_us: int = 0  # Rate limit sync error logging
         self._frames_inserted_since_log: int = 0  # Track inserts for logging
         self._frames_dropped_since_log: int = 0  # Track drops for logging
+        self._callback_time_total_us: int = 0  # Total callback time for averaging
+        self._callback_count: int = 0  # Number of callbacks for averaging
 
     def set_format(self, pcm_format: PCMFormat) -> None:
         """Configure the audio output format."""
@@ -221,6 +223,8 @@ class AudioPlayer:
         self._last_sync_error_log_us = 0
         self._frames_inserted_since_log = 0
         self._frames_dropped_since_log = 0
+        self._callback_time_total_us = 0
+        self._callback_count = 0
 
     def _audio_callback(  # noqa: PLR0915
         self,
@@ -238,6 +242,8 @@ class AudioPlayer:
             time: CFFI cdata structure with timing info (outputBufferDacTime, etc).
             status: Status flags (underrun, overflow, etc.).
         """
+        callback_start_us = int(self._loop.time() * 1_000_000)
+
         if status:
             # Detect underflow and immediately re-anchor to avoid long desync
             if status.input_underflow or status.output_underflow:
@@ -329,6 +335,11 @@ class AudioPlayer:
             # Reset partial chunk state on error
             self._current_chunk = None
             self._current_chunk_offset = 0
+
+        # Track callback execution time for performance monitoring
+        callback_end_us = int(self._loop.time() * 1_000_000)
+        self._callback_time_total_us += callback_end_us - callback_start_us
+        self._callback_count += 1
 
     def _update_playback_position_from_dac(self, time: Any) -> None:
         """Capture DAC and loop time simultaneously, update playback position.
@@ -551,19 +562,30 @@ class AudioPlayer:
                 else:
                     playback_speed_percent = 100.0
                     normal_frames = 0
+
+                # Calculate average callback execution time
+                avg_callback_us = (
+                    self._callback_time_total_us / self._callback_count
+                    if self._callback_count > 0
+                    else 0.0
+                )
+
                 logger.debug(
                     "Sync error: %.1f ms, buffer: %.2f s, speed: %.2f%%, "
-                    "played: %d, inserted: %d, dropped: %d",
+                    "played: %d, inserted: %d, dropped: %d, callback: %.1f µs",
                     self._sync_error_ema_us / 1000.0,
                     self._queued_duration_us / 1_000_000,
                     playback_speed_percent,
                     normal_frames,
                     self._frames_inserted_since_log,
                     self._frames_dropped_since_log,
+                    avg_callback_us,
                 )
                 # Reset counters for next logging period
                 self._frames_inserted_since_log = 0
                 self._frames_dropped_since_log = 0
+                self._callback_time_total_us = 0
+                self._callback_count = 0
 
     def _smooth_sync_error(self, error_us: int) -> None:
         """Update EMA smoothed sync error to avoid reacting to jitter."""
