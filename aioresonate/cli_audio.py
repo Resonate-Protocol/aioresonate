@@ -245,7 +245,8 @@ class AudioPlayer:
         # Clear deferred operation flag
         self._clear_requested = False
 
-        while not self._queue.empty():
+        # Drain all queued chunks
+        while True:
             try:
                 self._queue.get_nowait()
             except asyncio.QueueEmpty:
