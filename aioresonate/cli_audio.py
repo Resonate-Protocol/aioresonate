@@ -119,11 +119,11 @@ class AudioPlayer:
         self._dac_loop_calibrations: collections.deque[tuple[int, int]] = collections.deque(
             maxlen=100
         )
-        # Recent [(dac_time_us, loop_time_us), ...] pairs for DAC↔Loop mapping
+        # Recent [(dac_time_us, loop_time_us), ...] pairs for DAC-Loop mapping
         self._last_known_playback_position_us: int = 0
         # Current playback position in server timestamp space
         self._last_dac_calibration_time_us: int = 0
-        # Last loop time when we calibrated DAC↔Loop mapping
+        # Last loop time when we calibrated DAC-Loop mapping
 
         # Scheduled start anchoring
         self._scheduled_start_loop_time_us: int | None = None
@@ -365,19 +365,44 @@ class AudioPlayer:
             self._current_chunk_offset = 0
 
     def _update_playback_position_from_dac(self, time: Any) -> None:
-        ### lets inline this (to reduce LOC and latency)
-        """Store DAC timing from audio callback.
+        """Capture DAC and loop time simultaneously, update playback position.
 
-        The actual loop time is filled in later from the async context
-        in _calibrate_dac_loop_mapping() for thread safety.
+        Note: loop.time() is thread-safe - it's a wrapper around time.monotonic(),
+        which is a fast, thread-safe system call.
         """
         try:
             dac_time_us = int(time.outputBufferDacTime * 1_000_000)
-            # Store DAC time; loop time (0) will be filled in from async context
-            self._dac_loop_calibrations.append((dac_time_us, 0))
-            ### remove this if and log
-            if len(self._dac_loop_calibrations) == 1:
-                logger.debug("First DAC timestamp captured: %d", dac_time_us)
+            # Safe to call from audio callback thread - just calls time.monotonic()
+            loop_time_us = int(self._loop.time() * 1_000_000)
+
+            # Store complete calibration pair atomically
+            self._dac_loop_calibrations.append((dac_time_us, loop_time_us))
+            self._last_dac_calibration_time_us = loop_time_us
+
+            # Update playback position in server time using latest calibration
+            try:
+                # Estimate the loop time that corresponds to the captured DAC time
+                loop_at_dac_us = self._estimate_loop_time_for_dac_time(dac_time_us)
+                if loop_at_dac_us == 0:
+                    loop_at_dac_us = loop_time_us
+                estimated_position = self._compute_server_time(loop_at_dac_us)
+                self._last_known_playback_position_us = estimated_position
+            except Exception:
+                logger.exception("Failed to estimate playback position")
+
+            # If we haven't set the DAC-anchored start yet, approximate it now
+            if self._scheduled_start_dac_time_us is None and self._scheduled_start_loop_time_us:
+                try:
+                    loop_start = self._scheduled_start_loop_time_us
+                    est_dac = self._estimate_dac_time_for_server_timestamp(
+                        self._compute_server_time(loop_start)
+                    )
+                    if est_dac:
+                        self._scheduled_start_dac_time_us = est_dac
+                except Exception:
+                    logger.exception("Failed to estimate DAC start time")
+                    self._scheduled_start_dac_time_us = self._scheduled_start_loop_time_us
+
         except (AttributeError, TypeError):
             # time object may not have expected attributes in all backends
             logger.debug("Could not extract timing info from callback")
@@ -477,55 +502,6 @@ class AudioPlayer:
             frames_to_skip -= take
             if self._current_chunk_offset >= len(data):
                 self._advance_finished_chunk()
-
-    def _calibrate_dac_loop_mapping(self) -> None:
-        ### remove ↔ symbol in this file
-        """Calibrate DAC↔Loop time mapping from async context.
-
-        Called from submit() which runs in event loop thread, allowing safe
-        measurement of loop time to pair with DAC time from the callback.
-        """
-        if not self._dac_loop_calibrations:
-            return
-
-        # Get most recent DAC time from callback
-        dac_time_us, _loop_time_old_us = self._dac_loop_calibrations[-1]
-
-        # Get current loop time (safe to call from async)
-        loop_time_us = int(self._loop.time() * 1_000_000)
-
-        # Update calibration pair
-        self._dac_loop_calibrations[-1] = (dac_time_us, loop_time_us)
-        self._last_dac_calibration_time_us = loop_time_us
-
-        # Update playback position in server time using latest calibration
-        try:
-            # Estimate the loop time that corresponds to the captured DAC time
-            loop_at_dac_us = self._estimate_loop_time_for_dac_time(dac_time_us)
-            if loop_at_dac_us == 0:
-                loop_at_dac_us = loop_time_us
-            estimated_position = self._compute_server_time(loop_at_dac_us)
-
-            # Use raw estimate without smoothing
-            self._last_known_playback_position_us = estimated_position
-        except Exception:
-            logger.exception("Failed to estimate playback position")
-
-        # If we haven't set the DAC-anchored start yet, approximate it now
-        if self._scheduled_start_dac_time_us is None and self._scheduled_start_loop_time_us:
-            try:
-                loop_start = self._scheduled_start_loop_time_us
-                # Estimate DAC time for the scheduled loop start
-                # Use last two calibrations if available for better slope estimate
-                est_dac = self._estimate_dac_time_for_server_timestamp(
-                    self._compute_server_time(loop_start)
-                )
-                if est_dac:
-                    self._scheduled_start_dac_time_us = est_dac
-            except Exception:
-                # Fall back to mapping 1:1 when estimation fails
-                logger.exception("Failed to estimate DAC start time")
-                self._scheduled_start_dac_time_us = self._scheduled_start_loop_time_us
 
     def _estimate_dac_time_for_server_timestamp(self, server_timestamp_us: int) -> int:
         """Estimate when a server timestamp will play out (in DAC time).
@@ -817,9 +793,6 @@ class AudioPlayer:
                 self._format.frame_size,
             )
             return
-
-        # Calibrate DAC↔Loop time mapping from async context
-        self._calibrate_dac_loop_mapping()
 
         now_us = int(self._loop.time() * 1_000_000)
 
