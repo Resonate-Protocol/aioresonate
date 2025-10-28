@@ -722,11 +722,7 @@ class AudioPlayer:
                     normal_frames = 0
 
                 # Calculate average callback execution time
-                avg_callback_us = (
-                    self._callback_time_total_us / self._callback_count
-                    if self._callback_count > 0
-                    else 0.0
-                )
+                avg_callback_us = self._callback_time_total_us / max(self._callback_count, 1)
 
                 logger.debug(
                     "Sync error: %.1f ms, buffer: %.2f s, speed: %.2f%%, "
