@@ -153,6 +153,8 @@ class ResonateGroup:
     """Command queue for the active streamer task, None when not streaming."""
     _play_start_time_us: int | None
     """Absolute timestamp in microseconds when playback started, None when not streaming."""
+    _scheduled_stop_handle: asyncio.TimerHandle | None
+    """Timer handle for scheduled stop, None when no stop is scheduled."""
 
     def __init__(self, server: ResonateServer, *args: ResonateClient) -> None:
         """
@@ -180,6 +182,7 @@ class ResonateGroup:
         self._media_stream: MediaStream | None = None
         self._stream_commands: asyncio.Queue[_StreamerReconfigureCommand] | None = None
         self._play_start_time_us: int | None = None
+        self._scheduled_stop_handle: asyncio.TimerHandle | None = None
         logger.debug(
             "ResonateGroup initialized with %d client(s): %s",
             len(self._clients),
@@ -197,6 +200,12 @@ class ResonateGroup:
             "Starting play_media with play_start_time_us=%s",
             play_start_time_us,
         )
+
+        # Cancel any previously scheduled stop to prevent race conditions
+        if self._scheduled_stop_handle is not None:
+            logger.debug("Canceling previously scheduled stop")
+            self._scheduled_stop_handle.cancel()
+            self._scheduled_stop_handle = None
 
         self._media_stream = media_stream
         self._streamer = None
