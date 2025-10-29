@@ -967,33 +967,6 @@ class AudioPlayer:
             except Exception:
                 logger.exception("Failed to update start time")
 
-        # If we started too early due to fallback mapping, re-anchor once sync improves
-        elif (
-            self._playback_state == PlaybackState.PLAYING
-            and self._early_start_suspect
-            and not self._has_reanchored
-        ):
-            # Heuristic: when DAC mapping becomes available or loop mapping pushes
-            # the start > 1s into the future for current server timestamp, re-anchor.
-            est_dac = self._estimate_dac_time_for_server_timestamp(server_timestamp_us)
-            loop_start_now = None
-            try:
-                loop_start_now = self._compute_client_time(server_timestamp_us)
-            except Exception:
-                logger.exception("Failed to compute loop start time")
-                loop_start_now = None
-
-            if est_dac or (loop_start_now is not None and loop_start_now - now_us > 1_000_000):
-                # Clear current queue and reset timing; then continue to queue this chunk
-                logger.info("Re-anchoring playback after time sync matured")
-                self.clear()
-                self._compute_and_set_loop_start(server_timestamp_us)
-                est_dac2 = self._estimate_dac_time_for_server_timestamp(server_timestamp_us)
-                self._scheduled_start_dac_time_us = est_dac2 if est_dac2 else None
-                self._playback_state = PlaybackState.WAITING_FOR_START
-                self._first_server_timestamp_us = server_timestamp_us
-                self._has_reanchored = True
-
         # After calibration, if we have both a DAC-derived playback position and a
         # server-timeline cursor, compute sync error and schedule micro-corrections.
         # Only compute sync error when actively playing (not during initial buffering)
