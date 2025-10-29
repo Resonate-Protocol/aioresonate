@@ -114,7 +114,7 @@ class AudioPlayer:
     """Audio block size (~46ms at 44.1kHz)."""
 
     # Sync error EMA smoothing
-    _SYNC_ERROR_EMA_ALPHA: Final[float] = 0.50
+    _SYNC_ERROR_EMA_ALPHA: Final[float] = 0.02
     """EMA smoothing factor for sync error (heavier smoothing to avoid aggressive corrections)."""
 
     # Time synchronization thresholds
