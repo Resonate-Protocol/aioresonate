@@ -19,6 +19,7 @@ import sounddevice
 from sounddevice import CallbackFlags
 
 from aioresonate.client import PCMFormat
+from aioresonate.client.time_sync import ResonateTimeFilter
 
 logger = logging.getLogger(__name__)
 
@@ -100,8 +101,8 @@ class AudioPlayer:
     """Maximum playback speed deviation for sync correction (0.04 = ±4% speed variation)."""
 
     # Sync error correction: secondary thresholds (rarely need adjustment)
-    _CORRECTION_DEADBAND_US: Final[int] = 5_000
-    """Sync error threshold below which no correction is applied (5 ms)."""
+    _CORRECTION_DEADBAND_US: Final[int] = 2_000
+    """Sync error threshold below which no correction is applied (2 ms)."""
     _REANCHOR_THRESHOLD_US: Final[int] = 500_000
     """Sync error threshold above which re-anchoring is triggered (500 ms)."""
     _REANCHOR_COOLDOWN_US: Final[int] = 5_000_000
@@ -113,10 +114,6 @@ class AudioPlayer:
     _BLOCKSIZE: Final[int] = 2048
     """Audio block size (~46ms at 44.1kHz)."""
 
-    # Sync error EMA smoothing
-    _SYNC_ERROR_EMA_ALPHA: Final[float] = 0.02
-    """EMA smoothing factor for sync error (heavier smoothing to avoid aggressive corrections)."""
-
     # Time synchronization thresholds
     _EARLY_START_THRESHOLD_US: Final[int] = 700_000
     """Threshold for detecting early start due to fallback mapping (700ms)."""
@@ -124,8 +121,8 @@ class AudioPlayer:
     """Minimum threshold for updating start time to avoid churn (5ms)."""
 
     # Sync correction planning
-    _CORRECTION_TARGET_SECONDS: Final[float] = 5.0
-    """Target window to fix sync error through micro-corrections (5 seconds)."""
+    _CORRECTION_TARGET_SECONDS: Final[float] = 2.0
+    """Target window to fix sync error through micro-corrections (2 seconds)."""
 
     def __init__(
         self,
@@ -202,9 +199,9 @@ class AudioPlayer:
         self._frames_until_next_drop: int = 0
         self._last_output_frame: bytes = b""
 
-        # Sync error smoothing and re-anchor cooldown
-        self._sync_error_ema_us: float = 0.0
-        self._sync_error_ema_init: bool = False
+        # Sync error smoothing (Kalman filter) and re-anchor cooldown
+        self._sync_error_filter = ResonateTimeFilter(process_std_dev=0.01, forget_factor=1.001)
+        self._sync_error_filtered_us: float = 0.0  # Cached filtered error value
         self._last_reanchor_loop_time_us: int = 0
         self._last_sync_error_log_us: int = 0  # Rate limit sync error logging
         self._frames_inserted_since_log: int = 0  # Track inserts for logging
@@ -275,8 +272,8 @@ class AudioPlayer:
         self._frames_until_next_insert = 0
         self._frames_until_next_drop = 0
         self._last_output_frame = b""
-        self._sync_error_ema_us = 0.0
-        self._sync_error_ema_init = False
+        self._sync_error_filter.reset()
+        self._sync_error_filtered_us = 0.0
         self._last_reanchor_loop_time_us = 0
         self._last_sync_error_log_us = 0
         self._frames_inserted_since_log = 0
@@ -700,7 +697,7 @@ class AudioPlayer:
 
     def _log_chunk_timing(self, _server_timestamp_us: int) -> None:
         """Log sync error and buffer status for debugging sync issues."""
-        if self._sync_error_ema_init:
+        if self._sync_error_filter.is_synchronized:
             now_us = int(self._loop.time() * 1_000_000)
             if now_us - self._last_sync_error_log_us >= 1_000_000:
                 self._last_sync_error_log_us = now_us
@@ -731,7 +728,7 @@ class AudioPlayer:
                 logger.debug(
                     "Sync error: %.1f ms, buffer: %.2f s, speed: %.2f%%, "
                     "played: %d, inserted: %d, dropped: %d, callback: %.1f µs",
-                    self._sync_error_ema_us / 1000.0,
+                    self._sync_error_filtered_us / 1000.0,
                     self._queued_duration_us / 1_000_000,
                     playback_speed_percent,
                     normal_frames,
@@ -746,14 +743,17 @@ class AudioPlayer:
                 self._callback_count = 0
 
     def _smooth_sync_error(self, error_us: int) -> None:
-        """Update EMA smoothed sync error to avoid reacting to jitter."""
-        if not self._sync_error_ema_init:
-            self._sync_error_ema_us = float(error_us)
-            self._sync_error_ema_init = True
-        else:
-            self._sync_error_ema_us = self._SYNC_ERROR_EMA_ALPHA * self._sync_error_ema_us + (
-                1.0 - self._SYNC_ERROR_EMA_ALPHA
-            ) * float(error_us)
+        """Update Kalman filtered sync error to optimally track error and drift."""
+        now_us = int(self._loop.time() * 1_000_000)
+        # Use fixed max_error representing expected jitter/noise (5ms)
+        max_error_us = 5_000
+        self._sync_error_filter.update(
+            measurement=error_us,
+            max_error=max_error_us,
+            time_added=now_us,
+        )
+        # Cache filtered offset for use in correction logic
+        self._sync_error_filtered_us = self._sync_error_filter._offset  # noqa: SLF001
 
     def _fill_silence(self, output_buffer: memoryview, offset: int, num_bytes: int) -> None:
         """Fill output buffer range with silence."""
@@ -850,7 +850,7 @@ class AudioPlayer:
         # Smooth the error to avoid reacting to jitter
         self._smooth_sync_error(error_us)
 
-        abs_err = abs(self._sync_error_ema_us)
+        abs_err = abs(self._sync_error_filtered_us)
 
         # Do nothing within deadband
         if abs_err <= self._CORRECTION_DEADBAND_US:
@@ -893,7 +893,7 @@ class AudioPlayer:
             interval_frames = int(1.0 / max(self._MAX_SPEED_CORRECTION, 0.001))
 
         # Determine direction based on sign of sync error
-        if self._sync_error_ema_us > 0:
+        if self._sync_error_filtered_us > 0:
             # We are behind (DAC ahead) -> drop to catch up
             self._drop_every_n_frames = interval_frames
             self._insert_every_n_frames = 0
