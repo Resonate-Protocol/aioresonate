@@ -666,9 +666,6 @@ class CommandHandler:
             if parts[1] == "-":
                 delta = -delta
             self._client.set_static_delay_ms(self._client.static_delay_ms + delta)
-            # Clear audio queue to prevent desync from chunks with stale timing
-            self._audio_handler.clear_queue()
-            logger.debug("Cleared audio queue after delay change")
             _print_event(f"Static delay: {self._client.static_delay_ms:.1f} ms")
             return
         if len(parts) == 2:
@@ -678,9 +675,6 @@ class CommandHandler:
                 _print_event("Invalid delay value")
                 return
             self._client.set_static_delay_ms(value)
-            # Clear audio queue to prevent desync from chunks with stale timing
-            self._audio_handler.clear_queue()
-            logger.debug("Cleared audio queue after delay change")
             _print_event(f"Static delay: {self._client.static_delay_ms:.1f} ms")
             return
         _print_event("Usage: delay [<ms>|+ <ms>|- <ms>]")
