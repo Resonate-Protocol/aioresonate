@@ -16,6 +16,7 @@ if TYPE_CHECKING:
     from zeroconf import ServiceListener
 
 import aioconsole
+import sounddevice
 from aiohttp import ClientError
 from zeroconf.asyncio import AsyncServiceBrowser, AsyncZeroconf
 
@@ -112,6 +113,20 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         default=0.0,
         help="Extra playback delay in milliseconds applied after clock sync",
     )
+    parser.add_argument(
+        "--audio-device",
+        type=int,
+        default=None,
+        help=(
+            "Audio output device ID (e.g., 0, 1, 2). "
+            "Use --list-audio-devices to see available devices."
+        ),
+    )
+    parser.add_argument(
+        "--list-audio-devices",
+        action="store_true",
+        help="List available audio output devices and exit",
+    )
     return parser.parse_args(argv)
 
 
@@ -125,6 +140,50 @@ def _build_service_url(host: str, port: int, properties: dict[bytes, bytes | Non
         path = "/" + path
     host_fmt = f"[{host}]" if ":" in host else host
     return f"ws://{host_fmt}:{port}{path}"
+
+
+def list_audio_devices() -> None:
+    """List all available audio output devices."""
+    try:
+        devices = sounddevice.query_devices()
+        default_device = sounddevice.default.device[1]  # Output device index
+
+        print("Available audio output devices:")  # noqa: T201
+        print("-" * 80)  # noqa: T201
+        for i, device in enumerate(devices):
+            if device["max_output_channels"] > 0:
+                default_marker = " (default)" if i == default_device else ""
+                print(  # noqa: T201
+                    f"  [{i}] {device['name']}{default_marker}\n"
+                    f"       Channels: {device['max_output_channels']}, "
+                    f"Sample rate: {device['default_samplerate']} Hz"
+                )
+    except Exception as e:  # noqa: BLE001
+        print(f"Error listing audio devices: {e}")  # noqa: T201
+        sys.exit(1)
+
+
+def resolve_audio_device(device_id: int | None) -> int | None:
+    """Validate audio device ID.
+
+    Args:
+        device_id: Device ID to validate.
+
+    Returns:
+        Device ID if valid, None for default device.
+
+    Raises:
+        ValueError: If device_id is invalid.
+    """
+    if device_id is None:
+        return None
+
+    devices = sounddevice.query_devices()
+    if 0 <= device_id < len(devices):
+        if devices[device_id]["max_output_channels"] > 0:
+            return device_id
+        raise ValueError(f"Device {device_id} has no output channels")
+    raise ValueError(f"Device ID {device_id} out of range (0-{len(devices) - 1})")
 
 
 class _ServiceDiscoveryListener:
@@ -404,9 +463,15 @@ async def _connection_loop(
 class AudioStreamHandler:
     """Manages audio playback state and stream lifecycle."""
 
-    def __init__(self, client: ResonateClient) -> None:
-        """Initialize the audio stream handler."""
+    def __init__(self, client: ResonateClient, audio_device: int | None = None) -> None:
+        """Initialize the audio stream handler.
+
+        Args:
+            client: The Resonate client instance.
+            audio_device: Audio device ID to use. None for default device.
+        """
         self._client = client
+        self._audio_device = audio_device
         self.audio_player: AudioPlayer | None = None
         self._current_format: PCMFormat | None = None
 
@@ -421,7 +486,7 @@ class AudioStreamHandler:
             self.audio_player = AudioPlayer(
                 loop, self._client.compute_play_time, self._client.compute_server_time
             )
-            self.audio_player.set_format(fmt)
+            self.audio_player.set_format(fmt, device=self._audio_device)
             self._current_format = fmt
 
         # Submit audio chunk - AudioPlayer handles timing
@@ -454,7 +519,7 @@ class AudioStreamHandler:
             self.audio_player = None
 
 
-async def main_async(argv: Sequence[str] | None = None) -> int:
+async def main_async(argv: Sequence[str] | None = None) -> int:  # noqa: PLR0915
     """Entry point executing the asynchronous CLI workflow."""
     args = parse_args(list(argv) if argv is not None else None)
     logging.basicConfig(level=getattr(logging, args.log_level))
@@ -497,8 +562,20 @@ async def main_async(argv: Sequence[str] | None = None) -> int:
                 logger.exception("Failed to discover server")
                 return 1
 
+        # Resolve audio device if specified
+        audio_device = None
+        if args.audio_device is not None:
+            try:
+                audio_device = resolve_audio_device(args.audio_device)
+                if audio_device is not None:
+                    device_name = sounddevice.query_devices(audio_device)["name"]
+                    logger.info("Using audio device %d: %s", audio_device, device_name)
+            except ValueError as e:
+                logger.error("Audio device error: %s", e)
+                return 1
+
         # Create audio and stream handlers
-        audio_handler = AudioStreamHandler(client)
+        audio_handler = AudioStreamHandler(client, audio_device=audio_device)
 
         client.set_metadata_listener(lambda payload: _handle_session_update(state, payload))
         client.set_group_update_listener(lambda payload: _handle_group_update(state, payload))
@@ -716,6 +793,12 @@ def _print_instructions() -> None:
 
 def main() -> int:
     """Run the CLI client."""
+    # Handle --list-audio-devices before starting async runtime
+    args = parse_args(sys.argv[1:])
+    if args.list_audio_devices:
+        list_audio_devices()
+        return 0
+
     return asyncio.run(main_async(sys.argv[1:]))
 
 
