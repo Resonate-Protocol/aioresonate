@@ -124,8 +124,8 @@ class AudioPlayer:
     """Minimum threshold for updating start time to avoid churn (5ms)."""
 
     # Sync correction planning
-    _CORRECTION_TARGET_SECONDS: Final[float] = 2.0
-    """Target window to fix sync error through micro-corrections (2 seconds)."""
+    _CORRECTION_TARGET_SECONDS: Final[float] = 5.0
+    """Target window to fix sync error through micro-corrections (5 seconds)."""
 
     def __init__(
         self,
