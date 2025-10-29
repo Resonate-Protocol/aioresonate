@@ -102,8 +102,8 @@ class AudioPlayer:
     # Sync error correction: secondary thresholds (rarely need adjustment)
     _CORRECTION_DEADBAND_US: Final[int] = 5_000
     """Sync error threshold below which no correction is applied (5 ms)."""
-    _REANCHOR_THRESHOLD_US: Final[int] = 120_000
-    """Sync error threshold above which re-anchoring is triggered (120 ms)."""
+    _REANCHOR_THRESHOLD_US: Final[int] = 500_000
+    """Sync error threshold above which re-anchoring is triggered (500 ms)."""
     _REANCHOR_COOLDOWN_US: Final[int] = 5_000_000
     """Minimum time between re-anchor events (5 seconds)."""
     _MIN_BUFFER_DURATION_US: Final[int] = 200_000
