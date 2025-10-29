@@ -287,3 +287,8 @@ class ResonateTimeFilter:
     def covariance(self) -> int:
         """Return the covariance (variance) estimate for the offset."""
         return round(self._offset_covariance)
+
+    @property
+    def offset(self) -> float:
+        """Return the current filtered offset estimate in microseconds."""
+        return self._offset

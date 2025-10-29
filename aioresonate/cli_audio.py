@@ -753,7 +753,7 @@ class AudioPlayer:
             time_added=now_us,
         )
         # Cache filtered offset for use in correction logic
-        self._sync_error_filtered_us = self._sync_error_filter._offset  # noqa: SLF001
+        self._sync_error_filtered_us = self._sync_error_filter.offset
 
     def _fill_silence(self, output_buffer: memoryview, offset: int, num_bytes: int) -> None:
         """Fill output buffer range with silence."""
