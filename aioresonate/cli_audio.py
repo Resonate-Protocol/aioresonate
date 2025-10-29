@@ -212,8 +212,13 @@ class AudioPlayer:
         # Thread-safe flag for deferred operations (audio thread → main thread)
         self._clear_requested: bool = False
 
-    def set_format(self, pcm_format: PCMFormat) -> None:
-        """Configure the audio output format."""
+    def set_format(self, pcm_format: PCMFormat, device: int | None = None) -> None:
+        """Configure the audio output format.
+
+        Args:
+            pcm_format: PCM audio format specification.
+            device: Audio device ID to use. None for default device.
+        """
         self._format = pcm_format
         self._close_stream()
 
@@ -229,8 +234,12 @@ class AudioPlayer:
             blocksize=self._BLOCKSIZE,
             callback=self._audio_callback,
             latency="high",
+            device=device,
         )
-        logger.info("Audio stream configured: blocksize=%d, latency=high", self._BLOCKSIZE)
+        device_info = f", device={device}" if device is not None else ""
+        logger.info(
+            "Audio stream configured: blocksize=%d, latency=high%s", self._BLOCKSIZE, device_info
+        )
 
     async def stop(self) -> None:
         """Stop playback and release resources."""
