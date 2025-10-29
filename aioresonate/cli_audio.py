@@ -996,7 +996,12 @@ class AudioPlayer:
 
         # After calibration, if we have both a DAC-derived playback position and a
         # server-timeline cursor, compute sync error and schedule micro-corrections.
-        if self._last_known_playback_position_us > 0 and self._server_ts_cursor_us > 0:
+        # Only compute sync error when actively playing (not during initial buffering)
+        if (
+            self._playback_state == PlaybackState.PLAYING
+            and self._last_known_playback_position_us > 0
+            and self._server_ts_cursor_us > 0
+        ):
             sync_error_us = self._last_known_playback_position_us - self._server_ts_cursor_us
             self._update_correction_schedule(sync_error_us)
 
