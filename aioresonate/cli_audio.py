@@ -337,8 +337,12 @@ class AudioPlayer:
             else:
                 frame_size = self._format.frame_size
 
+                # Thread-safe snapshot of correction schedule (prevent mid-callback changes)
+                insert_every_n = self._insert_every_n_frames
+                drop_every_n = self._drop_every_n_frames
+
                 # Fast path: no sync corrections needed - use bulk operations
-                if self._insert_every_n_frames == 0 and self._drop_every_n_frames == 0:
+                if insert_every_n == 0 and drop_every_n == 0:
                     # Bulk read all frames at once - 15-25x faster than frame-by-frame
                     frames_data = self._read_input_frames_bulk(frames)
                     frames_bytes = len(frames_data)
@@ -347,10 +351,10 @@ class AudioPlayer:
                 else:
                     # Slow path: sync corrections active - process in optimized segments
                     # Reset cadence counters if needed
-                    if self._frames_until_next_insert <= 0 and self._insert_every_n_frames > 0:
-                        self._frames_until_next_insert = self._insert_every_n_frames
-                    if self._frames_until_next_drop <= 0 and self._drop_every_n_frames > 0:
-                        self._frames_until_next_drop = self._drop_every_n_frames
+                    if self._frames_until_next_insert <= 0 and insert_every_n > 0:
+                        self._frames_until_next_insert = insert_every_n
+                    if self._frames_until_next_drop <= 0 and drop_every_n > 0:
+                        self._frames_until_next_drop = drop_every_n
 
                     if not self._last_output_frame:
                         self._last_output_frame = b"\x00" * frame_size
@@ -362,12 +366,10 @@ class AudioPlayer:
                     while frames_remaining > 0:
                         # Calculate frames until next correction event
                         frames_until_insert = (
-                            insert_counter
-                            if self._insert_every_n_frames > 0
-                            else frames_remaining + 1
+                            insert_counter if insert_every_n > 0 else frames_remaining + 1
                         )
                         frames_until_drop = (
-                            drop_counter if self._drop_every_n_frames > 0 else frames_remaining + 1
+                            drop_counter if drop_every_n > 0 else frames_remaining + 1
                         )
 
                         # Find next event and process segment before it
