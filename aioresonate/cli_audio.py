@@ -96,8 +96,8 @@ class AudioPlayer:
     """Maximum DAC-to-loop time ratio to prevent wild extrapolation."""
 
     # Sync error correction: playback speed adjustment range
-    _MAX_SPEED_CORRECTION: Final[float] = 0.02
-    """Maximum playback speed deviation for sync correction (0.02 = ±2% speed variation)."""
+    _MAX_SPEED_CORRECTION: Final[float] = 0.04
+    """Maximum playback speed deviation for sync correction (0.04 = ±4% speed variation)."""
 
     # Sync error correction: secondary thresholds (rarely need adjustment)
     _CORRECTION_DEADBAND_US: Final[int] = 5_000
