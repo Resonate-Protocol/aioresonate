@@ -392,11 +392,12 @@ class AudioPlayer:
                         # Handle correction event if at boundary
                         if frames_remaining > 0:
                             if drop_counter <= 0 and self._drop_every_n_frames > 0:
-                                # Drop frame: read but don't output
-                                _ = self._read_one_input_frame()
+                                # Drop frame: read EXTRA frame to advance cursor faster
+                                _ = self._read_one_input_frame()  # Read frame we're replacing
+                                _ = self._read_one_input_frame()  # Read frame we're DROPPING
                                 drop_counter = self._drop_every_n_frames
                                 self._frames_dropped_since_log += 1
-                                # Output last frame instead
+                                # Output last frame instead (don't output either frame we read)
                                 output_buffer[bytes_written : bytes_written + frame_size] = (
                                     self._last_output_frame
                                 )
@@ -404,7 +405,8 @@ class AudioPlayer:
                                 frames_remaining -= 1
                                 insert_counter -= 1
                             elif insert_counter <= 0 and self._insert_every_n_frames > 0:
-                                # Insert frame: duplicate last frame
+                                # Insert frame: output duplicate WITHOUT reading
+                                # This makes playback catch up to cursor (cursor doesn't advance)
                                 insert_counter = self._insert_every_n_frames
                                 self._frames_inserted_since_log += 1
                                 output_buffer[bytes_written : bytes_written + frame_size] = (
