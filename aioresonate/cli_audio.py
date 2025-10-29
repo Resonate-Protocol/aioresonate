@@ -834,7 +834,10 @@ class AudioPlayer:
         return bytes_written
 
     def _update_correction_schedule(self, error_us: int) -> None:
-        """Plan occasional sample drop/insert to correct sync drift.
+        """Plan occasional sample drop/insert to correct sync error.
+
+        Uses simple proportional control: correction rate is proportional to error.
+        The feedback loop naturally handles both clock drift and accumulated error.
 
         Positive error means DAC/server playback is ahead of our read cursor;
         schedule drops to catch up. Negative error means we're ahead; schedule
@@ -873,25 +876,23 @@ class AudioPlayer:
             self.clear()
             return
 
-        # Convert error to equivalent frames and plan correction cadence
-        frames_error = round(abs_err * self._format.sample_rate / 1_000_000.0)
+        # Simple proportional control: correction rate proportional to error
+        # Target is to fix error within _CORRECTION_TARGET_SECONDS
+        frames_error = abs_err * self._format.sample_rate / 1_000_000.0
+        desired_corrections_per_sec = frames_error / self._CORRECTION_TARGET_SECONDS
 
-        # Maximum drop/insert interval based on allowed playback speed variation
-        # e.g., 0.01 speed correction = drop 1 frame per 100 frames
-        max_interval_frames = int(1.0 / max(self._MAX_SPEED_CORRECTION, 0.001))
+        # Cap at maximum allowed correction rate (4%)
+        max_corrections_per_sec = self._format.sample_rate * self._MAX_SPEED_CORRECTION
+        corrections_per_sec = min(desired_corrections_per_sec, max_corrections_per_sec)
 
-        # Plan correction cadence to fix error within target window
-        if frames_error > 0:
-            desired_corrections_per_sec = min(
-                frames_error / self._CORRECTION_TARGET_SECONDS,
-                self._format.sample_rate / max_interval_frames,
-            )
-            interval_frames = int(self._format.sample_rate / max(desired_corrections_per_sec, 1.0))
+        # Convert to interval between corrections
+        if corrections_per_sec > 0:
+            interval_frames = int(self._format.sample_rate / corrections_per_sec)
+            interval_frames = max(interval_frames, 1)
         else:
-            interval_frames = max_interval_frames
+            interval_frames = int(1.0 / max(self._MAX_SPEED_CORRECTION, 0.001))
 
-        interval_frames = max(interval_frames, 1)
-
+        # Determine direction based on sign of sync error
         if self._sync_error_ema_us > 0:
             # We are behind (DAC ahead) -> drop to catch up
             self._drop_every_n_frames = interval_frames
@@ -1026,6 +1027,7 @@ class AudioPlayer:
                 return
 
         # Queue the chunk
+        chunk_duration_us = 0
         if len(payload) > 0:
             # Compute duration from the post-trim payload
             chunk_frames = len(payload) // self._format.frame_size
@@ -1037,35 +1039,17 @@ class AudioPlayer:
             self._queue.put_nowait(chunk)
             # Track duration of queued audio
             self._queued_duration_us += chunk_duration_us
-
-        # Update expected position for next chunk
-        if len(payload) > 0:
+            # Update expected position for next chunk
             self._expected_next_timestamp = server_timestamp_us + chunk_duration_us
 
-        # Compute minimum buffer needed for network jitter
-        min_duration_us = self._MIN_BUFFER_DURATION_US
-
-        queue_size = self._queue.qsize()
-        if self._queued_duration_us >= min_duration_us and not self._stream_started:
-            if self._stream is not None:
-                self._stream.start()
-                self._stream_started = True
-                logger.info(
-                    "Stream STARTED: %d chunks, %.2f seconds buffered, "
-                    "ready to play (min required: %.2f s)",
-                    queue_size,
-                    self._queued_duration_us / 1_000_000,
-                    min_duration_us / 1_000_000,
-                )
-        elif not self._stream_started:
-            buffered_pct = (
-                100 * self._queued_duration_us / min_duration_us if min_duration_us > 0 else 0
-            )
-            logger.debug(
-                "Buffering: %.2f/%.2f s (%.0f%%)",
+        # Start stream immediately when first chunk arrives
+        if not self._stream_started and self._queue.qsize() > 0 and self._stream is not None:
+            self._stream.start()
+            self._stream_started = True
+            logger.info(
+                "Stream STARTED: %d chunks, %.2f seconds buffered",
+                self._queue.qsize(),
                 self._queued_duration_us / 1_000_000,
-                min_duration_us / 1_000_000,
-                buffered_pct,
             )
 
     def _close_stream(self) -> None:
