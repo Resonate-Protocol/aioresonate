@@ -19,6 +19,7 @@ import sounddevice
 from sounddevice import CallbackFlags
 
 from aioresonate.client import PCMFormat
+from aioresonate.client.time_sync import ResonateTimeFilter
 
 logger = logging.getLogger(__name__)
 
@@ -96,14 +97,14 @@ class AudioPlayer:
     """Maximum DAC-to-loop time ratio to prevent wild extrapolation."""
 
     # Sync error correction: playback speed adjustment range
-    _MAX_SPEED_CORRECTION: Final[float] = 0.02
-    """Maximum playback speed deviation for sync correction (0.02 = ±2% speed variation)."""
+    _MAX_SPEED_CORRECTION: Final[float] = 0.04
+    """Maximum playback speed deviation for sync correction (0.04 = ±4% speed variation)."""
 
     # Sync error correction: secondary thresholds (rarely need adjustment)
-    _CORRECTION_DEADBAND_US: Final[int] = 5_000
-    """Sync error threshold below which no correction is applied (5 ms)."""
-    _REANCHOR_THRESHOLD_US: Final[int] = 120_000
-    """Sync error threshold above which re-anchoring is triggered (120 ms)."""
+    _CORRECTION_DEADBAND_US: Final[int] = 2_000
+    """Sync error threshold below which no correction is applied (2 ms)."""
+    _REANCHOR_THRESHOLD_US: Final[int] = 500_000
+    """Sync error threshold above which re-anchoring is triggered (500 ms)."""
     _REANCHOR_COOLDOWN_US: Final[int] = 5_000_000
     """Minimum time between re-anchor events (5 seconds)."""
     _MIN_BUFFER_DURATION_US: Final[int] = 200_000
@@ -112,10 +113,6 @@ class AudioPlayer:
     # Audio stream configuration
     _BLOCKSIZE: Final[int] = 2048
     """Audio block size (~46ms at 44.1kHz)."""
-
-    # Sync error EMA smoothing
-    _SYNC_ERROR_EMA_ALPHA: Final[float] = 0.50
-    """EMA smoothing factor for sync error (heavier smoothing to avoid aggressive corrections)."""
 
     # Time synchronization thresholds
     _EARLY_START_THRESHOLD_US: Final[int] = 700_000
@@ -202,9 +199,9 @@ class AudioPlayer:
         self._frames_until_next_drop: int = 0
         self._last_output_frame: bytes = b""
 
-        # Sync error smoothing and re-anchor cooldown
-        self._sync_error_ema_us: float = 0.0
-        self._sync_error_ema_init: bool = False
+        # Sync error smoothing (Kalman filter) and re-anchor cooldown
+        self._sync_error_filter = ResonateTimeFilter(process_std_dev=0.01, forget_factor=1.001)
+        self._sync_error_filtered_us: float = 0.0  # Cached filtered error value
         self._last_reanchor_loop_time_us: int = 0
         self._last_sync_error_log_us: int = 0  # Rate limit sync error logging
         self._frames_inserted_since_log: int = 0  # Track inserts for logging
@@ -275,8 +272,8 @@ class AudioPlayer:
         self._frames_until_next_insert = 0
         self._frames_until_next_drop = 0
         self._last_output_frame = b""
-        self._sync_error_ema_us = 0.0
-        self._sync_error_ema_init = False
+        self._sync_error_filter.reset()
+        self._sync_error_filtered_us = 0.0
         self._last_reanchor_loop_time_us = 0
         self._last_sync_error_log_us = 0
         self._frames_inserted_since_log = 0
@@ -337,8 +334,12 @@ class AudioPlayer:
             else:
                 frame_size = self._format.frame_size
 
+                # Thread-safe snapshot of correction schedule (prevent mid-callback changes)
+                insert_every_n = self._insert_every_n_frames
+                drop_every_n = self._drop_every_n_frames
+
                 # Fast path: no sync corrections needed - use bulk operations
-                if self._insert_every_n_frames == 0 and self._drop_every_n_frames == 0:
+                if insert_every_n == 0 and drop_every_n == 0:
                     # Bulk read all frames at once - 15-25x faster than frame-by-frame
                     frames_data = self._read_input_frames_bulk(frames)
                     frames_bytes = len(frames_data)
@@ -347,10 +348,10 @@ class AudioPlayer:
                 else:
                     # Slow path: sync corrections active - process in optimized segments
                     # Reset cadence counters if needed
-                    if self._frames_until_next_insert <= 0 and self._insert_every_n_frames > 0:
-                        self._frames_until_next_insert = self._insert_every_n_frames
-                    if self._frames_until_next_drop <= 0 and self._drop_every_n_frames > 0:
-                        self._frames_until_next_drop = self._drop_every_n_frames
+                    if self._frames_until_next_insert <= 0 and insert_every_n > 0:
+                        self._frames_until_next_insert = insert_every_n
+                    if self._frames_until_next_drop <= 0 and drop_every_n > 0:
+                        self._frames_until_next_drop = drop_every_n
 
                     if not self._last_output_frame:
                         self._last_output_frame = b"\x00" * frame_size
@@ -362,12 +363,10 @@ class AudioPlayer:
                     while frames_remaining > 0:
                         # Calculate frames until next correction event
                         frames_until_insert = (
-                            insert_counter
-                            if self._insert_every_n_frames > 0
-                            else frames_remaining + 1
+                            insert_counter if insert_every_n > 0 else frames_remaining + 1
                         )
                         frames_until_drop = (
-                            drop_counter if self._drop_every_n_frames > 0 else frames_remaining + 1
+                            drop_counter if drop_every_n > 0 else frames_remaining + 1
                         )
 
                         # Find next event and process segment before it
@@ -390,11 +389,12 @@ class AudioPlayer:
                         # Handle correction event if at boundary
                         if frames_remaining > 0:
                             if drop_counter <= 0 and self._drop_every_n_frames > 0:
-                                # Drop frame: read but don't output
-                                _ = self._read_one_input_frame()
+                                # Drop frame: read EXTRA frame to advance cursor faster
+                                _ = self._read_one_input_frame()  # Read frame we're replacing
+                                _ = self._read_one_input_frame()  # Read frame we're DROPPING
                                 drop_counter = self._drop_every_n_frames
                                 self._frames_dropped_since_log += 1
-                                # Output last frame instead
+                                # Output last frame instead (don't output either frame we read)
                                 output_buffer[bytes_written : bytes_written + frame_size] = (
                                     self._last_output_frame
                                 )
@@ -402,7 +402,8 @@ class AudioPlayer:
                                 frames_remaining -= 1
                                 insert_counter -= 1
                             elif insert_counter <= 0 and self._insert_every_n_frames > 0:
-                                # Insert frame: duplicate last frame
+                                # Insert frame: output duplicate WITHOUT reading
+                                # This makes playback catch up to cursor (cursor doesn't advance)
                                 insert_counter = self._insert_every_n_frames
                                 self._frames_inserted_since_log += 1
                                 output_buffer[bytes_written : bytes_written + frame_size] = (
@@ -696,7 +697,7 @@ class AudioPlayer:
 
     def _log_chunk_timing(self, _server_timestamp_us: int) -> None:
         """Log sync error and buffer status for debugging sync issues."""
-        if self._sync_error_ema_init:
+        if self._sync_error_filter.is_synchronized:
             now_us = int(self._loop.time() * 1_000_000)
             if now_us - self._last_sync_error_log_us >= 1_000_000:
                 self._last_sync_error_log_us = now_us
@@ -727,7 +728,7 @@ class AudioPlayer:
                 logger.debug(
                     "Sync error: %.1f ms, buffer: %.2f s, speed: %.2f%%, "
                     "played: %d, inserted: %d, dropped: %d, callback: %.1f µs",
-                    self._sync_error_ema_us / 1000.0,
+                    self._sync_error_filtered_us / 1000.0,
                     self._queued_duration_us / 1_000_000,
                     playback_speed_percent,
                     normal_frames,
@@ -742,14 +743,17 @@ class AudioPlayer:
                 self._callback_count = 0
 
     def _smooth_sync_error(self, error_us: int) -> None:
-        """Update EMA smoothed sync error to avoid reacting to jitter."""
-        if not self._sync_error_ema_init:
-            self._sync_error_ema_us = float(error_us)
-            self._sync_error_ema_init = True
-        else:
-            self._sync_error_ema_us = self._SYNC_ERROR_EMA_ALPHA * self._sync_error_ema_us + (
-                1.0 - self._SYNC_ERROR_EMA_ALPHA
-            ) * float(error_us)
+        """Update Kalman filtered sync error to optimally track error and drift."""
+        now_us = int(self._loop.time() * 1_000_000)
+        # Use fixed max_error representing expected jitter/noise (5ms)
+        max_error_us = 5_000
+        self._sync_error_filter.update(
+            measurement=error_us,
+            max_error=max_error_us,
+            time_added=now_us,
+        )
+        # Cache filtered offset for use in correction logic
+        self._sync_error_filtered_us = self._sync_error_filter.offset
 
     def _fill_silence(self, output_buffer: memoryview, offset: int, num_bytes: int) -> None:
         """Fill output buffer range with silence."""
@@ -830,7 +834,10 @@ class AudioPlayer:
         return bytes_written
 
     def _update_correction_schedule(self, error_us: int) -> None:
-        """Plan occasional sample drop/insert to correct sync drift.
+        """Plan occasional sample drop/insert to correct sync error.
+
+        Uses simple proportional control: correction rate is proportional to error.
+        The feedback loop naturally handles both clock drift and accumulated error.
 
         Positive error means DAC/server playback is ahead of our read cursor;
         schedule drops to catch up. Negative error means we're ahead; schedule
@@ -843,7 +850,7 @@ class AudioPlayer:
         # Smooth the error to avoid reacting to jitter
         self._smooth_sync_error(error_us)
 
-        abs_err = abs(self._sync_error_ema_us)
+        abs_err = abs(self._sync_error_filtered_us)
 
         # Do nothing within deadband
         if abs_err <= self._CORRECTION_DEADBAND_US:
@@ -869,26 +876,24 @@ class AudioPlayer:
             self.clear()
             return
 
-        # Convert error to equivalent frames and plan correction cadence
-        frames_error = round(abs_err * self._format.sample_rate / 1_000_000.0)
+        # Simple proportional control: correction rate proportional to error
+        # Target is to fix error within _CORRECTION_TARGET_SECONDS
+        frames_error = abs_err * self._format.sample_rate / 1_000_000.0
+        desired_corrections_per_sec = frames_error / self._CORRECTION_TARGET_SECONDS
 
-        # Maximum drop/insert interval based on allowed playback speed variation
-        # e.g., 0.01 speed correction = drop 1 frame per 100 frames
-        max_interval_frames = int(1.0 / max(self._MAX_SPEED_CORRECTION, 0.001))
+        # Cap at maximum allowed correction rate (4%)
+        max_corrections_per_sec = self._format.sample_rate * self._MAX_SPEED_CORRECTION
+        corrections_per_sec = min(desired_corrections_per_sec, max_corrections_per_sec)
 
-        # Plan correction cadence to fix error within target window
-        if frames_error > 0:
-            desired_corrections_per_sec = min(
-                frames_error / self._CORRECTION_TARGET_SECONDS,
-                self._format.sample_rate / max_interval_frames,
-            )
-            interval_frames = int(self._format.sample_rate / max(desired_corrections_per_sec, 1.0))
+        # Convert to interval between corrections
+        if corrections_per_sec > 0:
+            interval_frames = int(self._format.sample_rate / corrections_per_sec)
+            interval_frames = max(interval_frames, 1)
         else:
-            interval_frames = max_interval_frames
+            interval_frames = int(1.0 / max(self._MAX_SPEED_CORRECTION, 0.001))
 
-        interval_frames = max(interval_frames, 1)
-
-        if self._sync_error_ema_us > 0:
+        # Determine direction based on sign of sync error
+        if self._sync_error_filtered_us > 0:
             # We are behind (DAC ahead) -> drop to catch up
             self._drop_every_n_frames = interval_frames
             self._insert_every_n_frames = 0
@@ -963,36 +968,14 @@ class AudioPlayer:
             except Exception:
                 logger.exception("Failed to update start time")
 
-        # If we started too early due to fallback mapping, re-anchor once sync improves
-        elif (
-            self._playback_state == PlaybackState.PLAYING
-            and self._early_start_suspect
-            and not self._has_reanchored
-        ):
-            # Heuristic: when DAC mapping becomes available or loop mapping pushes
-            # the start > 1s into the future for current server timestamp, re-anchor.
-            est_dac = self._estimate_dac_time_for_server_timestamp(server_timestamp_us)
-            loop_start_now = None
-            try:
-                loop_start_now = self._compute_client_time(server_timestamp_us)
-            except Exception:
-                logger.exception("Failed to compute loop start time")
-                loop_start_now = None
-
-            if est_dac or (loop_start_now is not None and loop_start_now - now_us > 1_000_000):
-                # Clear current queue and reset timing; then continue to queue this chunk
-                logger.info("Re-anchoring playback after time sync matured")
-                self.clear()
-                self._compute_and_set_loop_start(server_timestamp_us)
-                est_dac2 = self._estimate_dac_time_for_server_timestamp(server_timestamp_us)
-                self._scheduled_start_dac_time_us = est_dac2 if est_dac2 else None
-                self._playback_state = PlaybackState.WAITING_FOR_START
-                self._first_server_timestamp_us = server_timestamp_us
-                self._has_reanchored = True
-
         # After calibration, if we have both a DAC-derived playback position and a
         # server-timeline cursor, compute sync error and schedule micro-corrections.
-        if self._last_known_playback_position_us > 0 and self._server_ts_cursor_us > 0:
+        # Only compute sync error when actively playing (not during initial buffering)
+        if (
+            self._playback_state == PlaybackState.PLAYING
+            and self._last_known_playback_position_us > 0
+            and self._server_ts_cursor_us > 0
+        ):
             sync_error_us = self._last_known_playback_position_us - self._server_ts_cursor_us
             self._update_correction_schedule(sync_error_us)
 
@@ -1044,6 +1027,7 @@ class AudioPlayer:
                 return
 
         # Queue the chunk
+        chunk_duration_us = 0
         if len(payload) > 0:
             # Compute duration from the post-trim payload
             chunk_frames = len(payload) // self._format.frame_size
@@ -1055,35 +1039,17 @@ class AudioPlayer:
             self._queue.put_nowait(chunk)
             # Track duration of queued audio
             self._queued_duration_us += chunk_duration_us
-
-        # Update expected position for next chunk
-        if len(payload) > 0:
+            # Update expected position for next chunk
             self._expected_next_timestamp = server_timestamp_us + chunk_duration_us
 
-        # Compute minimum buffer needed for network jitter
-        min_duration_us = self._MIN_BUFFER_DURATION_US
-
-        queue_size = self._queue.qsize()
-        if self._queued_duration_us >= min_duration_us and not self._stream_started:
-            if self._stream is not None:
-                self._stream.start()
-                self._stream_started = True
-                logger.info(
-                    "Stream STARTED: %d chunks, %.2f seconds buffered, "
-                    "ready to play (min required: %.2f s)",
-                    queue_size,
-                    self._queued_duration_us / 1_000_000,
-                    min_duration_us / 1_000_000,
-                )
-        elif not self._stream_started:
-            buffered_pct = (
-                100 * self._queued_duration_us / min_duration_us if min_duration_us > 0 else 0
-            )
-            logger.debug(
-                "Buffering: %.2f/%.2f s (%.0f%%)",
+        # Start stream immediately when first chunk arrives
+        if not self._stream_started and self._queue.qsize() > 0 and self._stream is not None:
+            self._stream.start()
+            self._stream_started = True
+            logger.info(
+                "Stream STARTED: %d chunks, %.2f seconds buffered",
+                self._queue.qsize(),
                 self._queued_duration_us / 1_000_000,
-                min_duration_us / 1_000_000,
-                buffered_pct,
             )
 
     def _close_stream(self) -> None:
