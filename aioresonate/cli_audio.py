@@ -228,9 +228,9 @@ class AudioPlayer:
             dtype="int16",
             blocksize=self._BLOCKSIZE,
             callback=self._audio_callback,
-            latency="low",
+            latency="high",
         )
-        logger.info("Audio stream configured: blocksize=%d, latency=low", self._BLOCKSIZE)
+        logger.info("Audio stream configured: blocksize=%d, latency=high", self._BLOCKSIZE)
 
     async def stop(self) -> None:
         """Stop playback and release resources."""
