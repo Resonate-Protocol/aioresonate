@@ -6,11 +6,12 @@ import asyncio
 import logging
 import uuid
 from asyncio import Task
-from collections.abc import Callable, Coroutine
+from collections.abc import AsyncGenerator, Callable, Coroutine
 from contextlib import suppress
 from dataclasses import dataclass
 from io import BytesIO
 from typing import TYPE_CHECKING, cast
+from uuid import UUID
 
 from PIL import Image
 
@@ -106,10 +107,13 @@ class GroupDeletedEvent(GroupEvent):
 
 @dataclass
 class _StreamerReconfigureCommand:
-    """Request to reconfigure the running streamer with new client topology."""
+    """Signal to reconfigure the running streamer with new player topology."""
 
-    audio_format: AudioFormat
-    client_configs: list[ClientStreamConfig]
+    all_player_configs: list[ClientStreamConfig]
+    """List of ClientStreamConfig for all players (existing and new)."""
+
+    new_player_ids: set[str]
+    """Set of client IDs that are newly joining."""
 
 
 class ResonateGroup:
@@ -223,40 +227,34 @@ class ResonateGroup:
             self._current_state = PlaybackStateType.STOPPED
             return start_time_us
 
-        self._player_formats.clear()
-
-        for player in group_players:
-            client = player.client
-            player_format = player.determine_optimal_format(media_stream.main_channel[1])
-            self._player_formats[client.client_id] = player_format
-
         streamer = Streamer(
             loop=self._server.loop,
             play_start_time_us=start_time_us,
         )
+        self._streamer = streamer
+        self._media_stream = media_stream
 
-        client_configs: list[ClientStreamConfig] = []
+        # Build configs for all players (all are new for initial setup)
+        all_player_configs: list[ClientStreamConfig] = []
         for player in group_players:
-            support = player.support
-            if support is None:
-                raise ValueError(f"Player {player.client.client_id} lacks support payload")
-            client_configs.append(
+            assert player.support
+            target_format = player.determine_optimal_format(media_stream.main_channel[1])
+            all_player_configs.append(
                 ClientStreamConfig(
                     client_id=player.client.client_id,
-                    target_format=self._player_formats[player.client.client_id],
-                    buffer_capacity_bytes=support.buffer_capacity,
+                    target_format=target_format,
+                    buffer_capacity_bytes=player.support.buffer_capacity,
                     send=player.client.send_message,
                 )
             )
 
-        start_payloads = streamer.configure(
-            audio_format=media_stream.main_channel[1],
-            clients=client_configs,
+        new_player_ids = {p.client.client_id for p in group_players}
+        start_payloads, channel_sources = await streamer.configure(
+            all_player_configs, new_player_ids, media_stream
         )
-        self._streamer = streamer
         self._stream_commands = asyncio.Queue()
         self._stream_task = self._server.loop.create_task(
-            self._run_streamer(streamer, media_stream)
+            self._run_streamer(streamer, media_stream, channel_sources)
         )
 
         # Notify clients about the upcoming stream configuration
@@ -288,29 +286,42 @@ class ResonateGroup:
 
         return end_time_us
 
-    async def _run_streamer(  # noqa: PLR0915
+    async def _run_streamer(  # noqa: PLR0915, PLR0912
         self,
         streamer: Streamer,
         media_stream: MediaStream,
+        active_channels: dict[UUID, AsyncGenerator[bytes, None]],
     ) -> int:
         """Consume media channels, distribute via streamer, and return end timestamp."""
         last_end_us = self._play_start_time_us or int(self._server.loop.time() * 1_000_000)
         cancelled = False
-        just_started = True
-        main_channel_source = media_stream.main_channel[0]
+        just_started_channels: set[UUID] = set(active_channels.keys())
 
         try:
             while True:
                 # Check for commands before processing chunks
                 if self._stream_commands is not None and not self._stream_commands.empty():
-                    # We handle reconfiguration requests only between chunks so that
-                    # all clients only receive binary messages once the session was correctly
-                    # started or updated
                     command = self._stream_commands.get_nowait()
-                    start_payloads = streamer.configure(
-                        audio_format=command.audio_format,
-                        clients=command.client_configs,
+
+                    # Reconfigure with current player topology
+                    start_payloads, new_sources = await streamer.configure(
+                        command.all_player_configs, command.new_player_ids, media_stream
                     )
+
+                    # Add new channel sources to active channels
+                    for channel_id, source in new_sources.items():
+                        if channel_id not in active_channels:
+                            active_channels[channel_id] = source
+                            just_started_channels.add(channel_id)
+
+                    # Drop channel sources that were removed by configure()
+                    removed_channel_ids = set(active_channels) - streamer.get_channel_ids()
+                    for removed_id in removed_channel_ids:
+                        source = active_channels.pop(removed_id)
+                        just_started_channels.discard(removed_id)
+                        with suppress(Exception):
+                            await source.aclose()
+
                     # Send stream/start messages to affected players
                     player_lookup = {player.client.client_id: player for player in self.players()}
                     for client_id, player_payload in start_payloads.items():
@@ -349,30 +360,48 @@ class ResonateGroup:
                             )
                         )
                         client.send_message(message)
+                    logger.debug("streamer reconfigured")
                     continue
 
-                if just_started:
-                    try:
-                        while streamer.prepare(
-                            await anext(main_channel_source), during_initial_buffering=True
-                        ):
-                            # Pre-fill the initial buffer
-                            pass
-                    except StopAsyncIteration:
-                        # Source exhausted, exit loop
-                        break
-                    just_started = False
+                # Pre-fill buffers for channels that just started
+                if just_started_channels:
+                    channels_to_check = list(just_started_channels)
+                    for channel_id in channels_to_check:
+                        if channel_id not in active_channels:
+                            just_started_channels.discard(channel_id)
+                            continue
+                        # Pre-fill this channel's buffer before starting playback
+                        while streamer.channel_needs_data(channel_id):
+                            source = active_channels[channel_id]
+                            try:
+                                chunk = await anext(source)
+                                streamer.prepare(channel_id, chunk, during_initial_buffering=True)
+                            except StopAsyncIteration:
+                                active_channels.pop(channel_id, None)
+                                break
+                        # Channel is now pre-filled, remove from just_started set
+                        just_started_channels.discard(channel_id)
 
-                try:
-                    chunk = await anext(main_channel_source)
-                except StopAsyncIteration:
-                    # Source exhausted, exit loop
-                    break
+                # Read chunks from channels that need data until buffers are full
+                any_channel_needs_data = True
+                while any_channel_needs_data and active_channels:
+                    any_channel_needs_data = False
+                    for channel_id in list(active_channels.keys()):
+                        if not streamer.channel_needs_data(channel_id):
+                            continue
+                        any_channel_needs_data = True
+                        source = active_channels[channel_id]
+                        try:
+                            logger.debug("Fetching chunk for channel %s", channel_id)
+                            chunk = await anext(source)
+                            streamer.prepare(channel_id, chunk)
+                        except StopAsyncIteration:
+                            active_channels.pop(channel_id, None)
 
-                # Prepare the chunk
-                streamer.prepare(chunk)
+                if not active_channels:
+                    break  # All channels exhausted
 
-                # Send all prepared chunks
+                # Send prepared chunks after buffers are full
                 await streamer.send()
 
             # We are done
@@ -404,24 +433,30 @@ class ResonateGroup:
         ):
             raise RuntimeError("Streamer is not running")
 
-        client_configs: list[ClientStreamConfig] = []
-
+        # Build configs for all current players
+        all_player_configs: list[ClientStreamConfig] = []
         for player in self.players():
             assert player.support
-            client_id = player.client.client_id
-            target_format = self._player_formats[client_id]
-            client_configs.append(
+            target_format = player.determine_optimal_format(self._media_stream.main_channel[1])
+            all_player_configs.append(
                 ClientStreamConfig(
-                    client_id=client_id,
+                    client_id=player.client.client_id,
                     target_format=target_format,
                     buffer_capacity_bytes=player.support.buffer_capacity,
                     send=player.client.send_message,
                 )
             )
+
+        # Determine which players are new
+        existing_player_ids = self._streamer.get_player_ids()
+        current_player_ids = {p.client.client_id for p in self.players()}
+        new_player_ids = current_player_ids - existing_player_ids
+
+        # Signal the streamer to reconfigure on next iteration with the new topology
         self._stream_commands.put_nowait(
             _StreamerReconfigureCommand(
-                audio_format=self._media_stream.main_channel[1],
-                client_configs=client_configs,
+                all_player_configs=all_player_configs,
+                new_player_ids=new_player_ids,
             )
         )
 
