@@ -286,6 +286,8 @@ class ResonateGroup:
 
         return end_time_us
 
+    ### Review this method carefully, and if possible simplify it.
+    ### Why is active_channels passed in? can't we make it a ResonateGroup attribute?
     async def _run_streamer(  # noqa: PLR0915, PLR0912
         self,
         streamer: Streamer,
@@ -392,7 +394,6 @@ class ResonateGroup:
                         any_channel_needs_data = True
                         source = active_channels[channel_id]
                         try:
-                            logger.debug("Fetching chunk for channel %s", channel_id)
                             chunk = await anext(source)
                             streamer.prepare(channel_id, chunk)
                         except StopAsyncIteration:

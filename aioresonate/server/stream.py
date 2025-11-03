@@ -111,7 +111,8 @@ class BufferTracker:
         return now_us
 
     def has_capacity_now(self, bytes_needed: int) -> bool:
-        """Check if buffer can accept bytes_needed without waiting.
+        """
+        Check if buffer can accept bytes_needed without waiting.
 
         This is a non-blocking version of wait_for_capacity that returns immediately.
 
@@ -152,39 +153,32 @@ class BufferTracker:
             return 0
 
         # Prune consumed chunks once at the start
-        now_us = self.prune_consumed()
+        cursor_time_us = self.prune_consumed()
         time_needed_us = 0
 
-        # Simulate state without modifying it
+        # Simulate state without modifying it to find when capacity is available
         virtual_buffered_bytes = self.buffered_bytes
-        virtual_chunk_idx = 0
+        cursor_index = 0
 
-        while True:
+        while cursor_index < len(self.buffered_chunks):
             projected_usage = virtual_buffered_bytes + bytes_needed
             if projected_usage <= self.capacity_bytes:
-                # Returning here keeps the producer running because we are below capacity.
-                return time_needed_us
+                # We have enough capacity at this point
+                break
 
-            # Check if we have chunks left to virtually consume
-            if virtual_chunk_idx >= len(self.buffered_chunks):
-                # No more chunks to consume, but still over capacity
-                return time_needed_us
+            chunk = self.buffered_chunks[cursor_index]
+            cursor_end_time_us = chunk.end_time_us
+            time_needed_us += max(cursor_end_time_us - cursor_time_us, 0)
 
-            # Virtually advance time to when the next chunk finishes
-            chunk = self.buffered_chunks[virtual_chunk_idx]
-            sleep_target_us = chunk.end_time_us
-            sleep_us = sleep_target_us - now_us
-            time_needed_us += max(sleep_us, 0)
-
-            # Virtually consume the chunk
-            now_us = sleep_target_us
+            # Advance cursor to the next chunk
+            cursor_index += 1
+            cursor_time_us = cursor_end_time_us
             virtual_buffered_bytes -= chunk.byte_count
-            virtual_chunk_idx += 1
+        return time_needed_us
 
     async def wait_for_capacity(self, bytes_needed: int) -> None:
         """Block until the device buffer can accept bytes_needed more bytes."""
-        sleep_time_us = self.time_for_capacity(bytes_needed)
-        if sleep_time_us > 0:
+        if sleep_time_us := self.time_for_capacity(bytes_needed):
             await asyncio.sleep(sleep_time_us / 1_000_000)
 
     def register(self, end_time_us: int, byte_count: int) -> None:
@@ -321,7 +315,7 @@ class PreparedChunkState:
 
 @dataclass
 class PipelineState:
-    """Holds state for a distinct channel/format/chunk-size pipeline."""
+    """Holds state for a pipeline of a channel/format/chunk-size/encoding combination."""
 
     source_format_params: AudioFormatParams
     """Source audio format parameters."""
@@ -434,10 +428,15 @@ class MediaStream:
         """
         Get a player-specific audio channel (time-synchronized with main channel).
 
+        The returned audio stream should ideally start at position_us relative to
+        the main channel's start. But implementations can return any position if
+        they can only start at specific boundaries (e.g., codec frame sizes, internal buffers).
+        If the returned stream and actual_position_us are equal, they will play in perfect sync.
+
         Args:
             player_id: Identifier for the player requesting the channel.
             preferred_format: The player's preferred native format.
-            position_us: Position in microseconds relative to main_channel start.
+            position_us: Requested position in microseconds relative to main_channel start.
 
         Returns:
             Tuple of (generator, format, actual_position_us) or None for fallback.
@@ -454,7 +453,7 @@ class Streamer:
     _loop: asyncio.AbstractEventLoop
     """Event loop used for time calculations and task scheduling."""
     _play_start_time_us: int
-    """Absolute timestamp in microseconds when playback should start."""
+    """Playback start time in microseconds, may be adjusted forward to prevent chunk skipping."""
     _channels: dict[UUID, ChannelState]
     """Mapping of channel IDs to their state."""
     _pipelines: dict[tuple[UUID, AudioFormat], PipelineState]
@@ -495,14 +494,16 @@ class Streamer:
         while pipeline.prepared and pipeline.prepared[0].refcount == 0:
             pipeline.prepared.popleft()
 
+    ### carefully review the merged configure + _apply_topology method
     async def configure(
         self,
         all_player_configs: list[ClientStreamConfig],
-        ## TODO: refactor so new_player_ids is not needed
+        ### TODO: refactor so new_player_ids is not needed
         new_player_ids: set[str],
         media_stream: MediaStream,
     ) -> tuple[dict[str, StreamStartPlayer], dict[UUID, AsyncGenerator[bytes, None]]]:
-        """Configure or reconfigure pipelines for the provided players.
+        """
+        Configure or reconfigure pipelines for the provided players.
 
         Resolves topology (which players get which channels) by querying MediaStream
         for player-specific channels and calculating synchronization offsets.
@@ -607,7 +608,7 @@ class Streamer:
 
         return start_payloads, new_channel_sources
 
-    ## merge this into configure
+    ### merge this into configure
     def _apply_topology(  # noqa: PLR0915
         self,
         *,
@@ -616,7 +617,8 @@ class Streamer:
         clients: Iterable[ClientStreamConfig],
         player_channel_assignments: dict[str, UUID],
     ) -> dict[str, StreamStartPlayer]:
-        """Apply resolved topology to internal state.
+        """
+        Apply resolved topology to internal state.
 
         Args:
             channel_formats: Mapping of channel_id to source audio format.
@@ -716,8 +718,9 @@ class Streamer:
                     chunk.refcount -= 1
                 old_player.queue.clear()
                 # Clean up consumed chunks from old pipeline
-                old_pipeline_key = (old_player.channel_id, old_player.audio_format)
-                if old_pipeline := self._pipelines.get(old_pipeline_key):
+                if old_pipeline := self._pipelines.get(
+                    (old_player.channel_id, old_player.audio_format)
+                ):
                     self._cleanup_consumed_chunks(old_pipeline)
 
             # Create new player or reconfigure existing one
@@ -731,6 +734,7 @@ class Streamer:
                 )
             )
 
+            ### Review if this is correct
             # Find synchronized join point based on SOURCE CHANNEL
             # Use the earliest prepared chunk across ALL pipelines on this channel
             # This ensures late joiners start from the beginning of available audio,
@@ -794,41 +798,41 @@ class Streamer:
                     chunk.refcount -= 1
                 old_player.queue.clear()
                 # Clean up consumed chunks from old pipeline
-                pipeline_key = (old_player.channel_id, old_player.audio_format)
-                if old_pipeline := self._pipelines.get(pipeline_key):
+                if old_pipeline := self._pipelines.get(
+                    (old_player.channel_id, old_player.audio_format)
+                ):
                     self._cleanup_consumed_chunks(old_pipeline)
 
         # Replace players dict
         self._players = new_players
 
-        # Skip stale check on next send() iteration to avoid false positives
-        # when newly joined players have chunks with past timestamps
+        # Skip stale check on next send() iteration since newly joined players
+        # may have chunks with past timestamps that don't originate from a slow source
         self._skip_stale_check_once = True
 
         return start_payloads
 
-    def channel_wait_time_us(self, channel_id: UUID, now_us: int) -> int | None:
-        """Calculate time in microseconds until a channel needs data.
+    def _channel_wait_time_us(self, channel_state: ChannelState, now_us: int) -> int:
+        """
+        Calculate time in microseconds until a channel needs data.
 
         Args:
-            channel_id: ID of the channel to check.
+            channel_state: Channel state to check.
             now_us: Current time in microseconds.
 
         Returns:
-            Wait time in microseconds (0 if immediate), or None if channel has no buffer.
+            Wait time in microseconds (0 if immediate).
         """
-        channel_state = self._channels.get(channel_id)
-        assert channel_state is not None
         if not channel_state.source_buffer:
-            return None
+            return 0
 
-        buffer_end = channel_state.source_buffer[-1].end_time_us
         # Calculate when buffer will drop below target duration from now
-        target_time_us = buffer_end - self._source_buffer_target_duration_us
-        return max(0, target_time_us - now_us)
+        buffer_end = channel_state.source_buffer[-1].end_time_us
+        return max(0, buffer_end - self._source_buffer_target_duration_us - now_us)
 
     def channel_needs_data(self, channel_id: UUID) -> bool:
-        """Check if a channel's buffer is below the target duration from now.
+        """
+        Check if a channel's buffer is below the target duration from now.
 
         Args:
             channel_id: ID of the channel to check.
@@ -841,15 +845,14 @@ class Streamer:
         if not channel_state.source_buffer:
             return True
 
-        # Measure buffer depth from now (not from buffer start)
-        now_us = int(self._loop.time() * 1_000_000)
-        wait_time_us = self.channel_wait_time_us(channel_id, now_us)
-        return wait_time_us is None or wait_time_us == 0
+        # Check if wait time is zero, means that it needs data now
+        return self._channel_wait_time_us(channel_state, int(self._loop.time() * 1_000_000)) == 0
 
     def prepare(
         self, channel_id: UUID, chunk: bytes, *, during_initial_buffering: bool = False
     ) -> None:
-        """Buffer raw PCM data and process through pipelines.
+        """
+        Buffer raw PCM data and process through pipelines.
 
         Args:
             channel_id: ID of the channel this chunk belongs to.
@@ -868,12 +871,14 @@ class Streamer:
         start_samples = channel_state.samples_produced
 
         # Check and adjust for stale chunks (skip during initial buffering)
-        if not during_initial_buffering:
+        if not during_initial_buffering and not self._skip_stale_check_once:
             start_us, end_us = self._check_and_adjust_for_stale_chunk(
                 channel_id, channel_state, start_samples, sample_count
             )
+            # _skip_stale_check_once flag will be reset after first send() call
         else:
-            # During initial buffering, just calculate timestamps without stale detection
+            # During initial buffering and after reconfiguration,
+            # just calculate timestamps without stale detection
             start_us = self._play_start_time_us + int(
                 start_samples
                 * 1_000_000
@@ -907,7 +912,8 @@ class Streamer:
         start_samples: int,
         sample_count: int,
     ) -> tuple[int, int]:
-        """Check if the next chunk would be stale and adjust timing if needed.
+        """
+        Check if the next chunk would be stale and adjust timing if needed.
 
         Args:
             channel_id: ID of the channel.
@@ -926,6 +932,8 @@ class Streamer:
         # Check if this chunk would be stale
         now_us = int(self._loop.time() * 1_000_000)
 
+        ### Test if this is not true anymore, since we have _skip_stale_check_once now
+        ### I think we can now check all chennels always
         # Only apply global timing adjustments for the main channel
         # Dedicated player channels with offsets should not trigger global adjustments
         # as this would desynchronize all channels. Stale chunks from offset channels
@@ -951,7 +959,8 @@ class Streamer:
     def _adjust_timing_for_stale_chunk(
         self, channel_id: UUID, now_us: int, chunk_start_us: int
     ) -> None:
-        """Adjust timing when a stale chunk is detected.
+        """
+        Adjust timing when a stale chunk is detected.
 
         Args:
             channel_id: ID of the channel.
@@ -975,39 +984,32 @@ class Streamer:
         if current_buffer_us >= target_buffer_us:
             # We already have enough buffer, just ensure headroom
             timing_adjustment_us = headroom_shortfall_us
-            logger.debug(
-                "Adjusting timing globally from channel %s: needs %.3fs headroom, "
-                "have %.3fs buffer (adjusting %.3fs)",
-                channel_id,
-                headroom_shortfall_us / 1_000_000,
-                current_buffer_us / 1_000_000,
-                timing_adjustment_us / 1_000_000,
-            )
         else:
             # Need to build buffer to target level
             buffer_shortfall_us = target_buffer_us - current_buffer_us
             # Use the larger of headroom need and buffer need
             timing_adjustment_us = max(headroom_shortfall_us, buffer_shortfall_us)
-            logger.debug(
-                "Adjusting timing globally from channel %s: needs %.3fs headroom, "
-                "have %.3fs buffer, target %.3fs (adjusting %.3fs)",
-                channel_id,
-                headroom_shortfall_us / 1_000_000,
-                current_buffer_us / 1_000_000,
-                target_buffer_us / 1_000_000,
-                timing_adjustment_us / 1_000_000,
-            )
 
-        # Adjust timing forward
+        logger.info("Detected slow source channel, adjusting timing to prevent skipping.")
+        logger.debug(
+            "Adjusting timing from slow channel %s: needs %.3fs headroom, "
+            "have %.3fs buffer (adjusting %.3fs)",
+            channel_id,
+            headroom_shortfall_us / 1_000_000,
+            current_buffer_us / 1_000_000,
+            timing_adjustment_us / 1_000_000,
+        )
+
+        # Adjust global timing forward
         self._play_start_time_us += timing_adjustment_us
 
-        # Update source buffer chunk timestamps
+        # Update source buffers chunk timestamps
         for ch_state in self._channels.values():
             for source_chunk in ch_state.source_buffer:
                 source_chunk.start_time_us += timing_adjustment_us
                 source_chunk.end_time_us += timing_adjustment_us
 
-        # Update pipeline timestamps and prepared chunks
+        # Update pipelines buffer and prepared chunks timestamps
         for pipeline in self._pipelines.values():
             if pipeline.next_chunk_start_us is not None:
                 pipeline.next_chunk_start_us += timing_adjustment_us
@@ -1016,8 +1018,10 @@ class Streamer:
                 prepared_chunk.start_time_us += timing_adjustment_us
                 prepared_chunk.end_time_us += timing_adjustment_us
 
+    ### I think we can rip this out, didn't had this detect any issues in testing
     def _validate_group_sync(self) -> None:
-        """Validate that all players on the same channel have synchronized timestamps.
+        """
+        Validate that all players on the same channel have synchronized timestamps.
 
         This is a safeguard to detect synchronization issues early. All players
         sharing the same source channel must have chunks with matching timestamps
@@ -1073,8 +1077,11 @@ class Streamer:
                         )
                         raise AssertionError(msg)
 
+    ### Seems like duplicated code with _adjust_timing_for_stale_chunk, maybe remove this and just
+    ### use that _adjust_timing_for_stale_chunk everywhere?
     def _adjust_timing_for_stale_chunk_all_channels(self, now_us: int, chunk_start_us: int) -> None:
-        """Adjust timing globally when a stale chunk is detected (for all channels).
+        """
+        Adjust timing globally when a stale chunk is detected (for all channels).
 
         This method adjusts play_start_time_us forward to prevent chunk skipping,
         ensuring all players stay synchronized even when timing adjustments are needed.
@@ -1145,7 +1152,8 @@ class Streamer:
                 prepared_chunk.end_time_us += timing_adjustment_us
 
     async def send(self) -> None:  # noqa: PLR0915, PLR0912, C901
-        """Send prepared audio to all clients with perfect group synchronization.
+        """
+        Send prepared audio to all clients with perfect group synchronization.
 
         This method performs stages in a loop:
         1. Perform catch-up for late joiners (if needed)
@@ -1163,7 +1171,6 @@ class Streamer:
         Continues until all pending audio has been delivered and source buffer is below target.
         """
         while True:
-            logger.debug("Streamer send loop iteration started")
             # Stage 1: Perform catch-up for players that need it
             for player_state in self._players.values():
                 if player_state.needs_catchup:
@@ -1174,12 +1181,14 @@ class Streamer:
             # when newly joined players have chunks with past timestamps
             if self._skip_stale_check_once:
                 self._skip_stale_check_once = False
-                logger.debug("Skipping stale check after reconfiguration")
             else:
                 # Dedicated player channels can have arbitrary timestamps from player_channel()
                 now_us = int(self._loop.time() * 1_000_000)
                 min_send_margin_us = 100_000  # 100ms for network + client processing
 
+                ### Can we remove this? don't we already have stale chunk detection and adjustment
+                ### in other places already? we could then just delete
+                ### _adjust_timing_for_stale_chunk_all_channels
                 # Find the earliest chunk on MAIN_CHANNEL only
                 earliest_main_chunk_start: int | None = None
                 for player_state in self._players.values():
@@ -1209,9 +1218,10 @@ class Streamer:
                     continue
 
             # Stage 3: Send chunks to players with backpressure control
+            ### think of better variable names, should still all 3 be referring to the player
             earliest_blocked_player: PlayerState | None = None
             earliest_blocked_chunk_size = 0
-            smallest_wait_time = 0
+            earliest_blocked_player_unblock_time = 0
 
             for player_state in self._players.values():
                 tracker = player_state.buffer_tracker
@@ -1223,15 +1233,27 @@ class Streamer:
                 while queue:
                     chunk = queue[0]
 
-                    # No per-player stale skipping - timing adjustment prevents this
-
+                    ### re-add this instead of the timing adjustments above?
+                    # # Skip chunks that are too close to playback or already in the past
+                    # if chunk.start_time_us < now_us + min_send_margin_us:
+                    #     # Chunk is stale, skip it without sending
+                    #     logger.debug(
+                    #         "Skipping stale chunk for %s (starts in %d us)",  # noqa: ERA001
+                    #         player_state.config.client_id,
+                    #         chunk.start_time_us - now_us,
+                    #     )  # noqa: ERA001, RUF100
+                    #     self._dequeue_chunk(player_state, chunk)  # noqa: ERA001
+                    #     continue  # noqa: ERA001
                     # Check if we can send without waiting
                     if requested_wait := tracker.time_for_capacity(chunk.byte_count):
-                        # This player is blocked - track if this chunk is earliest
-                        if smallest_wait_time == 0 or requested_wait < smallest_wait_time:
+                        # This player is blocked, track if this player gets unblocked first
+                        if (
+                            earliest_blocked_player_unblock_time == 0
+                            or requested_wait < earliest_blocked_player_unblock_time
+                        ):
                             earliest_blocked_player = player_state
                             earliest_blocked_chunk_size = chunk.byte_count
-                            smallest_wait_time = requested_wait
+                            earliest_blocked_player_unblock_time = requested_wait
                         break
 
                     # We have capacity - send immediately
@@ -1243,62 +1265,58 @@ class Streamer:
                     self._dequeue_chunk(player_state, chunk)
 
             # Stage 3b: Handle backpressure - compare client buffer wait vs source buffer urgency
-            if smallest_wait_time > 0:
+            if earliest_blocked_player_unblock_time > 0:
+                ### Refactor this section to be more "compact"?
                 # Calculate when source buffers will need refilling using helper method
-                now_us_for_scheduling = int(self._loop.time() * 1_000_000)
-                source_buffer_wait_us = None
+                now_us = int(self._loop.time() * 1_000_000)
+                earliest_channel_wait_time_us = None
 
-                for channel_id in self._channels:
-                    wait_us = self.channel_wait_time_us(channel_id, now_us_for_scheduling)
-                    if wait_us is None:
-                        # Channel has no buffer - needs immediate refilling
-                        source_buffer_wait_us = None
-                        break
-                    if source_buffer_wait_us is None or wait_us < source_buffer_wait_us:
-                        source_buffer_wait_us = wait_us
+                for channel in self._channels.values():
+                    wait_us = self._channel_wait_time_us(channel, now_us)
+                    if (
+                        earliest_channel_wait_time_us is None
+                        or wait_us < earliest_channel_wait_time_us
+                    ):
+                        earliest_channel_wait_time_us = wait_us
 
                 # Choose the more urgent wait
                 # If source_buffer_wait_us is None, it means at least one channel is empty
-                if source_buffer_wait_us is None or source_buffer_wait_us < smallest_wait_time:
+                if (
+                    earliest_channel_wait_time_us is None
+                    or earliest_channel_wait_time_us < earliest_blocked_player_unblock_time
+                ):
                     # Source buffer is more urgent - wait for it, then exit to refill
-                    if source_buffer_wait_us and source_buffer_wait_us > 0:
-                        sleep_duration_s = source_buffer_wait_us / 1_000_000
-                        logger.debug(
-                            "Source buffer more urgent (%.3fs vs client %.3fs), "
-                            "waiting then exiting to refill",
-                            sleep_duration_s,
-                            smallest_wait_time / 1_000_000,
-                        )
+                    if earliest_channel_wait_time_us and earliest_channel_wait_time_us > 0:
+                        sleep_duration_s = earliest_channel_wait_time_us / 1_000_000
                         await asyncio.sleep(sleep_duration_s)
-                    else:
-                        logger.debug("Source buffer needs immediate refilling, exiting")
                     break  # Exit to refill source buffer
 
                 # Client buffer is more urgent - wait for it, then continue sending
                 assert earliest_blocked_player is not None
                 tracker = earliest_blocked_player.buffer_tracker
                 if tracker is not None:
-                    logger.debug(
-                        "Client buffer more urgent (%.3fs vs source %.3fs), "
-                        "waiting for client capacity",
-                        smallest_wait_time / 1_000_000,
-                        source_buffer_wait_us / 1_000_000,
-                    )
+                    ### Refactor time_for_capacity to time_until_capacity?
+                    ### Then we could remove earliest_blocked_chunk_size, and manually
+                    ### call sleep here based on the current loop time
+                    ### I think we wouldn't need earliest_blocked_player/tracker then either
                     await tracker.wait_for_capacity(earliest_blocked_chunk_size)
                 continue  # More work to do, loop again
 
             # Stage 4: Validate synchronization (debug safeguard)
+            ### I think we can remove this
             self._validate_group_sync()
 
             # Stage 5: Cleanup
             self._prune_old_data()
 
+            ### client_work is a bit bad variable name
             # Stage 6: Check exit conditions and apply source buffer backpressure
             has_client_work = any(
                 player_state.queue or player_state.needs_catchup
                 for player_state in self._players.values()
             )
 
+            ### don't we implicitly check this through _channel_wait_time_us?
             # Check source buffer status - exit send() when buffers need more data
             # so that prepare() can be called to fill them
             any_channel_needs_data = any(
@@ -1309,26 +1327,22 @@ class Streamer:
                 # If client work pending, continue immediately
                 continue
             if any_channel_needs_data:
-                # Exit when both conditions met: no client work pending in send() AND
-                # at least one buffer needs data
+                # send() ran out of work to do, exit so prepare() can be called to fill buffers
                 break
 
             # Stage 6b: Wait for source buffer to drain below target
             # Calculate when source buffers will need refilling using helper method
             now_us = int(self._loop.time() * 1_000_000)
-            source_buffer_wait_us = None
+            earliest_channel_wait_time_us = None
 
-            for channel_id in self._channels:
-                wait_us = self.channel_wait_time_us(channel_id, now_us)
-                if wait_us is None:
-                    # Channel has no buffer - needs immediate refilling
-                    source_buffer_wait_us = None
-                    break
-                if source_buffer_wait_us is None or wait_us < source_buffer_wait_us:
-                    source_buffer_wait_us = wait_us
+            for channel in self._channels.values():
+                wait_us = self._channel_wait_time_us(channel, now_us)
+                if earliest_channel_wait_time_us is None or wait_us < earliest_channel_wait_time_us:
+                    earliest_channel_wait_time_us = wait_us
 
+            ### When is this None? can't we simplify the rest of the method from this line an below?
             # If no source buffer wait calculated or immediate need, exit to refill
-            if source_buffer_wait_us is None:
+            if earliest_channel_wait_time_us is None:
                 # At least one channel has no buffer
                 # Wait for first chunk to be consumed to avoid busy loop
                 earliest_chunk_end_us = None
@@ -1339,22 +1353,15 @@ class Streamer:
                             earliest_chunk_end_us = end_us
                 if earliest_chunk_end_us and earliest_chunk_end_us > now_us:
                     sleep_duration_s = (earliest_chunk_end_us - now_us) / 1_000_000
-                    logger.debug(
-                        "No buffer on at least one channel, waiting %.3fs for first chunk",
-                        sleep_duration_s,
-                    )
                     await asyncio.sleep(sleep_duration_s)
-                else:
-                    logger.debug("Source buffer needs immediate refilling, exiting send()")
+                # Break so prepare() can be called to fill buffers
                 break
 
-            if source_buffer_wait_us == 0:
+            if earliest_channel_wait_time_us == 0:
                 # Source buffer needs immediate attention - exit to refill
-                logger.debug("Source buffer needs immediate refilling, exiting send()")
                 break
 
-            sleep_duration_s = source_buffer_wait_us / 1_000_000
-            logger.debug("Waiting %.3fs for source buffer to drain below target", sleep_duration_s)
+            sleep_duration_s = earliest_channel_wait_time_us / 1_000_000
             await asyncio.sleep(sleep_duration_s)
 
     def flush(self) -> None:
@@ -1394,7 +1401,8 @@ class Streamer:
             pipeline.prepared.popleft()
 
     def _prune_old_data(self) -> None:
-        """Prune old source chunks to free memory.
+        """
+        Prune old source chunks to free memory.
 
         Removes source chunks that have finished playing (end_time_us <= now).
         Prepared chunks are managed separately by refcount in send().
@@ -1402,7 +1410,6 @@ class Streamer:
         # Prune source buffer based on playback time
         now_us = int(self._loop.time() * 1_000_000)
 
-        # Prune each channel's buffer independently
         for channel_id, channel_state in self._channels.items():
             chunks_removed = 0
             while (
@@ -1420,7 +1427,8 @@ class Streamer:
                         )
 
     def _check_needs_catchup(self, player_state: PlayerState, join_time_us: int) -> bool:
-        """Check if player needs catch-up processing.
+        """
+        Check if player needs catch-up processing.
 
         Args:
             player_state: The player to check.
@@ -1450,7 +1458,8 @@ class Streamer:
         return False
 
     def _perform_catchup(self, player_state: PlayerState) -> None:
-        """Process and queue missing chunks for late joiners from source buffer.
+        """
+        Process and queue missing chunks for late joiners from source buffer.
 
         When a late joiner arrives, this reprocesses source chunks to fill the gap
         between join_time and the first queued chunk. Chunks are added to the player's
@@ -1529,7 +1538,8 @@ class Streamer:
         source_chunks: list[SourceChunk],
         first_queued_start_us: int | None,
     ) -> list[PreparedChunkState]:
-        """Process source chunks and create catch-up chunks for queueing.
+        """
+        Process source chunks and create catch-up chunks for queueing.
 
         Creates temporary resampler/encoder to avoid corrupting shared pipeline state.
         Uses sample-based timestamp calculation to align perfectly with prepared chunks.
@@ -1722,7 +1732,8 @@ class Streamer:
         processed_chunks: list[tuple[bytes, int]],
         force_flush: bool,
     ) -> None:
-        """Drain temporary buffer and collect chunks (without sending).
+        """
+        Drain temporary buffer and collect chunks (without sending).
 
         Args:
             temp_buffer: Temporary buffer to drain.
@@ -1774,7 +1785,8 @@ class Streamer:
     def _process_pipeline_from_source(
         self, pipeline: PipelineState, channel_state: ChannelState
     ) -> bool:
-        """Process available source chunks through this pipeline.
+        """
+        Process available source chunks through this pipeline.
 
         Args:
             pipeline: The pipeline to process.
@@ -1806,7 +1818,8 @@ class Streamer:
         channel_state: ChannelState,
         source_chunk: SourceChunk,
     ) -> None:
-        """Process source PCM data through the pipeline's resampler.
+        """
+        Process source PCM data through the pipeline's resampler.
 
         Args:
             pipeline: The pipeline to process through.
@@ -1836,7 +1849,8 @@ class Streamer:
         pipeline: PipelineState,
         sample_count: int,
     ) -> tuple[int, int]:
-        """Calculate start and end timestamps for a chunk.
+        """
+        Calculate start and end timestamps for a chunk.
 
         Uses the pipeline's next_chunk_start_us to maintain alignment with source timestamps.
 
@@ -1861,7 +1875,8 @@ class Streamer:
         *,
         force_flush: bool,
     ) -> None:
-        """Drain the pipeline buffer by creating and publishing chunks.
+        """
+        Drain the pipeline buffer by creating and publishing chunks.
 
         Extracts complete chunks from the pipeline buffer and either publishes them
         directly (for PCM) or encodes them first (for compressed codecs).
@@ -1910,7 +1925,8 @@ class Streamer:
         chunk: bytes,
         sample_count: int,
     ) -> None:
-        """Encode a PCM chunk and publish the resulting packets.
+        """
+        Encode a PCM chunk and publish the resulting packets.
 
         The encoder may buffer input and produce 0, 1, or multiple output packets.
         Timestamps are calculated from each output packet's duration.
@@ -1948,7 +1964,8 @@ class Streamer:
         start_us: int,
         end_us: int,
     ) -> None:
-        """Handle an encoded packet by publishing it as a chunk.
+        """
+        Handle an encoded packet by publishing it as a chunk.
 
         Args:
             pipeline: The pipeline that produced the packet.
@@ -1968,7 +1985,8 @@ class Streamer:
         start_us: int,
         end_us: int,
     ) -> None:
-        """Create a PreparedChunkState and queue it for all subscribers.
+        """
+        Create a PreparedChunkState and queue it for all subscribers.
 
         Queues the chunk for delivery to all clients subscribed to this pipeline.
 
@@ -1999,7 +2017,8 @@ class Streamer:
             player_state.queue.append(chunk)
 
     def get_channel_ids(self) -> set[UUID]:
-        """Get the set of active channel IDs.
+        """
+        Get the set of active channel IDs.
 
         Returns:
             Set of currently active channel IDs.
@@ -2007,7 +2026,8 @@ class Streamer:
         return set(self._channels.keys())
 
     def get_player_ids(self) -> set[str]:
-        """Get the set of active player IDs.
+        """
+        Get the set of active player IDs.
 
         Returns:
             Set of currently active player client IDs.
