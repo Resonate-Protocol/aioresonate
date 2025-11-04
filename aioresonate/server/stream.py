@@ -697,7 +697,6 @@ class Streamer:
             codec_header=pipeline.codec_header_b64,
         )
 
-    ### carefully review the merged configure + _apply_topology method
     async def configure(
         self,
         all_player_configs: list[ClientStreamConfig],
@@ -718,45 +717,41 @@ class Streamer:
             - start_payloads: Dict mapping client IDs to StreamStartPlayer messages
             - new_channel_sources: Dict mapping channel IDs to source generators for new channels
         """
-        ### Extract topology resolution to _resolve_topology() returning StreamTopology dataclass
-        # === RESOLVE TOPOLOGY ===
+        # RESOLVE TOPOLOGY
         # Build topology: determine which players are new, query channels
-        channel_formats: dict[UUID, AudioFormat] = {MAIN_CHANNEL_ID: media_stream.main_channel[1]}
+        main_source, main_format = media_stream.main_channel
+        channel_formats: dict[UUID, AudioFormat] = {MAIN_CHANNEL_ID: main_format}
         new_channel_sources: dict[UUID, AsyncGenerator[bytes, None]] = {
-            MAIN_CHANNEL_ID: media_stream.main_channel[0]
+            MAIN_CHANNEL_ID: main_source
         }
         player_channel_assignments: dict[str, UUID] = {}
         channel_initial_samples: dict[UUID, int] = {MAIN_CHANNEL_ID: 0}
 
-        # Build set of player IDs in the new configuration
-        new_config_player_ids = {cfg.client_id for cfg in all_player_configs}
-
         # Calculate which players are new by comparing with existing players
-        existing_player_ids = set(self._players.keys())
-        new_player_ids = new_config_player_ids - existing_player_ids
+        new_config_player_ids = {cfg.client_id for cfg in all_player_configs}
+        new_player_ids = new_config_player_ids - set(self._players.keys())
 
         # Preserve existing channel assignments and add their formats to channel_formats
         # Only preserve for players that are still in the new configuration
         for player_id, player_state in self._players.items():
             if player_id not in new_config_player_ids:
                 continue  # Skip players being removed
-            player_channel_assignments[player_id] = player_state.channel_id
-            # Preserve existing channel formats to prevent them from being removed
-            channel_id = player_state.channel_id
-            if channel_id not in channel_formats and channel_id in self._channels:
-                channel_state = self._channels[channel_id]
+            player_channel_assignments[player_id] = (channel_id := player_state.channel_id)
+            if channel_id not in channel_formats and (
+                channel_state := self._channels.get(channel_id)
+            ):
                 channel_formats[channel_id] = channel_state.source_format_params.audio_format
 
         # Query channels for new players
         for player_id in new_player_ids:
-            # Find the config for this player
-            player_config = next((c for c in all_player_configs if c.client_id == player_id), None)
-            if player_config is None:
+            if not (
+                player_config := next(
+                    (c for c in all_player_configs if c.client_id == player_id), None
+                )
+            ):
                 logger.warning("Config not found for new player %s", player_id)
-                # Assign to main channel
                 player_channel_assignments[player_id] = MAIN_CHANNEL_ID
                 continue
-
             await self._query_player_channel(
                 player_id,
                 player_config,
@@ -767,11 +762,10 @@ class Streamer:
                 channel_initial_samples,
             )
 
-        # === APPLY TOPOLOGY TO INTERNAL STATE ===
+        # APPLY TOPOLOGY TO INTERNAL STATE
         # Update or create channel states
         for channel_id, audio_format in channel_formats.items():
             if channel_id not in self._channels:
-                # New channel - create it
                 bytes_per_sample, av_format, av_layout = _resolve_audio_format(audio_format)
                 self._channels[channel_id] = ChannelState(
                     source_format_params=AudioFormatParams(
@@ -782,14 +776,11 @@ class Streamer:
                         av_layout=av_layout,
                     ),
                 )
-                # Only set initial samples for newly created channels
-                if channel_id in channel_initial_samples:
-                    initial_sample_count = channel_initial_samples[channel_id]
+                if initial_sample_count := channel_initial_samples.get(channel_id):
                     self._channels[channel_id].samples_produced = initial_sample_count
 
         # Remove channels that are no longer needed
-        channels_to_remove = set(self._channels) - set(channel_formats)
-        for channel_id in channels_to_remove:
+        for channel_id in set(self._channels) - set(channel_formats):
             self._channels.pop(channel_id)
 
         # Clear subscriber lists to rebuild them
@@ -802,16 +793,15 @@ class Streamer:
 
         for client_cfg in all_player_configs:
             channel_id = player_channel_assignments[client_cfg.client_id]
-            audio_format = client_cfg.target_format
-
-            # Get or create pipeline for this channel/format combination
-            pipeline = self._get_or_create_pipeline(channel_id, audio_format)
+            pipeline = self._get_or_create_pipeline(channel_id, client_cfg.target_format)
             pipeline.subscribers.append(client_cfg.client_id)
 
             # Create or update player state
-            result = self._create_or_update_player(client_cfg, pipeline, channel_id, audio_format)
-            if result is None:
-                # Existing player reused, already added to new_players
+            if (
+                result := self._create_or_update_player(
+                    client_cfg, pipeline, channel_id, client_cfg.target_format
+                )
+            ) is None:
                 new_players[client_cfg.client_id] = self._players[client_cfg.client_id]
                 continue
 
@@ -819,12 +809,8 @@ class Streamer:
             start_payloads[client_cfg.client_id] = self._build_start_payload(client_cfg, pipeline)
 
         # Remove pipelines with no subscribers
-        pipelines_to_remove = [
-            key for key, pipeline in self._pipelines.items() if not pipeline.subscribers
-        ]
-        for key in pipelines_to_remove:
-            pipeline = self._pipelines.pop(key)
-            if pipeline.encoder:
+        for key in [k for k, p in self._pipelines.items() if not p.subscribers]:
+            if (pipeline := self._pipelines.pop(key)).encoder:
                 pipeline.encoder = None
 
         # Clean up refcounts for players being removed
