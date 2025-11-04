@@ -1187,19 +1187,9 @@ class Streamer:
                 for player_state in self._players.values()
             )
 
-            ### don't we implicitly check this through _channel_wait_time_us?
-            # Check source buffer status - exit send() when buffers need more data
-            # so that prepare() can be called to fill them
-            any_channel_needs_data = any(
-                self.channel_needs_data(channel_id) for channel_id in self._channels
-            )
-
             if has_client_work:
                 # If client work pending, continue immediately
                 continue
-            if any_channel_needs_data:
-                # send() ran out of work to do, exit so prepare() can be called to fill buffers
-                break
 
             ### Extract to _wait_for_source_buffer_drain() helper
             # Stage 5b: Wait for source buffer to drain below target
@@ -1216,8 +1206,7 @@ class Streamer:
             ### When is this None? can't we simplify the rest of the method from this line an below?
             # If no source buffer wait calculated or immediate need, exit to refill
             if earliest_channel_wait_time_us is None:
-                # At least one channel has no buffer
-                # Wait for first chunk to be consumed to avoid busy loop
+                # No channels exist - wait for first chunk to be consumed to avoid busy loop
                 earliest_chunk_end_us = None
                 for channel_state in self._channels.values():
                     if channel_state.source_buffer:
