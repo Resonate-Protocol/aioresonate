@@ -1040,65 +1040,6 @@ class Streamer:
                 prepared_chunk.start_time_us += timing_adjustment_us
                 prepared_chunk.end_time_us += timing_adjustment_us
 
-    ### I think we can rip this out, didn't had this detect any issues in testing
-    def _validate_group_sync(self) -> None:
-        """
-        Validate that all players on the same channel have synchronized timestamps.
-
-        This is a safeguard to detect synchronization issues early. All players
-        sharing the same source channel must have chunks with matching timestamps
-        at the front of their queues (within tolerance), even if they're on
-        different pipelines (different target formats).
-        """
-        # Group players by source channel
-        channel_players: dict[UUID, list[PlayerState]] = {}
-        for player_state in self._players.values():
-            channel_id = player_state.channel_id
-            if channel_id not in channel_players:
-                channel_players[channel_id] = []
-            channel_players[channel_id].append(player_state)
-
-        # Check each channel's players for timestamp sync
-        for channel_id, players in channel_players.items():
-            if len(players) <= 1:
-                # Single player, no sync issues possible
-                continue
-
-            # Get the timestamps at the front of each player's queue
-            front_timestamps: list[int | None] = []
-            for player in players:
-                front_ts = player.queue[0].start_time_us if player.queue else None
-                front_timestamps.append(front_ts)
-
-            # Check if all players have matching timestamps (within small tolerance)
-            # Players on different pipelines might have slightly different timestamps
-            # due to resampling, but should be very close (within 1ms)
-            first_ts = front_timestamps[0]
-            if first_ts is not None:
-                for ts in front_timestamps[1:]:
-                    if ts is None:
-                        continue
-                    # Allow 1ms tolerance for resampling differences
-                    if abs(ts - first_ts) > 1000:
-                        # Desync detected!
-                        player_ids = [p.config.client_id for p in players]
-                        chunk_times = [
-                            f"{ts}us" if ts is not None else "empty" for ts in front_timestamps
-                        ]
-                        logger.error(
-                            "SYNC ERROR: Players on channel %s are desynchronized! "
-                            "Players: %s, Front chunk timestamps: %s",
-                            channel_id,
-                            player_ids,
-                            chunk_times,
-                        )
-                        # Raise assertion error to catch sync violations
-                        msg = (
-                            f"Group sync violation: players {player_ids} on channel "
-                            f"{channel_id} have timestamps differing by >1ms: {chunk_times}"
-                        )
-                        raise AssertionError(msg)
-
     async def send(self) -> None:  # noqa: PLR0915, PLR0912, C901
         """
         Send prepared audio to all clients with perfect group synchronization.
@@ -1107,9 +1048,8 @@ class Streamer:
         1. Perform catch-up for late joiners (if needed)
         2. Check for stale chunks and adjust timing globally if needed (prevents skipping)
         3. Send chunks to players with backpressure control (per-player throughput)
-        4. Validate synchronization (debug safeguard)
-        5. Prune old data
-        6. Check exit conditions and apply source buffer backpressure
+        4. Prune old data
+        5. Check exit conditions and apply source buffer backpressure
 
         Global timing adjustments prevent chunk skipping, ensuring all players
         receive identical audio content for perfect synchronization. Players can
@@ -1251,15 +1191,11 @@ class Streamer:
                     await tracker.wait_for_capacity(earliest_blocked_chunk_size)
                 continue  # More work to do, loop again
 
-            # Stage 4: Validate synchronization (debug safeguard)
-            ### I think we can remove this
-            self._validate_group_sync()
-
-            # Stage 5: Cleanup
+            # Stage 4: Cleanup
             self._prune_old_data()
 
             ### client_work is a bit bad variable name
-            # Stage 6: Check exit conditions and apply source buffer backpressure
+            # Stage 5: Check exit conditions and apply source buffer backpressure
             has_client_work = any(
                 player_state.queue or player_state.needs_catchup
                 for player_state in self._players.values()
@@ -1280,7 +1216,7 @@ class Streamer:
                 break
 
             ### Extract to _wait_for_source_buffer_drain() helper
-            # Stage 6b: Wait for source buffer to drain below target
+            # Stage 5b: Wait for source buffer to drain below target
             ### Extract to _get_earliest_channel_wait_time_us() helper (also in Stage 3b)
             # Calculate when source buffers will need refilling using helper method
             now_us = int(self._loop.time() * 1_000_000)
