@@ -1026,7 +1026,7 @@ class Streamer:
                 prepared_chunk.start_time_us += timing_adjustment_us
                 prepared_chunk.end_time_us += timing_adjustment_us
 
-    async def send(self) -> None:  # noqa: PLR0915, PLR0912, C901
+    async def send(self) -> None:  # noqa: PLR0915
         """
         Send prepared audio to all clients with perfect group synchronization.
 
@@ -1203,28 +1203,12 @@ class Streamer:
                 if earliest_channel_wait_time_us is None or wait_us < earliest_channel_wait_time_us:
                     earliest_channel_wait_time_us = wait_us
 
-            ### When is this None? can't we simplify the rest of the method from this line an below?
-            # If no source buffer wait calculated or immediate need, exit to refill
-            if earliest_channel_wait_time_us is None:
-                # No channels exist - wait for first chunk to be consumed to avoid busy loop
-                earliest_chunk_end_us = None
-                for channel_state in self._channels.values():
-                    if channel_state.source_buffer:
-                        end_us = channel_state.source_buffer[0].end_time_us
-                        if earliest_chunk_end_us is None or end_us < earliest_chunk_end_us:
-                            earliest_chunk_end_us = end_us
-                if earliest_chunk_end_us and earliest_chunk_end_us > now_us:
-                    sleep_duration_s = (earliest_chunk_end_us - now_us) / 1_000_000
-                    await asyncio.sleep(sleep_duration_s)
-                # Break so prepare() can be called to fill buffers
+            # If no channels (shouldn't happen) or immediate need, exit to refill
+            if earliest_channel_wait_time_us is None or earliest_channel_wait_time_us == 0:
                 break
 
-            if earliest_channel_wait_time_us == 0:
-                # Source buffer needs immediate attention - exit to refill
-                break
-
-            sleep_duration_s = earliest_channel_wait_time_us / 1_000_000
-            await asyncio.sleep(sleep_duration_s)
+            # Wait for source buffer to drain
+            await asyncio.sleep(earliest_channel_wait_time_us / 1_000_000)
 
     def flush(self) -> None:
         """Flush all pipelines, preparing any buffered data for sending."""
