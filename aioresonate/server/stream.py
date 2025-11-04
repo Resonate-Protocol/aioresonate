@@ -1087,6 +1087,9 @@ class Streamer:
 
             ### Extract to _send_chunks_to_all_players() helper
             # Stage 3: Send chunks to players with backpressure control
+            ### TODO: Add queue depth limit protection - slow players accumulate unbounded queues
+            ###       since prepare() publishes to all subscribers regardless of send rate.
+            ###       Detect and evict falling-behind players to prevent memory exhaustion.
             earliest_blocked_wait_time_us = 0
 
             for player_state in self._players.values():
