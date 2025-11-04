@@ -138,7 +138,7 @@ class BufferTracker:
         projected_usage = self.buffered_bytes + bytes_needed
         return projected_usage <= self.capacity_bytes
 
-    def time_for_capacity(self, bytes_needed: int) -> int:
+    def time_until_capacity(self, bytes_needed: int) -> int:
         """Calculate time in microseconds until the buffer can accept bytes_needed more bytes."""
         if bytes_needed <= 0:
             return 0
@@ -178,7 +178,7 @@ class BufferTracker:
 
     async def wait_for_capacity(self, bytes_needed: int) -> None:
         """Block until the device buffer can accept bytes_needed more bytes."""
-        if sleep_time_us := self.time_for_capacity(bytes_needed):
+        if sleep_time_us := self.time_until_capacity(bytes_needed):
             await asyncio.sleep(sleep_time_us / 1_000_000)
 
     def register(self, end_time_us: int, byte_count: int) -> None:
@@ -1087,10 +1087,7 @@ class Streamer:
 
             ### Extract to _send_chunks_to_all_players() helper
             # Stage 3: Send chunks to players with backpressure control
-            ### think of better variable names, should still all 3 be referring to the player
-            earliest_blocked_player: PlayerState | None = None
-            earliest_blocked_chunk_size = 0
-            earliest_blocked_player_unblock_time = 0
+            earliest_blocked_wait_time_us = 0
 
             for player_state in self._players.values():
                 tracker = player_state.buffer_tracker
@@ -1114,15 +1111,13 @@ class Streamer:
                     #     self._dequeue_chunk(player_state, chunk)  # noqa: ERA001
                     #     continue  # noqa: ERA001
                     # Check if we can send without waiting
-                    if requested_wait := tracker.time_for_capacity(chunk.byte_count):
-                        # This player is blocked, track if this player gets unblocked first
+                    if requested_wait := tracker.time_until_capacity(chunk.byte_count):
+                        # This player is blocked, track the earliest unblock time
                         if (
-                            earliest_blocked_player_unblock_time == 0
-                            or requested_wait < earliest_blocked_player_unblock_time
+                            earliest_blocked_wait_time_us == 0
+                            or requested_wait < earliest_blocked_wait_time_us
                         ):
-                            earliest_blocked_player = player_state
-                            earliest_blocked_chunk_size = chunk.byte_count
-                            earliest_blocked_player_unblock_time = requested_wait
+                            earliest_blocked_wait_time_us = requested_wait
                         break
 
                     # We have capacity - send immediately
@@ -1134,7 +1129,7 @@ class Streamer:
                     self._dequeue_chunk(player_state, chunk)
 
             # Stage 3b: Handle backpressure - compare client buffer wait vs source buffer urgency
-            if earliest_blocked_player_unblock_time > 0:
+            if earliest_blocked_wait_time_us > 0:
                 ### Extract to _get_earliest_channel_wait_time_us() helper (also in Stage 6b)
                 ### Refactor this section to be more "compact"?
                 # Calculate when source buffers will need refilling using helper method
@@ -1153,7 +1148,7 @@ class Streamer:
                 # If source_buffer_wait_us is None, it means at least one channel is empty
                 if (
                     earliest_channel_wait_time_us is None
-                    or earliest_channel_wait_time_us < earliest_blocked_player_unblock_time
+                    or earliest_channel_wait_time_us < earliest_blocked_wait_time_us
                 ):
                     # Source buffer is more urgent - wait for it, then exit to refill
                     if earliest_channel_wait_time_us and earliest_channel_wait_time_us > 0:
@@ -1162,14 +1157,7 @@ class Streamer:
                     break  # Exit to refill source buffer
 
                 # Client buffer is more urgent - wait for it, then continue sending
-                assert earliest_blocked_player is not None
-                tracker = earliest_blocked_player.buffer_tracker
-                if tracker is not None:
-                    ### Refactor time_for_capacity to time_until_capacity?
-                    ### Then we could remove earliest_blocked_chunk_size, and manually
-                    ### call sleep here based on the current loop time
-                    ### I think we wouldn't need earliest_blocked_player/tracker then either
-                    await tracker.wait_for_capacity(earliest_blocked_chunk_size)
+                await asyncio.sleep(earliest_blocked_wait_time_us / 1_000_000)
                 continue  # More work to do, loop again
 
             # Stage 4: Cleanup
