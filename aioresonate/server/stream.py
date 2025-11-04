@@ -482,6 +482,10 @@ class Streamer:
         self._pipelines = {}
         self._players = {}
 
+    def _now_us(self) -> int:
+        """Get current time in microseconds."""
+        return int(self._loop.time() * 1_000_000)
+
     def _cleanup_consumed_chunks(self, pipeline: PipelineState) -> None:
         """Clean up consumed chunks from a pipeline.
 
@@ -603,7 +607,7 @@ class Streamer:
             player_channel_result = await media_stream.player_channel(
                 player_id=player_id,
                 preferred_format=player_config.target_format,
-                position_us=int(self._loop.time() * 1_000_000) - self._play_start_time_us,
+                position_us=self._now_us() - self._play_start_time_us,
             )
         except Exception:
             logger.exception(
@@ -629,7 +633,7 @@ class Streamer:
             first_chunk_start_us = self._play_start_time_us + int(
                 initial_samples * 1_000_000 / channel_format.sample_rate
             )
-            now_us = int(self._loop.time() * 1_000_000)
+            now_us = self._now_us()
             delay_s = (first_chunk_start_us - now_us) / 1_000_000
 
             logger.info(
@@ -861,7 +865,7 @@ class Streamer:
             return True
 
         # Check if wait time is zero, means that it needs data now
-        return self._channel_wait_time_us(channel_state, int(self._loop.time() * 1_000_000)) == 0
+        return self._channel_wait_time_us(channel_state, self._now_us()) == 0
 
     def prepare(
         self, channel_id: UUID, chunk: bytes, *, during_initial_buffering: bool = False
@@ -943,7 +947,7 @@ class Streamer:
         )
 
         # Check if this chunk would be stale
-        now_us = int(self._loop.time() * 1_000_000)
+        now_us = self._now_us()
 
         if start_us < now_us + self._min_send_margin_us:
             # Adjust timing globally (checks all channels)
@@ -1057,7 +1061,7 @@ class Streamer:
                 self._skip_stale_check_once = False
             else:
                 # Dedicated player channels can have arbitrary timestamps from player_channel()
-                now_us = int(self._loop.time() * 1_000_000)
+                now_us = self._now_us()
                 min_send_margin_us = 100_000  # 100ms for network + client processing
 
                 # Find the earliest chunk on MAIN_CHANNEL only
@@ -1136,7 +1140,7 @@ class Streamer:
                 ### Extract to _get_earliest_channel_wait_time_us() helper (also in Stage 6b)
                 ### Refactor this section to be more "compact"?
                 # Calculate when source buffers will need refilling using helper method
-                now_us = int(self._loop.time() * 1_000_000)
+                now_us = self._now_us()
                 earliest_channel_wait_time_us = None
 
                 for channel in self._channels.values():
@@ -1181,7 +1185,7 @@ class Streamer:
             # Stage 5b: Wait for source buffer to drain below target
             ### Extract to _get_earliest_channel_wait_time_us() helper (also in Stage 3b)
             # Calculate when source buffers will need refilling using helper method
-            now_us = int(self._loop.time() * 1_000_000)
+            now_us = self._now_us()
             earliest_channel_wait_time_us = None
 
             for channel in self._channels.values():
@@ -1240,7 +1244,7 @@ class Streamer:
         Prepared chunks are managed separately by refcount in send().
         """
         # Prune source buffer based on playback time
-        now_us = int(self._loop.time() * 1_000_000)
+        now_us = self._now_us()
 
         for channel_id, channel_state in self._channels.items():
             chunks_removed = 0
