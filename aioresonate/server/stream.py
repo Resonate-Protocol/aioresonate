@@ -721,6 +721,7 @@ class Streamer:
             - start_payloads: Dict mapping client IDs to StreamStartPlayer messages
             - new_channel_sources: Dict mapping channel IDs to source generators for new channels
         """
+        ### Extract topology resolution to _resolve_topology() returning StreamTopology dataclass
         # === RESOLVE TOPOLOGY ===
         # Build topology: determine which players are new, query channels
         channel_formats: dict[UUID, AudioFormat] = {MAIN_CHANNEL_ID: media_stream.main_channel[1]}
@@ -1203,6 +1204,7 @@ class Streamer:
                 if player_state.needs_catchup:
                     self._perform_catchup(player_state)
 
+            ### Extract to _check_and_adjust_stale_main_channel() helper
             # Stage 2: Check for stale chunks on MAIN_CHANNEL only
             # Skip this check for one iteration after reconfigure to avoid false positives
             # when newly joined players have chunks with past timestamps
@@ -1244,6 +1246,7 @@ class Streamer:
                     # After adjustment, continue to next iteration with updated timing
                     continue
 
+            ### Extract to _send_chunks_to_all_players() helper
             # Stage 3: Send chunks to players with backpressure control
             ### think of better variable names, should still all 3 be referring to the player
             earliest_blocked_player: PlayerState | None = None
@@ -1293,6 +1296,7 @@ class Streamer:
 
             # Stage 3b: Handle backpressure - compare client buffer wait vs source buffer urgency
             if earliest_blocked_player_unblock_time > 0:
+                ### Extract to _get_earliest_channel_wait_time_us() helper (also in Stage 6b)
                 ### Refactor this section to be more "compact"?
                 # Calculate when source buffers will need refilling using helper method
                 now_us = int(self._loop.time() * 1_000_000)
@@ -1357,7 +1361,9 @@ class Streamer:
                 # send() ran out of work to do, exit so prepare() can be called to fill buffers
                 break
 
+            ### Extract to _wait_for_source_buffer_drain() helper
             # Stage 6b: Wait for source buffer to drain below target
+            ### Extract to _get_earliest_channel_wait_time_us() helper (also in Stage 3b)
             # Calculate when source buffers will need refilling using helper method
             now_us = int(self._loop.time() * 1_000_000)
             earliest_channel_wait_time_us = None
