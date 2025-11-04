@@ -464,8 +464,8 @@ class Streamer:
     """End timestamp of the most recently prepared chunk, None if no chunks prepared yet."""
     _source_buffer_target_duration_us: int = 5_000_000
     """Target duration for source buffer in microseconds."""
-    _min_send_margin_us: int = 1_000_000
-    """Minimum time margin before playback for stale chunk detection (1 second)."""
+    _prepare_buffer_margin_us: int = 1_000_000
+    """Time margin for stale chunk detection during prepare() (1 second)."""
     _skip_stale_check_once: bool = False
     """Skip stale check for one iteration after reconfigure to avoid false positives."""
 
@@ -967,7 +967,7 @@ class Streamer:
         # Check if this chunk would be stale
         now_us = self._now_us()
 
-        if start_us < now_us + self._min_send_margin_us:
+        if start_us < now_us + self._prepare_buffer_margin_us:
             # Adjust timing globally (checks all channels)
             self._adjust_timing_for_stale_chunk(now_us, start_us)
             # Recalculate timestamps after adjustment
@@ -1010,7 +1010,7 @@ class Streamer:
         current_buffer_us = min_buffer_us if min_buffer_us is not None else 0
 
         # Calculate minimum adjustment needed to give this chunk proper headroom
-        headroom_shortfall_us = (now_us + self._min_send_margin_us) - chunk_start_us
+        headroom_shortfall_us = (now_us + self._prepare_buffer_margin_us) - chunk_start_us
 
         # Determine total adjustment based on buffer status
         if current_buffer_us >= target_buffer_us:
@@ -1080,7 +1080,7 @@ class Streamer:
             else:
                 # Dedicated player channels can have arbitrary timestamps from player_channel()
                 now_us = self._now_us()
-                min_send_margin_us = 100_000  # 100ms for network + client processing
+                send_transmission_margin_us = 100_000  # 100ms for network + client processing
 
                 # Find the earliest chunk on MAIN_CHANNEL only
                 earliest_main_chunk_start = min(
@@ -1095,7 +1095,7 @@ class Streamer:
                 # If main channel chunk is stale, adjust timing globally
                 if (
                     earliest_main_chunk_start is not None
-                    and earliest_main_chunk_start < now_us + min_send_margin_us
+                    and earliest_main_chunk_start < now_us + send_transmission_margin_us
                 ):
                     logger.warning(
                         "Main channel chunk is stale (starts at %d us, now is %d us). "
