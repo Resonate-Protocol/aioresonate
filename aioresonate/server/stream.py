@@ -1106,7 +1106,6 @@ class Streamer:
                     # After adjustment, continue to next iteration with updated timing
                     continue
 
-            ### Extract to _send_chunks_to_all_players() helper
             # Stage 3: Send chunks to players with backpressure control
             ### TODO: Add queue depth limit protection - slow players accumulate unbounded queues
             ###       since prepare() publishes to all subscribers regardless of send rate.
