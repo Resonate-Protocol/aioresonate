@@ -867,6 +867,23 @@ class Streamer:
         # Check if wait time is zero, means that it needs data now
         return self._channel_wait_time_us(channel_state, self._now_us()) == 0
 
+    def _get_earliest_channel_wait_time_us(self) -> int | None:
+        """
+        Calculate the earliest wait time across all channels.
+
+        Returns:
+            Earliest wait time in microseconds, or None if any channel is empty.
+        """
+        now_us = self._now_us()
+        earliest_wait_us = None
+
+        for channel in self._channels.values():
+            wait_us = self._channel_wait_time_us(channel, now_us)
+            if earliest_wait_us is None or wait_us < earliest_wait_us:
+                earliest_wait_us = wait_us
+
+        return earliest_wait_us
+
     def prepare(
         self, channel_id: UUID, chunk: bytes, *, during_initial_buffering: bool = False
     ) -> None:
@@ -1030,7 +1047,7 @@ class Streamer:
                 prepared_chunk.start_time_us += timing_adjustment_us
                 prepared_chunk.end_time_us += timing_adjustment_us
 
-    async def send(self) -> None:  # noqa: PLR0915
+    async def send(self) -> None:
         """
         Send prepared audio to all clients with perfect group synchronization.
 
@@ -1126,35 +1143,17 @@ class Streamer:
 
             # Stage 3b: Handle backpressure - compare client buffer wait vs source buffer urgency
             if earliest_blocked_wait_time_us > 0:
-                ### Extract to _get_earliest_channel_wait_time_us() helper (also in Stage 6b)
-                ### Refactor this section to be more "compact"?
-                # Calculate when source buffers will need refilling using helper method
-                now_us = self._now_us()
-                earliest_channel_wait_time_us = None
+                channel_wait_us = self._get_earliest_channel_wait_time_us() or 0
 
-                for channel in self._channels.values():
-                    wait_us = self._channel_wait_time_us(channel, now_us)
-                    if (
-                        earliest_channel_wait_time_us is None
-                        or wait_us < earliest_channel_wait_time_us
-                    ):
-                        earliest_channel_wait_time_us = wait_us
+                if channel_wait_us < earliest_blocked_wait_time_us:
+                    # Source buffer more urgent - wait then exit to refill
+                    if channel_wait_us:
+                        await asyncio.sleep(channel_wait_us / 1_000_000)
+                    break
 
-                # Choose the more urgent wait
-                # If source_buffer_wait_us is None, it means at least one channel is empty
-                if (
-                    earliest_channel_wait_time_us is None
-                    or earliest_channel_wait_time_us < earliest_blocked_wait_time_us
-                ):
-                    # Source buffer is more urgent - wait for it, then exit to refill
-                    if earliest_channel_wait_time_us and earliest_channel_wait_time_us > 0:
-                        sleep_duration_s = earliest_channel_wait_time_us / 1_000_000
-                        await asyncio.sleep(sleep_duration_s)
-                    break  # Exit to refill source buffer
-
-                # Client buffer is more urgent - wait for it, then continue sending
+                # Client buffer more urgent - wait then continue sending
                 await asyncio.sleep(earliest_blocked_wait_time_us / 1_000_000)
-                continue  # More work to do, loop again
+                continue
 
             # Stage 4: Cleanup
             self._prune_old_data()
@@ -1169,24 +1168,15 @@ class Streamer:
                 # If client work pending, continue immediately
                 continue
 
-            ### Extract to _wait_for_source_buffer_drain() helper
             # Stage 5b: Wait for source buffer to drain below target
-            ### Extract to _get_earliest_channel_wait_time_us() helper (also in Stage 3b)
-            # Calculate when source buffers will need refilling using helper method
-            now_us = self._now_us()
-            earliest_channel_wait_time_us = None
+            channel_wait_us = self._get_earliest_channel_wait_time_us() or 0
 
-            for channel in self._channels.values():
-                wait_us = self._channel_wait_time_us(channel, now_us)
-                if earliest_channel_wait_time_us is None or wait_us < earliest_channel_wait_time_us:
-                    earliest_channel_wait_time_us = wait_us
-
-            # If no channels (shouldn't happen) or immediate need, exit to refill
-            if earliest_channel_wait_time_us is None or earliest_channel_wait_time_us == 0:
+            # If no channels or immediate need, exit to refill
+            if channel_wait_us == 0:
                 break
 
             # Wait for source buffer to drain
-            await asyncio.sleep(earliest_channel_wait_time_us / 1_000_000)
+            await asyncio.sleep(channel_wait_us / 1_000_000)
 
     def flush(self) -> None:
         """Flush all pipelines, preparing any buffered data for sending."""
