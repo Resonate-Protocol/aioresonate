@@ -1047,7 +1047,7 @@ class Streamer:
                 prepared_chunk.start_time_us += timing_adjustment_us
                 prepared_chunk.end_time_us += timing_adjustment_us
 
-    async def send(self) -> None:  # noqa: PLR0915
+    async def send(self) -> None:
         """
         Send prepared audio to all clients with perfect group synchronization.
 
@@ -1107,49 +1107,7 @@ class Streamer:
                     continue
 
             # Stage 3: Send chunks to players with backpressure control
-            earliest_blocked_wait_time_us = 0
-            players_to_remove = []
-
-            for player_state in self._players.values():
-                tracker = player_state.buffer_tracker
-                if tracker is None:
-                    continue
-                queue = player_state.queue
-
-                # Send as many chunks as possible for this player
-                while queue:
-                    chunk = queue[0]
-
-                    # Check if we can send without waiting
-                    if requested_wait := tracker.time_until_capacity(chunk.byte_count):
-                        # This player is blocked, track the earliest unblock time
-                        if (
-                            earliest_blocked_wait_time_us == 0
-                            or requested_wait < earliest_blocked_wait_time_us
-                        ):
-                            earliest_blocked_wait_time_us = requested_wait
-                        break
-
-                    # We have capacity - send immediately
-                    header = pack_binary_header_raw(
-                        BinaryMessageType.AUDIO_CHUNK.value, chunk.start_time_us
-                    )
-                    try:
-                        player_state.config.send(header + chunk.data)
-                    except Exception:
-                        logger.exception(
-                            "Failed to send chunk to player %s. Removing player.",
-                            player_state.config.client_id,
-                        )
-                        players_to_remove.append(player_state.config.client_id)
-                        break
-                    tracker.register(chunk.end_time_us, chunk.byte_count)
-                    self._dequeue_chunk(player_state, chunk)
-
-            # Remove players that failed to send
-            for player_id in players_to_remove:
-                player_state = self._players.pop(player_id)
-                self._cleanup_player_refcounts(player_state)
+            earliest_blocked_wait_time_us = self._send_chunks_to_players()
 
             # Stage 3b: Handle backpressure - compare client buffer wait vs source buffer urgency
             if earliest_blocked_wait_time_us > 0:
@@ -1223,6 +1181,58 @@ class Streamer:
         pipeline = self._pipelines[(player_state.channel_id, player_state.audio_format)]
         if chunk.refcount == 0 and pipeline.prepared and pipeline.prepared[0] is chunk:
             pipeline.prepared.popleft()
+
+    def _send_chunks_to_players(self) -> int:
+        """Send chunks to all players with backpressure control.
+
+        Returns:
+            Earliest blocked wait time in microseconds (0 if no players blocked).
+        """
+        earliest_blocked_wait_time_us = 0
+        players_to_remove = []
+
+        for player_state in self._players.values():
+            tracker = player_state.buffer_tracker
+            if tracker is None:
+                continue
+            queue = player_state.queue
+
+            # Send as many chunks as possible for this player
+            while queue:
+                chunk = queue[0]
+
+                # Check if we can send without waiting
+                if requested_wait := tracker.time_until_capacity(chunk.byte_count):
+                    # This player is blocked, track the earliest unblock time
+                    if (
+                        earliest_blocked_wait_time_us == 0
+                        or requested_wait < earliest_blocked_wait_time_us
+                    ):
+                        earliest_blocked_wait_time_us = requested_wait
+                    break
+
+                # We have capacity - send immediately
+                header = pack_binary_header_raw(
+                    BinaryMessageType.AUDIO_CHUNK.value, chunk.start_time_us
+                )
+                try:
+                    player_state.config.send(header + chunk.data)
+                except Exception:
+                    logger.exception(
+                        "Failed to send chunk to player %s. Removing player.",
+                        player_state.config.client_id,
+                    )
+                    players_to_remove.append(player_state.config.client_id)
+                    break
+                tracker.register(chunk.end_time_us, chunk.byte_count)
+                self._dequeue_chunk(player_state, chunk)
+
+        # Remove players that failed to send
+        for player_id in players_to_remove:
+            player_state = self._players.pop(player_id)
+            self._cleanup_player_refcounts(player_state)
+
+        return earliest_blocked_wait_time_us
 
     def _prune_old_data(self) -> None:
         """
