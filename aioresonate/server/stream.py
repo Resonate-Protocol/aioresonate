@@ -1050,7 +1050,6 @@ class Streamer:
                 if player_state.needs_catchup:
                     self._perform_catchup(player_state)
 
-            ### Extract to _check_and_adjust_stale_main_channel() helper
             # Stage 2: Check for stale chunks on MAIN_CHANNEL only
             # Skip this check for one iteration after reconfigure to avoid false positives
             # when newly joined players have chunks with past timestamps
@@ -1061,19 +1060,15 @@ class Streamer:
                 now_us = int(self._loop.time() * 1_000_000)
                 min_send_margin_us = 100_000  # 100ms for network + client processing
 
-                ### Can we remove this? don't we already have stale chunk detection and adjustment
-                ### in other places already? we could then just delete
-                ### _adjust_timing_for_stale_chunk_all_channels
                 # Find the earliest chunk on MAIN_CHANNEL only
-                earliest_main_chunk_start: int | None = None
-                for player_state in self._players.values():
-                    if player_state.channel_id == MAIN_CHANNEL_ID and player_state.queue:
-                        chunk = player_state.queue[0]
-                        if (
-                            earliest_main_chunk_start is None
-                            or chunk.start_time_us < earliest_main_chunk_start
-                        ):
-                            earliest_main_chunk_start = chunk.start_time_us
+                earliest_main_chunk_start = min(
+                    (
+                        ps.queue[0].start_time_us
+                        for ps in self._players.values()
+                        if ps.channel_id == MAIN_CHANNEL_ID and ps.queue
+                    ),
+                    default=None,
+                )
 
                 # If main channel chunk is stale, adjust timing globally
                 if (
