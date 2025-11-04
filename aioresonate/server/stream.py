@@ -1047,7 +1047,7 @@ class Streamer:
                 prepared_chunk.start_time_us += timing_adjustment_us
                 prepared_chunk.end_time_us += timing_adjustment_us
 
-    async def send(self) -> None:
+    async def send(self) -> None:  # noqa: PLR0915
         """
         Send prepared audio to all clients with perfect group synchronization.
 
@@ -1107,10 +1107,8 @@ class Streamer:
                     continue
 
             # Stage 3: Send chunks to players with backpressure control
-            ### TODO: Add queue depth limit protection - slow players accumulate unbounded queues
-            ###       since prepare() publishes to all subscribers regardless of send rate.
-            ###       Detect and evict falling-behind players to prevent memory exhaustion.
             earliest_blocked_wait_time_us = 0
+            players_to_remove = []
 
             for player_state in self._players.values():
                 tracker = player_state.buffer_tracker
@@ -1136,9 +1134,22 @@ class Streamer:
                     header = pack_binary_header_raw(
                         BinaryMessageType.AUDIO_CHUNK.value, chunk.start_time_us
                     )
-                    player_state.config.send(header + chunk.data)
+                    try:
+                        player_state.config.send(header + chunk.data)
+                    except Exception:
+                        logger.exception(
+                            "Failed to send chunk to player %s. Removing player.",
+                            player_state.config.client_id,
+                        )
+                        players_to_remove.append(player_state.config.client_id)
+                        break
                     tracker.register(chunk.end_time_us, chunk.byte_count)
                     self._dequeue_chunk(player_state, chunk)
+
+            # Remove players that failed to send
+            for player_id in players_to_remove:
+                player_state = self._players.pop(player_id)
+                self._cleanup_player_refcounts(player_state)
 
             # Stage 3b: Handle backpressure - compare client buffer wait vs source buffer urgency
             if earliest_blocked_wait_time_us > 0:
