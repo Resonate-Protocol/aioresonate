@@ -902,7 +902,7 @@ class Streamer:
         # Check and adjust for stale chunks (skip during initial buffering)
         if not during_initial_buffering and not self._skip_stale_check_once:
             start_us, end_us = self._check_and_adjust_for_stale_chunk(
-                channel_id, channel_state, start_samples, sample_count
+                channel_state, start_samples, sample_count
             )
             # _skip_stale_check_once flag will be reset after first send() call
         else:
@@ -936,7 +936,6 @@ class Streamer:
 
     def _check_and_adjust_for_stale_chunk(
         self,
-        channel_id: UUID,
         channel_state: ChannelState,
         start_samples: int,
         sample_count: int,
@@ -945,7 +944,6 @@ class Streamer:
         Check if the next chunk would be stale and adjust timing if needed.
 
         Args:
-            channel_id: ID of the channel.
             channel_state: The channel state for this chunk.
             start_samples: Sample position where the chunk starts.
             sample_count: Number of samples in the chunk.
@@ -961,15 +959,9 @@ class Streamer:
         # Check if this chunk would be stale
         now_us = int(self._loop.time() * 1_000_000)
 
-        ### Test if this is not true anymore, since we have _skip_stale_check_once now
-        ### I think we can now check all chennels always
-        # Only apply global timing adjustments for the main channel
-        # Dedicated player channels with offsets should not trigger global adjustments
-        # as this would desynchronize all channels. Stale chunks from offset channels
-        # will be naturally skipped by send().
-        if start_us < now_us + self._min_send_margin_us and channel_id == MAIN_CHANNEL_ID:
-            # Adjust timing globally
-            self._adjust_timing_for_stale_chunk(channel_id, now_us, start_us)
+        if start_us < now_us + self._min_send_margin_us:
+            # Adjust timing globally (checks all channels)
+            self._adjust_timing_for_stale_chunk(now_us, start_us)
             # Recalculate timestamps after adjustment
             start_us = self._play_start_time_us + int(
                 start_samples
@@ -985,26 +977,29 @@ class Streamer:
 
         return start_us, end_us
 
-    def _adjust_timing_for_stale_chunk(
-        self, channel_id: UUID, now_us: int, chunk_start_us: int
-    ) -> None:
+    def _adjust_timing_for_stale_chunk(self, now_us: int, chunk_start_us: int) -> None:
         """
         Adjust timing when a stale chunk is detected.
 
+        Checks all channels and uses minimum buffer depth for conservative adjustment
+        that keeps all channels in sync.
+
         Args:
-            channel_id: ID of the channel.
             now_us: Current time in microseconds.
             chunk_start_us: Start time of the stale chunk.
         """
-        channel_state = self._channels[channel_id]
         target_buffer_us = self._source_buffer_target_duration_us
 
-        # Calculate current buffer depth (from now to end of buffer)
-        current_buffer_us = 0
-        if channel_state.source_buffer:
-            # Buffer depth is from now to the end of the last buffered chunk
-            last_chunk_end = channel_state.source_buffer[-1].end_time_us
-            current_buffer_us = max(0, last_chunk_end - now_us)
+        # Calculate minimum buffer depth across all channels
+        min_buffer_us = None
+        for channel_state in self._channels.values():
+            if channel_state.source_buffer:
+                last_chunk_end = channel_state.source_buffer[-1].end_time_us
+                current_buffer_us = max(0, last_chunk_end - now_us)
+                if min_buffer_us is None or current_buffer_us < min_buffer_us:
+                    min_buffer_us = current_buffer_us
+
+        current_buffer_us = min_buffer_us if min_buffer_us is not None else 0
 
         # Calculate minimum adjustment needed to give this chunk proper headroom
         headroom_shortfall_us = (now_us + self._min_send_margin_us) - chunk_start_us
@@ -1019,11 +1014,9 @@ class Streamer:
             # Use the larger of headroom need and buffer need
             timing_adjustment_us = max(headroom_shortfall_us, buffer_shortfall_us)
 
-        logger.info("Detected slow source channel, adjusting timing to prevent skipping.")
+        logger.info("Detected slow source, adjusting timing to prevent skipping.")
         logger.debug(
-            "Adjusting timing from slow channel %s: needs %.3fs headroom, "
-            "have %.3fs buffer (adjusting %.3fs)",
-            channel_id,
+            "Adjusting timing: needs %.3fs headroom, have %.3fs buffer (adjusting %.3fs)",
             headroom_shortfall_us / 1_000_000,
             current_buffer_us / 1_000_000,
             timing_adjustment_us / 1_000_000,
@@ -1106,80 +1099,6 @@ class Streamer:
                         )
                         raise AssertionError(msg)
 
-    ### Seems like duplicated code with _adjust_timing_for_stale_chunk, maybe remove this and just
-    ### use that _adjust_timing_for_stale_chunk everywhere?
-    def _adjust_timing_for_stale_chunk_all_channels(self, now_us: int, chunk_start_us: int) -> None:
-        """
-        Adjust timing globally when a stale chunk is detected (for all channels).
-
-        This method adjusts play_start_time_us forward to prevent chunk skipping,
-        ensuring all players stay synchronized even when timing adjustments are needed.
-        Unlike _adjust_timing_for_stale_chunk, this applies to ALL channels.
-
-        Args:
-            now_us: Current time in microseconds.
-            chunk_start_us: Start time of the stale chunk.
-        """
-        target_buffer_us = self._source_buffer_target_duration_us
-
-        # Calculate adjustment needed across all channels
-        max_buffer_us = 0
-        min_buffer_us = None
-        for channel_state in self._channels.values():
-            if channel_state.source_buffer:
-                last_chunk_end = channel_state.source_buffer[-1].end_time_us
-                current_buffer_us = max(0, last_chunk_end - now_us)
-                max_buffer_us = max(max_buffer_us, current_buffer_us)
-                if min_buffer_us is None or current_buffer_us < min_buffer_us:
-                    min_buffer_us = current_buffer_us
-
-        # Calculate minimum adjustment needed to give this chunk proper headroom
-        headroom_shortfall_us = (now_us + self._min_send_margin_us) - chunk_start_us
-
-        # Determine total adjustment based on buffer status
-        if min_buffer_us is not None and min_buffer_us >= target_buffer_us:
-            # We already have enough buffer, just ensure headroom
-            timing_adjustment_us = headroom_shortfall_us
-            logger.debug(
-                "Adjusting timing globally: needs %.3fs headroom, "
-                "have %.3fs min buffer (adjusting %.3fs)",
-                headroom_shortfall_us / 1_000_000,
-                min_buffer_us / 1_000_000,
-                timing_adjustment_us / 1_000_000,
-            )
-        else:
-            # Need to build buffer to target level
-            current_buffer_us = min_buffer_us if min_buffer_us is not None else 0
-            buffer_shortfall_us = target_buffer_us - current_buffer_us
-            # Use the larger of headroom need and buffer need
-            timing_adjustment_us = max(headroom_shortfall_us, buffer_shortfall_us)
-            logger.debug(
-                "Adjusting timing globally: needs %.3fs headroom, "
-                "have %.3fs min buffer, target %.3fs (adjusting %.3fs)",
-                headroom_shortfall_us / 1_000_000,
-                current_buffer_us / 1_000_000,
-                target_buffer_us / 1_000_000,
-                timing_adjustment_us / 1_000_000,
-            )
-
-        # Adjust timing forward
-        self._play_start_time_us += timing_adjustment_us
-
-        # Update source buffer chunk timestamps for all channels
-        for ch_state in self._channels.values():
-            for source_chunk in ch_state.source_buffer:
-                source_chunk.start_time_us += timing_adjustment_us
-                source_chunk.end_time_us += timing_adjustment_us
-
-        # Update pipeline timestamps and prepared chunks for all pipelines
-        for pipeline in self._pipelines.values():
-            if pipeline.next_chunk_start_us is not None:
-                pipeline.next_chunk_start_us += timing_adjustment_us
-            # Update timestamps of already-prepared chunks to prevent cascading adjustments
-            for prepared_chunk in pipeline.prepared:
-                prepared_chunk.start_time_us += timing_adjustment_us
-                prepared_chunk.end_time_us += timing_adjustment_us
-
     async def send(self) -> None:  # noqa: PLR0915, PLR0912, C901
         """
         Send prepared audio to all clients with perfect group synchronization.
@@ -1241,9 +1160,7 @@ class Streamer:
                         earliest_main_chunk_start,
                         now_us,
                     )
-                    self._adjust_timing_for_stale_chunk_all_channels(
-                        now_us, earliest_main_chunk_start
-                    )
+                    self._adjust_timing_for_stale_chunk(now_us, earliest_main_chunk_start)
                     # After adjustment, continue to next iteration with updated timing
                     continue
 
