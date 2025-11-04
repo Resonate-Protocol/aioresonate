@@ -1157,8 +1157,11 @@ class Streamer:
             if pipeline.encoder is not None:
                 packets = pipeline.encoder.encode(None)
                 for packet in packets:
-                    # Skip packets with invalid duration from encoder flush
                     if not packet.duration or packet.duration <= 0:
+                        logger.warning(
+                            "Skipping packet with invalid duration %r during encoder flush",
+                            packet.duration,
+                        )
                         continue
                     # Calculate timestamps for each flushed packet from its duration
                     start_us, end_us = self._calculate_chunk_timestamps(pipeline, packet.duration)
