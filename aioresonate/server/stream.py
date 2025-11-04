@@ -6,7 +6,7 @@ import asyncio
 import base64
 import logging
 from collections import deque
-from collections.abc import AsyncGenerator, Callable, Iterable, Mapping
+from collections.abc import AsyncGenerator, Callable
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import NamedTuple, cast
@@ -494,6 +494,209 @@ class Streamer:
         while pipeline.prepared and pipeline.prepared[0].refcount == 0:
             pipeline.prepared.popleft()
 
+    def _cleanup_player_refcounts(self, player_state: PlayerState) -> None:
+        """Clean up refcounts when removing or reconfiguring a player."""
+        for chunk in player_state.queue:
+            chunk.refcount -= 1
+        player_state.queue.clear()
+        # Clean up consumed chunks from old pipeline
+        if old_pipeline := self._pipelines.get(
+            (player_state.channel_id, player_state.audio_format)
+        ):
+            self._cleanup_consumed_chunks(old_pipeline)
+
+    def _create_or_update_player(
+        self,
+        client_cfg: ClientStreamConfig,
+        pipeline: PipelineState,
+        channel_id: UUID,
+        audio_format: AudioFormat,
+    ) -> PlayerState | None:
+        """Create new player or update existing one, handling format changes.
+
+        Returns:
+            PlayerState if a new player was created, None if existing player was reused.
+        """
+        old_player = self._players.get(client_cfg.client_id)
+
+        # Reuse existing player if format unchanged
+        if old_player and old_player.audio_format == audio_format:
+            old_player.config = client_cfg
+            return None  # Signal that existing player should be reused
+
+        # Format changed - clean up old queue refcounts
+        if old_player and old_player.audio_format != audio_format:
+            self._cleanup_player_refcounts(old_player)
+
+        # Create new player or reconfigure existing one
+        buffer_tracker = (
+            old_player.buffer_tracker
+            if old_player
+            else BufferTracker(
+                loop=self._loop,
+                client_id=client_cfg.client_id,
+                capacity_bytes=client_cfg.buffer_capacity_bytes,
+            )
+        )
+
+        # Find synchronized join point based on SOURCE CHANNEL
+        # Use the earliest prepared chunk across ALL pipelines on this channel
+        # This ensures late joiners start from the beginning of available audio,
+        # not from where existing players' queues currently are (which would skip
+        # already-sent chunks that are still playing on those clients)
+        sync_point_start_time_us: int | None = None
+
+        # Check all pipelines consuming from this channel for their earliest prepared chunk
+        for (pipe_channel_id, _), pipe in self._pipelines.items():
+            if pipe_channel_id == channel_id and pipe.prepared:
+                chunk_start = pipe.prepared[0].start_time_us
+                if sync_point_start_time_us is None or chunk_start < sync_point_start_time_us:
+                    sync_point_start_time_us = chunk_start
+
+        # Fallback to play_start_time_us if no prepared chunks exist yet (initial startup)
+        # This ensures chunks timestamped relative to play_start_time_us will be queued
+        if sync_point_start_time_us is None:
+            sync_point_start_time_us = self._play_start_time_us
+
+        player_state = PlayerState(
+            config=client_cfg,
+            audio_format=audio_format,
+            channel_id=channel_id,
+            buffer_tracker=buffer_tracker,
+            join_time_us=sync_point_start_time_us,
+        )
+
+        # Queue chunks starting from the sync point
+        for chunk in pipeline.prepared:
+            if chunk.start_time_us >= sync_point_start_time_us:
+                player_state.queue.append(chunk)
+                chunk.refcount += 1
+
+        # No catchup needed since we're starting at the sync point
+        player_state.needs_catchup = False
+
+        return player_state
+
+    async def _query_player_channel(
+        self,
+        player_id: str,
+        player_config: ClientStreamConfig,
+        media_stream: MediaStream,
+        channel_formats: dict[UUID, AudioFormat],
+        new_channel_sources: dict[UUID, AsyncGenerator[bytes, None]],
+        player_channel_assignments: dict[str, UUID],
+        channel_initial_samples: dict[UUID, int],
+    ) -> None:
+        """Query player channel from MediaStream and update topology dictionaries.
+
+        Args:
+            player_id: ID of the player to query.
+            player_config: Configuration for the player.
+            media_stream: Media stream to query for player channel.
+            channel_formats: Dict to update with channel formats.
+            new_channel_sources: Dict to update with channel sources.
+            player_channel_assignments: Dict to update with player assignments.
+            channel_initial_samples: Dict to update with initial sample counts.
+        """
+        # Try to get player-specific channel with error handling
+        try:
+            player_channel_result = await media_stream.player_channel(
+                player_id=player_id,
+                preferred_format=player_config.target_format,
+                position_us=int(self._loop.time() * 1_000_000) - self._play_start_time_us,
+            )
+        except Exception:
+            logger.exception(
+                "Failed to query player_channel for %s, falling back to main channel",
+                player_id,
+            )
+            player_channel_result = None
+
+        if player_channel_result is not None:
+            source, channel_format, actual_pos_us = player_channel_result
+            channel_id = uuid4()
+
+            # Add new channel
+            channel_formats[channel_id] = channel_format
+            new_channel_sources[channel_id] = source
+            player_channel_assignments[player_id] = channel_id
+
+            # Calculate and store position offset
+            initial_samples = round(actual_pos_us * channel_format.sample_rate / 1_000_000)
+            channel_initial_samples[channel_id] = initial_samples
+
+            # Calculate when the first chunk from this channel will play
+            first_chunk_start_us = self._play_start_time_us + int(
+                initial_samples * 1_000_000 / channel_format.sample_rate
+            )
+            now_us = int(self._loop.time() * 1_000_000)
+            delay_s = (first_chunk_start_us - now_us) / 1_000_000
+
+            logger.info(
+                "Player %s assigned to dedicated channel with offset %d us (%.3f s). "
+                "First chunk will play in %.3f seconds from now.",
+                player_id,
+                actual_pos_us,
+                actual_pos_us / 1_000_000,
+                delay_s,
+            )
+        else:
+            # Fallback to main channel
+            player_channel_assignments[player_id] = MAIN_CHANNEL_ID
+            logger.info("Player %s assigned to main channel", player_id)
+
+    def _get_or_create_pipeline(self, channel_id: UUID, audio_format: AudioFormat) -> PipelineState:
+        """Get existing pipeline or create new one for channel/format combination."""
+        pipeline_key = (channel_id, audio_format)
+        pipeline = self._pipelines.get(pipeline_key)
+        if pipeline is not None:
+            return pipeline
+
+        # Create new pipeline for this channel/format
+        channel_state = self._channels[channel_id]
+        source_format_params = channel_state.source_format_params
+
+        target_bytes_per_sample, target_av_format, target_layout = _resolve_audio_format(
+            audio_format
+        )
+
+        resampler = av.AudioResampler(
+            format=target_av_format,
+            layout=target_layout,
+            rate=audio_format.sample_rate,
+        )
+        encoder, codec_header_b64, chunk_samples = build_encoder_for_format(
+            audio_format,
+            input_audio_layout=target_layout,
+            input_audio_format=target_av_format,
+        )
+        pipeline = PipelineState(
+            source_format_params=source_format_params,
+            channel_id=channel_id,
+            target_format=audio_format,
+            target_frame_stride=target_bytes_per_sample * audio_format.channels,
+            target_av_format=target_av_format,
+            target_layout=target_layout,
+            chunk_samples=chunk_samples,
+            resampler=resampler,
+            encoder=encoder,
+            codec_header_b64=codec_header_b64,
+        )
+        self._pipelines[pipeline_key] = pipeline
+        return pipeline
+
+    def _build_start_payload(
+        self, client_cfg: ClientStreamConfig, pipeline: PipelineState
+    ) -> StreamStartPlayer:
+        """Build StreamStartPlayer message for client."""
+        return StreamStartPlayer(
+            codec=client_cfg.target_format.codec.value,
+            sample_rate=client_cfg.target_format.sample_rate,
+            channels=client_cfg.target_format.channels,
+            bit_depth=client_cfg.target_format.bit_depth,
+            codec_header=pipeline.codec_header_b64,
+        )
+
     ### carefully review the merged configure + _apply_topology method
     async def configure(
         self,
@@ -518,6 +721,7 @@ class Streamer:
             - start_payloads: Dict mapping client IDs to StreamStartPlayer messages
             - new_channel_sources: Dict mapping channel IDs to source generators for new channels
         """
+        # === RESOLVE TOPOLOGY ===
         # Build topology: determine which players are new, query channels
         channel_formats: dict[UUID, AudioFormat] = {MAIN_CHANNEL_ID: media_stream.main_channel[1]}
         new_channel_sources: dict[UUID, AsyncGenerator[bytes, None]] = {
@@ -551,85 +755,17 @@ class Streamer:
                 player_channel_assignments[player_id] = MAIN_CHANNEL_ID
                 continue
 
-            # Try to get player-specific channel with error handling
-            try:
-                player_channel_result = await media_stream.player_channel(
-                    player_id=player_id,
-                    preferred_format=player_config.target_format,
-                    position_us=int(self._loop.time() * 1_000_000) - self._play_start_time_us,
-                )
-            except Exception:
-                logger.exception(
-                    "Failed to query player_channel for %s, falling back to main channel",
-                    player_id,
-                )
-                player_channel_result = None
+            await self._query_player_channel(
+                player_id,
+                player_config,
+                media_stream,
+                channel_formats,
+                new_channel_sources,
+                player_channel_assignments,
+                channel_initial_samples,
+            )
 
-            if player_channel_result is not None:
-                source, channel_format, actual_pos_us = player_channel_result
-                channel_id = uuid4()
-
-                # Add new channel
-                channel_formats[channel_id] = channel_format
-                new_channel_sources[channel_id] = source
-                player_channel_assignments[player_id] = channel_id
-
-                # Calculate and store position offset
-                initial_samples = round(actual_pos_us * channel_format.sample_rate / 1_000_000)
-                channel_initial_samples[channel_id] = initial_samples
-
-                # Calculate when the first chunk from this channel will play
-                first_chunk_start_us = self._play_start_time_us + int(
-                    initial_samples * 1_000_000 / channel_format.sample_rate
-                )
-                now_us = int(self._loop.time() * 1_000_000)
-                delay_s = (first_chunk_start_us - now_us) / 1_000_000
-
-                logger.info(
-                    "Player %s assigned to dedicated channel with offset %d us (%.3f s). "
-                    "First chunk will play in %.3f seconds from now.",
-                    player_id,
-                    actual_pos_us,
-                    actual_pos_us / 1_000_000,
-                    delay_s,
-                )
-            else:
-                # Fallback to main channel
-                player_channel_assignments[player_id] = MAIN_CHANNEL_ID
-                logger.info("Player %s assigned to main channel", player_id)
-
-        # Apply topology to internal state
-        start_payloads = self._apply_topology(
-            channel_formats=channel_formats,
-            channel_initial_samples=channel_initial_samples,
-            clients=all_player_configs,
-            player_channel_assignments=player_channel_assignments,
-        )
-
-        return start_payloads, new_channel_sources
-
-    ### merge this into configure
-    def _apply_topology(  # noqa: PLR0915
-        self,
-        *,
-        channel_formats: dict[UUID, AudioFormat],
-        channel_initial_samples: Mapping[UUID, int] | None = None,
-        clients: Iterable[ClientStreamConfig],
-        player_channel_assignments: dict[str, UUID],
-    ) -> dict[str, StreamStartPlayer]:
-        """
-        Apply resolved topology to internal state.
-
-        Args:
-            channel_formats: Mapping of channel_id to source audio format.
-            channel_initial_samples: Optional mapping of channel_id to the sample index
-                (relative to play_start) already covered when the channel was created.
-            clients: Configuration for each client/player.
-            player_channel_assignments: Mapping of client_id to channel_id.
-
-        Returns:
-            Dictionary mapping client IDs to their StreamStartPlayer messages.
-        """
+        # === APPLY TOPOLOGY TO INTERNAL STATE ===
         # Update or create channel states
         for channel_id, audio_format in channel_formats.items():
             if channel_id not in self._channels:
@@ -645,7 +781,7 @@ class Streamer:
                     ),
                 )
                 # Only set initial samples for newly created channels
-                if channel_initial_samples and channel_id in channel_initial_samples:
+                if channel_id in channel_initial_samples:
                     initial_sample_count = channel_initial_samples[channel_id]
                     self._channels[channel_id].samples_produced = initial_sample_count
 
@@ -662,125 +798,23 @@ class Streamer:
         new_players: dict[str, PlayerState] = {}
         start_payloads: dict[str, StreamStartPlayer] = {}
 
-        for client_cfg in clients:
+        for client_cfg in all_player_configs:
             channel_id = player_channel_assignments[client_cfg.client_id]
             audio_format = client_cfg.target_format
-            pipeline_key = (channel_id, audio_format)
-            pipeline: PipelineState | None = self._pipelines.get(pipeline_key)
-            if pipeline is None:
-                # Create new pipeline for this channel/format
-                channel_state = self._channels[channel_id]
-                source_format_params = channel_state.source_format_params
 
-                (
-                    target_bytes_per_sample,
-                    target_av_format,
-                    target_layout,
-                ) = _resolve_audio_format(client_cfg.target_format)
-
-                resampler = av.AudioResampler(
-                    format=target_av_format,
-                    layout=target_layout,
-                    rate=client_cfg.target_format.sample_rate,
-                )
-                encoder, codec_header_b64, chunk_samples = build_encoder_for_format(
-                    client_cfg.target_format,
-                    input_audio_layout=target_layout,
-                    input_audio_format=target_av_format,
-                )
-                pipeline = PipelineState(
-                    source_format_params=source_format_params,
-                    channel_id=channel_id,
-                    target_format=client_cfg.target_format,
-                    target_frame_stride=target_bytes_per_sample * client_cfg.target_format.channels,
-                    target_av_format=target_av_format,
-                    target_layout=target_layout,
-                    chunk_samples=chunk_samples,
-                    resampler=resampler,
-                    encoder=encoder,
-                    codec_header_b64=codec_header_b64,
-                )
-                self._pipelines[pipeline_key] = pipeline
-
+            # Get or create pipeline for this channel/format combination
+            pipeline = self._get_or_create_pipeline(channel_id, audio_format)
             pipeline.subscribers.append(client_cfg.client_id)
 
-            old_player = self._players.get(client_cfg.client_id)
-
-            # Reuse existing player if format unchanged
-            if old_player and old_player.audio_format == audio_format:
-                old_player.config = client_cfg
-                new_players[client_cfg.client_id] = old_player
+            # Create or update player state
+            result = self._create_or_update_player(client_cfg, pipeline, channel_id, audio_format)
+            if result is None:
+                # Existing player reused, already added to new_players
+                new_players[client_cfg.client_id] = self._players[client_cfg.client_id]
                 continue
 
-            # Format changed - clean up old queue refcounts
-            if old_player and old_player.audio_format != audio_format:
-                for chunk in old_player.queue:
-                    chunk.refcount -= 1
-                old_player.queue.clear()
-                # Clean up consumed chunks from old pipeline
-                if old_pipeline := self._pipelines.get(
-                    (old_player.channel_id, old_player.audio_format)
-                ):
-                    self._cleanup_consumed_chunks(old_pipeline)
-
-            # Create new player or reconfigure existing one
-            buffer_tracker = (
-                old_player.buffer_tracker
-                if old_player
-                else BufferTracker(
-                    loop=self._loop,
-                    client_id=client_cfg.client_id,
-                    capacity_bytes=client_cfg.buffer_capacity_bytes,
-                )
-            )
-
-            ### Review if this is correct
-            # Find synchronized join point based on SOURCE CHANNEL
-            # Use the earliest prepared chunk across ALL pipelines on this channel
-            # This ensures late joiners start from the beginning of available audio,
-            # not from where existing players' queues currently are (which would skip
-            # already-sent chunks that are still playing on those clients)
-            sync_point_start_time_us: int | None = None
-            channel_id = player_channel_assignments[client_cfg.client_id]
-
-            # Check all pipelines consuming from this channel for their earliest prepared chunk
-            for (pipe_channel_id, _), pipe in self._pipelines.items():
-                if pipe_channel_id == channel_id and pipe.prepared:
-                    chunk_start = pipe.prepared[0].start_time_us
-                    if sync_point_start_time_us is None or chunk_start < sync_point_start_time_us:
-                        sync_point_start_time_us = chunk_start
-
-            # Fallback to play_start_time_us if no prepared chunks exist yet (initial startup)
-            # This ensures chunks timestamped relative to play_start_time_us will be queued
-            if sync_point_start_time_us is None:
-                sync_point_start_time_us = self._play_start_time_us
-
-            player_state = PlayerState(
-                config=client_cfg,
-                audio_format=audio_format,
-                channel_id=channel_id,
-                buffer_tracker=buffer_tracker,
-                join_time_us=sync_point_start_time_us,
-            )
-
-            # Queue chunks starting from the sync point
-            for chunk in pipeline.prepared:
-                if chunk.start_time_us >= sync_point_start_time_us:
-                    player_state.queue.append(chunk)
-                    chunk.refcount += 1
-
-            # No catchup needed since we're starting at the sync point
-            player_state.needs_catchup = False
-
-            new_players[client_cfg.client_id] = player_state
-
-            start_payloads[client_cfg.client_id] = StreamStartPlayer(
-                codec=client_cfg.target_format.codec.value,
-                sample_rate=client_cfg.target_format.sample_rate,
-                channels=client_cfg.target_format.channels,
-                bit_depth=client_cfg.target_format.bit_depth,
-                codec_header=pipeline.codec_header_b64,
-            )
+            new_players[client_cfg.client_id] = result
+            start_payloads[client_cfg.client_id] = self._build_start_payload(client_cfg, pipeline)
 
         # Remove pipelines with no subscribers
         pipelines_to_remove = [
@@ -794,14 +828,7 @@ class Streamer:
         # Clean up refcounts for players being removed
         for old_client_id, old_player in self._players.items():
             if old_client_id not in new_players:
-                for chunk in old_player.queue:
-                    chunk.refcount -= 1
-                old_player.queue.clear()
-                # Clean up consumed chunks from old pipeline
-                if old_pipeline := self._pipelines.get(
-                    (old_player.channel_id, old_player.audio_format)
-                ):
-                    self._cleanup_consumed_chunks(old_pipeline)
+                self._cleanup_player_refcounts(old_player)
 
         # Replace players dict
         self._players = new_players
@@ -810,7 +837,7 @@ class Streamer:
         # may have chunks with past timestamps that don't originate from a slow source
         self._skip_stale_check_once = True
 
-        return start_payloads
+        return start_payloads, new_channel_sources
 
     def _channel_wait_time_us(self, channel_state: ChannelState, now_us: int) -> int:
         """
