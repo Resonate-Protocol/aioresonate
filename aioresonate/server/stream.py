@@ -1106,17 +1106,6 @@ class Streamer:
                 while queue:
                     chunk = queue[0]
 
-                    ### re-add this instead of the timing adjustments above?
-                    # # Skip chunks that are too close to playback or already in the past
-                    # if chunk.start_time_us < now_us + min_send_margin_us:
-                    #     # Chunk is stale, skip it without sending
-                    #     logger.debug(
-                    #         "Skipping stale chunk for %s (starts in %d us)",  # noqa: ERA001
-                    #         player_state.config.client_id,
-                    #         chunk.start_time_us - now_us,
-                    #     )  # noqa: ERA001, RUF100
-                    #     self._dequeue_chunk(player_state, chunk)  # noqa: ERA001
-                    #     continue  # noqa: ERA001
                     # Check if we can send without waiting
                     if requested_wait := tracker.time_until_capacity(chunk.byte_count):
                         # This player is blocked, track the earliest unblock time
