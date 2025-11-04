@@ -701,8 +701,6 @@ class Streamer:
     async def configure(
         self,
         all_player_configs: list[ClientStreamConfig],
-        ### TODO: refactor so new_player_ids is not needed
-        new_player_ids: set[str],
         media_stream: MediaStream,
     ) -> tuple[dict[str, StreamStartPlayer], dict[UUID, AsyncGenerator[bytes, None]]]:
         """
@@ -713,7 +711,6 @@ class Streamer:
 
         Args:
             all_player_configs: List of ClientStreamConfig for all players (existing and new).
-            new_player_ids: Set of client IDs that are newly joining.
             media_stream: Media stream providing audio sources and player channels.
 
         Returns:
@@ -733,6 +730,10 @@ class Streamer:
 
         # Build set of player IDs in the new configuration
         new_config_player_ids = {cfg.client_id for cfg in all_player_configs}
+
+        # Calculate which players are new by comparing with existing players
+        existing_player_ids = set(self._players.keys())
+        new_player_ids = new_config_player_ids - existing_player_ids
 
         # Preserve existing channel assignments and add their formats to channel_formats
         # Only preserve for players that are still in the new configuration

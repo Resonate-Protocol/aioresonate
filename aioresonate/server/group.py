@@ -112,9 +112,6 @@ class _StreamerReconfigureCommand:
     all_player_configs: list[ClientStreamConfig]
     """List of ClientStreamConfig for all players (existing and new)."""
 
-    new_player_ids: set[str]
-    """Set of client IDs that are newly joining."""
-
 
 class ResonateGroup:
     """
@@ -248,10 +245,7 @@ class ResonateGroup:
                 )
             )
 
-        new_player_ids = {p.client.client_id for p in group_players}
-        start_payloads, channel_sources = await streamer.configure(
-            all_player_configs, new_player_ids, media_stream
-        )
+        start_payloads, channel_sources = await streamer.configure(all_player_configs, media_stream)
         self._stream_commands = asyncio.Queue()
         self._stream_task = self._server.loop.create_task(
             self._run_streamer(streamer, media_stream, channel_sources)
@@ -307,7 +301,7 @@ class ResonateGroup:
 
                     # Reconfigure with current player topology
                     start_payloads, new_sources = await streamer.configure(
-                        command.all_player_configs, command.new_player_ids, media_stream
+                        command.all_player_configs, media_stream
                     )
 
                     # Add new channel sources to active channels
@@ -448,16 +442,10 @@ class ResonateGroup:
                 )
             )
 
-        # Determine which players are new
-        existing_player_ids = self._streamer.get_player_ids()
-        current_player_ids = {p.client.client_id for p in self.players()}
-        new_player_ids = current_player_ids - existing_player_ids
-
         # Signal the streamer to reconfigure on next iteration with the new topology
         self._stream_commands.put_nowait(
             _StreamerReconfigureCommand(
                 all_player_configs=all_player_configs,
-                new_player_ids=new_player_ids,
             )
         )
 
