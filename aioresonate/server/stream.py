@@ -1159,14 +1159,13 @@ class Streamer:
             # Stage 4: Cleanup
             self._prune_old_data()
 
-            ### client_work is a bit bad variable name
             # Stage 5: Check exit conditions and apply source buffer backpressure
-            has_client_work = any(
+            has_pending_deliveries = any(
                 player_state.queue or player_state.needs_catchup
                 for player_state in self._players.values()
             )
 
-            if has_client_work:
+            if has_pending_deliveries:
                 # If client work pending, continue immediately
                 continue
 
