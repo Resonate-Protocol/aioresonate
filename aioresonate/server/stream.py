@@ -501,7 +501,7 @@ class Streamer:
     def _cleanup_player_refcounts(self, player_state: PlayerState) -> None:
         """Clean up refcounts when removing or reconfiguring a player."""
         for chunk in player_state.queue:
-            chunk.refcount -= 1
+            chunk.refcount = max(0, chunk.refcount - 1)
         player_state.queue.clear()
         # Clean up consumed chunks from old pipeline
         if old_pipeline := self._pipelines.get(
@@ -1236,6 +1236,17 @@ class Streamer:
             player_state = self._players.pop(player_id)
             self._cleanup_player_refcounts(player_state)
 
+            pipeline_key = (player_state.channel_id, player_state.audio_format)
+            if pipeline := self._pipelines.get(pipeline_key):
+                if player_id in pipeline.subscribers:
+                    pipeline.subscribers.remove(player_id)
+
+                # Clean up pipeline if no subscribers remain
+                if not pipeline.subscribers:
+                    self._pipelines.pop(pipeline_key)
+                    pipeline.encoder = None
+                    logger.debug("Removed empty pipeline for channel %s", player_state.channel_id)
+
         return earliest_blocked_wait_time_us
 
     def _prune_old_data(self) -> None:
@@ -1844,8 +1855,8 @@ class Streamer:
         self._last_chunk_end_us = end_us
 
         for client_id in pipeline.subscribers:
-            player_state = self._players[client_id]
-            player_state.queue.append(chunk)
+            if player_state := self._players.get(client_id):
+                player_state.queue.append(chunk)
 
     def get_channel_ids(self) -> set[UUID]:
         """
