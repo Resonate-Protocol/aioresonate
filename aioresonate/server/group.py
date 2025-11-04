@@ -280,9 +280,129 @@ class ResonateGroup:
 
         return end_time_us
 
-    ### Review this method carefully, and if possible simplify it.
-    ### Why is active_channels passed in? can't we make it a ResonateGroup attribute?
-    async def _run_streamer(  # noqa: PLR0915, PLR0912
+    def _send_session_update_to_clients(self) -> None:
+        """Send session/update messages to all clients with current playback state and metadata."""
+        for client in self._clients:
+            if client.check_role(Roles.METADATA):
+                metadata_update = (
+                    self._current_metadata.snapshot_update(
+                        int(self._server.loop.time() * 1_000_000)
+                    )
+                    if self._current_metadata is not None
+                    else None
+                )
+            else:
+                metadata_update = None
+            if client.check_role(Roles.CONTROLLER) or client.check_role(Roles.METADATA):
+                playback_state = (
+                    PlaybackStateType.PLAYING
+                    if self._current_state == PlaybackStateType.PLAYING
+                    else PlaybackStateType.PAUSED
+                )
+            else:
+                playback_state = None
+            message = SessionUpdateMessage(
+                SessionUpdatePayload(
+                    group_id=self._group_id,
+                    playback_state=playback_state,
+                    metadata=metadata_update,
+                )
+            )
+            client.send_message(message)
+
+    async def _handle_reconfiguration_command(
+        self,
+        command: _StreamerReconfigureCommand,
+        streamer: Streamer,
+        media_stream: MediaStream,
+        active_channels: dict[UUID, AsyncGenerator[bytes, None]],
+        just_started_channels: set[UUID],
+    ) -> None:
+        """Handle a streamer reconfiguration command by updating topology and notifying clients."""
+        # Reconfigure with current player topology
+        start_payloads, new_sources = await streamer.configure(
+            command.all_player_configs, media_stream
+        )
+
+        # Add new channel sources to active channels
+        for channel_id, source in new_sources.items():
+            if channel_id not in active_channels:
+                active_channels[channel_id] = source
+                just_started_channels.add(channel_id)
+
+        # Drop channel sources that were removed by configure()
+        removed_channel_ids = set(active_channels) - streamer.get_channel_ids()
+        for removed_id in removed_channel_ids:
+            source = active_channels.pop(removed_id)
+            just_started_channels.discard(removed_id)
+            with suppress(Exception):
+                await source.aclose()
+
+        # Send stream/start messages to affected players
+        player_lookup = {player.client.client_id: player for player in self.players()}
+        for client_id, player_payload in start_payloads.items():
+            player_obj = player_lookup.get(client_id)
+            if player_obj is not None:
+                self._send_stream_start_msg(
+                    player_obj.client,
+                    player_stream_info=player_payload,
+                )
+        # Send session/update to all clients
+        # TODO: only send to clients that were affected by the change!
+        self._send_session_update_to_clients()
+        logger.debug("streamer reconfigured")
+
+    async def _prefill_channel_buffers(
+        self,
+        streamer: Streamer,
+        active_channels: dict[UUID, AsyncGenerator[bytes, None]],
+        just_started_channels: set[UUID],
+    ) -> None:
+        """Pre-fill buffers for channels that just started before beginning playback."""
+        channels_to_check = list(just_started_channels)
+        for channel_id in channels_to_check:
+            if channel_id not in active_channels:
+                just_started_channels.discard(channel_id)
+                continue
+            # Pre-fill this channel's buffer before starting playback
+            while streamer.channel_needs_data(channel_id):
+                source = active_channels[channel_id]
+                try:
+                    chunk = await anext(source)
+                    streamer.prepare(channel_id, chunk, during_initial_buffering=True)
+                except StopAsyncIteration:
+                    active_channels.pop(channel_id, None)
+                    break
+            # Channel is now pre-filled, remove from just_started set
+            just_started_channels.discard(channel_id)
+
+    async def _read_pending_chunks(
+        self,
+        streamer: Streamer,
+        active_channels: dict[UUID, AsyncGenerator[bytes, None]],
+    ) -> bool:
+        """Read chunks from channels that need data until buffers are full.
+
+        Returns:
+            True if there are still active channels, False if all channels are exhausted.
+        """
+        any_channel_needs_data = True
+        while any_channel_needs_data and active_channels:
+            any_channel_needs_data = False
+            for channel_id in list(active_channels.keys()):
+                if not streamer.channel_needs_data(channel_id):
+                    continue
+                any_channel_needs_data = True
+                source = active_channels[channel_id]
+                try:
+                    chunk = await anext(source)
+                    streamer.prepare(channel_id, chunk)
+                except StopAsyncIteration:
+                    active_channels.pop(channel_id, None)
+
+        return bool(active_channels)
+
+    async def _run_streamer(
         self,
         streamer: Streamer,
         media_stream: MediaStream,
@@ -298,102 +418,19 @@ class ResonateGroup:
                 # Check for commands before processing chunks
                 if self._stream_commands is not None and not self._stream_commands.empty():
                     command = self._stream_commands.get_nowait()
-
-                    # Reconfigure with current player topology
-                    start_payloads, new_sources = await streamer.configure(
-                        command.all_player_configs, media_stream
+                    await self._handle_reconfiguration_command(
+                        command, streamer, media_stream, active_channels, just_started_channels
                     )
-
-                    # Add new channel sources to active channels
-                    for channel_id, source in new_sources.items():
-                        if channel_id not in active_channels:
-                            active_channels[channel_id] = source
-                            just_started_channels.add(channel_id)
-
-                    # Drop channel sources that were removed by configure()
-                    removed_channel_ids = set(active_channels) - streamer.get_channel_ids()
-                    for removed_id in removed_channel_ids:
-                        source = active_channels.pop(removed_id)
-                        just_started_channels.discard(removed_id)
-                        with suppress(Exception):
-                            await source.aclose()
-
-                    # Send stream/start messages to affected players
-                    player_lookup = {player.client.client_id: player for player in self.players()}
-                    for client_id, player_payload in start_payloads.items():
-                        player_obj = player_lookup.get(client_id)
-                        if player_obj is not None:
-                            self._send_stream_start_msg(
-                                player_obj.client,
-                                player_stream_info=player_payload,
-                            )
-                    # Send session/update to all clients
-                    # TODO: only send to clients that were affected by the change!
-                    for client in self._clients:
-                        if client.check_role(Roles.METADATA):
-                            metadata_update = (
-                                self._current_metadata.snapshot_update(
-                                    int(self._server.loop.time() * 1_000_000)
-                                )
-                                if self._current_metadata is not None
-                                else None
-                            )
-                        else:
-                            metadata_update = None
-                        if client.check_role(Roles.CONTROLLER) or client.check_role(Roles.METADATA):
-                            playback_state = (
-                                PlaybackStateType.PLAYING
-                                if self._current_state == PlaybackStateType.PLAYING
-                                else PlaybackStateType.PAUSED
-                            )
-                        else:
-                            playback_state = None
-                        message = SessionUpdateMessage(
-                            SessionUpdatePayload(
-                                group_id=self._group_id,
-                                playback_state=playback_state,
-                                metadata=metadata_update,
-                            )
-                        )
-                        client.send_message(message)
-                    logger.debug("streamer reconfigured")
                     continue
 
                 # Pre-fill buffers for channels that just started
                 if just_started_channels:
-                    channels_to_check = list(just_started_channels)
-                    for channel_id in channels_to_check:
-                        if channel_id not in active_channels:
-                            just_started_channels.discard(channel_id)
-                            continue
-                        # Pre-fill this channel's buffer before starting playback
-                        while streamer.channel_needs_data(channel_id):
-                            source = active_channels[channel_id]
-                            try:
-                                chunk = await anext(source)
-                                streamer.prepare(channel_id, chunk, during_initial_buffering=True)
-                            except StopAsyncIteration:
-                                active_channels.pop(channel_id, None)
-                                break
-                        # Channel is now pre-filled, remove from just_started set
-                        just_started_channels.discard(channel_id)
+                    await self._prefill_channel_buffers(
+                        streamer, active_channels, just_started_channels
+                    )
 
                 # Read chunks from channels that need data until buffers are full
-                any_channel_needs_data = True
-                while any_channel_needs_data and active_channels:
-                    any_channel_needs_data = False
-                    for channel_id in list(active_channels.keys()):
-                        if not streamer.channel_needs_data(channel_id):
-                            continue
-                        any_channel_needs_data = True
-                        source = active_channels[channel_id]
-                        try:
-                            chunk = await anext(source)
-                            streamer.prepare(channel_id, chunk)
-                        except StopAsyncIteration:
-                            active_channels.pop(channel_id, None)
-
-                if not active_channels:
+                if not await self._read_pending_chunks(streamer, active_channels):
                     break  # All channels exhausted
 
                 # Send prepared chunks after buffers are full
