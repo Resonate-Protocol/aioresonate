@@ -860,7 +860,8 @@ class Streamer:
             True if buffer depth from now < target, False otherwise.
         """
         channel_state = self._channels.get(channel_id)
-        assert channel_state is not None
+        if channel_state is None:
+            raise ValueError(f"Channel {channel_id} not found")
         if not channel_state.source_buffer:
             return True
 
