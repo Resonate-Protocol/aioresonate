@@ -1618,21 +1618,17 @@ class Streamer:
 
     def _process_pipeline_from_source(
         self, pipeline: PipelineState, channel_state: ChannelState
-    ) -> bool:
+    ) -> None:
         """
         Process available source chunks through this pipeline.
 
         Args:
             pipeline: The pipeline to process.
             channel_state: The channel state to read from.
-
-        Returns:
-            True if any work was done, False otherwise.
         """
         if not pipeline.subscribers:
-            return False
+            return
 
-        any_work = False
         # Process all available source chunks that haven't been processed yet
         while pipeline.source_read_position < len(channel_state.source_buffer):
             source_chunk = channel_state.source_buffer[pipeline.source_read_position]
@@ -1642,9 +1638,6 @@ class Streamer:
                 source_chunk,
             )
             pipeline.source_read_position += 1
-            any_work = True
-
-        return any_work
 
     def _process_source_pcm(
         self,
