@@ -124,8 +124,6 @@ class ResonateGroup:
 
     _clients: list[ResonateClient]
     """List of all clients in this group."""
-    _player_formats: dict[str, AudioFormat]
-    """Mapping of client IDs (with the player role) to their selected audio formats."""
     _client_art_formats: dict[str, PictureFormat]
     """Mapping of client IDs (with the metadata role) to their selected artwork formats."""
     _server: ResonateServer
@@ -170,7 +168,6 @@ class ResonateGroup:
             *args: Clients to add to this group.
         """
         self._clients = list(args)
-        self._player_formats = {}
         self._client_art_formats = {}
         self._server = server
         self._stream_task: Task[int] | None = None
@@ -666,8 +663,6 @@ class ResonateGroup:
 
         for client in self._clients:
             self._send_stream_end_msg(client)
-            if client.check_role(Roles.PLAYER):
-                self._player_formats.pop(client.client_id, None)
 
         self._audio_encoders.clear()
         self._current_media_art = None
@@ -963,8 +958,6 @@ class ResonateGroup:
             self._clients = []
         else:
             self._clients.remove(client)
-            if client.check_role(Roles.PLAYER):
-                self._player_formats.pop(client.client_id, None)
             self._send_stream_end_msg(client)
 
             # Reconfigure streamer if actively streaming
@@ -1012,10 +1005,6 @@ class ResonateGroup:
         if self._stream_task is not None and self._media_stream:
             logger.debug("Joining client %s to current stream", client.client_id)
             if client.check_role(Roles.PLAYER):
-                player_format = client.require_player.determine_optimal_format(
-                    self._media_stream.main_channel[1]
-                )
-                self._player_formats[client.client_id] = player_format
                 self._reconfigure_streamer()
             elif client.check_role(Roles.METADATA) or client.check_role(Roles.VISUALIZER):
                 self._send_stream_start_msg(client, None)
