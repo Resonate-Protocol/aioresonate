@@ -139,7 +139,12 @@ class BufferTracker:
         return projected_usage <= self.capacity_bytes
 
     def time_until_capacity(self, bytes_needed: int) -> int:
-        """Calculate time in microseconds until the buffer can accept bytes_needed more bytes."""
+        """
+        Calculate time in microseconds until the buffer can accept bytes_needed more bytes.
+
+        Returns 0 if bytes_needed <= 0 (immediate capacity) or bytes_needed >= capacity_bytes
+        (chunk exceeds capacity but is allowed through anyway).
+        """
         if bytes_needed <= 0:
             return 0
         if bytes_needed >= self.capacity_bytes:
