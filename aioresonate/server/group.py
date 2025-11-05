@@ -579,7 +579,102 @@ class ResonateGroup:
         self._client_art_formats.pop(client.client_id, None)
         client.send_message(StreamEndMessage())
 
-    async def stop(self, stop_time_us: int | None = None) -> bool:  # noqa: PLR0915
+    def _schedule_delayed_stop(self, stop_time_us: int, active: bool, needs_cleanup: bool) -> bool:  # noqa: FBT001
+        """Schedule a delayed stop at the specified timestamp.
+
+        Args:
+            stop_time_us: Absolute timestamp when stop should occur
+            active: Whether stream task is currently active
+            needs_cleanup: Whether cleanup is needed
+
+        Returns:
+            True if stop was scheduled, False if nothing to do
+        """
+        now_us = int(self._server.loop.time() * 1_000_000)
+        if stop_time_us <= now_us:
+            return False
+
+        # Only schedule if there's something to stop or cleanup
+        if not active and not needs_cleanup:
+            return False
+
+        delay = (stop_time_us - now_us) / 1_000_000
+
+        async def _delayed_stop() -> None:
+            # Store handle locally to detect if it's been replaced
+            handle = self._scheduled_stop_handle
+            try:
+                await self.stop()  # This will clear _scheduled_stop_handle
+            except Exception:
+                logger.exception("Scheduled stop failed")
+            finally:
+                # Only clear if this handle is still current (e.g., stop() was interrupted
+                # or a new stop was scheduled during the stop() call)
+                if self._scheduled_stop_handle is handle:
+                    self._scheduled_stop_handle = None
+
+        self._scheduled_stop_handle = self._server.loop.call_later(
+            delay, lambda: self._server.loop.create_task(_delayed_stop())
+        )
+        return True
+
+    async def _cancel_stream_task(self) -> None:
+        """Cancel the active stream task and wait for it to complete."""
+        if self._stream_task is None:
+            return
+
+        stream_task = self._stream_task
+        stream_task.cancel()
+        try:
+            await stream_task
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            logger.exception("Unhandled exception while stopping stream task")
+        self._stream_task = None
+
+    async def _cleanup_streaming_resources(self) -> None:
+        """Clean up all streaming-related resources."""
+        if self._streamer is not None:
+            self._streamer.reset()
+            self._streamer = None
+
+        if self._media_stream is not None:
+            with suppress(Exception):
+                await self._media_stream.main_channel[0].aclose()
+        self._media_stream = None
+        self._stream_commands = None
+
+        for client in self._clients:
+            self._send_stream_end_msg(client)
+            if client.check_role(Roles.PLAYER):
+                self._player_formats.pop(client.client_id, None)
+
+        self._audio_encoders.clear()
+        self._current_media_art = None
+        self._play_start_time_us = None
+
+    def _send_stopped_state_to_clients(self) -> None:
+        """Send stopped state and cleared metadata to all clients."""
+        timestamp = int(self._server.loop.time() * 1_000_000)
+        cleared_metadata = Metadata.cleared_update(timestamp)
+        for client in self._clients:
+            playback_state = (
+                PlaybackStateType.STOPPED
+                if (client.check_role(Roles.CONTROLLER) or client.check_role(Roles.METADATA))
+                else None
+            )
+            metadata_payload = cleared_metadata if client.check_role(Roles.METADATA) else None
+            message = SessionUpdateMessage(
+                SessionUpdatePayload(
+                    group_id=self._group_id,
+                    playback_state=playback_state,
+                    metadata=metadata_payload,
+                )
+            )
+            client.send_message(message)
+
+    async def stop(self, stop_time_us: int | None = None) -> bool:
         """
         Stop playback for the group and clean up resources.
 
@@ -607,32 +702,11 @@ class ResonateGroup:
         active = self._stream_task is not None
         needs_cleanup = self._current_state != PlaybackStateType.STOPPED
 
-        if stop_time_us is not None:
-            now_us = int(self._server.loop.time() * 1_000_000)
-            if stop_time_us > now_us:
-                # Only schedule if there's something to stop or cleanup
-                if not active and not needs_cleanup:
-                    return False
-
-                delay = (stop_time_us - now_us) / 1_000_000
-
-                async def _delayed_stop() -> None:
-                    # Store handle locally to detect if it's been replaced
-                    handle = self._scheduled_stop_handle
-                    try:
-                        await self.stop()  # This will clear _scheduled_stop_handle
-                    except Exception:
-                        logger.exception("Scheduled stop failed")
-                    finally:
-                        # Only clear if this handle is still current (e.g., stop() was interrupted
-                        # or a new stop was scheduled during the stop() call)
-                        if self._scheduled_stop_handle is handle:
-                            self._scheduled_stop_handle = None
-
-                self._scheduled_stop_handle = self._server.loop.call_later(
-                    delay, lambda: self._server.loop.create_task(_delayed_stop())
-                )
-                return active or needs_cleanup
+        # Handle delayed stop if requested
+        if stop_time_us is not None and self._schedule_delayed_stop(
+            stop_time_us, active, needs_cleanup
+        ):
+            return active or needs_cleanup
 
         if not active and not needs_cleanup:
             return False
@@ -642,57 +716,14 @@ class ResonateGroup:
             [c.client_id for c in self._clients],
         )
 
-        if self._stream_task is not None:
-            stream_task = self._stream_task
-            stream_task.cancel()
-            try:
-                await stream_task
-            except asyncio.CancelledError:
-                pass
-            except Exception:
-                logger.exception("Unhandled exception while stopping stream task")
-            self._stream_task = None
-
-        if self._streamer is not None:
-            self._streamer.reset()
-            self._streamer = None
-
-        if self._media_stream is not None:
-            with suppress(Exception):
-                await self._media_stream.main_channel[0].aclose()
-        self._media_stream = None
-        self._stream_commands = None
-
-        for client in self._clients:
-            self._send_stream_end_msg(client)
-            if client.check_role(Roles.PLAYER):
-                self._player_formats.pop(client.client_id, None)
-
-        self._audio_encoders.clear()
-        self._current_media_art = None
-        self._play_start_time_us = None
+        await self._cancel_stream_task()
+        await self._cleanup_streaming_resources()
 
         if self._current_state != PlaybackStateType.STOPPED:
             self._signal_event(GroupStateChangedEvent(PlaybackStateType.STOPPED))
             self._current_state = PlaybackStateType.STOPPED
 
-        timestamp = int(self._server.loop.time() * 1_000_000)
-        cleared_metadata = Metadata.cleared_update(timestamp)
-        for client in self._clients:
-            playback_state = (
-                PlaybackStateType.STOPPED
-                if (client.check_role(Roles.CONTROLLER) or client.check_role(Roles.METADATA))
-                else None
-            )
-            metadata_payload = cleared_metadata if client.check_role(Roles.METADATA) else None
-            message = SessionUpdateMessage(
-                SessionUpdatePayload(
-                    group_id=self._group_id,
-                    playback_state=playback_state,
-                    metadata=metadata_payload,
-                )
-            )
-            client.send_message(message)
+        self._send_stopped_state_to_clients()
         return True
 
     def set_metadata(self, metadata: Metadata | None, timestamp: int | None = None) -> None:
