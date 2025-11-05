@@ -428,7 +428,6 @@ class ResonateGroup:
     ) -> int:
         """Consume media channels, distribute via streamer, and return end timestamp."""
         last_end_us = self._play_start_time_us or int(self._server.loop.time() * 1_000_000)
-        cancelled = False
         just_started_channels: set[UUID] = set(active_channels.keys())
 
         try:
@@ -454,24 +453,24 @@ class ResonateGroup:
                 # Send prepared chunks after buffers are full
                 await streamer.send()
 
-            # We are done
-
+            # Normal completion - flush and send remaining chunks
             streamer.flush()
-            # Send all remaining chunks
             await streamer.send()
             if streamer.last_chunk_end_time_us is not None:
                 last_end_us = streamer.last_chunk_end_time_us
         except asyncio.CancelledError:
-            cancelled = True
+            # Cancellation - flush and send remaining chunks before cleanup
             streamer.flush()
-            # Send all remaining chunks
             await streamer.send()
             raise
         else:
             return last_end_us
         finally:
-            if cancelled and streamer.last_chunk_end_time_us is not None:
-                last_end_us = streamer.last_chunk_end_time_us
+            # Always close all remaining active channels to prevent resource leaks
+            for source in list(active_channels.values()):
+                with suppress(Exception):
+                    await source.aclose()
+            active_channels.clear()
 
     def _reconfigure_streamer(self) -> None:
         """Reconfigure the running streamer with current client topology."""
