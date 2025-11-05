@@ -44,15 +44,15 @@ The CLI client will automatically connect to a Resonate server on your local net
 
 #### Client Identification
 
-If you want to run multiple CLI clients simultaneously, each must have a unique identifier:
+If you want to run multiple CLI clients on the **same computer**, you can specify unique identifiers:
 
 ```bash
 resonate-cli --id my-client-1 --name "Kitchen"
 resonate-cli --id my-client-2 --name "Bedroom"
 ```
 
-- `--id`: A unique identifier for this client (required if running multiple instances)
-- `--name`: A friendly name displayed on the server (optional)
+- `--id`: A unique identifier for this client (optional; defaults to `resonate-cli-<hostname>`, useful for running multiple instances on one computer)
+- `--name`: A friendly name displayed on the server (optional; defaults to hostname)
 
 #### Audio Output Device Selection
 
