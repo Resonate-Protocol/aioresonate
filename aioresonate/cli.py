@@ -6,6 +6,7 @@ import argparse
 import asyncio
 import logging
 import signal
+import socket
 import sys
 from collections.abc import Sequence
 from dataclasses import dataclass, field
@@ -93,13 +94,13 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--name",
-        default="Resonate CLI",
-        help="Friendly name for this client",
+        default=None,
+        help="Friendly name for this client (defaults to hostname)",
     )
     parser.add_argument(
         "--id",
-        default="resonate-cli",
-        help="Unique identifier for this client",
+        default=None,
+        help="Unique identifier for this client (defaults to resonate-cli-<hostname>)",
     )
     parser.add_argument(
         "--log-level",
@@ -525,10 +526,26 @@ async def main_async(argv: Sequence[str] | None = None) -> int:  # noqa: PLR0915
     args = parse_args(list(argv) if argv is not None else None)
     logging.basicConfig(level=getattr(logging, args.log_level))
 
+    # Get hostname for defaults if needed
+    if args.id is None or args.name is None:
+        hostname = socket.gethostname()
+        if not hostname:
+            logger.error("Unable to determine hostname. Please specify --id and/or --name")
+            return 1
+        # Auto-generate client ID and name from hostname
+        client_id = args.id if args.id is not None else f"resonate-cli-{hostname}"
+        client_name = args.name if args.name is not None else hostname
+    else:
+        # Both explicitly provided
+        client_id = args.id
+        client_name = args.name
+
+    _print_event(f"Using client ID: {client_id}")
+
     state = CLIState()
     client = ResonateClient(
-        client_id=args.id,
-        client_name=args.name,
+        client_id=client_id,
+        client_name=client_name,
         roles=[Roles.CONTROLLER, Roles.PLAYER, Roles.METADATA],
         player_support=ClientHelloPlayerSupport(
             support_codecs=["pcm"],
