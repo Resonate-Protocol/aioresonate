@@ -380,7 +380,9 @@ class PlayerState:
     buffer_tracker: BufferTracker | None = None
     """Tracks client buffer state."""
     join_time_us: int | None = None
-    """When player joined in microseconds."""
+    """Stream position when player joined (in stream microseconds)."""
+    join_wall_time_us: int | None = None
+    """Wall-clock time when player joined (for grace period tracking)."""
     needs_catchup: bool = False
     """Whether player needs catch-up processing."""
 
@@ -466,8 +468,6 @@ class Streamer:
     """Target duration for source buffer in microseconds."""
     _prepare_buffer_margin_us: int = 1_000_000
     """Time margin for stale chunk detection during prepare() (1 second)."""
-    _skip_stale_check_once: bool = False
-    """Skip stale check for one iteration after reconfigure to avoid false positives."""
 
     def __init__(
         self,
@@ -568,6 +568,7 @@ class Streamer:
             channel_id=channel_id,
             buffer_tracker=buffer_tracker,
             join_time_us=sync_point_start_time_us,
+            join_wall_time_us=self._now_us(),
         )
 
         # Queue chunks starting from the sync point
@@ -825,10 +826,6 @@ class Streamer:
         # Replace players dict
         self._players = new_players
 
-        # Skip stale check on next send() iteration since newly joined players
-        # may have chunks with past timestamps that don't originate from a slow source
-        self._skip_stale_check_once = True
-
         return start_payloads, new_channel_sources
 
     def _channel_wait_time_us(self, channel_state: ChannelState, now_us: int) -> int:
@@ -908,14 +905,12 @@ class Streamer:
         start_samples = channel_state.samples_produced
 
         # Check and adjust for stale chunks (skip during initial buffering)
-        if not during_initial_buffering and not self._skip_stale_check_once:
+        if not during_initial_buffering:
             start_us, end_us = self._check_and_adjust_for_stale_chunk(
                 channel_state, start_samples, sample_count
             )
-            # _skip_stale_check_once flag will be reset after first send() call
         else:
-            # During initial buffering and after reconfiguration,
-            # just calculate timestamps without stale detection
+            # During initial buffering, just calculate timestamps without stale detection
             start_us = self._play_start_time_us + int(
                 start_samples
                 * 1_000_000
@@ -1073,39 +1068,44 @@ class Streamer:
                     self._perform_catchup(player_state)
 
             # Stage 2: Check for stale chunks on MAIN_CHANNEL only
-            # Skip this check for one iteration after reconfigure to avoid false positives
-            # when newly joined players have chunks with past timestamps
-            if self._skip_stale_check_once:
-                self._skip_stale_check_once = False
-            else:
-                # Dedicated player channels can have arbitrary timestamps from player_channel()
-                now_us = self._now_us()
-                send_transmission_margin_us = 100_000  # 100ms for network + client processing
+            # Newly joined players are excluded via grace period to avoid false positives
+            # from sync-point chunks with past timestamps
+            # Dedicated player channels can have arbitrary timestamps from player_channel()
+            now_us = self._now_us()
+            send_transmission_margin_us = 100_000  # 100ms for network + client processing
+            join_grace_period_us = 2_000_000  # 2s grace period for newly joined players
 
-                # Find the earliest chunk on MAIN_CHANNEL only
-                earliest_main_chunk_start = min(
-                    (
-                        ps.queue[0].start_time_us
-                        for ps in self._players.values()
-                        if ps.channel_id == MAIN_CHANNEL_ID and ps.queue
-                    ),
-                    default=None,
-                )
-
-                # If main channel chunk is stale, adjust timing globally
-                if (
-                    earliest_main_chunk_start is not None
-                    and earliest_main_chunk_start < now_us + send_transmission_margin_us
-                ):
-                    logger.warning(
-                        "Main channel chunk is stale (starts at %d us, now is %d us). "
-                        "Adjusting timing globally.",
-                        earliest_main_chunk_start,
-                        now_us,
+            # Find the earliest chunk on MAIN_CHANNEL only, excluding newly joined players
+            # Newly joined players receive sync-point chunks with past timestamps by design
+            earliest_main_chunk_start = min(
+                (
+                    ps.queue[0].start_time_us
+                    for ps in self._players.values()
+                    if ps.channel_id == MAIN_CHANNEL_ID
+                    and ps.queue
+                    and (
+                        ps.join_wall_time_us is None  # Old player (no join time tracked)
+                        or now_us - ps.join_wall_time_us
+                        > join_grace_period_us  # Grace period expired
                     )
-                    self._adjust_timing_for_stale_chunk(now_us, earliest_main_chunk_start)
-                    # After adjustment, continue to next iteration with updated timing
-                    continue
+                ),
+                default=None,
+            )
+
+            # If main channel chunk is stale, adjust timing globally
+            if (
+                earliest_main_chunk_start is not None
+                and earliest_main_chunk_start < now_us + send_transmission_margin_us
+            ):
+                logger.warning(
+                    "Main channel chunk is stale (starts at %d us, now is %d us). "
+                    "Adjusting timing globally.",
+                    earliest_main_chunk_start,
+                    now_us,
+                )
+                self._adjust_timing_for_stale_chunk(now_us, earliest_main_chunk_start)
+                # After adjustment, continue to next iteration with updated timing
+                continue
 
             # Stage 3: Send chunks to players with backpressure control
             earliest_blocked_wait_time_us = self._send_chunks_to_players()
