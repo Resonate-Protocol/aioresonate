@@ -539,14 +539,17 @@ class ResonateClient:
         NOTE: Binary messages are directly sent to the client, you need to add the
         header yourself using pack_binary_header().
         """
-        # TODO: handle full queue
+        try:
+            self._to_write.put_nowait(message)
+        except asyncio.QueueFull:
+            self._logger.error("Message queue full, client too slow - disconnecting")
+            self._server.loop.create_task(self.disconnect(retry_connection=True))
+            return
+
         if isinstance(message, bytes):
-            # Only log binary messages occasionally to reduce spam
             pass
         elif not isinstance(message, ServerTimeMessage):
-            # Only log important non-time messages
             self._logger.debug("Enqueueing message: %s", type(message).__name__)
-        self._to_write.put_nowait(message)
 
     def add_event_listener(
         self, callback: Callable[[ClientEvent], Coroutine[None, None, None]]
