@@ -368,11 +368,20 @@ class ResonateGroup:
             while streamer.channel_needs_data(channel_id):
                 source = active_channels[channel_id]
                 try:
-                    chunk = await anext(source)
+                    chunk = await asyncio.wait_for(anext(source), timeout=30.0)
                     streamer.prepare(channel_id, chunk, during_initial_buffering=True)
+                    continue  # Continue filling buffer
                 except StopAsyncIteration:
-                    active_channels.pop(channel_id, None)
-                    break
+                    pass  # Channel exhausted (normal completion)
+                except TimeoutError:
+                    logger.error("Channel %s timed out during prefill, removing", channel_id)
+                except Exception:
+                    logger.exception("Channel %s failed during prefill, removing", channel_id)
+                # Channel done (exhausted, timed out, or failed) - clean up and exit
+                del active_channels[channel_id]
+                with suppress(Exception):
+                    await source.aclose()
+                break
             # Channel is now pre-filled, remove from just_started set
             just_started_channels.discard(channel_id)
 
@@ -395,10 +404,19 @@ class ResonateGroup:
                 any_channel_needs_data = True
                 source = active_channels[channel_id]
                 try:
-                    chunk = await anext(source)
+                    chunk = await asyncio.wait_for(anext(source), timeout=30.0)
                     streamer.prepare(channel_id, chunk)
+                    continue  # Done, continue with next channel
                 except StopAsyncIteration:
-                    active_channels.pop(channel_id, None)
+                    pass  # Channel exhausted (normal completion)
+                except TimeoutError:
+                    logger.error("Channel %s timed out during read, removing", channel_id)
+                except Exception:
+                    logger.exception("Channel %s failed during read, removing", channel_id)
+                # Channel done (exhausted, timed out, or failed) - clean up
+                del active_channels[channel_id]
+                with suppress(Exception):
+                    await source.aclose()
 
         return bool(active_channels)
 
