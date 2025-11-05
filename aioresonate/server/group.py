@@ -630,9 +630,11 @@ class ResonateGroup:
                 if self._scheduled_stop_handle is handle:
                     self._scheduled_stop_handle = None
 
-        self._scheduled_stop_handle = self._server.loop.call_later(
-            delay, lambda: self._server.loop.create_task(_delayed_stop())
-        )
+        def _schedule_stop() -> None:
+            task = self._server.loop.create_task(_delayed_stop())
+            task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
+
+        self._scheduled_stop_handle = self._server.loop.call_later(delay, _schedule_stop)
         return True
 
     async def _cancel_stream_task(self) -> None:
@@ -932,7 +934,8 @@ class ResonateGroup:
 
     def _signal_event(self, event: GroupEvent) -> None:
         for cb in self._event_cbs:
-            self._server.loop.create_task(cb(event))
+            task = self._server.loop.create_task(cb(event))
+            task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
 
     @property
     def state(self) -> PlaybackStateType:

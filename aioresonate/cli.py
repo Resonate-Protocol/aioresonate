@@ -226,6 +226,7 @@ class _ServiceDiscoveryListener:
         task = self._loop.create_task(self._process_service_info(zeroconf, service_type, name))
         self.tasks.add(task)
         task.add_done_callback(self.tasks.discard)
+        task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
 
     def add_service(self, zeroconf: AsyncZeroconf, service_type: str, name: str) -> None:
         self._schedule(zeroconf, service_type, name)

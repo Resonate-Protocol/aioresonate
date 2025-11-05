@@ -543,7 +543,8 @@ class ResonateClient:
             self._to_write.put_nowait(message)
         except asyncio.QueueFull:
             self._logger.error("Message queue full, client too slow - disconnecting")
-            self._server.loop.create_task(self.disconnect(retry_connection=True))
+            task = self._server.loop.create_task(self.disconnect(retry_connection=True))
+            task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
             return
 
         if isinstance(message, bytes):
@@ -568,4 +569,5 @@ class ResonateClient:
 
     def _signal_event(self, event: ClientEvent) -> None:
         for cb in self._event_cbs:
-            self._server.loop.create_task(cb(event))
+            task = self._server.loop.create_task(cb(event))
+            task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
