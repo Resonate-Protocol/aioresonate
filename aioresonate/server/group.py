@@ -6,11 +6,12 @@ import asyncio
 import logging
 import uuid
 from asyncio import Task
-from collections.abc import Callable, Coroutine
+from collections.abc import AsyncGenerator, Callable, Coroutine
 from contextlib import suppress
 from dataclasses import dataclass
 from io import BytesIO
 from typing import TYPE_CHECKING, cast
+from uuid import UUID
 
 from PIL import Image
 
@@ -106,10 +107,10 @@ class GroupDeletedEvent(GroupEvent):
 
 @dataclass
 class _StreamerReconfigureCommand:
-    """Request to reconfigure the running streamer with new client topology."""
+    """Signal to reconfigure the running streamer with new player topology."""
 
-    audio_format: AudioFormat
-    client_configs: list[ClientStreamConfig]
+    all_player_configs: list[ClientStreamConfig]
+    """List of ClientStreamConfig for all players (existing and new)."""
 
 
 class ResonateGroup:
@@ -123,8 +124,6 @@ class ResonateGroup:
 
     _clients: list[ResonateClient]
     """List of all clients in this group."""
-    _player_formats: dict[str, AudioFormat]
-    """Mapping of client IDs (with the player role) to their selected audio formats."""
     _client_art_formats: dict[str, PictureFormat]
     """Mapping of client IDs (with the metadata role) to their selected artwork formats."""
     _server: ResonateServer
@@ -169,7 +168,6 @@ class ResonateGroup:
             *args: Clients to add to this group.
         """
         self._clients = list(args)
-        self._player_formats = {}
         self._client_art_formats = {}
         self._server = server
         self._stream_task: Task[int] | None = None
@@ -223,40 +221,31 @@ class ResonateGroup:
             self._current_state = PlaybackStateType.STOPPED
             return start_time_us
 
-        self._player_formats.clear()
-
-        for player in group_players:
-            client = player.client
-            player_format = player.determine_optimal_format(media_stream.audio_format)
-            self._player_formats[client.client_id] = player_format
-
         streamer = Streamer(
             loop=self._server.loop,
             play_start_time_us=start_time_us,
         )
+        self._streamer = streamer
+        self._media_stream = media_stream
 
-        client_configs: list[ClientStreamConfig] = []
+        # Build configs for all players (all are new for initial setup)
+        all_player_configs: list[ClientStreamConfig] = []
         for player in group_players:
-            support = player.support
-            if support is None:
-                raise ValueError(f"Player {player.client.client_id} lacks support payload")
-            client_configs.append(
+            assert player.support
+            target_format = player.determine_optimal_format(media_stream.main_channel[1])
+            all_player_configs.append(
                 ClientStreamConfig(
                     client_id=player.client.client_id,
-                    target_format=self._player_formats[player.client.client_id],
-                    buffer_capacity_bytes=support.buffer_capacity,
+                    target_format=target_format,
+                    buffer_capacity_bytes=player.support.buffer_capacity,
                     send=player.client.send_message,
                 )
             )
 
-        start_payloads = streamer.configure(
-            audio_format=media_stream.audio_format,
-            clients=client_configs,
-        )
-        self._streamer = streamer
+        start_payloads, channel_sources = await streamer.configure(all_player_configs, media_stream)
         self._stream_commands = asyncio.Queue()
         self._stream_task = self._server.loop.create_task(
-            self._run_streamer(streamer, media_stream)
+            self._run_streamer(streamer, media_stream, channel_sources)
         )
 
         # Notify clients about the upcoming stream configuration
@@ -288,110 +277,197 @@ class ResonateGroup:
 
         return end_time_us
 
-    async def _run_streamer(  # noqa: PLR0915
+    def _send_session_update_to_clients(self) -> None:
+        """Send session/update messages to all clients with current playback state and metadata."""
+        for client in self._clients:
+            if client.check_role(Roles.METADATA):
+                metadata_update = (
+                    self._current_metadata.snapshot_update(
+                        int(self._server.loop.time() * 1_000_000)
+                    )
+                    if self._current_metadata is not None
+                    else None
+                )
+            else:
+                metadata_update = None
+            if client.check_role(Roles.CONTROLLER) or client.check_role(Roles.METADATA):
+                playback_state = (
+                    PlaybackStateType.PLAYING
+                    if self._current_state == PlaybackStateType.PLAYING
+                    else PlaybackStateType.PAUSED
+                )
+            else:
+                playback_state = None
+            message = SessionUpdateMessage(
+                SessionUpdatePayload(
+                    group_id=self._group_id,
+                    playback_state=playback_state,
+                    metadata=metadata_update,
+                )
+            )
+            client.send_message(message)
+
+    async def _handle_reconfiguration_command(
+        self,
+        command: _StreamerReconfigureCommand,
+        streamer: Streamer,
+        media_stream: MediaStream,
+        active_channels: dict[UUID, AsyncGenerator[bytes, None]],
+        just_started_channels: set[UUID],
+    ) -> None:
+        """Handle a streamer reconfiguration command by updating topology and notifying clients."""
+        # Reconfigure with current player topology
+        start_payloads, new_sources = await streamer.configure(
+            command.all_player_configs, media_stream
+        )
+
+        # Add new channel sources to active channels
+        for channel_id, source in new_sources.items():
+            if channel_id not in active_channels:
+                active_channels[channel_id] = source
+                just_started_channels.add(channel_id)
+
+        # Drop channel sources that were removed by configure()
+        removed_channel_ids = set(active_channels) - streamer.get_channel_ids()
+        for removed_id in removed_channel_ids:
+            source = active_channels.pop(removed_id)
+            just_started_channels.discard(removed_id)
+            with suppress(Exception):
+                await source.aclose()
+
+        # Send stream/start messages to affected players
+        player_lookup = {player.client.client_id: player for player in self.players()}
+        for client_id, player_payload in start_payloads.items():
+            player_obj = player_lookup.get(client_id)
+            if player_obj is not None:
+                self._send_stream_start_msg(
+                    player_obj.client,
+                    player_stream_info=player_payload,
+                )
+        # Send session/update to all clients
+        # TODO: only send to clients that were affected by the change!
+        self._send_session_update_to_clients()
+        logger.debug("streamer reconfigured")
+
+    async def _prefill_channel_buffers(
+        self,
+        streamer: Streamer,
+        active_channels: dict[UUID, AsyncGenerator[bytes, None]],
+        just_started_channels: set[UUID],
+    ) -> None:
+        """Pre-fill buffers for channels that just started before beginning playback."""
+        channels_to_check = list(just_started_channels)
+        for channel_id in channels_to_check:
+            if channel_id not in active_channels:
+                just_started_channels.discard(channel_id)
+                continue
+            # Pre-fill this channel's buffer before starting playback
+            while streamer.channel_needs_data(channel_id):
+                source = active_channels[channel_id]
+                try:
+                    chunk = await asyncio.wait_for(anext(source), timeout=30.0)
+                    streamer.prepare(channel_id, chunk, during_initial_buffering=True)
+                    continue  # Continue filling buffer
+                except StopAsyncIteration:
+                    pass  # Channel exhausted (normal completion)
+                except TimeoutError:
+                    logger.error("Channel %s timed out during prefill, removing", channel_id)
+                except Exception:
+                    logger.exception("Channel %s failed during prefill, removing", channel_id)
+                # Channel done (exhausted, timed out, or failed) - clean up and exit
+                del active_channels[channel_id]
+                with suppress(Exception):
+                    await source.aclose()
+                break
+            # Channel is now pre-filled, remove from just_started set
+            just_started_channels.discard(channel_id)
+
+    async def _read_pending_chunks(
+        self,
+        streamer: Streamer,
+        active_channels: dict[UUID, AsyncGenerator[bytes, None]],
+    ) -> bool:
+        """Read chunks from channels that need data until buffers are full.
+
+        Returns:
+            True if there are still active channels, False if all channels are exhausted.
+        """
+        any_channel_needs_data = True
+        while any_channel_needs_data and active_channels:
+            any_channel_needs_data = False
+            for channel_id in list(active_channels.keys()):
+                if not streamer.channel_needs_data(channel_id):
+                    continue
+                any_channel_needs_data = True
+                source = active_channels[channel_id]
+                try:
+                    chunk = await asyncio.wait_for(anext(source), timeout=30.0)
+                    streamer.prepare(channel_id, chunk)
+                    continue  # Done, continue with next channel
+                except StopAsyncIteration:
+                    pass  # Channel exhausted (normal completion)
+                except TimeoutError:
+                    logger.error("Channel %s timed out during read, removing", channel_id)
+                except Exception:
+                    logger.exception("Channel %s failed during read, removing", channel_id)
+                # Channel done (exhausted, timed out, or failed) - clean up
+                del active_channels[channel_id]
+                with suppress(Exception):
+                    await source.aclose()
+
+        return bool(active_channels)
+
+    async def _run_streamer(
         self,
         streamer: Streamer,
         media_stream: MediaStream,
+        active_channels: dict[UUID, AsyncGenerator[bytes, None]],
     ) -> int:
         """Consume media channels, distribute via streamer, and return end timestamp."""
         last_end_us = self._play_start_time_us or int(self._server.loop.time() * 1_000_000)
-        cancelled = False
-        just_started = True
+        just_started_channels: set[UUID] = set(active_channels.keys())
 
         try:
             while True:
                 # Check for commands before processing chunks
                 if self._stream_commands is not None and not self._stream_commands.empty():
-                    # We handle reconfiguration requests only between chunks so that
-                    # all clients only receive binary messages once the session was correctly
-                    # started or updated
                     command = self._stream_commands.get_nowait()
-                    start_payloads = streamer.configure(
-                        audio_format=command.audio_format,
-                        clients=command.client_configs,
+                    await self._handle_reconfiguration_command(
+                        command, streamer, media_stream, active_channels, just_started_channels
                     )
-                    # Send stream/start messages to affected players
-                    player_lookup = {player.client.client_id: player for player in self.players()}
-                    for client_id, player_payload in start_payloads.items():
-                        player_obj = player_lookup.get(client_id)
-                        if player_obj is not None:
-                            self._send_stream_start_msg(
-                                player_obj.client,
-                                player_stream_info=player_payload,
-                            )
-                    # Send session/update to all clients
-                    # TODO: only send to clients that were affected by the change!
-                    for client in self._clients:
-                        if client.check_role(Roles.METADATA):
-                            metadata_update = (
-                                self._current_metadata.snapshot_update(
-                                    int(self._server.loop.time() * 1_000_000)
-                                )
-                                if self._current_metadata is not None
-                                else None
-                            )
-                        else:
-                            metadata_update = None
-                        if client.check_role(Roles.CONTROLLER) or client.check_role(Roles.METADATA):
-                            playback_state = (
-                                PlaybackStateType.PLAYING
-                                if self._current_state == PlaybackStateType.PLAYING
-                                else PlaybackStateType.PAUSED
-                            )
-                        else:
-                            playback_state = None
-                        message = SessionUpdateMessage(
-                            SessionUpdatePayload(
-                                group_id=self._group_id,
-                                playback_state=playback_state,
-                                metadata=metadata_update,
-                            )
-                        )
-                        client.send_message(message)
                     continue
 
-                if just_started:
-                    try:
-                        while streamer.prepare(
-                            await anext(media_stream.source), during_initial_buffering=True
-                        ):
-                            # Pre-fill the initial buffer
-                            pass
-                    except StopAsyncIteration:
-                        # Source exhausted, exit loop
-                        break
-                    just_started = False
+                # Pre-fill buffers for channels that just started
+                if just_started_channels:
+                    await self._prefill_channel_buffers(
+                        streamer, active_channels, just_started_channels
+                    )
 
-                try:
-                    chunk = await anext(media_stream.source)
-                except StopAsyncIteration:
-                    # Source exhausted, exit loop
-                    break
+                # Read chunks from channels that need data until buffers are full
+                if not await self._read_pending_chunks(streamer, active_channels):
+                    break  # All channels exhausted
 
-                # Prepare the chunk
-                streamer.prepare(chunk)
-
-                # Send all prepared chunks
+                # Send prepared chunks after buffers are full
                 await streamer.send()
 
-            # We are done
-
+            # Normal completion - flush and send remaining chunks
             streamer.flush()
-            # Send all remaining chunks
             await streamer.send()
             if streamer.last_chunk_end_time_us is not None:
                 last_end_us = streamer.last_chunk_end_time_us
         except asyncio.CancelledError:
-            cancelled = True
+            # Cancellation - flush and send remaining chunks before cleanup
             streamer.flush()
-            # Send all remaining chunks
             await streamer.send()
             raise
         else:
             return last_end_us
         finally:
-            if cancelled and streamer.last_chunk_end_time_us is not None:
-                last_end_us = streamer.last_chunk_end_time_us
+            # Always close all remaining active channels to prevent resource leaks
+            for source in list(active_channels.values()):
+                with suppress(Exception):
+                    await source.aclose()
+            active_channels.clear()
 
     def _reconfigure_streamer(self) -> None:
         """Reconfigure the running streamer with current client topology."""
@@ -403,24 +479,24 @@ class ResonateGroup:
         ):
             raise RuntimeError("Streamer is not running")
 
-        client_configs: list[ClientStreamConfig] = []
-
+        # Build configs for all current players
+        all_player_configs: list[ClientStreamConfig] = []
         for player in self.players():
             assert player.support
-            client_id = player.client.client_id
-            target_format = self._player_formats[client_id]
-            client_configs.append(
+            target_format = player.determine_optimal_format(self._media_stream.main_channel[1])
+            all_player_configs.append(
                 ClientStreamConfig(
-                    client_id=client_id,
+                    client_id=player.client.client_id,
                     target_format=target_format,
                     buffer_capacity_bytes=player.support.buffer_capacity,
                     send=player.client.send_message,
                 )
             )
+
+        # Signal the streamer to reconfigure on next iteration with the new topology
         self._stream_commands.put_nowait(
             _StreamerReconfigureCommand(
-                audio_format=self._media_stream.audio_format,
-                client_configs=client_configs,
+                all_player_configs=all_player_configs,
             )
         )
 
@@ -517,7 +593,102 @@ class ResonateGroup:
         self._client_art_formats.pop(client.client_id, None)
         client.send_message(StreamEndMessage())
 
-    async def stop(self, stop_time_us: int | None = None) -> bool:  # noqa: PLR0915
+    def _schedule_delayed_stop(self, stop_time_us: int, active: bool, needs_cleanup: bool) -> bool:  # noqa: FBT001
+        """Schedule a delayed stop at the specified timestamp.
+
+        Args:
+            stop_time_us: Absolute timestamp when stop should occur
+            active: Whether stream task is currently active
+            needs_cleanup: Whether cleanup is needed
+
+        Returns:
+            True if stop was scheduled, False if nothing to do
+        """
+        now_us = int(self._server.loop.time() * 1_000_000)
+        if stop_time_us <= now_us:
+            return False
+
+        # Only schedule if there's something to stop or cleanup
+        if not active and not needs_cleanup:
+            return False
+
+        delay = (stop_time_us - now_us) / 1_000_000
+
+        async def _delayed_stop() -> None:
+            # Store handle locally to detect if it's been replaced
+            handle = self._scheduled_stop_handle
+            try:
+                await self.stop()  # This will clear _scheduled_stop_handle
+            except Exception:
+                logger.exception("Scheduled stop failed")
+            finally:
+                # Only clear if this handle is still current (e.g., stop() was interrupted
+                # or a new stop was scheduled during the stop() call)
+                if self._scheduled_stop_handle is handle:
+                    self._scheduled_stop_handle = None
+
+        def _schedule_stop() -> None:
+            task = self._server.loop.create_task(_delayed_stop())
+            task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
+
+        self._scheduled_stop_handle = self._server.loop.call_later(delay, _schedule_stop)
+        return True
+
+    async def _cancel_stream_task(self) -> None:
+        """Cancel the active stream task and wait for it to complete."""
+        if self._stream_task is None:
+            return
+
+        stream_task = self._stream_task
+        stream_task.cancel()
+        try:
+            await stream_task
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            logger.exception("Unhandled exception while stopping stream task")
+        self._stream_task = None
+
+    async def _cleanup_streaming_resources(self) -> None:
+        """Clean up all streaming-related resources."""
+        if self._streamer is not None:
+            self._streamer.reset()
+            self._streamer = None
+
+        if self._media_stream is not None:
+            with suppress(Exception):
+                await self._media_stream.main_channel[0].aclose()
+        self._media_stream = None
+        self._stream_commands = None
+
+        for client in self._clients:
+            self._send_stream_end_msg(client)
+
+        self._audio_encoders.clear()
+        self._current_media_art = None
+        self._play_start_time_us = None
+
+    def _send_stopped_state_to_clients(self) -> None:
+        """Send stopped state and cleared metadata to all clients."""
+        timestamp = int(self._server.loop.time() * 1_000_000)
+        cleared_metadata = Metadata.cleared_update(timestamp)
+        for client in self._clients:
+            playback_state = (
+                PlaybackStateType.STOPPED
+                if (client.check_role(Roles.CONTROLLER) or client.check_role(Roles.METADATA))
+                else None
+            )
+            metadata_payload = cleared_metadata if client.check_role(Roles.METADATA) else None
+            message = SessionUpdateMessage(
+                SessionUpdatePayload(
+                    group_id=self._group_id,
+                    playback_state=playback_state,
+                    metadata=metadata_payload,
+                )
+            )
+            client.send_message(message)
+
+    async def stop(self, stop_time_us: int | None = None) -> bool:
         """
         Stop playback for the group and clean up resources.
 
@@ -545,32 +716,11 @@ class ResonateGroup:
         active = self._stream_task is not None
         needs_cleanup = self._current_state != PlaybackStateType.STOPPED
 
-        if stop_time_us is not None:
-            now_us = int(self._server.loop.time() * 1_000_000)
-            if stop_time_us > now_us:
-                # Only schedule if there's something to stop or cleanup
-                if not active and not needs_cleanup:
-                    return False
-
-                delay = (stop_time_us - now_us) / 1_000_000
-
-                async def _delayed_stop() -> None:
-                    # Store handle locally to detect if it's been replaced
-                    handle = self._scheduled_stop_handle
-                    try:
-                        await self.stop()  # This will clear _scheduled_stop_handle
-                    except Exception:
-                        logger.exception("Scheduled stop failed")
-                    finally:
-                        # Only clear if this handle is still current (e.g., stop() was interrupted
-                        # or a new stop was scheduled during the stop() call)
-                        if self._scheduled_stop_handle is handle:
-                            self._scheduled_stop_handle = None
-
-                self._scheduled_stop_handle = self._server.loop.call_later(
-                    delay, lambda: self._server.loop.create_task(_delayed_stop())
-                )
-                return active or needs_cleanup
+        # Handle delayed stop if requested
+        if stop_time_us is not None and self._schedule_delayed_stop(
+            stop_time_us, active, needs_cleanup
+        ):
+            return active or needs_cleanup
 
         if not active and not needs_cleanup:
             return False
@@ -580,57 +730,16 @@ class ResonateGroup:
             [c.client_id for c in self._clients],
         )
 
-        if self._stream_task is not None:
-            stream_task = self._stream_task
-            stream_task.cancel()
-            try:
-                await stream_task
-            except asyncio.CancelledError:
-                pass
-            except Exception:
-                logger.exception("Unhandled exception while stopping stream task")
-            self._stream_task = None
-
-        if self._streamer is not None:
-            self._streamer.reset()
-            self._streamer = None
-
-        if self._media_stream is not None:
-            with suppress(Exception):
-                await self._media_stream.source.aclose()
-        self._media_stream = None
-        self._stream_commands = None
-
-        for client in self._clients:
-            self._send_stream_end_msg(client)
-            if client.check_role(Roles.PLAYER):
-                self._player_formats.pop(client.client_id, None)
-
-        self._audio_encoders.clear()
-        self._current_media_art = None
-        self._play_start_time_us = None
+        try:
+            await self._cancel_stream_task()
+        finally:
+            await self._cleanup_streaming_resources()
 
         if self._current_state != PlaybackStateType.STOPPED:
             self._signal_event(GroupStateChangedEvent(PlaybackStateType.STOPPED))
             self._current_state = PlaybackStateType.STOPPED
 
-        timestamp = int(self._server.loop.time() * 1_000_000)
-        cleared_metadata = Metadata.cleared_update(timestamp)
-        for client in self._clients:
-            playback_state = (
-                PlaybackStateType.STOPPED
-                if (client.check_role(Roles.CONTROLLER) or client.check_role(Roles.METADATA))
-                else None
-            )
-            metadata_payload = cleared_metadata if client.check_role(Roles.METADATA) else None
-            message = SessionUpdateMessage(
-                SessionUpdatePayload(
-                    group_id=self._group_id,
-                    playback_state=playback_state,
-                    metadata=metadata_payload,
-                )
-            )
-            client.send_message(message)
+        self._send_stopped_state_to_clients()
         return True
 
     def set_metadata(self, metadata: Metadata | None, timestamp: int | None = None) -> None:
@@ -820,7 +929,8 @@ class ResonateGroup:
 
     def _signal_event(self, event: GroupEvent) -> None:
         for cb in self._event_cbs:
-            self._server.loop.create_task(cb(event))
+            task = self._server.loop.create_task(cb(event))
+            task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
 
     @property
     def state(self) -> PlaybackStateType:
@@ -848,8 +958,6 @@ class ResonateGroup:
             self._clients = []
         else:
             self._clients.remove(client)
-            if client.check_role(Roles.PLAYER):
-                self._player_formats.pop(client.client_id, None)
             self._send_stream_end_msg(client)
 
             # Reconfigure streamer if actively streaming
@@ -897,10 +1005,6 @@ class ResonateGroup:
         if self._stream_task is not None and self._media_stream:
             logger.debug("Joining client %s to current stream", client.client_id)
             if client.check_role(Roles.PLAYER):
-                player_format = client.require_player.determine_optimal_format(
-                    self._media_stream.audio_format
-                )
-                self._player_formats[client.client_id] = player_format
                 self._reconfigure_streamer()
             elif client.check_role(Roles.METADATA) or client.check_role(Roles.VISUALIZER):
                 self._send_stream_start_msg(client, None)

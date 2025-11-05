@@ -6,7 +6,7 @@ import socket
 from collections.abc import Callable, Coroutine
 from dataclasses import dataclass
 
-from aiohttp import ClientConnectionError, ClientResponseError, ClientWSTimeout, web
+from aiohttp import ClientConnectionError, ClientResponseError, ClientTimeout, ClientWSTimeout, web
 from aiohttp.client import ClientSession
 from zeroconf import InterfaceChoice, IPVersion, ServiceStateChange, Zeroconf
 from zeroconf.asyncio import AsyncServiceBrowser, AsyncServiceInfo, AsyncZeroconf
@@ -108,7 +108,7 @@ class ResonateServer:
         self._id = server_id
         self._name = server_name
         if client_session is None:
-            self._client_session = ClientSession(loop=self._loop)
+            self._client_session = ClientSession(loop=self._loop, timeout=ClientTimeout(total=30))
             self._owns_session = True
         else:
             self._client_session = client_session
@@ -269,7 +269,8 @@ class ResonateServer:
     def _signal_event(self, event: ResonateEvent) -> None:
         """Signal an event to all registered listeners."""
         for cb in self._event_cbs:
-            self._loop.create_task(cb(event))
+            task = self._loop.create_task(cb(event))
+            task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
 
     def _handle_client_connect(self, client: ResonateClient) -> None:
         """
@@ -434,7 +435,8 @@ class ResonateServer:
     ) -> None:
         """Handle mDNS service state callback."""
         if state_change in (ServiceStateChange.Added, ServiceStateChange.Updated):
-            self._loop.create_task(self._handle_service_added(zeroconf, service_type, name))
+            task = self._loop.create_task(self._handle_service_added(zeroconf, service_type, name))
+            task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
         # We don't listen on removals since connect_to_client has its own disconnect/retry logic
 
     async def _handle_service_added(self, zeroconf: Zeroconf, service_type: str, name: str) -> None:

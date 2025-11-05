@@ -101,6 +101,8 @@ class ResonateClient:
     _group: ResonateGroup
     _event_cbs: list[Callable[[ClientEvent], Coroutine[None, None, None]]]
     _closing: bool = False
+    _disconnecting: bool = False
+    """Flag to prevent multiple concurrent disconnect tasks."""
     disconnect_behaviour: DisconnectBehaviour
     """
     Controls the disconnect behavior for this client.
@@ -159,6 +161,7 @@ class ResonateClient:
         self._group = ResonateGroup(server, self)
         self._event_cbs = []
         self._closing = False
+        self._disconnecting = False
         self._roles = []
         self.disconnect_behaviour = DisconnectBehaviour.UNGROUP
 
@@ -166,6 +169,7 @@ class ResonateClient:
         """Disconnect this client from the server."""
         if not retry_connection:
             self._closing = True
+        self._disconnecting = True
         self._logger.debug("Disconnecting client")
 
         if self.disconnect_behaviour == DisconnectBehaviour.UNGROUP:
@@ -539,14 +543,20 @@ class ResonateClient:
         NOTE: Binary messages are directly sent to the client, you need to add the
         header yourself using pack_binary_header().
         """
-        # TODO: handle full queue
+        try:
+            self._to_write.put_nowait(message)
+        except asyncio.QueueFull:
+            # Only trigger disconnect once, even if queue fills repeatedly
+            if not self._disconnecting:
+                self._logger.error("Message queue full, client too slow - disconnecting")
+                task = self._server.loop.create_task(self.disconnect(retry_connection=True))
+                task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
+            return
+
         if isinstance(message, bytes):
-            # Only log binary messages occasionally to reduce spam
             pass
         elif not isinstance(message, ServerTimeMessage):
-            # Only log important non-time messages
             self._logger.debug("Enqueueing message: %s", type(message).__name__)
-        self._to_write.put_nowait(message)
 
     def add_event_listener(
         self, callback: Callable[[ClientEvent], Coroutine[None, None, None]]
@@ -565,4 +575,5 @@ class ResonateClient:
 
     def _signal_event(self, event: ClientEvent) -> None:
         for cb in self._event_cbs:
-            self._server.loop.create_task(cb(event))
+            task = self._server.loop.create_task(cb(event))
+            task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
