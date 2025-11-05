@@ -14,11 +14,23 @@ For a WIP reference implementation of a server using this library, see [Music As
 
 This repository includes a highly experimental CLI client for testing and development purposes.
 
+### Quick Start
+
+**Run directly with [uv](https://docs.astral.sh/uv/getting-started/installation/):**
+```bash
+uvx --from "aioresonate[cli]" resonate-cli
+```
+
 ### Installation
 
-Install from PyPI:
+**With pip:**
 ```bash
 pip install "aioresonate[cli]"
+```
+
+**With uv:**
+```bash
+uv tool install "aioresonate[cli]"
 ```
 
 <details>
@@ -32,8 +44,7 @@ pip install ".[cli]"
 
 </details>
 
-### Running the CLI
-
+**After installation, run:**
 ```bash
 resonate-cli
 ```
