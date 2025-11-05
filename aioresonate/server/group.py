@@ -733,8 +733,10 @@ class ResonateGroup:
             [c.client_id for c in self._clients],
         )
 
-        await self._cancel_stream_task()
-        await self._cleanup_streaming_resources()
+        try:
+            await self._cancel_stream_task()
+        finally:
+            await self._cleanup_streaming_resources()
 
         if self._current_state != PlaybackStateType.STOPPED:
             self._signal_event(GroupStateChangedEvent(PlaybackStateType.STOPPED))
