@@ -6,7 +6,7 @@ import socket
 from collections.abc import Callable, Coroutine
 from dataclasses import dataclass
 
-from aiohttp import ClientConnectionError, ClientResponseError, ClientWSTimeout, web
+from aiohttp import ClientConnectionError, ClientResponseError, ClientTimeout, ClientWSTimeout, web
 from aiohttp.client import ClientSession
 from zeroconf import InterfaceChoice, IPVersion, ServiceStateChange, Zeroconf
 from zeroconf.asyncio import AsyncServiceBrowser, AsyncServiceInfo, AsyncZeroconf
@@ -108,7 +108,7 @@ class ResonateServer:
         self._id = server_id
         self._name = server_name
         if client_session is None:
-            self._client_session = ClientSession(loop=self._loop)
+            self._client_session = ClientSession(loop=self._loop, timeout=ClientTimeout(total=30))
             self._owns_session = True
         else:
             self._client_session = client_session
