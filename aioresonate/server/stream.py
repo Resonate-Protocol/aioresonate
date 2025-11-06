@@ -384,12 +384,8 @@ class PlayerState:
     """Chunks queued for delivery."""
     buffer_tracker: BufferTracker | None = None
     """Tracks client buffer state."""
-    join_time_us: int | None = None
-    """Stream position when player joined (in stream microseconds)."""
     join_wall_time_us: int | None = None
     """Wall-clock time when player joined (for grace period tracking)."""
-    needs_catchup: bool = False
-    """Whether player needs catch-up processing."""
 
 
 class MediaStream:
@@ -572,7 +568,6 @@ class Streamer:
             audio_format=audio_format,
             channel_id=channel_id,
             buffer_tracker=buffer_tracker,
-            join_time_us=sync_point_start_time_us,
             join_wall_time_us=self._now_us(),
         )
 
@@ -581,9 +576,6 @@ class Streamer:
             if chunk.start_time_us >= sync_point_start_time_us:
                 player_state.queue.append(chunk)
                 chunk.refcount += 1
-
-        # No catchup needed since we're starting at the sync point
-        player_state.needs_catchup = False
 
         return player_state
 
@@ -1053,11 +1045,10 @@ class Streamer:
         Send prepared audio to all clients with perfect group synchronization.
 
         This method performs stages in a loop:
-        1. Perform catch-up for late joiners (if needed)
-        2. Check for stale chunks and adjust timing globally if needed (prevents skipping)
-        3. Send chunks to players with backpressure control (per-player throughput)
-        4. Prune old data
-        5. Check exit conditions and apply source buffer backpressure
+        1. Check for stale chunks and adjust timing globally if needed (prevents skipping)
+        2. Send chunks to players with backpressure control (per-player throughput)
+        3. Prune old data
+        4. Check exit conditions and apply source buffer backpressure
 
         Global timing adjustments prevent chunk skipping, ensuring all players
         receive identical audio content for perfect synchronization. Players can
@@ -1067,12 +1058,7 @@ class Streamer:
         Continues until all pending audio has been delivered and source buffer is below target.
         """
         while True:
-            # Stage 1: Perform catch-up for players that need it
-            for player_state in self._players.values():
-                if player_state.needs_catchup:
-                    self._perform_catchup(player_state)
-
-            # Stage 2: Check for stale chunks on MAIN_CHANNEL only
+            # Stage 1: Check for stale chunks on MAIN_CHANNEL only
             # Newly joined players are excluded via grace period to avoid false positives
             # from sync-point chunks with past timestamps
             # Dedicated player channels can have arbitrary timestamps from player_channel()
@@ -1112,10 +1098,10 @@ class Streamer:
                 # After adjustment, continue to next iteration with updated timing
                 continue
 
-            # Stage 3: Send chunks to players with backpressure control
+            # Stage 2: Send chunks to players with backpressure control
             earliest_blocked_wait_time_us = self._send_chunks_to_players()
 
-            # Stage 3b: Handle backpressure - compare client buffer wait vs source buffer urgency
+            # Stage 2b: Handle backpressure - compare client buffer wait vs source buffer urgency
             if earliest_blocked_wait_time_us > 0:
                 channel_wait_us = self._get_earliest_channel_wait_time_us() or 0
 
@@ -1129,20 +1115,19 @@ class Streamer:
                 await asyncio.sleep(earliest_blocked_wait_time_us / 1_000_000)
                 continue
 
-            # Stage 4: Cleanup
+            # Stage 3: Cleanup
             self._prune_old_data()
 
-            # Stage 5: Check exit conditions and apply source buffer backpressure
+            # Stage 4: Check exit conditions and apply source buffer backpressure
             has_pending_deliveries = any(
-                player_state.queue or player_state.needs_catchup
-                for player_state in self._players.values()
+                player_state.queue for player_state in self._players.values()
             )
 
             if has_pending_deliveries:
                 # If client work pending, continue immediately
                 continue
 
-            # Stage 5b: Wait for source buffer to drain below target
+            # Stage 4b: Wait for source buffer to drain below target
             channel_wait_us = self._get_earliest_channel_wait_time_us() or 0
 
             # If no channels or immediate need, exit to refill
@@ -1279,362 +1264,6 @@ class Streamer:
                         pipeline.source_read_position = max(
                             0, pipeline.source_read_position - chunks_removed
                         )
-
-    def _check_needs_catchup(self, player_state: PlayerState, join_time_us: int) -> bool:
-        """
-        Check if player needs catch-up processing.
-
-        Args:
-            player_state: The player to check.
-            join_time_us: Timestamp when the player joined.
-
-        Returns:
-            True if player has a gap that needs catch-up, False otherwise.
-        """
-        channel_state = self._channels.get(player_state.channel_id)
-        if not channel_state or not channel_state.source_buffer:
-            return False
-
-        # Determine if there's a gap that can be filled from source buffer
-        first_queued_start_us = player_state.queue[0].start_time_us if player_state.queue else None
-
-        # Check if any source chunks exist in the gap range
-        for source_chunk in channel_state.source_buffer:
-            # Skip chunks before join time
-            if source_chunk.end_time_us <= join_time_us:
-                continue
-            # Stop when we reach prepared chunks
-            if first_queued_start_us and source_chunk.start_time_us >= first_queued_start_us:
-                break
-            # Found at least one chunk in the gap
-            return True
-
-        return False
-
-    def _perform_catchup(self, player_state: PlayerState) -> None:
-        """
-        Process and queue missing chunks for late joiners from source buffer.
-
-        When a late joiner arrives, this reprocesses source chunks to fill the gap
-        between join_time and the first queued chunk. Chunks are added to the player's
-        queue and will be sent by the normal send loop with proper backpressure.
-
-        Args:
-            player_state: The late joining player.
-        """
-        channel_state = self._channels.get(player_state.channel_id)
-        if (
-            not channel_state
-            or not channel_state.source_buffer
-            or player_state.join_time_us is None
-        ):
-            return
-
-        join_time_us = player_state.join_time_us
-        pipeline = self._pipelines[(player_state.channel_id, player_state.audio_format)]
-
-        # Determine the coverage range we need to fill
-        first_queued_start_us = player_state.queue[0].start_time_us if player_state.queue else None
-
-        # Find source chunks that cover the gap
-        catchup_sources = []
-        for source_chunk in channel_state.source_buffer:
-            # Skip chunks before join time
-            if source_chunk.end_time_us <= join_time_us:
-                continue
-            # Stop when we reach prepared chunks
-            if first_queued_start_us and source_chunk.start_time_us >= first_queued_start_us:
-                break
-            catchup_sources.append(source_chunk)
-
-        if not catchup_sources:
-            player_state.needs_catchup = False
-            return
-
-        gap_duration_ms = (
-            catchup_sources[-1].end_time_us - catchup_sources[0].start_time_us
-        ) / 1000
-        logger.info(
-            "Catching up %s: processing %.1f ms from source buffer",
-            player_state.config.client_id,
-            gap_duration_ms,
-        )
-
-        # Process catch-up chunks and get PreparedChunkState objects
-        catchup_chunks = self._process_and_send_catchup(
-            pipeline=pipeline,
-            channel_state=channel_state,
-            player_state=player_state,
-            source_chunks=catchup_sources,
-            first_queued_start_us=first_queued_start_us,
-        )
-
-        # Prepend catch-up chunks to player queue (they'll be sent by send loop)
-        if catchup_chunks:
-            player_state.queue = deque(catchup_chunks + list(player_state.queue))
-            logger.info(
-                "Catch-up complete for %s: queued %d chunks for delivery",
-                player_state.config.client_id,
-                len(catchup_chunks),
-            )
-        else:
-            logger.info("Catch-up for %s: no chunks to queue", player_state.config.client_id)
-
-        # Mark catch-up as complete
-        player_state.needs_catchup = False
-
-    def _process_and_send_catchup(  # noqa: PLR0915
-        self,
-        *,
-        pipeline: PipelineState,
-        channel_state: ChannelState,
-        player_state: PlayerState,
-        source_chunks: list[SourceChunk],
-        first_queued_start_us: int | None,
-    ) -> list[PreparedChunkState]:
-        """
-        Process source chunks and create catch-up chunks for queueing.
-
-        Creates temporary resampler/encoder to avoid corrupting shared pipeline state.
-        Uses sample-based timestamp calculation to align perfectly with prepared chunks.
-
-        Args:
-            pipeline: Pipeline config to use for processing.
-            channel_state: Channel state for source format data.
-            player_state: Player to send chunks to.
-            source_chunks: Source chunks to process.
-            first_queued_start_us: Start time of first queued prepared chunk (for alignment).
-
-        Returns:
-            List of PreparedChunkState objects to prepend to player queue.
-        """
-        if not source_chunks:
-            return []
-
-        # Store processed chunks with their sample counts
-        processed_chunks: list[tuple[bytes, int]] = []
-
-        # Create temporary resampler (always needed)
-        temp_resampler = av.AudioResampler(
-            format=pipeline.target_av_format,
-            layout=pipeline.target_layout,
-            rate=pipeline.target_format.sample_rate,
-        )
-
-        # Create temporary encoder if needed
-        temp_encoder: av.AudioCodecContext | None = None
-        if pipeline.encoder is not None:
-            codec = (
-                "libopus"
-                if pipeline.target_format.codec == AudioCodec.OPUS
-                else pipeline.target_format.codec.value
-            )
-            temp_encoder = cast("av.AudioCodecContext", av.AudioCodecContext.create(codec, "w"))
-            temp_encoder.sample_rate = pipeline.target_format.sample_rate
-            temp_encoder.layout = pipeline.target_layout
-            temp_encoder.format = pipeline.target_av_format
-            if pipeline.target_format.codec == AudioCodec.FLAC:
-                temp_encoder.options = {"compression_level": "5"}
-            with Capture():
-                temp_encoder.open()
-
-        # PHASE 1: Process all source chunks and collect output chunks
-        temp_buffer = bytearray()
-
-        for source_chunk in source_chunks:
-            # Resample
-            frame = av.AudioFrame(
-                format=channel_state.source_format_params.av_format,
-                layout=channel_state.source_format_params.av_layout,
-                samples=source_chunk.sample_count,
-            )
-            frame.sample_rate = channel_state.source_format_params.audio_format.sample_rate
-            frame.planes[0].update(source_chunk.pcm_data)
-            out_frames = temp_resampler.resample(frame)
-
-            for out_frame in out_frames:
-                expected = pipeline.target_frame_stride * out_frame.samples
-                pcm_bytes = bytes(out_frame.planes[0])[:expected]
-                temp_buffer.extend(pcm_bytes)
-
-            # Drain buffer and collect chunks (don't send yet)
-            self._collect_catchup_chunks(
-                temp_buffer=temp_buffer,
-                temp_encoder=temp_encoder,
-                pipeline=pipeline,
-                processed_chunks=processed_chunks,
-                force_flush=False,
-            )
-
-        # Final flush
-        if temp_buffer:
-            self._collect_catchup_chunks(
-                temp_buffer=temp_buffer,
-                temp_encoder=temp_encoder,
-                pipeline=pipeline,
-                processed_chunks=processed_chunks,
-                force_flush=True,
-            )
-
-        # Flush encoder if used
-        if temp_encoder is not None:
-            packets = temp_encoder.encode(None)
-            for packet in packets:
-                if not packet.duration or packet.duration <= 0:
-                    raise ValueError(f"Invalid packet duration: {packet.duration!r}")
-                chunk_data = bytes(packet)
-                processed_chunks.append((chunk_data, packet.duration))
-
-        # PHASE 2: Calculate timestamps using sample-based math (like prepared chunks)
-        # Work backwards from first_queued_start_us to ensure perfect alignment
-        total_samples = sum(sample_count for _, sample_count in processed_chunks)
-        target_rate = pipeline.target_format.sample_rate
-
-        if first_queued_start_us:
-            # Work backwards from first queued chunk
-            actual_duration_us = int(total_samples * 1_000_000 / target_rate)
-            catchup_start_time_us = first_queued_start_us - actual_duration_us
-
-            # CRITICAL: Ensure catch-up doesn't start before join time
-            # If it would, skip chunks from the beginning to align with join time
-            if player_state.join_time_us and catchup_start_time_us < player_state.join_time_us:
-                # Calculate how many samples to skip
-                skip_duration_us = player_state.join_time_us - catchup_start_time_us
-                skip_samples = int(skip_duration_us * target_rate / 1_000_000)
-
-                logger.debug(
-                    "Catch-up would start %d us before join time, "
-                    "skipping first %d samples (%.1f ms)",
-                    player_state.join_time_us - catchup_start_time_us,
-                    skip_samples,
-                    skip_duration_us / 1000,
-                )
-
-                # Skip entire chunks until we've skipped enough samples
-                samples_to_skip = skip_samples
-                chunks_to_skip = []
-
-                for i, (_payload, sample_count) in enumerate(processed_chunks):
-                    if samples_to_skip >= sample_count:
-                        # Skip entire chunk
-                        samples_to_skip -= sample_count
-                        chunks_to_skip.append(i)
-                    else:
-                        # Partial skip would require splitting chunk - stop here
-                        break
-
-                # Remove chunks we're skipping
-                for i in reversed(chunks_to_skip):
-                    processed_chunks.pop(i)
-
-                # Recalculate after skipping
-                total_samples = sum(sample_count for _, sample_count in processed_chunks)
-                actual_duration_us = int(total_samples * 1_000_000 / target_rate)
-                catchup_start_time_us = first_queued_start_us - actual_duration_us
-
-                # Ensure start time is not before join time (due to rounding)
-                catchup_start_time_us = max(catchup_start_time_us, player_state.join_time_us)
-
-            logger.debug(
-                "Catch-up aligned: %d samples = %.1f ms, "
-                "starting at offset +%.1f ms, ending at offset +%.1f ms",
-                total_samples,
-                actual_duration_us / 1000,
-                (catchup_start_time_us - self._play_start_time_us) / 1000,
-                (first_queued_start_us - self._play_start_time_us) / 1000,
-            )
-        else:
-            # No queued chunks - start from join time
-            catchup_start_time_us = player_state.join_time_us or source_chunks[0].start_time_us
-            logger.debug(
-                "Catch-up with no prepared chunks: %d samples starting at offset +%.1f ms",
-                total_samples,
-                (catchup_start_time_us - self._play_start_time_us) / 1000,
-            )
-
-        # PHASE 3: Create PreparedChunkState objects for queueing
-        catchup_chunks: list[PreparedChunkState] = []
-        samples_sent = 0
-
-        for chunk_data, sample_count in processed_chunks:
-            # Calculate timestamps from sample position (same method as prepared chunks)
-            start_us = catchup_start_time_us + int(samples_sent * 1_000_000 / target_rate)
-            end_us = catchup_start_time_us + int(
-                (samples_sent + sample_count) * 1_000_000 / target_rate
-            )
-
-            # Create chunk with refcount=1 (not shared, player-specific)
-            chunk = PreparedChunkState(
-                data=chunk_data,
-                start_time_us=start_us,
-                end_time_us=end_us,
-                sample_count=sample_count,
-                byte_count=len(chunk_data),
-                refcount=1,  # Not shared - only for this player
-            )
-            catchup_chunks.append(chunk)
-            samples_sent += sample_count
-
-        return catchup_chunks
-
-    def _collect_catchup_chunks(
-        self,
-        *,
-        temp_buffer: bytearray,
-        temp_encoder: av.AudioCodecContext | None,
-        pipeline: PipelineState,
-        processed_chunks: list[tuple[bytes, int]],
-        force_flush: bool,
-    ) -> None:
-        """
-        Drain temporary buffer and collect chunks (without sending).
-
-        Args:
-            temp_buffer: Temporary buffer to drain.
-            temp_encoder: Temporary encoder (or None for PCM).
-            pipeline: Pipeline config.
-            processed_chunks: List to append (chunk_data, sample_count) tuples to.
-            force_flush: Whether to flush all remaining samples.
-        """
-        frame_stride = pipeline.target_frame_stride
-
-        while len(temp_buffer) >= frame_stride:
-            available_samples = len(temp_buffer) // frame_stride
-            if not force_flush and available_samples < pipeline.chunk_samples:
-                break
-
-            # Extract data to fit sample count
-            sample_count = pipeline.chunk_samples
-            if force_flush and available_samples < pipeline.chunk_samples:
-                # Pad incomplete chunk with zeros to reach full chunk_samples
-                audio_data_bytes = available_samples * frame_stride
-                padding_bytes = (sample_count - available_samples) * frame_stride
-                chunk = bytes(temp_buffer[:audio_data_bytes]) + bytes(padding_bytes)
-                del temp_buffer[:audio_data_bytes]
-            else:
-                chunk_size = sample_count * frame_stride
-                chunk = bytes(temp_buffer[:chunk_size])
-                del temp_buffer[:chunk_size]
-
-            if temp_encoder is None:
-                # PCM - collect directly
-                processed_chunks.append((chunk, sample_count))
-            else:
-                # Encode then collect
-                frame = av.AudioFrame(
-                    format=pipeline.target_av_format,
-                    layout=pipeline.target_layout,
-                    samples=sample_count,
-                )
-                frame.sample_rate = pipeline.target_format.sample_rate
-                frame.planes[0].update(chunk)
-                packets = temp_encoder.encode(frame)
-
-                for packet in packets:
-                    if not packet.duration or packet.duration <= 0:
-                        raise ValueError(f"Invalid packet duration: {packet.duration!r}")
-                    chunk_data = bytes(packet)
-                    processed_chunks.append((chunk_data, packet.duration))
 
     def _process_pipeline_from_source(
         self, pipeline: PipelineState, channel_state: ChannelState
