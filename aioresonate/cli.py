@@ -615,7 +615,11 @@ async def main_async(argv: Sequence[str] | None = None) -> int:  # noqa: PLR0915
             logger.debug("Received interrupt signal, shutting down...")
             keyboard_task.cancel()
 
-        loop.add_signal_handler(signal.SIGINT, signal_handler)
+        try:
+            loop.add_signal_handler(signal.SIGINT, signal_handler)
+        except NotImplementedError:
+           # Signal handlers aren't supported on this platform (e.g., Windows)
+           pass
 
         try:
             # Run connection loop with auto-reconnect
@@ -624,7 +628,11 @@ async def main_async(argv: Sequence[str] | None = None) -> int:  # noqa: PLR0915
             logger.debug("Connection loop cancelled")
         finally:
             # Remove signal handler
-            loop.remove_signal_handler(signal.SIGINT)
+            try:
+               loop.remove_signal_handler(signal.SIGINT)
+            except NotImplementedError:
+               # Signal handlers aren't supported on this platform (e.g., Windows)
+               pass
             await audio_handler.cleanup()
             await client.disconnect()
 
