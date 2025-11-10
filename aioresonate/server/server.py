@@ -319,7 +319,9 @@ class ResonateServer:
         """Get the name of this server."""
         return self._name
 
-    async def start_server(self, port: int = 8927, host: str = "0.0.0.0") -> None:
+    async def start_server(
+        self, port: int = 8927, host: str = "0.0.0.0", advertise_host: str = "0.0.0.0"
+    ) -> None:
         """
         Start the Resonate Server.
 
@@ -328,7 +330,10 @@ class ResonateServer:
         - Server initiated connections: This will listen for all _resonate._tcp mDNS services and
           automatically connect to them.
 
-        The server will be started on the given host and port.
+        :param port: The TCP port to bind the server to.
+        :param host: The IP address for the server to listen on
+            (e.g., "0.0.0.0" for all interfaces).
+        :param advertise_host: The IP address to advertise via mDNS.
         """
         if self._app is not None:
             logger.warning("Server is already running")
@@ -354,7 +359,7 @@ class ResonateServer:
             self._zc = AsyncZeroconf(
                 ip_version=IPVersion.V4Only, interfaces=InterfaceChoice.Default
             )
-            await self._start_mdns_advertising(host=host, port=port, path=api_path)
+            await self._start_mdns_advertising(host=advertise_host, port=port, path=api_path)
             await self._start_mdns_discovery()
         except OSError as e:
             logger.error("Failed to start server on %s:%d: %s", host, port, e)
