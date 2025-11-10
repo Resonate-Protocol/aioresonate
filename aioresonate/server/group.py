@@ -385,6 +385,12 @@ class ResonateGroup:
                         if start_us < now_us:
                             # Skip outdated chunk but update sample counter to maintain sync
                             channel_state.samples_produced += sample_count
+                            logger.debug(
+                                "Skipping outdated chunk for channel %s (start: %d us, now: %d us)",
+                                channel_id,
+                                start_us,
+                                now_us,
+                            )
                             continue
 
                     streamer.prepare(channel_id, chunk, during_initial_buffering=True)
