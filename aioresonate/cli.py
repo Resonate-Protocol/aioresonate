@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import logging
 import signal
 import socket
@@ -615,7 +616,9 @@ async def main_async(argv: Sequence[str] | None = None) -> int:  # noqa: PLR0915
             logger.debug("Received interrupt signal, shutting down...")
             keyboard_task.cancel()
 
-        loop.add_signal_handler(signal.SIGINT, signal_handler)
+        # Signal handlers aren't supported on this platform (e.g., Windows)
+        with contextlib.suppress(NotImplementedError):
+            loop.add_signal_handler(signal.SIGINT, signal_handler)
 
         try:
             # Run connection loop with auto-reconnect
@@ -624,7 +627,9 @@ async def main_async(argv: Sequence[str] | None = None) -> int:  # noqa: PLR0915
             logger.debug("Connection loop cancelled")
         finally:
             # Remove signal handler
-            loop.remove_signal_handler(signal.SIGINT)
+            # Signal handlers aren't supported on this platform (e.g., Windows)
+            with contextlib.suppress(NotImplementedError):
+                loop.remove_signal_handler(signal.SIGINT)
             await audio_handler.cleanup()
             await client.disconnect()
 
