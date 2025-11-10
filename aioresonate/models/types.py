@@ -72,12 +72,23 @@ class Roles(Enum):
 class BinaryMessageType(Enum):
     """Enum for Binary Message Types."""
 
-    AUDIO_CHUNK = 1
-    """Audio chunks with timestamps."""
-    MEDIA_ART = 2
-    """Media art (images)."""
-    VISUALIZATION_DATA = 3
-    """Visualization data."""
+    # Player role (bits 000000xx):
+    AUDIO_CHUNK = 0
+    """Audio chunks with timestamps (Player role, slot 0)."""
+
+    # Artwork role (bits 000001xx):
+    ARTWORK_CHANNEL_0 = 4
+    """Artwork channel 0 (Artwork role, slot 0)."""
+    ARTWORK_CHANNEL_1 = 5
+    """Artwork channel 1 (Artwork role, slot 1)."""
+    ARTWORK_CHANNEL_2 = 6
+    """Artwork channel 2 (Artwork role, slot 2)."""
+    ARTWORK_CHANNEL_3 = 7
+    """Artwork channel 3 (Artwork role, slot 3)."""
+
+    # Visualizer role (bits 000010xx):
+    VISUALIZATION_DATA = 8
+    """Visualization data (Visualizer role, slot 0)."""
 
 
 class RepeatMode(Enum):

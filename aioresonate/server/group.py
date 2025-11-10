@@ -917,7 +917,7 @@ class ResonateGroup:
             img_bytes.seek(0)
             img_data = img_bytes.read()
             header = pack_binary_header_raw(
-                BinaryMessageType.MEDIA_ART.value, int(self._server.loop.time() * 1_000_000)
+                BinaryMessageType.ARTWORK_CHANNEL_0.value, int(self._server.loop.time() * 1_000_000)
             )
             client.send_message(header + img_data)
 
