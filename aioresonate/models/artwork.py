@@ -10,10 +10,30 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from mashumaro.config import BaseConfig
 from mashumaro.mixins.orjson import DataClassORJSONMixin
 
-from .types import PictureFormat
+from .types import ArtworkSource, PictureFormat
+
+
+@dataclass
+class ArtworkChannel(DataClassORJSONMixin):
+    """Configuration for a single artwork channel."""
+
+    source: ArtworkSource
+    """Artwork source type."""
+    format: PictureFormat
+    """Image format identifier."""
+    media_width: int
+    """Max width in pixels."""
+    media_height: int
+    """Max height in pixels."""
+
+    def __post_init__(self) -> None:
+        """Validate field values."""
+        if self.media_width <= 0:
+            raise ValueError(f"media_width must be positive, got {self.media_width}")
+        if self.media_height <= 0:
+            raise ValueError(f"media_height must be positive, got {self.media_height}")
 
 
 # Client -> Server: client/hello artwork support object
@@ -21,25 +41,13 @@ from .types import PictureFormat
 class ClientHelloArtworkSupport(DataClassORJSONMixin):
     """Artwork support configuration - only if artwork role is set."""
 
-    support_picture_formats: list[str]
-    """Supported media art image formats (empty array if no art desired)."""
-    media_width: int | None = None
-    """Max width in pixels (if only width set, scales preserving aspect ratio)."""
-    media_height: int | None = None
-    """Max height in pixels (if only height set, scales preserving aspect ratio)."""
+    channels: list[ArtworkChannel]
+    """List of supported artwork channels (length 1-4), array index is the channel number."""
 
     def __post_init__(self) -> None:
         """Validate field values."""
-        if self.media_width is not None and self.media_width <= 0:
-            raise ValueError(f"media_width must be positive, got {self.media_width}")
-
-        if self.media_height is not None and self.media_height <= 0:
-            raise ValueError(f"media_height must be positive, got {self.media_height}")
-
-    class Config(BaseConfig):
-        """Config for parsing json messages."""
-
-        omit_none = True
+        if not 1 <= len(self.channels) <= 4:
+            raise ValueError(f"channels must have 1-4 elements, got {len(self.channels)}")
 
 
 # Server -> Client: stream/start artwork object

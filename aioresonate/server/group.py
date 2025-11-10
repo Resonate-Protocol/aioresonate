@@ -10,7 +10,7 @@ from collections.abc import AsyncGenerator, Callable, Coroutine
 from contextlib import suppress
 from dataclasses import dataclass
 from io import BytesIO
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 from uuid import UUID
 
 from PIL import Image
@@ -582,14 +582,12 @@ class ResonateGroup:
         """Send a stream start message to a client with the specified audio format for players."""
         assert client.check_role(Roles.PLAYER) == (player_stream_info is not None)
         if client.check_role(Roles.ARTWORK) and client.info.artwork_support:
-            supported = client.info.artwork_support.support_picture_formats
-            art_format: PictureFormat | None = None
-            for fmt in (PictureFormat.JPEG, PictureFormat.PNG, PictureFormat.BMP):
-                if fmt.value in supported:
-                    art_format = fmt
-                    self._client_art_formats[client.client_id] = art_format
-                    break
-            if art_format is not None:
+            # Use channel 0 (first channel) for now
+            channels = client.info.artwork_support.channels
+            if channels:
+                channel_0 = channels[0]
+                art_format = channel_0.format
+                self._client_art_formats[client.client_id] = art_format
                 artwork_stream_info = StreamStartArtwork(art_format=art_format)
             else:
                 artwork_stream_info = None
@@ -885,25 +883,15 @@ class ResonateGroup:
             # Do nothing if we are not in an active session or this client doesn't support artwork
             return
         artwork_support = client.info.artwork_support
-        width = artwork_support.media_width
-        height = artwork_support.media_height
+        # Use channel 0 (first channel) for now
+        if not artwork_support.channels:
+            return
+        channel_0 = artwork_support.channels[0]
+        width = channel_0.media_width
+        height = channel_0.media_height
 
-        if width is None and height is None:
-            # No size constraints, use original image size
-            resized_image = image
-        elif width is not None and height is None:
-            # Only width constraint, scale height to maintain aspect ratio
-            aspect_ratio = image.height / image.width
-            height = int(width * aspect_ratio)
-            resized_image = image.resize((width, height), Image.Resampling.LANCZOS)
-        elif width is None and height is not None:
-            # Only height constraint, scale width to maintain aspect ratio
-            aspect_ratio = image.width / image.height
-            width = int(height * aspect_ratio)
-            resized_image = image.resize((width, height), Image.Resampling.LANCZOS)
-        else:
-            # Both width and height constraints - use letterboxing to preserve aspect ratio
-            resized_image = self._letterbox_image(image, cast("int", width), cast("int", height))
+        # Resize with letterboxing to fit within width x height while preserving aspect ratio
+        resized_image = self._letterbox_image(image, width, height)
 
         with BytesIO() as img_bytes:
             if art_format == PictureFormat.JPEG:

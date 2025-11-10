@@ -133,3 +133,14 @@ class PictureFormat(Enum):
     BMP = "bmp"
     JPEG = "jpeg"
     PNG = "png"
+
+
+class ArtworkSource(Enum):
+    """Artwork source type."""
+
+    ALBUM = "album"
+    """Album artwork."""
+    ARTIST = "artist"
+    """Artist artwork."""
+    NONE = "none"
+    """No artwork - channel disabled."""
