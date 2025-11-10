@@ -29,7 +29,7 @@ from aioresonate.cli_audio import AudioPlayer
 from aioresonate.client import PCMFormat, ResonateClient
 from aioresonate.models.controller import GroupUpdateServerPayload
 from aioresonate.models.core import DeviceInfo, SessionUpdatePayload, StreamStartMessage
-from aioresonate.models.metadata import ClientHelloMetadataSupport, SessionUpdateMetadata
+from aioresonate.models.metadata import SessionUpdateMetadata
 from aioresonate.models.player import ClientHelloPlayerSupport
 from aioresonate.models.types import MediaCommand, PlaybackStateType, Roles, UndefinedField
 
@@ -604,11 +604,6 @@ async def main_async(argv: Sequence[str] | None = None) -> int:  # noqa: PLR0915
             support_sample_rates=[44_100],
             support_bit_depth=[16],
             buffer_capacity=32_000_000,
-        ),
-        metadata_support=ClientHelloMetadataSupport(
-            support_picture_formats=[],
-            media_width=None,
-            media_height=None,
         ),
         static_delay_ms=args.static_delay_ms,
     )

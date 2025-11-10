@@ -67,8 +67,8 @@ class ClientHelloPayload(DataClassORJSONMixin):
     """Optional information about the device."""
     player_support: ClientHelloPlayerSupport | None = None
     """Player support configuration - only if player role is in supported_roles."""
-    metadata_support: ClientHelloMetadataSupport | None = None
-    """Metadata support configuration - only if metadata role is in supported_roles."""
+    artwork_support: ClientHelloMetadataSupport | None = None
+    """Artwork support configuration - only if artwork role is in supported_roles."""
     visualizer_support: ClientHelloVisualizerSupport | None = None
     """Visualizer support configuration - only if visualizer role is in supported_roles."""
 
@@ -83,14 +83,14 @@ class ClientHelloPayload(DataClassORJSONMixin):
         if not player_role_supported:
             self.player_support = None
 
-        # Validate metadata role and support configuration
-        metadata_role_supported = Roles.METADATA in self.supported_roles
-        if metadata_role_supported and self.metadata_support is None:
+        # Validate artwork role and support configuration
+        artwork_role_supported = Roles.ARTWORK in self.supported_roles
+        if artwork_role_supported and self.artwork_support is None:
             raise ValueError(
-                "metadata_support must be provided when 'metadata' role is in supported_roles"
+                "artwork_support must be provided when 'artwork' role is in supported_roles"
             )
-        if not metadata_role_supported:
-            self.metadata_support = None
+        if not artwork_role_supported:
+            self.artwork_support = None
 
         # Validate visualizer role and support configuration
         visualizer_role_supported = Roles.VISUALIZER in self.supported_roles

@@ -58,11 +58,9 @@ class Roles(Enum):
     CONTROLLER = "controller"
     """Controls Resonate groups."""
     METADATA = "metadata"
-    """
-    Displays metadata.
-
-    Has preferred format for cover art.
-    """
+    """Displays text metadata describing the currently playing audio."""
+    ARTWORK = "artwork"
+    """Displays artwork images."""
     VISUALIZER = "visualizer"
     """
     Visualizes music.

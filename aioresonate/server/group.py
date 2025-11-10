@@ -581,8 +581,8 @@ class ResonateGroup:
     ) -> None:
         """Send a stream start message to a client with the specified audio format for players."""
         assert client.check_role(Roles.PLAYER) == (player_stream_info is not None)
-        if client.check_role(Roles.METADATA) and client.info.metadata_support:
-            supported = client.info.metadata_support.support_picture_formats
+        if client.check_role(Roles.ARTWORK) and client.info.artwork_support:
+            supported = client.info.artwork_support.support_picture_formats
             art_format: PictureFormat | None = None
             for fmt in (PictureFormat.JPEG, PictureFormat.PNG, PictureFormat.BMP):
                 if fmt.value in supported:
@@ -877,16 +877,16 @@ class ResonateGroup:
 
     def _send_media_art_to_client(self, client: ResonateClient, image: Image.Image) -> None:
         """Send media art to a specific client with appropriate format and sizing."""
-        if not client.check_role(Roles.METADATA) or not client.info.metadata_support:
+        if not client.check_role(Roles.ARTWORK) or not client.info.artwork_support:
             return
 
         art_format = self._client_art_formats.get(client.client_id)
         if art_format is None:
             # Do nothing if we are not in an active session or this client doesn't support artwork
             return
-        metadata_support = client.info.metadata_support
-        width = metadata_support.media_width
-        height = metadata_support.media_height
+        artwork_support = client.info.artwork_support
+        width = artwork_support.media_width
+        height = artwork_support.media_height
 
         if width is None and height is None:
             # No size constraints, use original image size

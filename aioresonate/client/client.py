@@ -120,8 +120,8 @@ class ResonateClient:
     """List of roles this client supports."""
     _player_support: ClientHelloPlayerSupport | None
     """Player capabilities (only set if PLAYER role is supported)."""
-    _metadata_support: ClientHelloMetadataSupport | None
-    """Metadata capabilities (only set if METADATA role is supported)."""
+    _artwork_support: ClientHelloMetadataSupport | None
+    """Artwork capabilities (only set if ARTWORK role is supported)."""
     _session: ClientSession | None
     """Optional aiohttp ClientSession for WebSocket connection."""
 
@@ -181,7 +181,7 @@ class ResonateClient:
         *,
         device_info: DeviceInfo | None = None,
         player_support: ClientHelloPlayerSupport | None = None,
-        metadata_support: ClientHelloMetadataSupport | None = None,
+        artwork_support: ClientHelloMetadataSupport | None = None,
         session: ClientSession | None = None,
         static_delay_ms: float = 0.0,
     ) -> None:
@@ -192,13 +192,13 @@ class ResonateClient:
             client_id: Unique identifier for this client.
             client_name: Human-readable name for this client.
             roles: Sequence of roles this client supports. Must include PLAYER
-                if player_support is provided; must include METADATA if
-                metadata_support is provided.
+                if player_support is provided; must include ARTWORK if
+                artwork_support is provided.
             device_info: Optional device information (product name, manufacturer,
                 software version).
             player_support: Custom player capabilities. Required if PLAYER role
                 is specified; raises ValueError if missing.
-            metadata_support: Custom metadata capabilities. Required if METADATA
+            artwork_support: Custom artwork capabilities. Required if ARTWORK
                 role is specified; raises ValueError if missing.
             session: Optional aiohttp ClientSession. If None, a session is created
                 and managed by this client.
@@ -207,7 +207,7 @@ class ResonateClient:
 
         Raises:
             ValueError: If PLAYER in roles but player_support is None, or if
-                METADATA in roles but metadata_support is None.
+                ARTWORK in roles but artwork_support is None.
         """
         self._client_id = client_id
         self._client_name = client_name
@@ -222,13 +222,13 @@ class ResonateClient:
         else:
             self._player_support = None
 
-        # Validate and store metadata support
-        if Roles.METADATA in self._roles:
-            if metadata_support is None:
-                raise ValueError("metadata_support is required when METADATA role is specified")
-            self._metadata_support = metadata_support
+        # Validate and store artwork support
+        if Roles.ARTWORK in self._roles:
+            if artwork_support is None:
+                raise ValueError("artwork_support is required when ARTWORK role is specified")
+            self._artwork_support = artwork_support
         else:
-            self._metadata_support = None
+            self._artwork_support = None
         self._session = session
         self._owns_session = session is None
         self._loop = asyncio.get_running_loop()
@@ -396,7 +396,7 @@ class ResonateClient:
             supported_roles=self._roles,
             device_info=self._device_info,
             player_support=self._player_support,
-            metadata_support=self._metadata_support,
+            artwork_support=self._artwork_support,
         )
         return ClientHelloMessage(payload=payload)
 

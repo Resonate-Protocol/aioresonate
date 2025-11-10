@@ -117,5 +117,5 @@ class MetadataClient:
 
     @property
     def support(self) -> ClientHelloMetadataSupport | None:
-        """Return metadata capabilities advertised in the hello payload."""
-        return self.client.info.metadata_support
+        """Return artwork capabilities advertised in the hello payload."""
+        return self.client.info.artwork_support
