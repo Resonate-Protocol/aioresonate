@@ -22,6 +22,7 @@ from aioresonate.models.core import (
     ClientHelloPayload,
     ClientTimeMessage,
     ClientTimePayload,
+    DeviceInfo,
     ServerHelloMessage,
     ServerHelloPayload,
     ServerTimeMessage,
@@ -113,6 +114,8 @@ class ResonateClient:
     """Unique identifier for this client."""
     _client_name: str
     """Human-readable name for this client."""
+    _device_info: DeviceInfo | None
+    """Optional device information."""
     _roles: list[Roles]
     """List of roles this client supports."""
     _player_support: ClientHelloPlayerSupport | None
@@ -176,6 +179,7 @@ class ResonateClient:
         client_name: str,
         roles: Sequence[Roles],
         *,
+        device_info: DeviceInfo | None = None,
         player_support: ClientHelloPlayerSupport | None = None,
         metadata_support: ClientHelloMetadataSupport | None = None,
         session: ClientSession | None = None,
@@ -190,6 +194,8 @@ class ResonateClient:
             roles: Sequence of roles this client supports. Must include PLAYER
                 if player_support is provided; must include METADATA if
                 metadata_support is provided.
+            device_info: Optional device information (product name, manufacturer,
+                software version).
             player_support: Custom player capabilities. Required if PLAYER role
                 is specified; raises ValueError if missing.
             metadata_support: Custom metadata capabilities. Required if METADATA
@@ -205,6 +211,7 @@ class ResonateClient:
         """
         self._client_id = client_id
         self._client_name = client_name
+        self._device_info = device_info
         self._roles = list(roles)
 
         # Validate and store player support
@@ -387,6 +394,7 @@ class ResonateClient:
             name=self._client_name,
             version=1,
             supported_roles=self._roles,
+            device_info=self._device_info,
             player_support=self._player_support,
             metadata_support=self._metadata_support,
         )

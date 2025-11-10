@@ -33,6 +33,23 @@ from .visualizer import (
 )
 
 
+@dataclass
+class DeviceInfo(DataClassORJSONMixin):
+    """Optional information about the device."""
+
+    product_name: str | None = None
+    """Device model/product name."""
+    manufacturer: str | None = None
+    """Device manufacturer name."""
+    software_version: str | None = None
+    """Software version of the client (not the Resonate version)."""
+
+    class Config(BaseConfig):
+        """Config for parsing json messages."""
+
+        omit_none = True
+
+
 # Client -> Server: client/hello
 @dataclass
 class ClientHelloPayload(DataClassORJSONMixin):
@@ -46,6 +63,8 @@ class ClientHelloPayload(DataClassORJSONMixin):
     """Version that the Resonate client implements."""
     supported_roles: list[Roles]
     """List of roles the client supports."""
+    device_info: DeviceInfo | None = None
+    """Optional information about the device."""
     player_support: ClientHelloPlayerSupport | None = None
     """Player support configuration - only if player role is in supported_roles."""
     metadata_support: ClientHelloMetadataSupport | None = None
