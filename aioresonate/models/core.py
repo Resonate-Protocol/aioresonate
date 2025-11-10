@@ -14,8 +14,8 @@ from typing import Literal
 from mashumaro.config import BaseConfig
 from mashumaro.mixins.orjson import DataClassORJSONMixin
 
-from .metadata import (
-    ClientHelloMetadataSupport,
+from .artwork import (
+    ClientHelloArtworkSupport,
     SessionUpdateMetadata,
     StreamStartMetadata,
     StreamUpdateMetadata,
@@ -67,7 +67,7 @@ class ClientHelloPayload(DataClassORJSONMixin):
     """Optional information about the device."""
     player_support: ClientHelloPlayerSupport | None = None
     """Player support configuration - only if player role is in supported_roles."""
-    artwork_support: ClientHelloMetadataSupport | None = None
+    artwork_support: ClientHelloArtworkSupport | None = None
     """Artwork support configuration - only if artwork role is in supported_roles."""
     visualizer_support: ClientHelloVisualizerSupport | None = None
     """Visualizer support configuration - only if visualizer role is in supported_roles."""

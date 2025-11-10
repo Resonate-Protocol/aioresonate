@@ -1,10 +1,9 @@
 """
-Metadata messages for the Resonate protocol.
+Artwork messages for the Resonate protocol.
 
-This module contains messages specific to clients with the metadata role, which
-handle display of track information, artwork, and playback state. Metadata clients
-receive session updates with track details and can optionally receive artwork in
-their preferred format and resolution.
+This module contains messages specific to clients with the artwork role, which
+handle display of artwork images. Artwork clients receive images in their
+preferred format and resolution.
 """
 
 from __future__ import annotations
@@ -17,10 +16,10 @@ from mashumaro.mixins.orjson import DataClassORJSONMixin
 from .types import PictureFormat, RepeatMode, UndefinedField, undefined_field
 
 
-# Client -> Server: client/hello metadata support object
+# Client -> Server: client/hello artwork support object
 @dataclass
-class ClientHelloMetadataSupport(DataClassORJSONMixin):
-    """Metadata support configuration - only if metadata role is set."""
+class ClientHelloArtworkSupport(DataClassORJSONMixin):
+    """Artwork support configuration - only if artwork role is set."""
 
     support_picture_formats: list[str]
     """Supported media art image formats (empty array if no art desired)."""

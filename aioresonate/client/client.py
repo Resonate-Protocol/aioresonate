@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from aiohttp import ClientSession, ClientWebSocketResponse, WSMessage, WSMsgType
 
 from aioresonate.models import BINARY_HEADER_SIZE, BinaryMessageType, unpack_binary_header
+from aioresonate.models.artwork import ClientHelloArtworkSupport
 from aioresonate.models.controller import (
     GroupCommandClientMessage,
     GroupCommandClientPayload,
@@ -33,7 +34,6 @@ from aioresonate.models.core import (
     StreamStartMessage,
     StreamUpdateMessage,
 )
-from aioresonate.models.metadata import ClientHelloMetadataSupport
 from aioresonate.models.player import (
     ClientHelloPlayerSupport,
     PlayerUpdateMessage,
@@ -120,7 +120,7 @@ class ResonateClient:
     """List of roles this client supports."""
     _player_support: ClientHelloPlayerSupport | None
     """Player capabilities (only set if PLAYER role is supported)."""
-    _artwork_support: ClientHelloMetadataSupport | None
+    _artwork_support: ClientHelloArtworkSupport | None
     """Artwork capabilities (only set if ARTWORK role is supported)."""
     _session: ClientSession | None
     """Optional aiohttp ClientSession for WebSocket connection."""
@@ -181,7 +181,7 @@ class ResonateClient:
         *,
         device_info: DeviceInfo | None = None,
         player_support: ClientHelloPlayerSupport | None = None,
-        artwork_support: ClientHelloMetadataSupport | None = None,
+        artwork_support: ClientHelloArtworkSupport | None = None,
         session: ClientSession | None = None,
         static_delay_ms: float = 0.0,
     ) -> None:

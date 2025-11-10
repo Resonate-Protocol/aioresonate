@@ -17,9 +17,9 @@ __all__ = [
     "Roles",
     "ServerMessage",
     "UndefinedField",
+    "artwork",
     "controller",
     "core",
-    "metadata",
     "pack_binary_header",
     "pack_binary_header_raw",
     "player",
@@ -31,7 +31,7 @@ __all__ = [
 import struct
 from typing import NamedTuple
 
-from . import controller, core, metadata, player, types, visualizer
+from . import artwork, controller, core, player, types, visualizer
 from .core import DeviceInfo
 from .types import (
     BinaryMessageType,

@@ -19,6 +19,9 @@ from aioresonate.models import (
     BinaryMessageType,
     pack_binary_header_raw,
 )
+from aioresonate.models.artwork import (
+    StreamStartMetadata,
+)
 from aioresonate.models.controller import GroupCommandClientPayload
 from aioresonate.models.core import (
     SessionUpdateMessage,
@@ -26,9 +29,6 @@ from aioresonate.models.core import (
     StreamEndMessage,
     StreamStartMessage,
     StreamStartPayload,
-)
-from aioresonate.models.metadata import (
-    StreamStartMetadata,
 )
 from aioresonate.models.player import (
     StreamRequestFormatPayload,
