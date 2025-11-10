@@ -9,8 +9,6 @@ from aioresonate.models.metadata import SessionUpdateMetadata
 from aioresonate.models.types import RepeatMode
 
 if TYPE_CHECKING:
-    from aioresonate.models.artwork import ClientHelloArtworkSupport
-
     from .client import ResonateClient
 
 
@@ -114,8 +112,3 @@ class MetadataClient:
         """Attach to a client that exposes metadata capabilities."""
         self.client = client
         self._logger = client._logger.getChild("metadata")  # noqa: SLF001
-
-    @property
-    def support(self) -> ClientHelloArtworkSupport | None:
-        """Return artwork capabilities advertised in the hello payload."""
-        return self.client.info.artwork_support
