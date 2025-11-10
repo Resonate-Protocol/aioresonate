@@ -20,7 +20,7 @@ from aioresonate.models import (
     pack_binary_header_raw,
 )
 from aioresonate.models.artwork import (
-    StreamStartMetadata,
+    StreamStartArtwork,
 )
 from aioresonate.models.controller import GroupCommandClientPayload
 from aioresonate.models.core import (
@@ -590,11 +590,11 @@ class ResonateGroup:
                     self._client_art_formats[client.client_id] = art_format
                     break
             if art_format is not None:
-                metadata_stream_info = StreamStartMetadata(art_format=art_format)
+                artwork_stream_info = StreamStartArtwork(art_format=art_format)
             else:
-                metadata_stream_info = None
+                artwork_stream_info = None
         else:
-            metadata_stream_info = None
+            artwork_stream_info = None
 
         # TODO: finish once spec is finalized
         visualizer_stream_info = (
@@ -603,7 +603,7 @@ class ResonateGroup:
 
         stream_info = StreamStartPayload(
             player=player_stream_info,
-            metadata=metadata_stream_info,
+            artwork=artwork_stream_info,
             visualizer=visualizer_stream_info,
         )
         logger.debug(

@@ -16,10 +16,10 @@ from mashumaro.mixins.orjson import DataClassORJSONMixin
 
 from .artwork import (
     ClientHelloArtworkSupport,
-    SessionUpdateMetadata,
-    StreamStartMetadata,
-    StreamUpdateMetadata,
+    StreamStartArtwork,
+    StreamUpdateArtwork,
 )
+from .metadata import SessionUpdateMetadata
 from .player import (
     ClientHelloPlayerSupport,
     StreamStartPlayer,
@@ -181,8 +181,8 @@ class StreamStartPayload(DataClassORJSONMixin):
 
     player: StreamStartPlayer | None = None
     """Information about the player."""
-    metadata: StreamStartMetadata | None = None
-    """Metadata information (sent to clients that specified supported picture formats)."""
+    artwork: StreamStartArtwork | None = None
+    """Artwork information (sent to clients with artwork role)."""
     visualizer: StreamStartVisualizer | None = None
     """Visualizer information (sent to clients with visualizer role)."""
 
@@ -207,8 +207,8 @@ class StreamUpdatePayload(DataClassORJSONMixin):
 
     player: StreamUpdatePlayer | None = None
     """Player updates."""
-    metadata: StreamUpdateMetadata | None = None
-    """Metadata updates."""
+    artwork: StreamUpdateArtwork | None = None
+    """Artwork updates."""
     visualizer: StreamUpdateVisualizer | None = None
     """Visualizer updates."""
 

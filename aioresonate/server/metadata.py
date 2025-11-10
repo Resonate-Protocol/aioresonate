@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from aioresonate.models.artwork import SessionUpdateMetadata
+from aioresonate.models.metadata import SessionUpdateMetadata
 from aioresonate.models.types import RepeatMode
 
 if TYPE_CHECKING:
