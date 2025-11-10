@@ -314,8 +314,6 @@ class PreparedChunkState:
     """Number of samples in this chunk."""
     byte_count: int
     """Size of chunk data in bytes."""
-    refcount: int
-    """Number of subscribers using this chunk."""
 
 
 @dataclass
@@ -487,29 +485,6 @@ class Streamer:
         """Get current time in microseconds."""
         return int(self._loop.time() * 1_000_000)
 
-    def _cleanup_consumed_chunks(self, pipeline: PipelineState) -> None:
-        """Clean up consumed chunks from a pipeline.
-
-        Note: consumed chunks (refcount == 0) can only appear as a contiguous block
-        at the front since chunks are consumed in FIFO order.
-
-        Args:
-            pipeline: The pipeline to clean up consumed chunks from.
-        """
-        while pipeline.prepared and pipeline.prepared[0].refcount == 0:
-            pipeline.prepared.popleft()
-
-    def _cleanup_player_refcounts(self, player_state: PlayerState) -> None:
-        """Clean up refcounts when removing or reconfiguring a player."""
-        for chunk in player_state.queue:
-            chunk.refcount = max(0, chunk.refcount - 1)
-        player_state.queue.clear()
-        # Clean up consumed chunks from old pipeline
-        if old_pipeline := self._pipelines.get(
-            (player_state.channel_id, player_state.audio_format)
-        ):
-            self._cleanup_consumed_chunks(old_pipeline)
-
     def _create_or_update_player(
         self,
         client_cfg: ClientStreamConfig,
@@ -529,9 +504,9 @@ class Streamer:
             old_player.config = client_cfg
             return None  # Signal that existing player should be reused
 
-        # Format changed - clean up old queue refcounts
+        # Format changed - clean up old queue
         if old_player and old_player.audio_format != audio_format:
-            self._cleanup_player_refcounts(old_player)
+            old_player.queue.clear()
 
         # Create new player or reconfigure existing one
         buffer_tracker = (
@@ -575,7 +550,6 @@ class Streamer:
         for chunk in pipeline.prepared:
             if chunk.start_time_us >= sync_point_start_time_us:
                 player_state.queue.append(chunk)
-                chunk.refcount += 1
 
         return player_state
 
@@ -815,10 +789,10 @@ class Streamer:
             if (pipeline := self._pipelines.pop(key)).encoder:
                 pipeline.encoder = None
 
-        # Clean up refcounts for players being removed
+        # Clean up queues for players being removed
         for old_client_id, old_player in self._players.items():
             if old_client_id not in new_players:
-                self._cleanup_player_refcounts(old_player)
+                old_player.queue.clear()
 
         # Replace players dict
         self._players = new_players
@@ -1115,8 +1089,9 @@ class Streamer:
                 await asyncio.sleep(earliest_blocked_wait_time_us / 1_000_000)
                 continue
 
-            # Stage 3: Cleanup
+            # Stage 3: Cleanup (prune old source data and stale prepared chunks)
             self._prune_old_data()
+            self._prune_stale_prepared_chunks()
 
             # Stage 4: Check exit conditions and apply source buffer backpressure
             has_pending_deliveries = any(
@@ -1168,13 +1143,12 @@ class Streamer:
         self._pipelines.clear()
         self._players.clear()
 
-    def _dequeue_chunk(self, player_state: PlayerState, chunk: PreparedChunkState) -> None:
-        """Remove chunk from player queue and clean up pipeline if fully consumed."""
-        player_state.queue.popleft()
-        chunk.refcount -= 1
-        pipeline = self._pipelines[(player_state.channel_id, player_state.audio_format)]
-        if chunk.refcount == 0 and pipeline.prepared and pipeline.prepared[0] is chunk:
-            pipeline.prepared.popleft()
+    def _prune_stale_prepared_chunks(self) -> None:
+        """Prune prepared chunks past their playback time (keeps chunks for late joiners)."""
+        now_us = self._now_us()
+        for pipeline in self._pipelines.values():
+            while pipeline.prepared and pipeline.prepared[0].end_time_us < now_us:
+                pipeline.prepared.popleft()
 
     def _send_chunks_to_players(self) -> int:
         """Send chunks to all players with backpressure control.
@@ -1219,12 +1193,12 @@ class Streamer:
                     players_to_remove.append(player_state.config.client_id)
                     break
                 tracker.register(chunk.end_time_us, chunk.byte_count)
-                self._dequeue_chunk(player_state, chunk)
+                player_state.queue.popleft()
 
         # Remove players that failed to send
         for player_id in players_to_remove:
             player_state = self._players.pop(player_id)
-            self._cleanup_player_refcounts(player_state)
+            player_state.queue.clear()
 
             pipeline_key = (player_state.channel_id, player_state.audio_format)
             if pipeline := self._pipelines.get(pipeline_key):
@@ -1244,7 +1218,7 @@ class Streamer:
         Prune old source chunks to free memory.
 
         Removes source chunks that have finished playing (end_time_us <= now).
-        Prepared chunks are managed separately by refcount in send().
+        Prepared chunks are managed separately by _prune_stale_prepared_chunks().
         """
         # Prune source buffer based on playback time
         now_us = self._now_us()
@@ -1482,7 +1456,6 @@ class Streamer:
             end_time_us=end_us,
             sample_count=sample_count,
             byte_count=len(audio_data),
-            refcount=len(pipeline.subscribers),
         )
         pipeline.prepared.append(chunk)
         pipeline.samples_produced += sample_count
