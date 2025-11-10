@@ -29,7 +29,7 @@ from aioresonate.models.player import (
     PlayerUpdateMessage,
     StreamRequestFormatMessage,
 )
-from aioresonate.models.types import ClientMessage, Roles, ServerMessage
+from aioresonate.models.types import BinaryMessageType, ClientMessage, Roles, ServerMessage
 
 from .controller import ControllerClient
 from .events import ClientEvent, ClientGroupChangedEvent
@@ -502,15 +502,20 @@ class ResonateClient:
                 if isinstance(item, bytes):
                     # Unpack binary header using helper function
                     header = unpack_binary_header(item)
-                    now = int(self._server.loop.time() * 1_000_000)
-                    if header.timestamp_us - now < 0:
-                        self._logger.error("Audio chunk should have played already, skipping it")
-                        continue
-                    if header.timestamp_us - now < 500_000:
-                        self._logger.warning(
-                            "sending audio chunk that needs to be played very soon (in %d us)",
-                            (header.timestamp_us - now),
-                        )
+
+                    # Only validate timestamps for audio chunks, since they are time-sensitive
+                    if header.message_type == BinaryMessageType.AUDIO_CHUNK.value:
+                        now = int(self._server.loop.time() * 1_000_000)
+                        if header.timestamp_us - now < 0:
+                            self._logger.error(
+                                "Audio chunk should have played already, skipping it"
+                            )
+                            continue
+                        if header.timestamp_us - now < 500_000:
+                            self._logger.warning(
+                                "sending audio chunk that needs to be played very soon (in %d us)",
+                                (header.timestamp_us - now),
+                            )
                     try:
                         await wsock.send_bytes(item)
                     except ConnectionError:
