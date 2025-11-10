@@ -1,1 +1,4 @@
 - Run ./scripts/run-in-env.sh pre-commit -a regularly to run linters, ruff and mypy (always run full pre-commit with -a)
+- First read SPEC.md before doing anything else
+- We are in the process of updating the implemented spec to the latest version, described in SPEC.md
+- When writing commits, keep them simple. Keep descriptions as minimal as possible
