@@ -228,6 +228,8 @@ class ServerTimeMessage(ServerMessage):
 class ServerStatePayload(DataClassORJSONMixin):
     """Server sends state updates to the client."""
 
+    metadata: SessionUpdateMetadata | None = None
+    """Metadata state - only sent to clients with metadata role."""
     controller: ControllerStatePayload | None = None
     """Controller state - only sent to clients with controller role."""
 
