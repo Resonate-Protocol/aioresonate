@@ -14,41 +14,51 @@ from dataclasses import dataclass
 from mashumaro.config import BaseConfig
 from mashumaro.mixins.orjson import DataClassORJSONMixin
 
-from .types import PlayerStateType
+from .types import PlayerCommand, PlayerStateType
 
 
 # Client -> Server client/hello player support object
 @dataclass
+class SupportedAudioFormat(DataClassORJSONMixin):
+    """Supported audio format configuration."""
+
+    codec: str
+    """Codec identifier (e.g., 'opus', 'flac', 'pcm')."""
+    channels: int
+    """Supported number of channels (e.g., 1 = mono, 2 = stereo)."""
+    sample_rate: int
+    """Sample rate in Hz (e.g., 44100, 48000)."""
+    bit_depth: int
+    """Bit depth for this format (e.g., 16, 24)."""
+
+    def __post_init__(self) -> None:
+        """Validate field values."""
+        if self.channels <= 0:
+            raise ValueError(f"channels must be positive, got {self.channels}")
+        if self.sample_rate <= 0:
+            raise ValueError(f"sample_rate must be positive, got {self.sample_rate}")
+        if self.bit_depth <= 0:
+            raise ValueError(f"bit_depth must be positive, got {self.bit_depth}")
+
+
+@dataclass
 class ClientHelloPlayerSupport(DataClassORJSONMixin):
     """Player support configuration - only if player role is set."""
 
-    support_codecs: list[str]
-    """Supported codecs in priority order."""
-    support_channels: list[int]
-    """Number of channels in priority order."""
-    support_sample_rates: list[int]
-    """Supported sample rates in priority order."""
-    support_bit_depth: list[int]
-    """Bit depth in priority order."""
+    support_formats: list[SupportedAudioFormat]
+    """List of supported audio formats in priority order (first is preferred)."""
     buffer_capacity: int
-    """Buffer capacity size in bytes."""
+    """Max size in bytes of compressed audio messages in the buffer that are yet to be played."""
+    supported_commands: list[PlayerCommand]
+    """Subset of: 'volume', 'mute'."""
 
     def __post_init__(self) -> None:
         """Validate field values."""
         if self.buffer_capacity <= 0:
             raise ValueError(f"buffer_capacity must be positive, got {self.buffer_capacity}")
 
-        if not self.support_codecs:
-            raise ValueError("support_codecs cannot be empty")
-
-        if not self.support_channels or any(ch <= 0 for ch in self.support_channels):
-            raise ValueError("support_channels must be non-empty with positive values")
-
-        if not self.support_sample_rates or any(sr <= 0 for sr in self.support_sample_rates):
-            raise ValueError("support_sample_rates must be non-empty with positive values")
-
-        if not self.support_bit_depth or any(bd <= 0 for bd in self.support_bit_depth):
-            raise ValueError("support_bit_depth must be non-empty with positive values")
+        if not self.support_formats:
+            raise ValueError("support_formats cannot be empty")
 
 
 # Client -> Server: client/state player object
@@ -74,7 +84,7 @@ class PlayerStatePayload(DataClassORJSONMixin):
 class PlayerCommandPayload(DataClassORJSONMixin):
     """Player object in server/command message."""
 
-    command: str
+    command: PlayerCommand
     """Command - must be 'volume' or 'mute'."""
     volume: int | None = None
     """Volume range 0-100, only set if command is volume."""
@@ -83,22 +93,19 @@ class PlayerCommandPayload(DataClassORJSONMixin):
 
     def __post_init__(self) -> None:
         """Validate field values and command consistency."""
-        if self.command not in ("volume", "mute"):
-            raise ValueError(f"command must be 'volume' or 'mute', got {self.command}")
-
-        if self.command == "volume":
+        if self.command == PlayerCommand.VOLUME:
             if self.volume is None:
                 raise ValueError("Volume must be provided when command is 'volume'")
             if not 0 <= self.volume <= 100:
                 raise ValueError(f"Volume must be in range 0-100, got {self.volume}")
         elif self.volume is not None:
-            raise ValueError(f"Volume should not be provided for command '{self.command}'")
+            raise ValueError(f"Volume should not be provided for command '{self.command.value}'")
 
-        if self.command == "mute":
+        if self.command == PlayerCommand.MUTE:
             if self.mute is None:
                 raise ValueError("Mute must be provided when command is 'mute'")
         elif self.mute is not None:
-            raise ValueError(f"Mute should not be provided for command '{self.command}'")
+            raise ValueError(f"Mute should not be provided for command '{self.command.value}'")
 
     class Config(BaseConfig):
         """Config for parsing json messages."""

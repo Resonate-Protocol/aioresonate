@@ -114,6 +114,13 @@ class PlaybackStateType(Enum):
     STOPPED = "stopped"
 
 
+class PlayerCommand(Enum):
+    """Enum for Player Commands."""
+
+    VOLUME = "volume"
+    MUTE = "mute"
+
+
 class MediaCommand(Enum):
     """Enum for Media Commands."""
 

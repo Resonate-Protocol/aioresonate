@@ -35,8 +35,14 @@ from aioresonate.models.core import (
     StreamStartMessage,
 )
 from aioresonate.models.metadata import SessionUpdateMetadata
-from aioresonate.models.player import ClientHelloPlayerSupport
-from aioresonate.models.types import MediaCommand, PlaybackStateType, Roles, UndefinedField
+from aioresonate.models.player import ClientHelloPlayerSupport, SupportedAudioFormat
+from aioresonate.models.types import (
+    MediaCommand,
+    PlaybackStateType,
+    PlayerCommand,
+    Roles,
+    UndefinedField,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -605,11 +611,12 @@ async def main_async(argv: Sequence[str] | None = None) -> int:  # noqa: PLR0915
         roles=[Roles.CONTROLLER, Roles.PLAYER, Roles.METADATA],
         device_info=_get_device_info(),
         player_support=ClientHelloPlayerSupport(
-            support_codecs=["pcm"],
-            support_channels=[2, 1],
-            support_sample_rates=[44_100],
-            support_bit_depth=[16],
+            support_formats=[
+                SupportedAudioFormat(codec="pcm", channels=2, sample_rate=44_100, bit_depth=16),
+                SupportedAudioFormat(codec="pcm", channels=1, sample_rate=44_100, bit_depth=16),
+            ],
             buffer_capacity=32_000_000,
+            supported_commands=[PlayerCommand.VOLUME, PlayerCommand.MUTE],
         ),
         static_delay_ms=args.static_delay_ms,
     )

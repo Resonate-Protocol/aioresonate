@@ -552,7 +552,7 @@ class ResonateGroup:
             The recommended sample rate in Hz.
         """
         supported_sets: list[set[int]] = [
-            set(client.info.player_support.support_sample_rates)
+            {fmt.sample_rate for fmt in client.info.player_support.support_formats}
             for client in self._clients
             if client.check_role(Roles.PLAYER) and client.info.player_support
         ]

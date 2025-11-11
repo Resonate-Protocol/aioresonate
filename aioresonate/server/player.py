@@ -82,21 +82,35 @@ class PlayerClient:
             AudioFormat: The optimal format for this client.
         """
         support = self.support
+        # TODO: This function still assumes the old spec where clients have a global list
+        # and not per-codec capabilities.
+
+        # Get supported values from support_formats
+        support_sample_rates = (
+            {fmt.sample_rate for fmt in support.support_formats} if support else set()
+        )
+        support_bit_depths = (
+            {fmt.bit_depth for fmt in support.support_formats} if support else set()
+        )
+        support_channels_list = (
+            {fmt.channels for fmt in support.support_formats} if support else set()
+        )
+        support_codecs = {fmt.codec for fmt in support.support_formats} if support else set()
 
         # Determine optimal sample rate
         sample_rate = source_format.sample_rate
-        if support and sample_rate not in support.support_sample_rates:
+        if support and sample_rate not in support_sample_rates:
             # Prefer lower rates that are closest to source, fallback to minimum
-            lower_rates = [r for r in support.support_sample_rates if r < sample_rate]
-            sample_rate = max(lower_rates) if lower_rates else min(support.support_sample_rates)
+            lower_rates = [r for r in support_sample_rates if r < sample_rate]
+            sample_rate = max(lower_rates) if lower_rates else min(support_sample_rates)
             self._logger.debug(
                 "Adjusted sample_rate for client %s: %s", self.client.client_id, sample_rate
             )
 
         # Determine optimal bit depth
         bit_depth = source_format.bit_depth
-        if support and bit_depth not in support.support_bit_depth:
-            if 16 in support.support_bit_depth:
+        if support and bit_depth not in support_bit_depths:
+            if 16 in support_bit_depths:
                 bit_depth = 16
             else:
                 raise NotImplementedError("Only 16bit is supported for now")
@@ -106,11 +120,11 @@ class PlayerClient:
 
         # Determine optimal channel count
         channels = source_format.channels
-        if support and channels not in support.support_channels:
+        if support and channels not in support_channels_list:
             # Prefer stereo, then mono
-            if 2 in support.support_channels:
+            if 2 in support_channels_list:
                 channels = 2
-            elif 1 in support.support_channels:
+            elif 1 in support_channels_list:
                 channels = 1
             else:
                 raise NotImplementedError("Only mono and stereo are supported")
@@ -122,7 +136,7 @@ class PlayerClient:
         codec_fallbacks = [AudioCodec.FLAC, AudioCodec.OPUS, AudioCodec.PCM]
         codec = None
         for candidate_codec in codec_fallbacks:
-            if support and candidate_codec.value in support.support_codecs:
+            if support and candidate_codec.value in support_codecs:
                 # Special handling for Opus - check if sample rates are compatible
                 if candidate_codec == AudioCodec.OPUS:
                     opus_rate_candidates = [
@@ -135,7 +149,7 @@ class PlayerClient:
 
                     opus_sample_rate = None
                     for candidate_rate, condition in opus_rate_candidates:
-                        if condition and support and candidate_rate in support.support_sample_rates:
+                        if condition and support and candidate_rate in support_sample_rates:
                             opus_sample_rate = candidate_rate
                             break
 
