@@ -283,6 +283,7 @@ class ResonateGroup:
 
         self._current_state = PlaybackStateType.PLAYING
         self._signal_event(GroupStateChangedEvent(PlaybackStateType.PLAYING))
+        self._send_group_update_to_clients()
 
         end_time_us = start_time_us
         if self._stream_task is not None:
