@@ -38,8 +38,8 @@ class Metadata:
     """Current repeat mode."""
     shuffle: bool | None = None
     """Whether shuffle is enabled."""
-
-    # TODO: inject track_progress and timestamp when sending updates?
+    track_progress: int | None = None
+    """Track progress in milliseconds at the last update time."""
 
     def diff_update(self, last: Metadata | None, timestamp: int) -> SessionUpdateMetadata:
         """Build a SessionUpdateMetadata containing only changed fields compared to last."""
@@ -68,6 +68,8 @@ class Metadata:
             metadata_update.repeat = self.repeat
         if last is None or last.shuffle != self.shuffle:
             metadata_update.shuffle = self.shuffle
+        if last is None or last.track_progress != self.track_progress:
+            metadata_update.track_progress = self.track_progress
 
         return metadata_update
 
@@ -86,6 +88,7 @@ class Metadata:
         metadata_update.playback_speed = None
         metadata_update.repeat = None
         metadata_update.shuffle = None
+        metadata_update.track_progress = None
         return metadata_update
 
     def snapshot_update(self, timestamp: int) -> SessionUpdateMetadata:
@@ -102,6 +105,7 @@ class Metadata:
         metadata_update.playback_speed = self.playback_speed
         metadata_update.repeat = self.repeat
         metadata_update.shuffle = self.shuffle
+        metadata_update.track_progress = self.track_progress
         return metadata_update
 
 
