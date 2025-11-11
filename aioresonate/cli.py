@@ -76,8 +76,9 @@ class CLIState:
         if self.album:
             lines.append(f"Album: {self.album}")
         if self.track_duration:
-            progress = self.track_progress or 0
-            lines.append(f"Progress: {progress:>2} / {self.track_duration:>2} s")
+            progress_s = (self.track_progress or 0) / 1000
+            duration_s = self.track_duration / 1000
+            lines.append(f"Progress: {progress_s:>5.1f} / {duration_s:>5.1f} s")
         if self.volume is not None:
             vol_line = f"Volume: {self.volume}%"
             if self.muted:

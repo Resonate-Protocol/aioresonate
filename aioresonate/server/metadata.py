@@ -31,9 +31,9 @@ class Metadata:
     track: int | None = None
     """Track number of the current media."""
     track_duration: int | None = None
-    """Track duration in seconds."""
-    playback_speed: int | None = 1
-    """Speed factor, 1.0 is normal speed."""
+    """Track duration in milliseconds."""
+    playback_speed: int | None = None
+    """Playback speed multiplier * 1000 (e.g., 1000 = normal speed, 1500 = 1.5x speed)."""
     repeat: RepeatMode | None = None
     """Current repeat mode."""
     shuffle: bool | None = None
