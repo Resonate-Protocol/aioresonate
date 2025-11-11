@@ -714,15 +714,7 @@ async def _handle_server_state(state: CLIState, payload: ServerStatePayload) -> 
     """Handle server/state messages with controller state."""
     if payload.controller:
         controller = payload.controller
-        supported: set[MediaCommand] = set()
-        for command in controller.supported_commands:
-            try:
-                supported.add(
-                    command if isinstance(command, MediaCommand) else MediaCommand(command)
-                )
-            except ValueError:
-                continue
-        state.supported_commands = supported
+        state.supported_commands = set(controller.supported_commands)
 
         if controller.volume != state.volume:
             state.volume = controller.volume

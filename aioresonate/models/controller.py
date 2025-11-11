@@ -59,7 +59,7 @@ class ControllerCommandPayload(DataClassORJSONMixin):
 class ControllerStatePayload(DataClassORJSONMixin):
     """Controller state object in server/state message."""
 
-    supported_commands: list[MediaCommand | str]
+    supported_commands: list[MediaCommand]
     """
     Subset of: play, pause, stop, next, previous, volume, mute, repeat_off, repeat_one,
     repeat_all, shuffle, unshuffle, switch.
