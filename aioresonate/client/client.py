@@ -27,6 +27,8 @@ from aioresonate.models.core import (
     DeviceInfo,
     ServerHelloMessage,
     ServerHelloPayload,
+    ServerStateMessage,
+    ServerStatePayload,
     ServerTimeMessage,
     ServerTimePayload,
     SessionUpdateMessage,
@@ -79,6 +81,9 @@ MetadataCallback = Callable[[SessionUpdatePayload], Awaitable[None] | None]
 
 # Callback invoked when group state updates are received.
 GroupUpdateCallback = Callable[[GroupUpdateServerPayload], Awaitable[None] | None]
+
+# Callback invoked when controller state updates are received.
+ControllerStateCallback = Callable[[ServerStatePayload], Awaitable[None] | None]
 
 # Callback invoked when audio streaming begins.
 StreamStartCallback = Callable[[StreamStartMessage], Awaitable[None] | None]
@@ -160,11 +165,15 @@ class ResonateClient:
     """Latest group state received from server."""
     _session_state: SessionUpdatePayload | None = None
     """Latest session state received from server."""
+    _controller_state: ServerStatePayload | None = None
+    """Latest controller state received from server."""
 
     _metadata_callback: MetadataCallback | None = None
     """Callback invoked on session/update messages."""
     _group_callback: GroupUpdateCallback | None = None
     """Callback invoked on group/update messages."""
+    _controller_callback: ControllerStateCallback | None = None
+    """Callback invoked on server/state messages."""
     _stream_start_callback: StreamStartCallback | None = None
     """Callback invoked when a stream starts."""
     _stream_end_callback: StreamEndCallback | None = None
@@ -358,6 +367,10 @@ class ResonateClient:
         """Set or clear (if None) the callback invoked on group/update messages."""
         self._group_callback = callback
 
+    def set_controller_state_listener(self, callback: ControllerStateCallback | None) -> None:
+        """Set or clear (if None) the callback invoked on server/state messages."""
+        self._controller_callback = callback
+
     def set_stream_start_listener(self, callback: StreamStartCallback | None) -> None:
         """Set or clear (if None) the callback invoked when a stream starts."""
         self._stream_start_callback = callback
@@ -466,6 +479,8 @@ class ResonateClient:
                 await self._handle_session_update(payload)
             case GroupUpdateServerMessage(payload=payload):
                 await self._handle_group_update(payload)
+            case ServerStateMessage(payload=payload):
+                await self._handle_server_state(payload)
             case _:
                 logger.debug("Unhandled server message type: %s", type(message).__name__)
 
@@ -581,6 +596,10 @@ class ResonateClient:
         self._group_state = payload
         await self._notify_group_callback(payload)
 
+    async def _handle_server_state(self, payload: ServerStatePayload) -> None:
+        self._controller_state = payload
+        await self._notify_controller_callback(payload)
+
     def _configure_audio_output(self, pcm_format: PCMFormat) -> None:
         """Store the current audio format for use in callbacks."""
         self._current_pcm_format = pcm_format
@@ -659,6 +678,16 @@ class ResonateClient:
                 await result
         except Exception:
             logger.exception("Error in group callback %s", self._group_callback)
+
+    async def _notify_controller_callback(self, payload: ServerStatePayload) -> None:
+        if self._controller_callback is None:
+            return
+        try:
+            result = self._controller_callback(payload)
+            if asyncio.iscoroutine(result):
+                await result
+        except Exception:
+            logger.exception("Error in controller callback %s", self._controller_callback)
 
     async def _notify_stream_start(self, message: StreamStartMessage) -> None:
         if self._stream_start_callback is None:

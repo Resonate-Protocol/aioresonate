@@ -20,7 +20,7 @@ from .artwork import (
     StreamStartArtwork,
     StreamUpdateArtwork,
 )
-from .controller import ControllerCommandPayload
+from .controller import ControllerCommandPayload, ControllerStatePayload
 from .metadata import SessionUpdateMetadata
 from .player import (
     ClientHelloPlayerSupport,
@@ -197,6 +197,28 @@ class ServerTimeMessage(ServerMessage):
 
     payload: ServerTimePayload
     type: Literal["server/time"] = "server/time"
+
+
+# Server -> Client: server/state
+@dataclass
+class ServerStatePayload(DataClassORJSONMixin):
+    """Server sends state updates to the client."""
+
+    controller: ControllerStatePayload | None = None
+    """Controller state - only sent to clients with controller role."""
+
+    class Config(BaseConfig):
+        """Config for parsing json messages."""
+
+        omit_none = True
+
+
+@dataclass
+class ServerStateMessage(ServerMessage):
+    """Message sent by the server to send state updates."""
+
+    payload: ServerStatePayload
+    type: Literal["server/state"] = "server/state"
 
 
 # Server -> Client: stream/start

@@ -118,6 +118,27 @@ class GroupListServerMessage(ServerMessage):
     type: Literal["group/list"] = "group/list"
 
 
+# Server -> Client: server/state controller object
+@dataclass
+class ControllerStatePayload(DataClassORJSONMixin):
+    """Controller state object in server/state message."""
+
+    supported_commands: list[MediaCommand | str]
+    """
+    Subset of: play, pause, stop, next, previous, volume, mute, repeat_off, repeat_one,
+    repeat_all, shuffle, unshuffle, switch.
+    """
+    volume: int
+    """Volume of the whole group, range 0-100."""
+    muted: bool
+    """Mute state of the whole group."""
+
+    def __post_init__(self) -> None:
+        """Validate field values."""
+        if not 0 <= self.volume <= 100:
+            raise ValueError(f"Volume must be in range 0-100, got {self.volume}")
+
+
 # Server -> Client: group/update
 @dataclass
 class GroupUpdateServerPayload(DataClassORJSONMixin):

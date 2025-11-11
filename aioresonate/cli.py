@@ -28,7 +28,12 @@ from zeroconf.asyncio import AsyncServiceBrowser, AsyncZeroconf
 from aioresonate.cli_audio import AudioPlayer
 from aioresonate.client import PCMFormat, ResonateClient
 from aioresonate.models.controller import GroupUpdateServerPayload
-from aioresonate.models.core import DeviceInfo, SessionUpdatePayload, StreamStartMessage
+from aioresonate.models.core import (
+    DeviceInfo,
+    ServerStatePayload,
+    SessionUpdatePayload,
+    StreamStartMessage,
+)
 from aioresonate.models.metadata import SessionUpdateMetadata
 from aioresonate.models.player import ClientHelloPlayerSupport
 from aioresonate.models.types import MediaCommand, PlaybackStateType, Roles, UndefinedField
@@ -644,6 +649,7 @@ async def main_async(argv: Sequence[str] | None = None) -> int:  # noqa: PLR0915
 
         client.set_metadata_listener(lambda payload: _handle_session_update(state, payload))
         client.set_group_update_listener(lambda payload: _handle_group_update(state, payload))
+        client.set_controller_state_listener(lambda payload: _handle_server_state(state, payload))
         client.set_stream_start_listener(audio_handler.on_stream_start)
         client.set_stream_end_listener(audio_handler.on_stream_end)
         client.set_audio_chunk_listener(audio_handler.on_audio_chunk)
@@ -702,6 +708,28 @@ async def _handle_group_update(_state: CLIState, payload: GroupUpdateServerPaylo
         _print_event(f"Group ID: {payload.group_id}")
     if payload.group_name:
         _print_event(f"Group name: {payload.group_name}")
+
+
+async def _handle_server_state(state: CLIState, payload: ServerStatePayload) -> None:
+    """Handle server/state messages with controller state."""
+    if payload.controller:
+        controller = payload.controller
+        supported: set[MediaCommand] = set()
+        for command in controller.supported_commands:
+            try:
+                supported.add(
+                    command if isinstance(command, MediaCommand) else MediaCommand(command)
+                )
+            except ValueError:
+                continue
+        state.supported_commands = supported
+
+        if controller.volume != state.volume:
+            state.volume = controller.volume
+            _print_event(f"Volume: {controller.volume}%")
+        if controller.muted != state.muted:
+            state.muted = controller.muted
+            _print_event("Muted" if controller.muted else "Unmuted")
 
 
 class CommandHandler:
