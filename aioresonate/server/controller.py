@@ -41,7 +41,7 @@ class ControllerClient:
             await self._handle_switch()
         else:
             # Forward other commands to the group
-            self.client.group._handle_group_command(payload)  # noqa: SLF001
+            await self.client.group._handle_group_command(payload)  # noqa: SLF001
 
     def _get_supported_commands(self) -> list[MediaCommand]:
         """Get list of commands supported in the current group state."""

@@ -28,6 +28,7 @@ from aioresonate.models.artwork import (
 )
 from aioresonate.models.controller import (
     ControllerCommandPayload,
+    ControllerStatePayload,
     GroupUpdateServerMessage,
     GroupUpdateServerPayload,
 )
@@ -165,10 +166,10 @@ class ResonateGroup:
     """Absolute timestamp in microseconds when playback started, None when not streaming."""
     _scheduled_stop_handle: asyncio.TimerHandle | None
     """Timer handle for scheduled stop, None when no stop is scheduled."""
-    _volume: int
-    """Group volume level (0-100)."""
     _muted: bool
     """Group mute state."""
+    _last_sent_volume: int | None
+    """Last volume sent to controller clients, for change detection."""
 
     def __init__(self, server: ResonateServer, *args: ResonateClient) -> None:
         """
@@ -196,8 +197,8 @@ class ResonateGroup:
         self._stream_commands: asyncio.Queue[_StreamerReconfigureCommand] | None = None
         self._play_start_time_us: int | None = None
         self._scheduled_stop_handle: asyncio.TimerHandle | None = None
-        self._volume = 100
         self._muted = False
+        self._last_sent_volume: int | None = None
         logger.debug(
             "ResonateGroup initialized with %d client(s): %s",
             len(self._clients),
@@ -296,6 +297,11 @@ class ResonateGroup:
 
     def _send_group_update_to_clients(self) -> None:
         """Send group/update and server/state messages to all clients."""
+        controller_state = ControllerStatePayload(
+            supported_commands=self._get_supported_commands(),
+            volume=self.volume,
+            muted=self._muted,
+        )
         for client in self._clients:
             # Send group/update for playback state
             if client.check_role(Roles.CONTROLLER) or client.check_role(Roles.METADATA):
@@ -323,6 +329,29 @@ class ResonateGroup:
                     else None
                 )
                 state_message = ServerStateMessage(ServerStatePayload(metadata=metadata_update))
+                client.send_message(state_message)
+
+            # Send server/state for controller
+            if client.check_role(Roles.CONTROLLER):
+                state_message = ServerStateMessage(ServerStatePayload(controller=controller_state))
+                client.send_message(state_message)
+
+    async def _send_controller_state_to_clients(self) -> None:
+        """Send server/state with controller payload to all controller clients."""
+        current_volume = self.volume
+        # Only send if rounded volume changed
+        if self._last_sent_volume is not None and self._last_sent_volume == current_volume:
+            return
+
+        self._last_sent_volume = current_volume
+        controller_state = ControllerStatePayload(
+            supported_commands=self._get_supported_commands(),
+            volume=current_volume,
+            muted=self._muted,
+        )
+        for client in self._clients:
+            if client.check_role(Roles.CONTROLLER):
+                state_message = ServerStateMessage(ServerStatePayload(controller=controller_state))
                 client.send_message(state_message)
 
     async def _handle_reconfiguration_command(
@@ -729,6 +758,11 @@ class ResonateGroup:
         """Send stopped state and cleared metadata to all clients."""
         timestamp = int(self._server.loop.time() * 1_000_000)
         cleared_metadata = Metadata.cleared_update(timestamp)
+        controller_state = ControllerStatePayload(
+            supported_commands=self._get_supported_commands(),
+            volume=self.volume,
+            muted=self._muted,
+        )
         for client in self._clients:
             # Send group/update for stopped state
             if client.check_role(Roles.CONTROLLER) or client.check_role(Roles.METADATA):
@@ -744,6 +778,11 @@ class ResonateGroup:
             # Send server/state for cleared metadata
             if client.check_role(Roles.METADATA):
                 state_message = ServerStateMessage(ServerStatePayload(metadata=cleared_metadata))
+                client.send_message(state_message)
+
+            # Send server/state for controller
+            if client.check_role(Roles.CONTROLLER):
+                state_message = ServerStateMessage(ServerStatePayload(controller=controller_state))
                 client.send_message(state_message)
 
     async def stop(self, stop_time_us: int | None = None) -> bool:
@@ -1023,7 +1062,7 @@ class ResonateGroup:
 
         return commands
 
-    def _handle_group_command(self, cmd: ControllerCommandPayload) -> None:
+    async def _handle_group_command(self, cmd: ControllerCommandPayload) -> None:
         # Verify that this command is actually supported for the current state
         supported = self._get_supported_commands()
         if cmd.command not in supported:
@@ -1035,6 +1074,13 @@ class ResonateGroup:
             )
             return
 
+        # Handle volume and mute commands directly
+        if cmd.command == MediaCommand.VOLUME and cmd.volume is not None:
+            await self.set_volume(cmd.volume)
+        elif cmd.command == MediaCommand.MUTE and cmd.mute is not None:
+            await self.set_mute(cmd.mute)
+
+        # Signal the event for other commands
         event = GroupCommandEvent(
             command=cmd.command,
             volume=cmd.volume,
@@ -1069,13 +1115,50 @@ class ResonateGroup:
 
     @property
     def volume(self) -> int:
-        """Current group volume (0-100)."""
-        return self._volume
+        """Current group volume (0-100), calculated as average of player volumes."""
+        players = self.players()
+        if not players:
+            return 100
+        # Calculate average volume from all players
+        total_volume = sum(player.volume for player in players)
+        return round(total_volume / len(players))
 
     @property
     def muted(self) -> bool:
         """Current group mute state."""
         return self._muted
+
+    async def set_volume(self, volume_level: int) -> None:
+        """
+        Set group volume by applying the difference to all players.
+
+        Similar to how Music Assistant handles group volume - calculates the
+        difference from current group volume and applies it to each player.
+        """
+        volume_level = max(0, min(100, volume_level))
+        cur_volume = self.volume
+        volume_dif = volume_level - cur_volume
+
+        # Apply volume difference to all players
+        for player in self.players():
+            cur_player_volume = player.volume
+            new_player_volume = max(0, min(100, cur_player_volume + volume_dif))
+            player.set_volume(new_player_volume)
+
+        # Send state update to controller clients if rounded volume changed
+        await self._send_controller_state_to_clients()
+
+    async def set_mute(self, muted: bool) -> None:  # noqa: FBT001
+        """Set group mute state and propagate to all players."""
+        self._muted = muted
+        # Propagate to all player clients
+        for player in self.players():
+            if muted:
+                player.mute()
+            else:
+                player.unmute()
+        # Send state update to controller clients
+        await self._send_controller_state_to_clients()
 
     async def remove_client(self, client: ResonateClient) -> None:
         """
@@ -1178,6 +1261,17 @@ class ResonateGroup:
             )
             state_message = ServerStateMessage(ServerStatePayload(metadata=metadata_update))
             logger.debug("Sending server state to new client %s", client.client_id)
+            client.send_message(state_message)
+
+        # Send server/state for controller
+        if client.check_role(Roles.CONTROLLER):
+            controller_state = ControllerStatePayload(
+                supported_commands=self._get_supported_commands(),
+                volume=self.volume,
+                muted=self._muted,
+            )
+            state_message = ServerStateMessage(ServerStatePayload(controller=controller_state))
+            logger.debug("Sending controller state to new client %s", client.client_id)
             client.send_message(state_message)
 
         # Send current media art to the new client if available
