@@ -41,6 +41,7 @@ from aioresonate.models.player import (
     StreamStartPlayer,
 )
 from aioresonate.models.types import (
+    ArtworkSource,
     MediaCommand,
     PictureFormat,
     PlaybackStateType,
@@ -138,8 +139,8 @@ class ResonateGroup:
     """Task handling the audio streaming loop, None when not streaming."""
     _current_metadata: Metadata | None = None
     """Current metadata for the group, None if no metadata set."""
-    _current_media_art: Image.Image | None = None
-    """Current media art image for the group, None if no image set."""
+    _current_media_art: dict[ArtworkSource, Image.Image]
+    """Current media art images for the group, keyed by source type."""
     _audio_encoders: dict[AudioFormat, av.AudioCodecContext]
     """Mapping of audio formats to their base64 encoded headers."""
     _preferred_stream_codec: AudioCodec = AudioCodec.OPUS
@@ -178,7 +179,7 @@ class ResonateGroup:
         self._server = server
         self._stream_task: Task[int] | None = None
         self._current_metadata = None
-        self._current_media_art = None
+        self._current_media_art = {}
         self._audio_encoders = {}
         self._event_cbs = []
         self._group_id = str(uuid.uuid4())
@@ -710,7 +711,7 @@ class ResonateGroup:
             self._send_stream_end_msg(client)
 
         self._audio_encoders.clear()
-        self._current_media_art = None
+        self._current_media_art.clear()
         self._play_start_time_us = None
 
     def _send_stopped_state_to_clients(self) -> None:
@@ -841,18 +842,26 @@ class ResonateGroup:
         # Update current metadata
         self._current_metadata = metadata
 
-    def set_media_art(self, image: Image.Image) -> None:
-        """Set the artwork image for the current media."""
-        # Store the current media art for new clients that join later
-        self._current_media_art = image
+    def set_media_art(
+        self, image: Image.Image, source: ArtworkSource = ArtworkSource.ALBUM
+    ) -> None:
+        """Set the artwork image for the current media.
 
-        # Send to all channels for all clients
+        Args:
+            image: The artwork image to set
+            source: Source type (ALBUM or ARTIST), NONE is not allowed
+        """
+        if source == ArtworkSource.NONE:
+            raise ValueError("Cannot set artwork with source NONE")
+
+        self._current_media_art[source] = image
+
         for client in self._clients:
             client_state = self._client_artwork_state.get(client.client_id)
             if client_state:
-                # Send to each active channel
-                for channel_num in client_state:
-                    self._send_media_art_to_client(client, image, channel_num)
+                for channel_num, channel_config in client_state.items():
+                    if channel_config.source == source:
+                        self._send_media_art_to_client(client, image, channel_num)
 
     def _letterbox_image(
         self, image: Image.Image, target_width: int, target_height: int
@@ -1083,12 +1092,12 @@ class ResonateGroup:
             client.send_message(message)
 
         # Send current media art to the new client if available
-        if self._current_media_art is not None:
-            client_state = self._client_artwork_state.get(client.client_id)
-            if client_state:
-                # Send to each active channel
-                for channel_num in client_state:
-                    self._send_media_art_to_client(client, self._current_media_art, channel_num)
+        client_state = self._client_artwork_state.get(client.client_id)
+        if client_state:
+            for channel_num, channel_config in client_state.items():
+                artwork = self._current_media_art.get(channel_config.source)
+                if artwork:
+                    self._send_media_art_to_client(client, artwork, channel_num)
 
     def handle_stream_format_request(
         self,
@@ -1159,10 +1168,9 @@ class ResonateGroup:
             )
             client.send_message(StreamUpdateMessage(stream_update))
 
-            if self._current_media_art is not None:
-                self._send_media_art_to_client(
-                    client, self._current_media_art, artwork_request.channel
-                )
+            artwork = self._current_media_art.get(updated_channel.source)
+            if artwork:
+                self._send_media_art_to_client(client, artwork, artwork_request.channel)
 
         if request.player:
             if not client.check_role(Roles.PLAYER):
