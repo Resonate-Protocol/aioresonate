@@ -156,6 +156,8 @@ class ResonateGroup:
     """Current playback state of the group."""
     _group_id: str
     """Unique identifier for this group."""
+    _group_name: str | None
+    """Friendly name for this group."""
     _streamer: Streamer | None
     """Active Streamer instance for the current stream, None when not streaming."""
     _media_stream: MediaStream | None
@@ -192,6 +194,7 @@ class ResonateGroup:
         self._audio_encoders = {}
         self._event_cbs = []
         self._group_id = str(uuid.uuid4())
+        self._group_name: str | None = None
         self._streamer: Streamer | None = None
         self._media_stream: MediaStream | None = None
         self._stream_commands: asyncio.Queue[_StreamerReconfigureCommand] | None = None
@@ -307,7 +310,7 @@ class ResonateGroup:
             GroupUpdateServerPayload(
                 playback_state=playback_state,
                 group_id=self._group_id,
-                group_name=None,
+                group_name=self._group_name,
             )
         )
         controller_state = ControllerStatePayload(
@@ -763,7 +766,7 @@ class ResonateGroup:
             GroupUpdateServerPayload(
                 playback_state=PlaybackStateType.STOPPED,
                 group_id=self._group_id,
-                group_name=None,
+                group_name=self._group_name,
             )
         )
         controller_state = ControllerStatePayload(
@@ -876,7 +879,7 @@ class ResonateGroup:
             GroupUpdateServerPayload(
                 playback_state=playback_state,
                 group_id=self._group_id,
-                group_name=None,
+                group_name=self._group_name,
             )
         )
 
@@ -1247,7 +1250,7 @@ class ResonateGroup:
             GroupUpdateServerPayload(
                 playback_state=playback_state,
                 group_id=self._group_id,
-                group_name=None,
+                group_name=self._group_name,
             )
         )
         logger.debug("Sending group update to new client %s", client.client_id)
