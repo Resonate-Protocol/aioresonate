@@ -165,6 +165,10 @@ class ResonateGroup:
     """Absolute timestamp in microseconds when playback started, None when not streaming."""
     _scheduled_stop_handle: asyncio.TimerHandle | None
     """Timer handle for scheduled stop, None when no stop is scheduled."""
+    _volume: int
+    """Group volume level (0-100)."""
+    _muted: bool
+    """Group mute state."""
 
     def __init__(self, server: ResonateServer, *args: ResonateClient) -> None:
         """
@@ -192,6 +196,8 @@ class ResonateGroup:
         self._stream_commands: asyncio.Queue[_StreamerReconfigureCommand] | None = None
         self._play_start_time_us: int | None = None
         self._scheduled_stop_handle: asyncio.TimerHandle | None = None
+        self._volume = 100
+        self._muted = False
         logger.debug(
             "ResonateGroup initialized with %d client(s): %s",
             len(self._clients),
@@ -1005,6 +1011,16 @@ class ResonateGroup:
     def state(self) -> PlaybackStateType:
         """Current playback state of the group."""
         return self._current_state
+
+    @property
+    def volume(self) -> int:
+        """Current group volume (0-100)."""
+        return self._volume
+
+    @property
+    def muted(self) -> bool:
+        """Current group mute state."""
+        return self._muted
 
     async def remove_client(self, client: ResonateClient) -> None:
         """
