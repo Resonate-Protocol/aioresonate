@@ -843,18 +843,21 @@ class ResonateGroup:
         self._current_metadata = metadata
 
     def set_media_art(
-        self, image: Image.Image, source: ArtworkSource = ArtworkSource.ALBUM
+        self, image: Image.Image | None, source: ArtworkSource = ArtworkSource.ALBUM
     ) -> None:
-        """Set the artwork image for the current media.
+        """Set or clear artwork image for the current media.
 
         Args:
-            image: The artwork image to set
+            image: The artwork image to set, or None to clear artwork for this source
             source: Source type (ALBUM or ARTIST), NONE is not allowed
         """
         if source == ArtworkSource.NONE:
             raise ValueError("Cannot set artwork with source NONE")
 
-        self._current_media_art[source] = image
+        if image is None:
+            self._current_media_art.pop(source, None)
+        else:
+            self._current_media_art[source] = image
 
         for client in self._clients:
             client_state = self._client_artwork_state.get(client.client_id)
@@ -908,42 +911,45 @@ class ResonateGroup:
         return letterboxed
 
     def _send_media_art_to_client(
-        self, client: ResonateClient, image: Image.Image, channel: int
+        self, client: ResonateClient, image: Image.Image | None, channel: int
     ) -> None:
-        """Send media art to a specific client channel with appropriate format and sizing."""
+        """Send or clear media art to a specific client channel.
+
+        Args:
+            client: Client to send to
+            image: Image to send, or None to clear artwork on this channel
+            channel: Channel number (0-3)
+        """
         if not client.check_role(Roles.ARTWORK):
             return
 
-        # Get channel state
         client_state = self._client_artwork_state.get(client.client_id)
         if client_state is None or channel not in client_state:
             return
 
-        channel_state = client_state[channel]
+        message_type = BinaryMessageType.ARTWORK_CHANNEL_0.value + channel
+        header = pack_binary_header_raw(message_type, int(self._server.loop.time() * 1_000_000))
 
-        # Resize with letterboxing to fit within channel dimensions while preserving aspect ratio
-        resized_image = self._letterbox_image(
-            image, channel_state.media_width, channel_state.media_height
-        )
+        if image is None:
+            client.send_message(header)
+        else:
+            channel_state = client_state[channel]
+            resized_image = self._letterbox_image(
+                image, channel_state.media_width, channel_state.media_height
+            )
 
-        # Encode image in the channel's format
-        with BytesIO() as img_bytes:
-            if channel_state.format == PictureFormat.JPEG:
-                resized_image.save(img_bytes, format="JPEG", quality=85)
-            elif channel_state.format == PictureFormat.PNG:
-                resized_image.save(img_bytes, format="PNG", compress_level=6)
-            elif channel_state.format == PictureFormat.BMP:
-                resized_image.save(img_bytes, format="BMP")
-            else:
-                raise NotImplementedError(f"Unsupported artwork format: {channel_state.format}")
-            img_bytes.seek(0)
-            img_data = img_bytes.read()
-
-            # Determine binary message type based on channel number
-            message_type = BinaryMessageType.ARTWORK_CHANNEL_0.value + channel
-
-            header = pack_binary_header_raw(message_type, int(self._server.loop.time() * 1_000_000))
-            client.send_message(header + img_data)
+            with BytesIO() as img_bytes:
+                if channel_state.format == PictureFormat.JPEG:
+                    resized_image.save(img_bytes, format="JPEG", quality=85)
+                elif channel_state.format == PictureFormat.PNG:
+                    resized_image.save(img_bytes, format="PNG", compress_level=6)
+                elif channel_state.format == PictureFormat.BMP:
+                    resized_image.save(img_bytes, format="BMP")
+                else:
+                    raise NotImplementedError(f"Unsupported artwork format: {channel_state.format}")
+                img_bytes.seek(0)
+                img_data = img_bytes.read()
+                client.send_message(header + img_data)
 
     @property
     def clients(self) -> list[ResonateClient]:
@@ -1095,6 +1101,8 @@ class ResonateGroup:
         client_state = self._client_artwork_state.get(client.client_id)
         if client_state:
             for channel_num, channel_config in client_state.items():
+                if channel_config.source == ArtworkSource.NONE:
+                    continue
                 artwork = self._current_media_art.get(channel_config.source)
                 if artwork:
                     self._send_media_art_to_client(client, artwork, channel_num)
@@ -1168,9 +1176,10 @@ class ResonateGroup:
             )
             client.send_message(StreamUpdateMessage(stream_update))
 
-            artwork = self._current_media_art.get(updated_channel.source)
-            if artwork:
-                self._send_media_art_to_client(client, artwork, artwork_request.channel)
+            if updated_channel.source != ArtworkSource.NONE:
+                artwork = self._current_media_art.get(updated_channel.source)
+                if artwork:
+                    self._send_media_art_to_client(client, artwork, artwork_request.channel)
 
         if request.player:
             if not client.check_role(Roles.PLAYER):
