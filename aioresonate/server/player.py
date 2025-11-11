@@ -136,7 +136,7 @@ class PlayerClient:
         codec_fallbacks = [AudioCodec.FLAC, AudioCodec.OPUS, AudioCodec.PCM]
         codec = None
         for candidate_codec in codec_fallbacks:
-            if support and candidate_codec.value in support_codecs:
+            if support and candidate_codec in support_codecs:
                 # Special handling for Opus - check if sample rates are compatible
                 if candidate_codec == AudioCodec.OPUS:
                     opus_rate_candidates = [

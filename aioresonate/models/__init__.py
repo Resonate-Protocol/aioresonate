@@ -5,6 +5,7 @@ from __future__ import annotations
 __all__ = [
     "BINARY_HEADER_FORMAT",
     "BINARY_HEADER_SIZE",
+    "AudioCodec",
     "BinaryHeader",
     "BinaryMessageType",
     "ClientMessage",
@@ -36,6 +37,7 @@ from typing import NamedTuple
 from . import artwork, controller, core, metadata, player, types, visualizer
 from .core import DeviceInfo
 from .types import (
+    AudioCodec,
     BinaryMessageType,
     ClientMessage,
     MediaCommand,

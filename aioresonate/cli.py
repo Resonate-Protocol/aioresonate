@@ -37,6 +37,7 @@ from aioresonate.models.core import (
 from aioresonate.models.metadata import SessionUpdateMetadata
 from aioresonate.models.player import ClientHelloPlayerSupport, SupportedAudioFormat
 from aioresonate.models.types import (
+    AudioCodec,
     MediaCommand,
     PlaybackStateType,
     PlayerCommand,
@@ -612,8 +613,12 @@ async def main_async(argv: Sequence[str] | None = None) -> int:  # noqa: PLR0915
         device_info=_get_device_info(),
         player_support=ClientHelloPlayerSupport(
             support_formats=[
-                SupportedAudioFormat(codec="pcm", channels=2, sample_rate=44_100, bit_depth=16),
-                SupportedAudioFormat(codec="pcm", channels=1, sample_rate=44_100, bit_depth=16),
+                SupportedAudioFormat(
+                    codec=AudioCodec.PCM, channels=2, sample_rate=44_100, bit_depth=16
+                ),
+                SupportedAudioFormat(
+                    codec=AudioCodec.PCM, channels=1, sample_rate=44_100, bit_depth=16
+                ),
             ],
             buffer_capacity=32_000_000,
             supported_commands=[PlayerCommand.VOLUME, PlayerCommand.MUTE],

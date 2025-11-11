@@ -114,6 +114,14 @@ class PlaybackStateType(Enum):
     STOPPED = "stopped"
 
 
+class AudioCodec(Enum):
+    """Enum for Audio Codecs."""
+
+    OPUS = "opus"
+    FLAC = "flac"
+    PCM = "pcm"
+
+
 class PlayerCommand(Enum):
     """Enum for Player Commands."""
 

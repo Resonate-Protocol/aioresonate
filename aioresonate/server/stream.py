@@ -8,14 +8,13 @@ import logging
 from collections import deque
 from collections.abc import AsyncGenerator, Callable
 from dataclasses import dataclass, field
-from enum import Enum
 from typing import NamedTuple, cast
 from uuid import UUID, uuid4
 
 import av
 from av.logging import Capture
 
-from aioresonate.models import BinaryMessageType, pack_binary_header_raw
+from aioresonate.models import AudioCodec, BinaryMessageType, pack_binary_header_raw
 from aioresonate.models.player import StreamStartPlayer
 
 logger = logging.getLogger(__name__)
@@ -24,14 +23,6 @@ logger = logging.getLogger(__name__)
 # Used as the canonical source for visualization and as a fallback when
 # player_channel() returns None.
 MAIN_CHANNEL_ID: UUID = UUID("00000000-0000-0000-0000-000000000000")
-
-
-class AudioCodec(Enum):
-    """Supported audio codecs."""
-
-    PCM = "pcm"
-    FLAC = "flac"
-    OPUS = "opus"
 
 
 @dataclass(frozen=True)
@@ -666,7 +657,7 @@ class Streamer:
     ) -> StreamStartPlayer:
         """Build StreamStartPlayer message for client."""
         return StreamStartPlayer(
-            codec=client_cfg.target_format.codec.value,
+            codec=client_cfg.target_format.codec,
             sample_rate=client_cfg.target_format.sample_rate,
             channels=client_cfg.target_format.channels,
             bit_depth=client_cfg.target_format.bit_depth,

@@ -44,7 +44,7 @@ from aioresonate.models.player import (
     PlayerStatePayload,
     StreamStartPlayer,
 )
-from aioresonate.models.types import MediaCommand, PlayerStateType, Roles, ServerMessage
+from aioresonate.models.types import AudioCodec, MediaCommand, PlayerStateType, Roles, ServerMessage
 
 from .time_sync import ResonateTimeFilter
 
@@ -539,8 +539,8 @@ class ResonateClient:
             logger.warning("Stream start message missing player payload")
             return
 
-        if player.codec != "pcm":
-            logger.error("Unsupported codec '%s' - only PCM is supported", player.codec)
+        if player.codec != AudioCodec.PCM:
+            logger.error("Unsupported codec '%s' - only PCM is supported", player.codec.value)
             return
 
         pcm_format = PCMFormat(
@@ -568,8 +568,8 @@ class ResonateClient:
             return
 
         codec = player_update.codec or self._current_player.codec
-        if codec != "pcm":
-            logger.error("Unsupported codec update '%s' - only PCM is supported", codec)
+        if codec != AudioCodec.PCM:
+            logger.error("Unsupported codec update '%s' - only PCM is supported", codec.value)
             return
 
         sample_rate = player_update.sample_rate or self._current_player.sample_rate

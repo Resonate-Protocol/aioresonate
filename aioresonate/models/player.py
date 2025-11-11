@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from mashumaro.config import BaseConfig
 from mashumaro.mixins.orjson import DataClassORJSONMixin
 
-from .types import PlayerCommand, PlayerStateType
+from .types import AudioCodec, PlayerCommand, PlayerStateType
 
 
 # Client -> Server client/hello player support object
@@ -22,8 +22,8 @@ from .types import PlayerCommand, PlayerStateType
 class SupportedAudioFormat(DataClassORJSONMixin):
     """Supported audio format configuration."""
 
-    codec: str
-    """Codec identifier (e.g., 'opus', 'flac', 'pcm')."""
+    codec: AudioCodec
+    """Codec identifier."""
     channels: int
     """Supported number of channels (e.g., 1 = mono, 2 = stereo)."""
     sample_rate: int
@@ -118,7 +118,7 @@ class PlayerCommandPayload(DataClassORJSONMixin):
 class StreamRequestFormatPlayer(DataClassORJSONMixin):
     """Request different player stream format (upgrade or downgrade)."""
 
-    codec: str | None = None
+    codec: AudioCodec | None = None
     """Requested codec."""
     sample_rate: int | None = None
     """Requested sample rate."""
@@ -138,7 +138,7 @@ class StreamRequestFormatPlayer(DataClassORJSONMixin):
 class StreamStartPlayer(DataClassORJSONMixin):
     """Player object in stream/start message."""
 
-    codec: str
+    codec: AudioCodec
     """Codec to be used."""
     sample_rate: int
     """Sample rate to be used."""
@@ -160,7 +160,7 @@ class StreamStartPlayer(DataClassORJSONMixin):
 class StreamUpdatePlayer(DataClassORJSONMixin):
     """Player object in stream/update message with delta updates."""
 
-    codec: str | None = None
+    codec: AudioCodec | None = None
     """Codec to be used."""
     sample_rate: int | None = None
     """Sample rate to be used."""
