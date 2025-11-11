@@ -10,11 +10,6 @@ from typing import TYPE_CHECKING, cast
 from aiohttp import ClientWebSocketResponse, WSMessage, WSMsgType, web
 
 from aioresonate.models import unpack_binary_header
-from aioresonate.models.controller import (
-    GroupGetListClientMessage,
-    GroupJoinClientMessage,
-    GroupUnjoinClientMessage,
-)
 from aioresonate.models.core import (
     ClientCommandMessage,
     ClientHelloMessage,
@@ -480,12 +475,6 @@ class ResonateClient:
             case StreamRequestFormatMessage(payload):
                 self.group.handle_stream_format_request(self, payload)
             # Controller messages
-            case GroupGetListClientMessage() as group_get_list:
-                self.require_controller.handle_get_list(group_get_list)
-            case GroupJoinClientMessage(payload):
-                self.require_controller.handle_join(payload)
-            case GroupUnjoinClientMessage() as group_unjoin:
-                self.require_controller.handle_unjoin(group_unjoin)
             case ClientCommandMessage(payload):
                 if payload.controller:
                     self.require_controller.handle_command(payload.controller)

@@ -14,40 +14,7 @@ from typing import Literal
 from mashumaro.config import BaseConfig
 from mashumaro.mixins.orjson import DataClassORJSONMixin
 
-from .types import ClientMessage, MediaCommand, PlaybackStateType, ServerMessage
-
-
-# Client -> Server: group/get-list
-@dataclass
-class GroupGetListClientMessage(ClientMessage):
-    """Message sent by the client to request all groups available to join."""
-
-    type: Literal["group/get-list"] = "group/get-list"
-
-
-# Client -> Server: group/join
-@dataclass
-class GroupJoinClientPayload(DataClassORJSONMixin):
-    """Payload for joining a group."""
-
-    group_id: str
-    """Identifier of group to join."""
-
-
-@dataclass
-class GroupJoinClientMessage(ClientMessage):
-    """Message sent by the client to join a group."""
-
-    payload: GroupJoinClientPayload
-    type: Literal["group/join"] = "group/join"
-
-
-# Client -> Server: group/unjoin
-@dataclass
-class GroupUnjoinClientMessage(ClientMessage):
-    """Message sent by the client to leave current group."""
-
-    type: Literal["group/unjoin"] = "group/unjoin"
+from .types import MediaCommand, PlaybackStateType, ServerMessage
 
 
 # Client -> Server: client/command controller object
@@ -85,37 +52,6 @@ class ControllerCommandPayload(DataClassORJSONMixin):
         """Config for parsing json messages."""
 
         omit_none = True
-
-
-# Server -> Client: group/list
-@dataclass
-class GroupInfoServerPayload(DataClassORJSONMixin):
-    """Information about a group."""
-
-    group_id: str
-    """Group identifier."""
-    name: str
-    """Group name."""
-    state: Literal["playing", "paused", "idle"]
-    """Group state."""
-    member_count: int
-    """Number of clients in group."""
-
-
-@dataclass
-class GroupListServerPayload(DataClassORJSONMixin):
-    """All groups available to join on the server."""
-
-    groups: list[GroupInfoServerPayload]
-    """List of available groups."""
-
-
-@dataclass
-class GroupListServerMessage(ServerMessage):
-    """Message sent by the server with list of available groups."""
-
-    payload: GroupListServerPayload
-    type: Literal["group/list"] = "group/list"
 
 
 # Server -> Client: server/state controller object
