@@ -298,29 +298,29 @@ class ResonateGroup:
 
     def _send_group_update_to_clients(self) -> None:
         """Send group/update and server/state messages to all clients."""
+        playback_state = (
+            PlaybackStateType.PLAYING
+            if self._current_state == PlaybackStateType.PLAYING
+            else PlaybackStateType.PAUSED
+        )
+        group_message = GroupUpdateServerMessage(
+            GroupUpdateServerPayload(
+                playback_state=playback_state,
+                group_id=self._group_id,
+                group_name=None,
+            )
+        )
         controller_state = ControllerStatePayload(
             supported_commands=self._get_supported_commands(),
             volume=self.volume,
             muted=self._muted,
         )
-        for client in self._clients:
-            # Send group/update for playback state
-            if client.check_role(Roles.CONTROLLER) or client.check_role(Roles.METADATA):
-                playback_state = (
-                    PlaybackStateType.PLAYING
-                    if self._current_state == PlaybackStateType.PLAYING
-                    else PlaybackStateType.PAUSED
-                )
-                group_message = GroupUpdateServerMessage(
-                    GroupUpdateServerPayload(
-                        playback_state=playback_state,
-                        group_id=self._group_id,
-                        group_name=None,
-                    )
-                )
-                client.send_message(group_message)
 
-            # Send server/state for metadata
+        for client in self._clients:
+            # Send group/update to all clients
+            client.send_message(group_message)
+
+            # Send server/state for metadata only to metadata clients
             if client.check_role(Roles.METADATA):
                 metadata_update = (
                     self._current_metadata.snapshot_update(
@@ -332,7 +332,7 @@ class ResonateGroup:
                 state_message = ServerStateMessage(ServerStatePayload(metadata=metadata_update))
                 client.send_message(state_message)
 
-            # Send server/state for controller
+            # Send server/state for controller only to controller clients
             if client.check_role(Roles.CONTROLLER):
                 state_message = ServerStateMessage(ServerStatePayload(controller=controller_state))
                 client.send_message(state_message)
@@ -759,29 +759,29 @@ class ResonateGroup:
         """Send stopped state and cleared metadata to all clients."""
         timestamp = int(self._server.loop.time() * 1_000_000)
         cleared_metadata = Metadata.cleared_update(timestamp)
+        group_message = GroupUpdateServerMessage(
+            GroupUpdateServerPayload(
+                playback_state=PlaybackStateType.STOPPED,
+                group_id=self._group_id,
+                group_name=None,
+            )
+        )
         controller_state = ControllerStatePayload(
             supported_commands=self._get_supported_commands(),
             volume=self.volume,
             muted=self._muted,
         )
-        for client in self._clients:
-            # Send group/update for stopped state
-            if client.check_role(Roles.CONTROLLER) or client.check_role(Roles.METADATA):
-                group_message = GroupUpdateServerMessage(
-                    GroupUpdateServerPayload(
-                        playback_state=PlaybackStateType.STOPPED,
-                        group_id=self._group_id,
-                        group_name=None,
-                    )
-                )
-                client.send_message(group_message)
 
-            # Send server/state for cleared metadata
+        for client in self._clients:
+            # Send group/update to all clients
+            client.send_message(group_message)
+
+            # Send server/state for cleared metadata only to metadata clients
             if client.check_role(Roles.METADATA):
                 state_message = ServerStateMessage(ServerStatePayload(metadata=cleared_metadata))
                 client.send_message(state_message)
 
-            # Send server/state for controller
+            # Send server/state for controller only to controller clients
             if client.check_role(Roles.CONTROLLER):
                 state_message = ServerStateMessage(ServerStatePayload(controller=controller_state))
                 client.send_message(state_message)
@@ -867,28 +867,28 @@ class ResonateGroup:
             metadata_update = metadata.diff_update(last_metadata, timestamp)
 
         # Send updates to all clients in the group
-        for client in self._clients:
-            # Send group/update for playback state
-            if client.check_role(Roles.CONTROLLER) or client.check_role(Roles.METADATA):
-                playback_state = (
-                    PlaybackStateType.PLAYING
-                    if self._current_state == PlaybackStateType.PLAYING
-                    else PlaybackStateType.PAUSED
-                )
-                group_message = GroupUpdateServerMessage(
-                    GroupUpdateServerPayload(
-                        playback_state=playback_state,
-                        group_id=self._group_id,
-                        group_name=None,
-                    )
-                )
-                logger.debug(
-                    "Sending group update to client %s",
-                    client.client_id,
-                )
-                client.send_message(group_message)
+        playback_state = (
+            PlaybackStateType.PLAYING
+            if self._current_state == PlaybackStateType.PLAYING
+            else PlaybackStateType.PAUSED
+        )
+        group_message = GroupUpdateServerMessage(
+            GroupUpdateServerPayload(
+                playback_state=playback_state,
+                group_id=self._group_id,
+                group_name=None,
+            )
+        )
 
-            # Send server/state for metadata
+        for client in self._clients:
+            # Send group/update to all clients
+            logger.debug(
+                "Sending group update to client %s",
+                client.client_id,
+            )
+            client.send_message(group_message)
+
+            # Send server/state for metadata only to metadata clients
             if client.check_role(Roles.METADATA):
                 state_message = ServerStateMessage(ServerStatePayload(metadata=metadata_update))
                 logger.debug(
@@ -1238,24 +1238,22 @@ class ResonateGroup:
                 self._send_stream_start_msg(client, None)
 
         # Send current state to the new client
-        # Send group/update for playback state
-        if client.check_role(Roles.CONTROLLER) or client.check_role(Roles.METADATA):
-            playback_state = (
-                PlaybackStateType.PLAYING
-                if self._current_state == PlaybackStateType.PLAYING
-                else PlaybackStateType.PAUSED
+        playback_state = (
+            PlaybackStateType.PLAYING
+            if self._current_state == PlaybackStateType.PLAYING
+            else PlaybackStateType.PAUSED
+        )
+        group_message = GroupUpdateServerMessage(
+            GroupUpdateServerPayload(
+                playback_state=playback_state,
+                group_id=self._group_id,
+                group_name=None,
             )
-            group_message = GroupUpdateServerMessage(
-                GroupUpdateServerPayload(
-                    playback_state=playback_state,
-                    group_id=self._group_id,
-                    group_name=None,
-                )
-            )
-            logger.debug("Sending group update to new client %s", client.client_id)
-            client.send_message(group_message)
+        )
+        logger.debug("Sending group update to new client %s", client.client_id)
+        client.send_message(group_message)
 
-        # Send server/state for metadata if available
+        # Send server/state for metadata only to metadata clients
         if self._current_metadata is not None and client.check_role(Roles.METADATA):
             metadata_update = self._current_metadata.snapshot_update(
                 int(self._server.loop.time() * 1_000_000)
@@ -1264,7 +1262,7 @@ class ResonateGroup:
             logger.debug("Sending server state to new client %s", client.client_id)
             client.send_message(state_message)
 
-        # Send server/state for controller
+        # Send server/state for controller only to controller clients
         if client.check_role(Roles.CONTROLLER):
             controller_state = ControllerStatePayload(
                 supported_commands=self._get_supported_commands(),
