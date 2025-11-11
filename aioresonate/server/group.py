@@ -20,6 +20,7 @@ from aioresonate.models import (
     pack_binary_header_raw,
 )
 from aioresonate.models.artwork import (
+    ArtworkChannel,
     StreamArtworkChannelConfig,
     StreamStartArtwork,
 )
@@ -125,8 +126,8 @@ class ResonateGroup:
 
     _clients: list[ResonateClient]
     """List of all clients in this group."""
-    _client_art_formats: dict[str, PictureFormat]
-    """Mapping of client IDs (with the metadata role) to their selected artwork formats."""
+    _client_artwork_state: dict[str, dict[int, ArtworkChannel]]
+    """Mapping of client IDs to their per-channel artwork state (channel 0-3)."""
     _server: ResonateServer
     """Reference to the ResonateServer instance."""
     _stream_task: Task[int] | None = None
@@ -169,7 +170,7 @@ class ResonateGroup:
             *args: Clients to add to this group.
         """
         self._clients = list(args)
-        self._client_art_formats = {}
+        self._client_artwork_state = {}
         self._server = server
         self._stream_task: Task[int] | None = None
         self._current_metadata = None
@@ -583,21 +584,27 @@ class ResonateGroup:
         """Send a stream start message to a client with the specified audio format for players."""
         assert client.check_role(Roles.PLAYER) == (player_stream_info is not None)
         if client.check_role(Roles.ARTWORK) and client.info.artwork_support:
-            # Use channel 0 (first channel) for now
-            # TODO: Add support for multiple channels and different source types
+            # Initialize artwork state for all channels
             channels = client.info.artwork_support.channels
             if channels:
-                channel_0 = channels[0]
-                art_format = channel_0.format
-                self._client_art_formats[client.client_id] = art_format
-                # Create stream channel config - currently only supporting channel 0
-                stream_channel = StreamArtworkChannelConfig(
-                    source=channel_0.source,
-                    format=channel_0.format,
-                    width=channel_0.media_width,
-                    height=channel_0.media_height,
-                )
-                artwork_stream_info = StreamStartArtwork(channels=[stream_channel])
+                stream_channels = []
+                client_channel_state = {}
+
+                for channel_num, channel in enumerate(channels):
+                    # Create stream channel config
+                    stream_channel = StreamArtworkChannelConfig(
+                        source=channel.source,
+                        format=channel.format,
+                        width=channel.media_width,
+                        height=channel.media_height,
+                    )
+                    stream_channels.append(stream_channel)
+
+                    # Store channel state (reuse ArtworkChannel)
+                    client_channel_state[channel_num] = channel
+
+                self._client_artwork_state[client.client_id] = client_channel_state
+                artwork_stream_info = StreamStartArtwork(channels=stream_channels)
             else:
                 artwork_stream_info = None
         else:
@@ -623,8 +630,8 @@ class ResonateGroup:
     def _send_stream_end_msg(self, client: ResonateClient) -> None:
         """Send a stream end message to a client to stop playback."""
         logger.debug("ending stream for %s (%s)", client.name, client.client_id)
-        # Lifetime of album artwork is bound to the stream
-        self._client_art_formats.pop(client.client_id, None)
+        # Lifetime of artwork state is bound to the stream
+        self._client_artwork_state.pop(client.client_id, None)
         client.send_message(StreamEndMessage())
 
     def _schedule_delayed_stop(self, stop_time_us: int, active: bool, needs_cleanup: bool) -> bool:  # noqa: FBT001
@@ -835,8 +842,13 @@ class ResonateGroup:
         # Store the current media art for new clients that join later
         self._current_media_art = image
 
+        # Send to all channels for all clients
         for client in self._clients:
-            self._send_media_art_to_client(client, image)
+            client_state = self._client_artwork_state.get(client.client_id)
+            if client_state:
+                # Send to each active channel
+                for channel_num in client_state:
+                    self._send_media_art_to_client(client, image, channel_num)
 
     def _letterbox_image(
         self, image: Image.Image, target_width: int, target_height: int
@@ -882,40 +894,42 @@ class ResonateGroup:
 
         return letterboxed
 
-    def _send_media_art_to_client(self, client: ResonateClient, image: Image.Image) -> None:
-        """Send media art to a specific client with appropriate format and sizing."""
-        if not client.check_role(Roles.ARTWORK) or not client.info.artwork_support:
+    def _send_media_art_to_client(
+        self, client: ResonateClient, image: Image.Image, channel: int
+    ) -> None:
+        """Send media art to a specific client channel with appropriate format and sizing."""
+        if not client.check_role(Roles.ARTWORK):
             return
 
-        art_format = self._client_art_formats.get(client.client_id)
-        if art_format is None:
-            # Do nothing if we are not in an active session or this client doesn't support artwork
+        # Get channel state
+        client_state = self._client_artwork_state.get(client.client_id)
+        if client_state is None or channel not in client_state:
             return
-        artwork_support = client.info.artwork_support
-        # Use channel 0 (first channel) for now
-        if not artwork_support.channels:
-            return
-        channel_0 = artwork_support.channels[0]
-        width = channel_0.media_width
-        height = channel_0.media_height
 
-        # Resize with letterboxing to fit within width x height while preserving aspect ratio
-        resized_image = self._letterbox_image(image, width, height)
+        channel_state = client_state[channel]
 
+        # Resize with letterboxing to fit within channel dimensions while preserving aspect ratio
+        resized_image = self._letterbox_image(
+            image, channel_state.media_width, channel_state.media_height
+        )
+
+        # Encode image in the channel's format
         with BytesIO() as img_bytes:
-            if art_format == PictureFormat.JPEG:
+            if channel_state.format == PictureFormat.JPEG:
                 resized_image.save(img_bytes, format="JPEG", quality=85)
-            elif art_format == PictureFormat.PNG:
+            elif channel_state.format == PictureFormat.PNG:
                 resized_image.save(img_bytes, format="PNG", compress_level=6)
-            elif art_format == PictureFormat.BMP:
+            elif channel_state.format == PictureFormat.BMP:
                 resized_image.save(img_bytes, format="BMP")
             else:
-                raise NotImplementedError(f"Unsupported artwork format: {art_format}")
+                raise NotImplementedError(f"Unsupported artwork format: {channel_state.format}")
             img_bytes.seek(0)
             img_data = img_bytes.read()
-            header = pack_binary_header_raw(
-                BinaryMessageType.ARTWORK_CHANNEL_0.value, int(self._server.loop.time() * 1_000_000)
-            )
+
+            # Determine binary message type based on channel number
+            message_type = BinaryMessageType.ARTWORK_CHANNEL_0.value + channel
+
+            header = pack_binary_header_raw(message_type, int(self._server.loop.time() * 1_000_000))
             client.send_message(header + img_data)
 
     @property
@@ -1030,7 +1044,11 @@ class ResonateGroup:
             logger.debug("Joining client %s to current stream", client.client_id)
             if client.check_role(Roles.PLAYER):
                 self._reconfigure_streamer()
-            elif client.check_role(Roles.METADATA) or client.check_role(Roles.VISUALIZER):
+            elif (
+                client.check_role(Roles.METADATA)
+                or client.check_role(Roles.VISUALIZER)
+                or client.check_role(Roles.ARTWORK)
+            ):
                 self._send_stream_start_msg(client, None)
 
         # Send current metadata to the new player if available
@@ -1062,7 +1080,11 @@ class ResonateGroup:
 
         # Send current media art to the new client if available
         if self._current_media_art is not None:
-            self._send_media_art_to_client(client, self._current_media_art)
+            client_state = self._client_artwork_state.get(client.client_id)
+            if client_state:
+                # Send to each active channel
+                for channel_num in client_state:
+                    self._send_media_art_to_client(client, self._current_media_art, channel_num)
 
     def handle_stream_format_request(
         self,
