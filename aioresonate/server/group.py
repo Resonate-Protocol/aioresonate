@@ -985,7 +985,19 @@ class ResonateGroup:
             return
 
         client_state = self._client_artwork_state.get(client.client_id)
-        if client_state is None or channel not in client_state:
+        if client_state is None:
+            logger.warning(
+                "Cannot send artwork to client %s channel %d: no active stream",
+                client.client_id,
+                channel,
+            )
+            return
+        if channel not in client_state:
+            logger.warning(
+                "Cannot send artwork to client %s channel %d: channel not configured",
+                client.client_id,
+                channel,
+            )
             return
 
         message_type = BinaryMessageType.ARTWORK_CHANNEL_0.value + channel
