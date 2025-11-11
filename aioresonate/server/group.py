@@ -978,8 +978,52 @@ class ResonateGroup:
         """Return player helpers for all members that support the role."""
         return [client.player for client in self._clients if client.player is not None]
 
+    def _get_supported_commands(self) -> list[MediaCommand]:
+        """Get list of commands supported in the current state."""
+        # TODO: ask library user instead what is supported and what not
+        # also, what if volume/mute/switch is not supported?
+        # Always available
+        commands: list[MediaCommand] = [
+            MediaCommand.VOLUME,
+            MediaCommand.MUTE,
+            MediaCommand.SWITCH,
+        ]
+
+        # State-dependent commands
+        if self._current_state == PlaybackStateType.PLAYING:
+            commands.extend(
+                [
+                    MediaCommand.PAUSE,
+                    MediaCommand.STOP,
+                    MediaCommand.NEXT,
+                    MediaCommand.PREVIOUS,
+                    MediaCommand.REPEAT_OFF,
+                    MediaCommand.REPEAT_ONE,
+                    MediaCommand.REPEAT_ALL,
+                    MediaCommand.SHUFFLE,
+                    MediaCommand.UNSHUFFLE,
+                ]
+            )
+        elif self._current_state == PlaybackStateType.PAUSED:
+            commands.extend(
+                [
+                    MediaCommand.PLAY,
+                    MediaCommand.STOP,
+                    MediaCommand.NEXT,
+                    MediaCommand.PREVIOUS,
+                    MediaCommand.REPEAT_OFF,
+                    MediaCommand.REPEAT_ONE,
+                    MediaCommand.REPEAT_ALL,
+                    MediaCommand.SHUFFLE,
+                    MediaCommand.UNSHUFFLE,
+                ]
+            )
+        elif self._current_state == PlaybackStateType.STOPPED:
+            commands.append(MediaCommand.PLAY)
+
+        return commands
+
     def _handle_group_command(self, cmd: ControllerCommandPayload) -> None:
-        # TODO: verify that this command is actually supported for the current state
         event = GroupCommandEvent(
             command=cmd.command,
             volume=cmd.volume,
