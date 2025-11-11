@@ -78,10 +78,10 @@ class PlayerUpdateMessage(ClientMessage):
     type: Literal["player/update"] = "player/update"
 
 
-# Client -> Server stream/request-format
+# Client -> Server stream/request-format player object
 @dataclass
-class StreamRequestFormatPayload(DataClassORJSONMixin):
-    """Request different stream format (upgrade or downgrade)."""
+class StreamRequestFormatPlayer(DataClassORJSONMixin):
+    """Request different player stream format (upgrade or downgrade)."""
 
     codec: str | None = None
     """Requested codec."""
@@ -96,14 +96,6 @@ class StreamRequestFormatPayload(DataClassORJSONMixin):
         """Config for parsing json messages."""
 
         omit_none = True
-
-
-@dataclass
-class StreamRequestFormatMessage(ClientMessage):
-    """Message sent by the client to request different stream format."""
-
-    payload: StreamRequestFormatPayload
-    type: Literal["stream/request-format"] = "stream/request-format"
 
 
 # Server -> Client stream/start player object

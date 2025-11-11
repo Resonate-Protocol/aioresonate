@@ -20,6 +20,7 @@ from aioresonate.models import (
     pack_binary_header_raw,
 )
 from aioresonate.models.artwork import (
+    StreamArtworkChannelConfig,
     StreamStartArtwork,
 )
 from aioresonate.models.controller import GroupCommandClientPayload
@@ -27,11 +28,11 @@ from aioresonate.models.core import (
     SessionUpdateMessage,
     SessionUpdatePayload,
     StreamEndMessage,
+    StreamRequestFormatPayload,
     StreamStartMessage,
     StreamStartPayload,
 )
 from aioresonate.models.player import (
-    StreamRequestFormatPayload,
     StreamStartPlayer,
 )
 from aioresonate.models.types import (
@@ -583,12 +584,20 @@ class ResonateGroup:
         assert client.check_role(Roles.PLAYER) == (player_stream_info is not None)
         if client.check_role(Roles.ARTWORK) and client.info.artwork_support:
             # Use channel 0 (first channel) for now
+            # TODO: Add support for multiple channels and different source types
             channels = client.info.artwork_support.channels
             if channels:
                 channel_0 = channels[0]
                 art_format = channel_0.format
                 self._client_art_formats[client.client_id] = art_format
-                artwork_stream_info = StreamStartArtwork(art_format=art_format)
+                # Create stream channel config - currently only supporting channel 0
+                stream_channel = StreamArtworkChannelConfig(
+                    source=channel_0.source,
+                    format=channel_0.format,
+                    width=channel_0.media_width,
+                    height=channel_0.media_height,
+                )
+                artwork_stream_info = StreamStartArtwork(channels=[stream_channel])
             else:
                 artwork_stream_info = None
         else:

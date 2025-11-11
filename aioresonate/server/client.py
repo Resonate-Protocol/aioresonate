@@ -24,10 +24,10 @@ from aioresonate.models.core import (
     ServerHelloPayload,
     ServerTimeMessage,
     ServerTimePayload,
+    StreamRequestFormatMessage,
 )
 from aioresonate.models.player import (
     PlayerUpdateMessage,
-    StreamRequestFormatMessage,
 )
 from aioresonate.models.types import BinaryMessageType, ClientMessage, Roles, ServerMessage
 

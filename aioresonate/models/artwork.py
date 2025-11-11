@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from mashumaro.config import BaseConfig
 from mashumaro.mixins.orjson import DataClassORJSONMixin
 
 from .types import ArtworkSource, PictureFormat
@@ -50,6 +51,39 @@ class ClientHelloArtworkSupport(DataClassORJSONMixin):
             raise ValueError(f"channels must have 1-4 elements, got {len(self.channels)}")
 
 
+@dataclass
+class StreamArtworkChannelConfig(DataClassORJSONMixin):
+    """Configuration for an artwork channel in stream/start."""
+
+    source: ArtworkSource
+    """Artwork source type."""
+    format: PictureFormat
+    """Format of the encoded image."""
+    width: int
+    """Width in pixels of the encoded image."""
+    height: int
+    """Height in pixels of the encoded image."""
+
+
+@dataclass
+class StreamArtworkChannelConfigUpdate(DataClassORJSONMixin):
+    """Configuration updates for an artwork channel in stream/update."""
+
+    source: ArtworkSource | None = None
+    """Artwork source type."""
+    format: PictureFormat | None = None
+    """Format of the encoded image."""
+    width: int | None = None
+    """Width in pixels of the encoded image."""
+    height: int | None = None
+    """Height in pixels of the encoded image."""
+
+    class Config(BaseConfig):
+        """Config for parsing json messages."""
+
+        omit_none = True
+
+
 # Server -> Client: stream/start artwork object
 @dataclass
 class StreamStartArtwork(DataClassORJSONMixin):
@@ -59,8 +93,8 @@ class StreamStartArtwork(DataClassORJSONMixin):
     Sent to clients with the artwork role.
     """
 
-    art_format: PictureFormat
-    """Format of the encoded image."""
+    channels: list[StreamArtworkChannelConfig]
+    """Configuration for each active artwork channel, array index is the channel number."""
 
 
 # Server -> Client: stream/update artwork object
@@ -68,5 +102,37 @@ class StreamStartArtwork(DataClassORJSONMixin):
 class StreamUpdateArtwork(DataClassORJSONMixin):
     """Artwork object in stream/update message with delta updates."""
 
-    art_format: PictureFormat
-    """Format of the encoded image."""
+    channels: list[StreamArtworkChannelConfigUpdate] | None = None
+    """Configuration updates for artwork channels, array index is the channel number."""
+
+    class Config(BaseConfig):
+        """Config for parsing json messages."""
+
+        omit_none = True
+
+
+# Client -> Server: stream/request-format artwork object
+@dataclass
+class StreamRequestFormatArtwork(DataClassORJSONMixin):
+    """Request the server to change artwork format for a specific channel."""
+
+    channel: int
+    """Channel number (0-3) corresponding to the channel index declared in artwork client/hello."""
+    source: ArtworkSource | None = None
+    """Artwork source type."""
+    format: PictureFormat | None = None
+    """Requested image format identifier."""
+    media_width: int | None = None
+    """Requested max width in pixels."""
+    media_height: int | None = None
+    """Requested max height in pixels."""
+
+    def __post_init__(self) -> None:
+        """Validate field values."""
+        if not 0 <= self.channel <= 3:
+            raise ValueError(f"channel must be 0-3, got {self.channel}")
+
+    class Config(BaseConfig):
+        """Config for parsing json messages."""
+
+        omit_none = True
