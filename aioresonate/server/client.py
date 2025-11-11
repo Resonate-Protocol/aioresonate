@@ -14,15 +14,13 @@ from aioresonate.models.core import (
     ClientCommandMessage,
     ClientHelloMessage,
     ClientHelloPayload,
+    ClientStateMessage,
     ClientTimeMessage,
     ServerHelloMessage,
     ServerHelloPayload,
     ServerTimeMessage,
     ServerTimePayload,
     StreamRequestFormatMessage,
-)
-from aioresonate.models.player import (
-    PlayerUpdateMessage,
 )
 from aioresonate.models.types import BinaryMessageType, ClientMessage, Roles, ServerMessage
 
@@ -470,8 +468,9 @@ class ResonateClient:
                     )
                 )
             # Player messages
-            case PlayerUpdateMessage(state):
-                self.require_player.handle_player_update(state)
+            case ClientStateMessage(payload):
+                if payload.player:
+                    self.require_player.handle_player_update(payload.player)
             case StreamRequestFormatMessage(payload):
                 self.group.handle_stream_format_request(self, payload)
             # Controller messages

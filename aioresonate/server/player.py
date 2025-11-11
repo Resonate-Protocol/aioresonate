@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from aioresonate.models.player import ClientHelloPlayerSupport, PlayerUpdatePayload
+from aioresonate.models.player import ClientHelloPlayerSupport, PlayerStatePayload
 
 from .events import VolumeChangedEvent
 from .stream import AudioCodec, AudioFormat
@@ -55,7 +55,7 @@ class PlayerClient:
         self._logger.debug("Unmuting player")
         self._logger.error("NOT SUPPORTED BY SPEC YET")
 
-    def handle_player_update(self, state: PlayerUpdatePayload) -> None:
+    def handle_player_update(self, state: PlayerStatePayload) -> None:
         """Update internal mute/volume state from client report and emit event."""
         self._logger.debug("Received player state: volume=%d, muted=%s", state.volume, state.muted)
         if self._muted != state.muted or self._volume != state.volume:

@@ -22,6 +22,8 @@ from aioresonate.models.core import (
     ClientCommandPayload,
     ClientHelloMessage,
     ClientHelloPayload,
+    ClientStateMessage,
+    ClientStatePayload,
     ClientTimeMessage,
     ClientTimePayload,
     DeviceInfo,
@@ -39,8 +41,7 @@ from aioresonate.models.core import (
 )
 from aioresonate.models.player import (
     ClientHelloPlayerSupport,
-    PlayerUpdateMessage,
-    PlayerUpdatePayload,
+    PlayerStatePayload,
     StreamStartPlayer,
 )
 from aioresonate.models.types import MediaCommand, PlayerStateType, Roles, ServerMessage
@@ -339,8 +340,10 @@ class ResonateClient:
         """Send the current player state to the server."""
         if not self.connected:
             raise RuntimeError("Client is not connected")
-        message = PlayerUpdateMessage(
-            payload=PlayerUpdatePayload(state=state, volume=volume, muted=muted)
+        message = ClientStateMessage(
+            payload=ClientStatePayload(
+                player=PlayerStatePayload(state=state, volume=volume, muted=muted)
+            )
         )
         await self._send_message(message.to_json())
 

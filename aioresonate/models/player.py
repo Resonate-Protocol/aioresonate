@@ -10,12 +10,11 @@ audio formats based on their capabilities and current conditions.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal
 
 from mashumaro.config import BaseConfig
 from mashumaro.mixins.orjson import DataClassORJSONMixin
 
-from .types import ClientMessage, PlayerStateType
+from .types import PlayerStateType
 
 
 # Client -> Server client/hello player support object
@@ -52,13 +51,13 @@ class ClientHelloPlayerSupport(DataClassORJSONMixin):
             raise ValueError("support_bit_depth must be non-empty with positive values")
 
 
-# Client -> Server player/update
+# Client -> Server: client/state player object
 @dataclass
-class PlayerUpdatePayload(DataClassORJSONMixin):
-    """State information of the player."""
+class PlayerStatePayload(DataClassORJSONMixin):
+    """Player object in client/state message."""
 
     state: PlayerStateType
-    """Playing if active stream, idle if no active stream."""
+    """State of the player - synchronized or error."""
     volume: int
     """Volume range 0-100."""
     muted: bool
@@ -68,14 +67,6 @@ class PlayerUpdatePayload(DataClassORJSONMixin):
         """Validate field values."""
         if not 0 <= self.volume <= 100:
             raise ValueError(f"Volume must be in range 0-100, got {self.volume}")
-
-
-@dataclass
-class PlayerUpdateMessage(ClientMessage):
-    """Message sent by the player to report its state changes."""
-
-    payload: PlayerUpdatePayload
-    type: Literal["player/update"] = "player/update"
 
 
 # Client -> Server stream/request-format player object

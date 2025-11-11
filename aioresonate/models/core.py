@@ -24,6 +24,7 @@ from .controller import ControllerCommandPayload, ControllerStatePayload
 from .metadata import SessionUpdateMetadata
 from .player import (
     ClientHelloPlayerSupport,
+    PlayerStatePayload,
     StreamRequestFormatPlayer,
     StreamStartPlayer,
     StreamUpdatePlayer,
@@ -133,6 +134,28 @@ class ClientTimeMessage(ClientMessage):
 
     payload: ClientTimePayload
     type: Literal["client/time"] = "client/time"
+
+
+# Client -> Server: client/state
+@dataclass
+class ClientStatePayload(DataClassORJSONMixin):
+    """Client sends state updates to the server."""
+
+    player: PlayerStatePayload | None = None
+    """Player state - only if client has player role."""
+
+    class Config(BaseConfig):
+        """Config for parsing json messages."""
+
+        omit_none = True
+
+
+@dataclass
+class ClientStateMessage(ClientMessage):
+    """Message sent by the client to report state changes."""
+
+    payload: ClientStatePayload
+    type: Literal["client/state"] = "client/state"
 
 
 # Client -> Server: client/command

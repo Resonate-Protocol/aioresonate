@@ -102,8 +102,8 @@ class RepeatMode(Enum):
 class PlayerStateType(Enum):
     """Enum for Player States."""
 
-    PLAYING = "playing"
-    IDLE = "idle"
+    SYNCHRONIZED = "synchronized"
+    ERROR = "error"
 
 
 class PlaybackStateType(Enum):
