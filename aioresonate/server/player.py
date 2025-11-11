@@ -4,7 +4,13 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from aioresonate.models.player import ClientHelloPlayerSupport, PlayerStatePayload
+from aioresonate.models.core import ServerCommandMessage, ServerCommandPayload
+from aioresonate.models.player import (
+    ClientHelloPlayerSupport,
+    PlayerCommandPayload,
+    PlayerStatePayload,
+)
+from aioresonate.models.types import PlayerCommand
 
 from .events import VolumeChangedEvent
 from .stream import AudioCodec, AudioFormat
@@ -43,17 +49,44 @@ class PlayerClient:
     def set_volume(self, volume: int) -> None:
         """Set the volume of this player."""
         self._logger.debug("Setting volume from %d to %d", self._volume, volume)
-        self._logger.error("NOT SUPPORTED BY SPEC YET")
+        self.client.send_message(
+            ServerCommandMessage(
+                payload=ServerCommandPayload(
+                    player=PlayerCommandPayload(
+                        command=PlayerCommand.VOLUME,
+                        volume=volume,
+                    )
+                )
+            )
+        )
 
     def mute(self) -> None:
         """Mute this player."""
         self._logger.debug("Muting player")
-        self._logger.error("NOT SUPPORTED BY SPEC YET")
+        self.client.send_message(
+            ServerCommandMessage(
+                payload=ServerCommandPayload(
+                    player=PlayerCommandPayload(
+                        command=PlayerCommand.MUTE,
+                        mute=True,
+                    )
+                )
+            )
+        )
 
     def unmute(self) -> None:
         """Unmute this player."""
         self._logger.debug("Unmuting player")
-        self._logger.error("NOT SUPPORTED BY SPEC YET")
+        self.client.send_message(
+            ServerCommandMessage(
+                payload=ServerCommandPayload(
+                    player=PlayerCommandPayload(
+                        command=PlayerCommand.MUTE,
+                        mute=False,
+                    )
+                )
+            )
+        )
 
     def handle_player_update(self, state: PlayerStatePayload) -> None:
         """Update internal mute/volume state from client report and emit event."""
