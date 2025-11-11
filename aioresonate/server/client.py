@@ -477,7 +477,7 @@ class ResonateClient:
             # Controller messages
             case ClientCommandMessage(payload):
                 if payload.controller:
-                    self.require_controller.handle_command(payload.controller)
+                    await self.require_controller.handle_command(payload.controller)
 
     async def _writer(self) -> None:
         """Write outgoing messages from the queue."""
