@@ -33,8 +33,6 @@ from aioresonate.models.core import (
     ServerStatePayload,
     ServerTimeMessage,
     ServerTimePayload,
-    SessionUpdateMessage,
-    SessionUpdatePayload,
     StreamEndMessage,
     StreamStartMessage,
     StreamUpdateMessage,
@@ -77,8 +75,8 @@ class PCMFormat:
         return self.channels * (self.bit_depth // 8)
 
 
-# Callback invoked when session metadata updates are received.
-MetadataCallback = Callable[[SessionUpdatePayload], Awaitable[None] | None]
+# Callback invoked when server state metadata updates are received.
+MetadataCallback = Callable[[ServerStatePayload], Awaitable[None] | None]
 
 # Callback invoked when group state updates are received.
 GroupUpdateCallback = Callable[[GroupUpdateServerPayload], Awaitable[None] | None]
@@ -164,13 +162,11 @@ class ResonateClient:
 
     _group_state: GroupUpdateServerPayload | None = None
     """Latest group state received from server."""
-    _session_state: SessionUpdatePayload | None = None
-    """Latest session state received from server."""
-    _controller_state: ServerStatePayload | None = None
-    """Latest controller state received from server."""
+    _server_state: ServerStatePayload | None = None
+    """Latest server state received from server."""
 
     _metadata_callback: MetadataCallback | None = None
-    """Callback invoked on session/update messages."""
+    """Callback invoked on server/state messages with metadata."""
     _group_callback: GroupUpdateCallback | None = None
     """Callback invoked on group/update messages."""
     _controller_callback: ControllerStateCallback | None = None
@@ -323,7 +319,7 @@ class ResonateClient:
         self._server_info = None
         self._server_hello_event = None
         self._group_state = None
-        self._session_state = None
+        self._server_state = None
         self._current_pcm_format = None
         self._current_player = None
 
@@ -478,8 +474,6 @@ class ResonateClient:
                 await self._handle_stream_update(message)
             case StreamEndMessage():
                 await self._handle_stream_end()
-            case SessionUpdateMessage(payload=payload):
-                await self._handle_session_update(payload)
             case GroupUpdateServerMessage(payload=payload):
                 await self._handle_group_update(payload)
             case ServerStateMessage(payload=payload):
@@ -591,17 +585,17 @@ class ResonateClient:
         self._current_pcm_format = None
         await self._notify_stream_end()
 
-    async def _handle_session_update(self, payload: SessionUpdatePayload) -> None:
-        self._session_state = payload
-        await self._notify_metadata_callback(payload)
-
     async def _handle_group_update(self, payload: GroupUpdateServerPayload) -> None:
         self._group_state = payload
         await self._notify_group_callback(payload)
 
     async def _handle_server_state(self, payload: ServerStatePayload) -> None:
-        self._controller_state = payload
+        self._server_state = payload
+        # Notify controller callback for controller state
         await self._notify_controller_callback(payload)
+        # Notify metadata callback when metadata is present
+        if payload.metadata is not None:
+            await self._notify_metadata_callback(payload)
 
     def _configure_audio_output(self, pcm_format: PCMFormat) -> None:
         """Store the current audio format for use in callbacks."""
@@ -662,7 +656,7 @@ class ResonateClient:
         adjusted_client_time = client_timestamp_us - self._static_delay_us
         return self._time_filter.compute_server_time(adjusted_client_time)
 
-    async def _notify_metadata_callback(self, payload: SessionUpdatePayload) -> None:
+    async def _notify_metadata_callback(self, payload: ServerStatePayload) -> None:
         if self._metadata_callback is None:
             return
         try:

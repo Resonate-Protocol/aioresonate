@@ -31,7 +31,6 @@ from aioresonate.models.controller import GroupUpdateServerPayload
 from aioresonate.models.core import (
     DeviceInfo,
     ServerStatePayload,
-    SessionUpdatePayload,
     StreamStartMessage,
 )
 from aioresonate.models.metadata import SessionUpdateMetadata
@@ -659,7 +658,7 @@ async def main_async(argv: Sequence[str] | None = None) -> int:  # noqa: PLR0915
         # Create audio and stream handlers
         audio_handler = AudioStreamHandler(client, audio_device=audio_device)
 
-        client.set_metadata_listener(lambda payload: _handle_session_update(state, payload))
+        client.set_metadata_listener(lambda payload: _handle_metadata_update(state, payload))
         client.set_group_update_listener(lambda payload: _handle_group_update(state, payload))
         client.set_controller_state_listener(lambda payload: _handle_server_state(state, payload))
         client.set_stream_start_listener(audio_handler.on_stream_start)
@@ -704,11 +703,8 @@ async def main_async(argv: Sequence[str] | None = None) -> int:  # noqa: PLR0915
     return 0
 
 
-async def _handle_session_update(state: CLIState, payload: SessionUpdatePayload) -> None:
-    if payload.playback_state is not None and payload.playback_state != state.playback_state:
-        state.playback_state = payload.playback_state
-        _print_event(f"Playback state: {payload.playback_state.value}")
-
+async def _handle_metadata_update(state: CLIState, payload: ServerStatePayload) -> None:
+    """Handle server/state messages with metadata."""
     if payload.metadata is not None and state.update_metadata(payload.metadata):
         _print_event(state.describe())
 

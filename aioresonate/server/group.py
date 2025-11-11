@@ -26,10 +26,14 @@ from aioresonate.models.artwork import (
     StreamStartArtwork,
     StreamUpdateArtwork,
 )
-from aioresonate.models.controller import ControllerCommandPayload
+from aioresonate.models.controller import (
+    ControllerCommandPayload,
+    GroupUpdateServerMessage,
+    GroupUpdateServerPayload,
+)
 from aioresonate.models.core import (
-    SessionUpdateMessage,
-    SessionUpdatePayload,
+    ServerStateMessage,
+    ServerStatePayload,
     StreamEndMessage,
     StreamRequestFormatPayload,
     StreamStartMessage,
@@ -284,9 +288,26 @@ class ResonateGroup:
 
         return end_time_us
 
-    def _send_session_update_to_clients(self) -> None:
-        """Send session/update messages to all clients with current playback state and metadata."""
+    def _send_group_update_to_clients(self) -> None:
+        """Send group/update and server/state messages to all clients."""
         for client in self._clients:
+            # Send group/update for playback state
+            if client.check_role(Roles.CONTROLLER) or client.check_role(Roles.METADATA):
+                playback_state = (
+                    PlaybackStateType.PLAYING
+                    if self._current_state == PlaybackStateType.PLAYING
+                    else PlaybackStateType.PAUSED
+                )
+                group_message = GroupUpdateServerMessage(
+                    GroupUpdateServerPayload(
+                        playback_state=playback_state,
+                        group_id=self._group_id,
+                        group_name=None,
+                    )
+                )
+                client.send_message(group_message)
+
+            # Send server/state for metadata
             if client.check_role(Roles.METADATA):
                 metadata_update = (
                     self._current_metadata.snapshot_update(
@@ -295,24 +316,8 @@ class ResonateGroup:
                     if self._current_metadata is not None
                     else None
                 )
-            else:
-                metadata_update = None
-            if client.check_role(Roles.CONTROLLER) or client.check_role(Roles.METADATA):
-                playback_state = (
-                    PlaybackStateType.PLAYING
-                    if self._current_state == PlaybackStateType.PLAYING
-                    else PlaybackStateType.PAUSED
-                )
-            else:
-                playback_state = None
-            message = SessionUpdateMessage(
-                SessionUpdatePayload(
-                    group_id=self._group_id,
-                    playback_state=playback_state,
-                    metadata=metadata_update,
-                )
-            )
-            client.send_message(message)
+                state_message = ServerStateMessage(ServerStatePayload(metadata=metadata_update))
+                client.send_message(state_message)
 
     async def _handle_reconfiguration_command(
         self,
@@ -351,9 +356,9 @@ class ResonateGroup:
                     player_obj.client,
                     player_stream_info=player_payload,
                 )
-        # Send session/update to all clients
+        # Send group/update and server/state to all clients
         # TODO: only send to clients that were affected by the change!
-        self._send_session_update_to_clients()
+        self._send_group_update_to_clients()
         logger.debug("streamer reconfigured")
 
     async def _prefill_channel_buffers(
@@ -719,20 +724,21 @@ class ResonateGroup:
         timestamp = int(self._server.loop.time() * 1_000_000)
         cleared_metadata = Metadata.cleared_update(timestamp)
         for client in self._clients:
-            playback_state = (
-                PlaybackStateType.STOPPED
-                if (client.check_role(Roles.CONTROLLER) or client.check_role(Roles.METADATA))
-                else None
-            )
-            metadata_payload = cleared_metadata if client.check_role(Roles.METADATA) else None
-            message = SessionUpdateMessage(
-                SessionUpdatePayload(
-                    group_id=self._group_id,
-                    playback_state=playback_state,
-                    metadata=metadata_payload,
+            # Send group/update for stopped state
+            if client.check_role(Roles.CONTROLLER) or client.check_role(Roles.METADATA):
+                group_message = GroupUpdateServerMessage(
+                    GroupUpdateServerPayload(
+                        playback_state=PlaybackStateType.STOPPED,
+                        group_id=self._group_id,
+                        group_name=None,
+                    )
                 )
-            )
-            client.send_message(message)
+                client.send_message(group_message)
+
+            # Send server/state for cleared metadata
+            if client.check_role(Roles.METADATA):
+                state_message = ServerStateMessage(ServerStatePayload(metadata=cleared_metadata))
+                client.send_message(state_message)
 
     async def stop(self, stop_time_us: int | None = None) -> bool:
         """
@@ -814,30 +820,36 @@ class ResonateGroup:
             # Only include fields that have changed since the last metadata update
             metadata_update = metadata.diff_update(last_metadata, timestamp)
 
-        # Send the update to all clients in the group
-        message = SessionUpdateMessage(
-            SessionUpdatePayload(
-                group_id=self._group_id,
-            )
-        )
+        # Send updates to all clients in the group
         for client in self._clients:
-            if client.check_role(Roles.METADATA):
-                message.payload.metadata = metadata_update
-            else:
-                message.payload.metadata = None
+            # Send group/update for playback state
             if client.check_role(Roles.CONTROLLER) or client.check_role(Roles.METADATA):
-                message.payload.playback_state = (
+                playback_state = (
                     PlaybackStateType.PLAYING
                     if self._current_state == PlaybackStateType.PLAYING
                     else PlaybackStateType.PAUSED
                 )
-            else:
-                message.payload.playback_state = None
-            logger.debug(
-                "Sending session update to client %s",
-                client.client_id,
-            )
-            client.send_message(message)
+                group_message = GroupUpdateServerMessage(
+                    GroupUpdateServerPayload(
+                        playback_state=playback_state,
+                        group_id=self._group_id,
+                        group_name=None,
+                    )
+                )
+                logger.debug(
+                    "Sending group update to client %s",
+                    client.client_id,
+                )
+                client.send_message(group_message)
+
+            # Send server/state for metadata
+            if client.check_role(Roles.METADATA):
+                state_message = ServerStateMessage(ServerStatePayload(metadata=metadata_update))
+                logger.debug(
+                    "Sending server state to client %s",
+                    client.client_id,
+                )
+                client.send_message(state_message)
 
         # Update current metadata
         self._current_metadata = metadata
@@ -1070,32 +1082,32 @@ class ResonateGroup:
             ):
                 self._send_stream_start_msg(client, None)
 
-        # Send current metadata to the new player if available
-        if self._current_metadata is not None:
-            if client.check_role(Roles.METADATA):
-                metadata_update = self._current_metadata.snapshot_update(
-                    int(self._server.loop.time() * 1_000_000)
-                )
-            else:
-                metadata_update = None
-            if client.check_role(Roles.CONTROLLER) or client.check_role(Roles.METADATA):
-                playback_state = (
-                    PlaybackStateType.PLAYING
-                    if self._current_state == PlaybackStateType.PLAYING
-                    else PlaybackStateType.PAUSED
-                )
-            else:
-                playback_state = None
-            message = SessionUpdateMessage(
-                SessionUpdatePayload(
-                    group_id=self._group_id,
+        # Send current state to the new client
+        # Send group/update for playback state
+        if client.check_role(Roles.CONTROLLER) or client.check_role(Roles.METADATA):
+            playback_state = (
+                PlaybackStateType.PLAYING
+                if self._current_state == PlaybackStateType.PLAYING
+                else PlaybackStateType.PAUSED
+            )
+            group_message = GroupUpdateServerMessage(
+                GroupUpdateServerPayload(
                     playback_state=playback_state,
-                    metadata=metadata_update,
+                    group_id=self._group_id,
+                    group_name=None,
                 )
             )
+            logger.debug("Sending group update to new client %s", client.client_id)
+            client.send_message(group_message)
 
-            logger.debug("Sending session update to new client %s", client.client_id)
-            client.send_message(message)
+        # Send server/state for metadata if available
+        if self._current_metadata is not None and client.check_role(Roles.METADATA):
+            metadata_update = self._current_metadata.snapshot_update(
+                int(self._server.loop.time() * 1_000_000)
+            )
+            state_message = ServerStateMessage(ServerStatePayload(metadata=metadata_update))
+            logger.debug("Sending server state to new client %s", client.client_id)
+            client.send_message(state_message)
 
         # Send current media art to the new client if available
         client_state = self._client_artwork_state.get(client.client_id)

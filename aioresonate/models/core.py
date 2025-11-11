@@ -30,7 +30,7 @@ from .player import (
     StreamStartPlayer,
     StreamUpdatePlayer,
 )
-from .types import ClientMessage, PlaybackStateType, Roles, ServerMessage
+from .types import ClientMessage, Roles, ServerMessage
 from .visualizer import (
     ClientHelloVisualizerSupport,
     StreamStartVisualizer,
@@ -351,29 +351,3 @@ class StreamEndMessage(ServerMessage):
     """Message sent by the server to end a stream."""
 
     type: Literal["stream/end"] = "stream/end"
-
-
-# Server -> Client: session/update
-@dataclass
-class SessionUpdatePayload(DataClassORJSONMixin):
-    """Delta updates for session state."""
-
-    group_id: str
-    """Group identifier."""
-    playback_state: PlaybackStateType | None = None
-    """Only sent to clients with controller or metadata roles."""
-    metadata: SessionUpdateMetadata | None = None
-    """Only sent to clients with metadata role."""
-
-    class Config(BaseConfig):
-        """Config for parsing json messages."""
-
-        omit_none = True
-
-
-@dataclass
-class SessionUpdateMessage(ServerMessage):
-    """Message sent by the server to update session state."""
-
-    payload: SessionUpdatePayload
-    type: Literal["session/update"] = "session/update"
