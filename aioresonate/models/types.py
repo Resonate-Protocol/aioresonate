@@ -122,9 +122,14 @@ class MediaCommand(Enum):
     STOP = "stop"
     NEXT = "next"
     PREVIOUS = "previous"
-    SEEK = "seek"
     VOLUME = "volume"
     MUTE = "mute"
+    REPEAT_OFF = "repeat_off"
+    REPEAT_ONE = "repeat_one"
+    REPEAT_ALL = "repeat_all"
+    SHUFFLE = "shuffle"
+    UNSHUFFLE = "unshuffle"
+    SWITCH = "switch"
 
 
 class PictureFormat(Enum):
