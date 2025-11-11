@@ -68,7 +68,8 @@ class Metadata:
             metadata_update.repeat = self.repeat
         if last is None or last.shuffle != self.shuffle:
             metadata_update.shuffle = self.shuffle
-        if last is None or last.track_progress != self.track_progress:
+        # Always send track_progress if set (clients need fresh timestamp for progress calculation)
+        if self.track_progress is not None:
             metadata_update.track_progress = self.track_progress
 
         return metadata_update
