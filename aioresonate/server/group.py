@@ -1024,6 +1024,17 @@ class ResonateGroup:
         return commands
 
     def _handle_group_command(self, cmd: ControllerCommandPayload) -> None:
+        # Verify that this command is actually supported for the current state
+        supported = self._get_supported_commands()
+        if cmd.command not in supported:
+            logger.warning(
+                "Ignoring unsupported command %s in state %s (supported: %s)",
+                cmd.command,
+                self._current_state,
+                supported,
+            )
+            return
+
         event = GroupCommandEvent(
             command=cmd.command,
             volume=cmd.volume,
