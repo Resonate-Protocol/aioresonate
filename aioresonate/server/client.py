@@ -478,7 +478,6 @@ class ResonateClient:
             case PlayerUpdateMessage(state):
                 self.require_player.handle_player_update(state)
             case StreamRequestFormatMessage(payload):
-                self._ensure_role(Roles.PLAYER)
                 self.group.handle_stream_format_request(self, payload)
             # Controller messages
             case GroupGetListClientMessage() as group_get_list:

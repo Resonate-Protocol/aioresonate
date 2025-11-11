@@ -22,7 +22,9 @@ from aioresonate.models import (
 from aioresonate.models.artwork import (
     ArtworkChannel,
     StreamArtworkChannelConfig,
+    StreamArtworkChannelConfigUpdate,
     StreamStartArtwork,
+    StreamUpdateArtwork,
 )
 from aioresonate.models.controller import GroupCommandClientPayload
 from aioresonate.models.core import (
@@ -32,6 +34,8 @@ from aioresonate.models.core import (
     StreamRequestFormatPayload,
     StreamStartMessage,
     StreamStartPayload,
+    StreamUpdateMessage,
+    StreamUpdatePayload,
 )
 from aioresonate.models.player import (
     StreamStartPlayer,
@@ -1088,8 +1092,82 @@ class ResonateGroup:
 
     def handle_stream_format_request(
         self,
-        player: ResonateClient,
+        client: ResonateClient,
         request: StreamRequestFormatPayload,
     ) -> None:
-        """Handle stream/request-format from a player and send stream/update."""
-        raise NotImplementedError("Dynamic format changes are not yet implemented")
+        """Handle stream/request-format from a client and send stream/update."""
+        if request.artwork:
+            if not client.check_role(Roles.ARTWORK):
+                raise ValueError(
+                    f"Client {client.client_id} sent artwork format request "
+                    "but does not have artwork role"
+                )
+
+            artwork_request = request.artwork
+
+            if not client.info.artwork_support:
+                raise ValueError(
+                    f"Client {client.client_id} sent artwork format request "
+                    "but has no artwork support"
+                )
+
+            client_state = self._client_artwork_state.get(client.client_id)
+            if client_state is None:
+                return
+
+            if artwork_request.channel not in client_state:
+                raise ValueError(
+                    f"Invalid channel {artwork_request.channel} from client {client.client_id} "
+                    f"(client declared {len(client.info.artwork_support.channels)} channels)"
+                )
+
+            current_channel = client_state[artwork_request.channel]
+
+            updated_channel = ArtworkChannel(
+                source=artwork_request.source
+                if artwork_request.source is not None
+                else current_channel.source,
+                format=artwork_request.format
+                if artwork_request.format is not None
+                else current_channel.format,
+                media_width=artwork_request.media_width
+                if artwork_request.media_width is not None
+                else current_channel.media_width,
+                media_height=artwork_request.media_height
+                if artwork_request.media_height is not None
+                else current_channel.media_height,
+            )
+
+            client_state[artwork_request.channel] = updated_channel
+
+            updates = [StreamArtworkChannelConfigUpdate()] * len(client_state)
+            updates[artwork_request.channel] = StreamArtworkChannelConfigUpdate(
+                source=artwork_request.source,
+                format=artwork_request.format,
+                width=artwork_request.media_width,
+                height=artwork_request.media_height,
+            )
+
+            stream_update = StreamUpdatePayload(
+                artwork=StreamUpdateArtwork(channels=updates),
+            )
+
+            logger.debug(
+                "Sending stream/update to client %s for artwork channel %d",
+                client.client_id,
+                artwork_request.channel,
+            )
+            client.send_message(StreamUpdateMessage(stream_update))
+
+            if self._current_media_art is not None:
+                self._send_media_art_to_client(
+                    client, self._current_media_art, artwork_request.channel
+                )
+
+        if request.player:
+            if not client.check_role(Roles.PLAYER):
+                raise ValueError(
+                    f"Client {client.client_id} sent player format request "
+                    "but does not have player role"
+                )
+            raise NotImplementedError("Player format changes are not yet implemented")
