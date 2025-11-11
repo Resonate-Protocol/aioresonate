@@ -69,6 +69,43 @@ class PlayerStatePayload(DataClassORJSONMixin):
             raise ValueError(f"Volume must be in range 0-100, got {self.volume}")
 
 
+# Server -> Client: server/command player object
+@dataclass
+class PlayerCommandPayload(DataClassORJSONMixin):
+    """Player object in server/command message."""
+
+    command: str
+    """Command - must be 'volume' or 'mute'."""
+    volume: int | None = None
+    """Volume range 0-100, only set if command is volume."""
+    mute: bool | None = None
+    """True to mute, false to unmute, only set if command is mute."""
+
+    def __post_init__(self) -> None:
+        """Validate field values and command consistency."""
+        if self.command not in ("volume", "mute"):
+            raise ValueError(f"command must be 'volume' or 'mute', got {self.command}")
+
+        if self.command == "volume":
+            if self.volume is None:
+                raise ValueError("Volume must be provided when command is 'volume'")
+            if not 0 <= self.volume <= 100:
+                raise ValueError(f"Volume must be in range 0-100, got {self.volume}")
+        elif self.volume is not None:
+            raise ValueError(f"Volume should not be provided for command '{self.command}'")
+
+        if self.command == "mute":
+            if self.mute is None:
+                raise ValueError("Mute must be provided when command is 'mute'")
+        elif self.mute is not None:
+            raise ValueError(f"Mute should not be provided for command '{self.command}'")
+
+    class Config(BaseConfig):
+        """Config for parsing json messages."""
+
+        omit_none = True
+
+
 # Client -> Server stream/request-format player object
 @dataclass
 class StreamRequestFormatPlayer(DataClassORJSONMixin):

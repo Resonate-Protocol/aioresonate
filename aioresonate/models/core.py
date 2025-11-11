@@ -24,6 +24,7 @@ from .controller import ControllerCommandPayload, ControllerStatePayload
 from .metadata import SessionUpdateMetadata
 from .player import (
     ClientHelloPlayerSupport,
+    PlayerCommandPayload,
     PlayerStatePayload,
     StreamRequestFormatPlayer,
     StreamStartPlayer,
@@ -242,6 +243,28 @@ class ServerStateMessage(ServerMessage):
 
     payload: ServerStatePayload
     type: Literal["server/state"] = "server/state"
+
+
+# Server -> Client: server/command
+@dataclass
+class ServerCommandPayload(DataClassORJSONMixin):
+    """Server sends commands to the client."""
+
+    player: PlayerCommandPayload | None = None
+    """Player commands - only sent to clients with player role."""
+
+    class Config(BaseConfig):
+        """Config for parsing json messages."""
+
+        omit_none = True
+
+
+@dataclass
+class ServerCommandMessage(ServerMessage):
+    """Message sent by the server to send commands to the client."""
+
+    payload: ServerCommandPayload
+    type: Literal["server/command"] = "server/command"
 
 
 # Server -> Client: stream/start
