@@ -11,12 +11,12 @@ from aiohttp import ClientWebSocketResponse, WSMessage, WSMsgType, web
 
 from aioresonate.models import unpack_binary_header
 from aioresonate.models.controller import (
-    GroupCommandClientMessage,
     GroupGetListClientMessage,
     GroupJoinClientMessage,
     GroupUnjoinClientMessage,
 )
 from aioresonate.models.core import (
+    ClientCommandMessage,
     ClientHelloMessage,
     ClientHelloPayload,
     ClientTimeMessage,
@@ -486,8 +486,9 @@ class ResonateClient:
                 self.require_controller.handle_join(payload)
             case GroupUnjoinClientMessage() as group_unjoin:
                 self.require_controller.handle_unjoin(group_unjoin)
-            case GroupCommandClientMessage(group_command):
-                self.require_controller.handle_command(group_command)
+            case ClientCommandMessage(payload):
+                if payload.controller:
+                    self.require_controller.handle_command(payload.controller)
 
     async def _writer(self) -> None:
         """Write outgoing messages from the queue."""

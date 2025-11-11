@@ -20,6 +20,7 @@ from .artwork import (
     StreamStartArtwork,
     StreamUpdateArtwork,
 )
+from .controller import ControllerCommandPayload
 from .metadata import SessionUpdateMetadata
 from .player import (
     ClientHelloPlayerSupport,
@@ -132,6 +133,28 @@ class ClientTimeMessage(ClientMessage):
 
     payload: ClientTimePayload
     type: Literal["client/time"] = "client/time"
+
+
+# Client -> Server: client/command
+@dataclass
+class ClientCommandPayload(DataClassORJSONMixin):
+    """Client sends commands to the server."""
+
+    controller: ControllerCommandPayload | None = None
+    """Controller commands - only if client has controller role."""
+
+    class Config(BaseConfig):
+        """Config for parsing json messages."""
+
+        omit_none = True
+
+
+@dataclass
+class ClientCommandMessage(ClientMessage):
+    """Message sent by the client to send commands."""
+
+    payload: ClientCommandPayload
+    type: Literal["client/command"] = "client/command"
 
 
 # Server -> Client: server/hello

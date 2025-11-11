@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from aioresonate.models.controller import (
-    GroupCommandClientPayload,
+    ControllerCommandPayload,
     GroupGetListClientMessage,
     GroupJoinClientPayload,
     GroupUnjoinClientMessage,
@@ -35,6 +35,6 @@ class ControllerClient:
         """Handle a request to leave the current group."""
         raise NotImplementedError("Leaving groups is not supported yet")
 
-    def handle_command(self, message: GroupCommandClientPayload) -> None:
+    def handle_command(self, payload: ControllerCommandPayload) -> None:
         """Forward a playback command to the owning group."""
-        self.client.group._handle_group_command(message)  # noqa: SLF001
+        self.client.group._handle_group_command(payload)  # noqa: SLF001

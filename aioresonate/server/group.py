@@ -26,7 +26,7 @@ from aioresonate.models.artwork import (
     StreamStartArtwork,
     StreamUpdateArtwork,
 )
-from aioresonate.models.controller import GroupCommandClientPayload
+from aioresonate.models.controller import ControllerCommandPayload
 from aioresonate.models.core import (
     SessionUpdateMessage,
     SessionUpdatePayload,
@@ -960,7 +960,7 @@ class ResonateGroup:
         """Return player helpers for all members that support the role."""
         return [client.player for client in self._clients if client.player is not None]
 
-    def _handle_group_command(self, cmd: GroupCommandClientPayload) -> None:
+    def _handle_group_command(self, cmd: ControllerCommandPayload) -> None:
         # TODO: verify that this command is actually supported for the current state
         event = GroupCommandEvent(
             command=cmd.command,

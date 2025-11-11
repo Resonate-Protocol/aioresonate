@@ -13,12 +13,13 @@ from aiohttp import ClientSession, ClientWebSocketResponse, WSMessage, WSMsgType
 from aioresonate.models import BINARY_HEADER_SIZE, BinaryMessageType, unpack_binary_header
 from aioresonate.models.artwork import ClientHelloArtworkSupport
 from aioresonate.models.controller import (
-    GroupCommandClientMessage,
-    GroupCommandClientPayload,
+    ControllerCommandPayload,
     GroupUpdateServerMessage,
     GroupUpdateServerPayload,
 )
 from aioresonate.models.core import (
+    ClientCommandMessage,
+    ClientCommandPayload,
     ClientHelloMessage,
     ClientHelloPayload,
     ClientTimeMessage,
@@ -344,8 +345,9 @@ class ResonateClient:
         """Send a group command (playback control) to the server."""
         if not self.connected:
             raise RuntimeError("Client is not connected")
-        payload = GroupCommandClientPayload(command=command, volume=volume, mute=mute)
-        message = GroupCommandClientMessage(payload=payload)
+        controller_payload = ControllerCommandPayload(command=command, volume=volume, mute=mute)
+        payload = ClientCommandPayload(controller=controller_payload)
+        message = ClientCommandMessage(payload=payload)
         await self._send_message(message.to_json())
 
     def set_metadata_listener(self, callback: MetadataCallback | None) -> None:

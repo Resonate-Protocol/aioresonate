@@ -50,13 +50,16 @@ class GroupUnjoinClientMessage(ClientMessage):
     type: Literal["group/unjoin"] = "group/unjoin"
 
 
-# Client -> Server: group/command
+# Client -> Server: client/command controller object
 @dataclass
-class GroupCommandClientPayload(DataClassORJSONMixin):
+class ControllerCommandPayload(DataClassORJSONMixin):
     """Control the group that's playing."""
 
     command: MediaCommand
-    """Command must be one of the values listed in group/update field supported_commands."""
+    """
+    Command must be one of the values listed in supported_commands from server/state controller
+    object.
+    """
     volume: int | None = None
     """Volume range 0-100, only set if command is volume."""
     mute: bool | None = None
@@ -82,14 +85,6 @@ class GroupCommandClientPayload(DataClassORJSONMixin):
         """Config for parsing json messages."""
 
         omit_none = True
-
-
-@dataclass
-class GroupCommandClientMessage(ClientMessage):
-    """Message sent by the client to control the group."""
-
-    payload: GroupCommandClientPayload
-    type: Literal["group/command"] = "group/command"
 
 
 # Server -> Client: group/list
