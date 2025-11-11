@@ -14,7 +14,7 @@ from typing import Literal
 from mashumaro.config import BaseConfig
 from mashumaro.mixins.orjson import DataClassORJSONMixin
 
-from .types import ClientMessage, MediaCommand, ServerMessage
+from .types import ClientMessage, MediaCommand, PlaybackStateType, ServerMessage
 
 
 # Client -> Server: group/get-list
@@ -120,34 +120,20 @@ class GroupListServerMessage(ServerMessage):
 
 # Server -> Client: group/update
 @dataclass
-class GroupMemberServerPayload(DataClassORJSONMixin):
-    """Represents a group member."""
-
-    client_id: str
-    """Client identifier."""
-    name: str
-    """Client friendly name."""
-
-
-@dataclass
 class GroupUpdateServerPayload(DataClassORJSONMixin):
-    """Group state update."""
+    """State update of the group this client is part of."""
 
-    supported_commands: list[MediaCommand | str]
-    """Subset of: play, pause, stop, next, previous, seek, volume, mute."""
-    members: list[GroupMemberServerPayload]
-    """List of group members."""
-    session_id: str | None
-    """Null if no active session."""
-    volume: int
-    """Volume range 0-100."""
-    muted: bool
-    """Mute state."""
+    playback_state: PlaybackStateType | None = None
+    """Playback state of the group."""
+    group_id: str | None = None
+    """Group identifier."""
+    group_name: str | None = None
+    """Friendly name of the group."""
 
-    def __post_init__(self) -> None:
-        """Validate field values."""
-        if not 0 <= self.volume <= 100:
-            raise ValueError(f"Volume must be in range 0-100, got {self.volume}")
+    class Config(BaseConfig):
+        """Config for parsing json messages."""
+
+        omit_none = True
 
 
 @dataclass

@@ -695,21 +695,13 @@ async def _handle_session_update(state: CLIState, payload: SessionUpdatePayload)
         _print_event(state.describe())
 
 
-async def _handle_group_update(state: CLIState, payload: GroupUpdateServerPayload) -> None:
-    supported: set[MediaCommand] = set()
-    for command in payload.supported_commands:
-        try:
-            supported.add(command if isinstance(command, MediaCommand) else MediaCommand(command))
-        except ValueError:
-            continue
-    state.supported_commands = supported
-
-    if payload.volume != state.volume:
-        state.volume = payload.volume
-        _print_event(f"Volume: {payload.volume}%")
-    if payload.muted != state.muted:
-        state.muted = payload.muted
-        _print_event("Muted" if payload.muted else "Unmuted")
+async def _handle_group_update(_state: CLIState, payload: GroupUpdateServerPayload) -> None:
+    if payload.playback_state:
+        _print_event(f"Playback state: {payload.playback_state.value}")
+    if payload.group_id:
+        _print_event(f"Group ID: {payload.group_id}")
+    if payload.group_name:
+        _print_event(f"Group name: {payload.group_name}")
 
 
 class CommandHandler:
