@@ -823,13 +823,15 @@ class ResonateGroup:
         # Update current metadata
         self._current_metadata = metadata
 
-    def set_media_art(self, image: Image.Image) -> None:
+    async def set_media_art(self, image: Image.Image) -> None:
         """Set the artwork image for the current media."""
         # Store the current media art for new clients that join later
         self._current_media_art = image
 
-        for client in self._clients:
-            self._send_media_art_to_client(client, image)
+        await asyncio.gather(
+            *[self._send_media_art_to_client(client, image) for client in self._clients],
+            return_exceptions=True,
+        )
 
     def _letterbox_image(
         self, image: Image.Image, target_width: int, target_height: int
@@ -875,7 +877,7 @@ class ResonateGroup:
 
         return letterboxed
 
-    def _send_media_art_to_client(self, client: ResonateClient, image: Image.Image) -> None:
+    async def _send_media_art_to_client(self, client: ResonateClient, image: Image.Image) -> None:
         """Send media art to a specific client with appropriate format and sizing."""
         if not client.check_role(Roles.METADATA) or not client.info.metadata_support:
             return
@@ -888,6 +890,33 @@ class ResonateGroup:
         width = metadata_support.media_width
         height = metadata_support.media_height
 
+        # Process and encode image in thread to avoid blocking event loop
+        img_data = await asyncio.to_thread(
+            self._process_and_encode_image,
+            image,
+            width,
+            height,
+            art_format,
+        )
+
+        header = pack_binary_header_raw(
+            BinaryMessageType.MEDIA_ART.value, int(self._server.loop.time() * 1_000_000)
+        )
+        client.send_message(header + img_data)
+
+    def _process_and_encode_image(
+        self,
+        image: Image.Image,
+        width: int | None,
+        height: int | None,
+        art_format: PictureFormat,
+    ) -> bytes:
+        """
+        Process and encode image for client.
+
+        NOTE: This method is not async friendly.
+        """
+        # Process image with appropriate resizing/letterboxing
         if width is None and height is None:
             # No size constraints, use original image size
             resized_image = image
@@ -915,11 +944,7 @@ class ResonateGroup:
             else:
                 raise NotImplementedError(f"Unsupported artwork format: {art_format}")
             img_bytes.seek(0)
-            img_data = img_bytes.read()
-            header = pack_binary_header_raw(
-                BinaryMessageType.MEDIA_ART.value, int(self._server.loop.time() * 1_000_000)
-            )
-            client.send_message(header + img_data)
+            return img_bytes.read()
 
     @property
     def clients(self) -> list[ResonateClient]:
@@ -1065,7 +1090,7 @@ class ResonateGroup:
 
         # Send current media art to the new client if available
         if self._current_media_art is not None:
-            self._send_media_art_to_client(client, self._current_media_art)
+            await self._send_media_art_to_client(client, self._current_media_art)
 
     def handle_stream_format_request(
         self,
