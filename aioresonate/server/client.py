@@ -567,6 +567,10 @@ class ResonateClient:
         NOTE: Binary messages are directly sent to the client, you need to add the
         header yourself using pack_binary_header().
         """
+        # Don't enqueue messages if disconnected
+        if self._disconnected:
+            return
+
         try:
             self._to_write.put_nowait(message)
         except asyncio.QueueFull:
