@@ -977,7 +977,12 @@ class ResonateGroup:
         Returns a function to remove the listener.
         """
         self._event_cbs.append(callback)
-        return lambda: self._event_cbs.remove(callback)
+
+        def _remove() -> None:
+            with suppress(ValueError):
+                self._event_cbs.remove(callback)
+
+        return _remove
 
     def _signal_event(self, event: GroupEvent) -> None:
         for cb in self._event_cbs:
