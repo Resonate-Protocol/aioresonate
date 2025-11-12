@@ -166,6 +166,8 @@ class ResonateGroup:
     """Command queue for the active streamer task, None when not streaming."""
     _play_start_time_us: int | None
     """Absolute timestamp in microseconds when playback started, None when not streaming."""
+    _track_progress_timestamp_us: int | None
+    """Timestamp in microseconds when track_progress was last updated, for progress calculation."""
     _scheduled_stop_handle: asyncio.TimerHandle | None
     """Timer handle for scheduled stop, None when no stop is scheduled."""
     _muted: bool
@@ -199,6 +201,7 @@ class ResonateGroup:
         self._media_stream: MediaStream | None = None
         self._stream_commands: asyncio.Queue[_StreamerReconfigureCommand] | None = None
         self._play_start_time_us: int | None = None
+        self._track_progress_timestamp_us: int | None = None
         self._scheduled_stop_handle: asyncio.TimerHandle | None = None
         self._muted = False
         self._last_sent_volume: int | None = None
@@ -332,6 +335,9 @@ class ResonateGroup:
                     if self._current_metadata is not None
                     else None
                 )
+                # Use calculated track progress for actively playing content
+                if metadata_update is not None:
+                    metadata_update.track_progress = self._get_current_track_progress()
                 state_message = ServerStateMessage(ServerStatePayload(metadata=metadata_update))
                 client.send_message(state_message)
 
@@ -757,6 +763,7 @@ class ResonateGroup:
         self._audio_encoders.clear()
         self._current_media_art.clear()
         self._play_start_time_us = None
+        self._track_progress_timestamp_us = None
 
     def _send_stopped_state_to_clients(self) -> None:
         """Send stopped state and cleared metadata to all clients."""
@@ -843,6 +850,42 @@ class ResonateGroup:
         self._send_stopped_state_to_clients()
         return True
 
+    def _get_current_track_progress(self) -> int | None:
+        """
+        Calculate the current track progress in milliseconds.
+
+        Returns the calculated progress based on playback time if actively playing,
+        otherwise returns the stored progress value.
+        """
+        if self._current_metadata is None or self._current_metadata.track_progress is None:
+            return None
+
+        # If we have a stored timestamp and we're actively playing, calculate current progress
+        if (
+            self._track_progress_timestamp_us is not None
+            and self.has_active_stream
+            and self._current_metadata.playback_speed is not None
+        ):
+            current_time_us = int(self._server.loop.time() * 1_000_000)
+            elapsed_us = current_time_us - self._track_progress_timestamp_us
+            # playback_speed is stored as int * 1000 (e.g., 1000 = normal speed)
+            # Convert elapsed microseconds to milliseconds, accounting for playback speed
+            elapsed_ms = (elapsed_us * self._current_metadata.playback_speed) // 1_000_000
+            calculated_progress = self._current_metadata.track_progress + elapsed_ms
+
+            # Clamp to valid range [0, track_duration]
+            if self._current_metadata.track_duration is not None:
+                calculated_progress = max(
+                    0, min(calculated_progress, self._current_metadata.track_duration)
+                )
+            else:
+                calculated_progress = max(0, calculated_progress)
+
+            return calculated_progress
+
+        # Otherwise return the stored value
+        return self._current_metadata.track_progress
+
     def set_metadata(self, metadata: Metadata | None, timestamp: int | None = None) -> None:
         """
         Set metadata for the group and send to all clients.
@@ -902,6 +945,10 @@ class ResonateGroup:
 
         # Update current metadata
         self._current_metadata = metadata
+
+        # Store timestamp when track_progress is updated for progress calculation
+        if metadata is not None and metadata.track_progress is not None:
+            self._track_progress_timestamp_us = timestamp
 
     def set_media_art(
         self, image: Image.Image | None, source: ArtworkSource = ArtworkSource.ALBUM
@@ -1278,6 +1325,8 @@ class ResonateGroup:
             metadata_update = self._current_metadata.snapshot_update(
                 int(self._server.loop.time() * 1_000_000)
             )
+            # Use calculated track progress for actively playing content
+            metadata_update.track_progress = self._get_current_track_progress()
             state_message = ServerStateMessage(ServerStatePayload(metadata=metadata_update))
             logger.debug("Sending server state to new client %s", client.client_id)
             client.send_message(state_message)
