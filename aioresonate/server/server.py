@@ -444,10 +444,16 @@ class ResonateServer:
         name: str,
         state_change: ServiceStateChange,
     ) -> None:
-        """Handle mDNS service state callback."""
+        """Handle mDNS service state callback (called from zeroconf thread)."""
         if state_change in (ServiceStateChange.Added, ServiceStateChange.Updated):
-            task = self._loop.create_task(self._handle_service_added(zeroconf, service_type, name))
-            task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
+
+            def _schedule() -> None:
+                task = self._loop.create_task(
+                    self._handle_service_added(zeroconf, service_type, name)
+                )
+                task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
+
+            self._loop.call_soon_threadsafe(_schedule)
         # We don't listen on removals since connect_to_client has its own disconnect/retry logic
 
     async def _handle_service_added(self, zeroconf: Zeroconf, service_type: str, name: str) -> None:
