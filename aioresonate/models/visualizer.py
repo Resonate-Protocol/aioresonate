@@ -20,7 +20,9 @@ class ClientHelloVisualizerSupport(DataClassORJSONMixin):
     """Visualizer support configuration - only if visualizer role is set."""
 
     buffer_capacity: int
-    """Buffer capacity size in bytes."""
+    """
+    Max size in bytes of visualization data messages in the buffer that are yet to be displayed.
+    """
 
     def __post_init__(self) -> None:
         """Validate field values."""

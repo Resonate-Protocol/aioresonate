@@ -22,7 +22,7 @@ class SessionUpdateMetadata(DataClassORJSONMixin):
     """Metadata object in server/state message."""
 
     timestamp: int
-    """Server timestamp for when this metadata is valid."""
+    """Server clock time in microseconds for when this metadata is valid."""
     title: str | None | UndefinedField = field(default_factory=undefined_field)
     artist: str | None | UndefinedField = field(default_factory=undefined_field)
     album_artist: str | None | UndefinedField = field(default_factory=undefined_field)
