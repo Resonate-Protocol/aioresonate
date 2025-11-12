@@ -103,6 +103,10 @@ class ResonateClient:
     _closing: bool = False
     _disconnecting: bool = False
     """Flag to prevent multiple concurrent disconnect tasks."""
+    _disconnected: bool = False
+    """Flag indicating disconnect has completed."""
+    _lifecycle_lock: asyncio.Lock
+    """Lock to guard _disconnecting and _disconnected state."""
     disconnect_behaviour: DisconnectBehaviour
     """
     Controls the disconnect behavior for this client.
@@ -162,42 +166,57 @@ class ResonateClient:
         self._event_cbs = []
         self._closing = False
         self._disconnecting = False
+        self._disconnected = False
+        self._lifecycle_lock = asyncio.Lock()
         self._roles = []
         self.disconnect_behaviour = DisconnectBehaviour.UNGROUP
 
     async def disconnect(self, *, retry_connection: bool = True) -> None:
         """Disconnect this client from the server."""
-        if not retry_connection:
-            self._closing = True
-        self._disconnecting = True
-        self._logger.debug("Disconnecting client")
+        async with self._lifecycle_lock:
+            if self._disconnected:
+                return
 
-        if self.disconnect_behaviour == DisconnectBehaviour.UNGROUP:
-            await self.ungroup()
-            # Try to stop playback if we were playing alone before disconnecting
-            await self.group.stop()
-        elif self.disconnect_behaviour == DisconnectBehaviour.STOP:
-            await self.group.stop()
-            await self.ungroup()
+            if self._disconnecting:
+                return
 
-        # Cancel running tasks
-        if self._writer_task and not self._writer_task.done():
-            self._logger.debug("Cancelling writer task")
-            self._writer_task.cancel()
-            with suppress(asyncio.CancelledError):
-                await self._writer_task
-        # Handle task is cancelled implicitly when wsock closes or externally
+            self._disconnecting = True
+            if not retry_connection:
+                self._closing = True
 
-        # Close WebSocket
-        if self._wsock_client is not None and not self._wsock_client.closed:
-            await self._wsock_client.close()
-        elif self._wsock_server is not None and not self._wsock_server.closed:
-            await self._wsock_server.close()
+        # Perform actual disconnect outside the lock to avoid blocking
+        try:
+            self._logger.debug("Disconnecting client")
 
-        if self._client_id is not None:
-            self._handle_client_disconnect(self)
+            if self.disconnect_behaviour == DisconnectBehaviour.UNGROUP:
+                await self.ungroup()
+                # Try to stop playback if we were playing alone before disconnecting
+                await self.group.stop()
+            elif self.disconnect_behaviour == DisconnectBehaviour.STOP:
+                await self.group.stop()
+                await self.ungroup()
 
-        self._logger.info("Client disconnected")
+            # Cancel running tasks
+            if self._writer_task and not self._writer_task.done():
+                self._logger.debug("Cancelling writer task")
+                self._writer_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await self._writer_task
+            # Handle task is cancelled implicitly when wsock closes or externally
+
+            # Close WebSocket
+            if self._wsock_client is not None and not self._wsock_client.closed:
+                await self._wsock_client.close()
+            elif self._wsock_server is not None and not self._wsock_server.closed:
+                await self._wsock_server.close()
+
+            if self._client_id is not None:
+                self._handle_client_disconnect(self)
+
+            self._logger.info("Client disconnected")
+        finally:
+            async with self._lifecycle_lock:
+                self._disconnected = True
 
     @property
     def group(self) -> ResonateGroup:
