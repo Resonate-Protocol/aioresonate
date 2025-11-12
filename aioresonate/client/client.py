@@ -422,9 +422,13 @@ class ResonateClient:
             return
         now_us = self._now_us()
         message = ClientTimeMessage(payload=ClientTimePayload(client_transmitted=now_us))
-        await self._send_message(message.to_json())
+        # Time sync can race with disconnect
+        with suppress(RuntimeError):
+            await self._send_message(message.to_json())
 
     async def _send_message(self, payload: str) -> None:
+        if self._disconnected:
+            raise RuntimeError("Cannot send message: client is disconnected")
         if not self._ws:
             raise RuntimeError("WebSocket is not connected")
         async with self._send_lock:
