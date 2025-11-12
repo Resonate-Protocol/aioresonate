@@ -106,44 +106,85 @@ class PlayerClient:
         Determine the optimal audio format for this client given a source format.
 
         Prefers higher quality within the client's capabilities and falls back gracefully.
+        Properly handles per-codec capabilities by filtering formats by codec first.
 
         Args:
             source_format: The source audio format to match against.
-            preferred_codec: Preferred audio codec (e.g., Opus). Falls back when unsupported.
 
         Returns:
             AudioFormat: The optimal format for this client.
         """
         support = self.support
-        # TODO: This function still assumes the old spec where clients have a global list
-        # and not per-codec capabilities.
+        if not support or not support.support_formats:
+            raise ValueError(f"Client {self.client.client_id} has no supported formats")
 
-        # Get supported values from support_formats
-        support_sample_rates = (
-            {fmt.sample_rate for fmt in support.support_formats} if support else set()
-        )
-        support_bit_depths = (
-            {fmt.bit_depth for fmt in support.support_formats} if support else set()
-        )
-        support_channels_list = (
-            {fmt.channels for fmt in support.support_formats} if support else set()
-        )
-        support_codecs = {fmt.codec for fmt in support.support_formats} if support else set()
+        # Get available codecs
+        support_codecs = {fmt.codec for fmt in support.support_formats}
 
-        # Determine optimal sample rate
+        # Determine optimal codec with fallback chain
+        codec_fallbacks = [AudioCodec.FLAC, AudioCodec.OPUS, AudioCodec.PCM]
+        selected_codec = None
+
+        for candidate_codec in codec_fallbacks:
+            if candidate_codec in support_codecs:
+                selected_codec = candidate_codec
+                break
+
+        if selected_codec is None:
+            raise ValueError(f"Client {self.client.client_id} does not support any known codec")
+
+        # Filter support_formats by the selected codec to get per-codec capabilities
+        codec_formats = [fmt for fmt in support.support_formats if fmt.codec == selected_codec]
+
+        # Get supported values for this specific codec
+        codec_sample_rates = {fmt.sample_rate for fmt in codec_formats}
+        codec_bit_depths = {fmt.bit_depth for fmt in codec_formats}
+        codec_channels = {fmt.channels for fmt in codec_formats}
+
+        # Determine optimal sample rate for this codec
         sample_rate = source_format.sample_rate
-        if support and sample_rate not in support_sample_rates:
-            # Prefer lower rates that are closest to source, fallback to minimum
-            lower_rates = [r for r in support_sample_rates if r < sample_rate]
-            sample_rate = max(lower_rates) if lower_rates else min(support_sample_rates)
+
+        # Special handling for Opus - use specific sample rates
+        if selected_codec == AudioCodec.OPUS:
+            opus_rate_candidates = [
+                (8000, sample_rate <= 8000),
+                (12000, sample_rate <= 12000),
+                (16000, sample_rate <= 16000),
+                (24000, sample_rate <= 24000),
+                (48000, True),  # Default fallback
+            ]
+
+            opus_sample_rate = None
+            for candidate_rate, condition in opus_rate_candidates:
+                if condition and candidate_rate in codec_sample_rates:
+                    opus_sample_rate = candidate_rate
+                    break
+
+            if opus_sample_rate is None:
+                raise ValueError(
+                    f"Client {self.client.client_id} does not support any Opus sample rates"
+                )
+
+            if sample_rate != opus_sample_rate:
+                self._logger.debug(
+                    "Adjusted sample_rate for Opus on client %s: %s -> %s",
+                    self.client.client_id,
+                    sample_rate,
+                    opus_sample_rate,
+                )
+            sample_rate = opus_sample_rate
+        elif sample_rate not in codec_sample_rates:
+            # For other codecs, prefer lower rates closest to source
+            lower_rates = [r for r in codec_sample_rates if r < sample_rate]
+            sample_rate = max(lower_rates) if lower_rates else min(codec_sample_rates)
             self._logger.debug(
                 "Adjusted sample_rate for client %s: %s", self.client.client_id, sample_rate
             )
 
-        # Determine optimal bit depth
+        # Determine optimal bit depth for this codec
         bit_depth = source_format.bit_depth
-        if support and bit_depth not in support_bit_depths:
-            if 16 in support_bit_depths:
+        if bit_depth not in codec_bit_depths:
+            if 16 in codec_bit_depths:
                 bit_depth = 16
             else:
                 raise NotImplementedError("Only 16bit is supported for now")
@@ -151,13 +192,13 @@ class PlayerClient:
                 "Adjusted bit_depth for client %s: %s", self.client.client_id, bit_depth
             )
 
-        # Determine optimal channel count
+        # Determine optimal channel count for this codec
         channels = source_format.channels
-        if support and channels not in support_channels_list:
+        if channels not in codec_channels:
             # Prefer stereo, then mono
-            if 2 in support_channels_list:
+            if 2 in codec_channels:
                 channels = 2
-            elif 1 in support_channels_list:
+            elif 1 in codec_channels:
                 channels = 1
             else:
                 raise NotImplementedError("Only mono and stereo are supported")
@@ -165,49 +206,4 @@ class PlayerClient:
                 "Adjusted channels for client %s: %s", self.client.client_id, channels
             )
 
-        # Determine optimal codec with fallback chain
-        codec_fallbacks = [AudioCodec.FLAC, AudioCodec.OPUS, AudioCodec.PCM]
-        codec = None
-        for candidate_codec in codec_fallbacks:
-            if support and candidate_codec in support_codecs:
-                # Special handling for Opus - check if sample rates are compatible
-                if candidate_codec == AudioCodec.OPUS:
-                    opus_rate_candidates = [
-                        (8000, sample_rate <= 8000),
-                        (12000, sample_rate <= 12000),
-                        (16000, sample_rate <= 16000),
-                        (24000, sample_rate <= 24000),
-                        (48000, True),  # Default fallback
-                    ]
-
-                    opus_sample_rate = None
-                    for candidate_rate, condition in opus_rate_candidates:
-                        if condition and support and candidate_rate in support_sample_rates:
-                            opus_sample_rate = candidate_rate
-                            break
-
-                    if opus_sample_rate is None:
-                        self._logger.error(
-                            "Client %s does not support any Opus sample rates, trying next codec",
-                            self.client.client_id,
-                        )
-                        continue  # Try next codec in fallback chain
-
-                    # Opus is viable, adjust sample rate and use it
-                    if sample_rate != opus_sample_rate:
-                        self._logger.debug(
-                            "Adjusted sample_rate for Opus on client %s: %s -> %s",
-                            self.client.client_id,
-                            sample_rate,
-                            opus_sample_rate,
-                        )
-                    sample_rate = opus_sample_rate
-
-                codec = candidate_codec
-                break
-
-        if codec is None:
-            raise ValueError(f"Client {self.client.client_id} does not support any known codec")
-
-        # FLAC and PCM support any sample rate, no adjustment needed
-        return AudioFormat(sample_rate, bit_depth, channels, codec)
+        return AudioFormat(sample_rate, bit_depth, channels, selected_codec)
