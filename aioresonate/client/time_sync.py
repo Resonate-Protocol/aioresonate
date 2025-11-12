@@ -70,8 +70,8 @@ class ResonateTimeFilter:
         delay.
 
         Note:
-            Thread-safe when called concurrently with compute_server_time() or
-            compute_client_time().
+            Thread-safe. TimeElement snapshot ensures consistent reads from
+            compute_server_time() and compute_client_time().
 
         Args:
             measurement: Computed offset from NTP-style exchange: ((T2-T1)+(T3-T4))/2
@@ -203,7 +203,7 @@ class ResonateTimeFilter:
         and dynamic drift accumulated since the last filter update.
 
         Note:
-            Not thread-safe when called concurrently with compute_client_time().
+            Thread-safe via snapshot of time element.
 
         Args:
             client_time: Client timestamp in microseconds.
@@ -215,10 +215,11 @@ class ResonateTimeFilter:
         # Compute instantaneous offset accounting for linear drift:
         # offset(t) = offset_base + drift * (t - t_last_update)
 
-        # Retrieve latest time transformation parameters
+        # Snapshot time element for consistency
+        element = self._current_time_element
 
-        dt = float(client_time - self._current_time_element.last_update)
-        offset = round(self._current_time_element.offset + self._current_time_element.drift * dt)
+        dt = float(client_time - element.last_update)
+        offset = round(element.offset + element.drift * dt)
         return client_time + offset
 
     def compute_client_time(self, server_time: int) -> int:
@@ -230,7 +231,7 @@ class ResonateTimeFilter:
         transformation.
 
         Note:
-            Not thread-safe when called concurrently with compute_server_time().
+            Thread-safe via snapshot of time element.
 
         Args:
             server_time: Server timestamp in microseconds.
@@ -243,13 +244,12 @@ class ResonateTimeFilter:
         # T_server = (1 + drift) * T_client + offset - drift * T_last_update
         # T_client = (T_server - offset + drift * T_last_update) / (1 + drift)
 
+        # Snapshot time element for consistency
+        element = self._current_time_element
+
         return round(
-            (
-                float(server_time)
-                - self._current_time_element.offset
-                + self._current_time_element.drift * self._current_time_element.last_update
-            )
-            / (1.0 + self._current_time_element.drift)
+            (float(server_time) - element.offset + element.drift * element.last_update)
+            / (1.0 + element.drift)
         )
 
     def reset(self) -> None:
