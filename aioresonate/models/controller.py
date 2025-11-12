@@ -2,8 +2,8 @@
 Controller messages for the Resonate protocol.
 
 This module contains messages specific to clients with the controller role, which
-enables remote control of groups and playback. Controller clients can browse
-available groups, join/leave groups, and send playback commands.
+enables the client to control the Resonate group this client is part of, and switch
+between groups.
 """
 
 from __future__ import annotations

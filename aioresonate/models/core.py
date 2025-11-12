@@ -3,7 +3,7 @@ Core messages for the Resonate protocol.
 
 This module contains the fundamental messages that establish communication between
 clients and the server. These messages handle initial handshakes, ongoing clock
-synchronization, and stream lifecycle management.
+synchronization, stream lifecycle management, and role-based state updates and commands.
 """
 
 from __future__ import annotations
