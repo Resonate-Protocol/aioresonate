@@ -4,6 +4,7 @@ import asyncio
 import logging
 import socket
 from collections.abc import Callable, Coroutine
+from contextlib import suppress
 from dataclasses import dataclass
 
 from aiohttp import ClientConnectionError, ClientResponseError, ClientTimeout, ClientWSTimeout, web
@@ -264,7 +265,12 @@ class ResonateServer:
         Returns a function to remove the listener.
         """
         self._event_cbs.append(callback)
-        return lambda: self._event_cbs.remove(callback)
+
+        def _remove() -> None:
+            with suppress(ValueError):
+                self._event_cbs.remove(callback)
+
+        return _remove
 
     def _signal_event(self, event: ResonateEvent) -> None:
         """Signal an event to all registered listeners."""
