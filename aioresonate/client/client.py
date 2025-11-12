@@ -359,7 +359,7 @@ class ResonateClient:
         await self._send_message(message.to_json())
 
     def set_metadata_listener(self, callback: MetadataCallback | None) -> None:
-        """Set or clear (if None) the callback invoked on session/update messages."""
+        """Set or clear (if None) the callback invoked on server/state messages with metadata."""
         self._metadata_callback = callback
 
     def set_group_update_listener(self, callback: GroupUpdateCallback | None) -> None:
