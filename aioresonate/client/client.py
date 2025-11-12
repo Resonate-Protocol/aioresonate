@@ -130,6 +130,12 @@ class ResonateClient:
     """Whether this client owns and should close the session."""
     _connected: bool = False
     """Whether the client is currently connected."""
+    _disconnecting: bool = False
+    """Whether disconnect is in progress."""
+    _disconnected: bool = False
+    """Whether disconnect has completed."""
+    _lifecycle_lock: asyncio.Lock
+    """Lock to guard _disconnecting and _disconnected state."""
     _server_info: ServerInfo | None = None
     """Information about the connected server."""
     _server_hello_event: asyncio.Event | None = None
@@ -226,6 +232,7 @@ class ResonateClient:
         self._owns_session = session is None
         self._loop = asyncio.get_running_loop()
         self._send_lock = asyncio.Lock()
+        self._lifecycle_lock = asyncio.Lock()
         self._time_filter = ResonateTimeFilter()
         self.set_static_delay_ms(static_delay_ms)
 
@@ -281,36 +288,50 @@ class ResonateClient:
 
     async def disconnect(self) -> None:
         """Disconnect from the server and release resources."""
-        self._connected = False
-        current_task = asyncio.current_task(loop=self._loop)
+        async with self._lifecycle_lock:
+            if self._disconnected:
+                return
 
-        if self._time_task is not None and self._time_task is not current_task:
-            self._time_task.cancel()
-            with suppress(asyncio.CancelledError):
-                await self._time_task
-            self._time_task = None
-        if self._reader_task is not None:
-            if self._reader_task is not current_task:
-                self._reader_task.cancel()
+            if self._disconnecting:
+                # Release lock, other caller is already disconnecting
+                return
+            self._disconnecting = True
+
+        # Perform actual disconnect outside the lock to avoid blocking
+        try:
+            self._connected = False
+            current_task = asyncio.current_task(loop=self._loop)
+
+            if self._time_task is not None and self._time_task is not current_task:
+                self._time_task.cancel()
                 with suppress(asyncio.CancelledError):
-                    await self._reader_task
-            self._reader_task = None
-        if self._ws is not None:
-            await self._ws.close()
-            self._ws = None
-        if self._owns_session and self._session is not None:
-            await self._session.close()
-            self._session = None
-        self._time_filter.reset()
-        self._server_info = None
-        self._server_hello_event = None
-        self._group_state = None
-        self._session_state = None
-        self._current_pcm_format = None
-        self._current_player = None
+                    await self._time_task
+                self._time_task = None
+            if self._reader_task is not None:
+                if self._reader_task is not current_task:
+                    self._reader_task.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await self._reader_task
+                self._reader_task = None
+            if self._ws is not None:
+                await self._ws.close()
+                self._ws = None
+            if self._owns_session and self._session is not None:
+                await self._session.close()
+                self._session = None
+            self._time_filter.reset()
+            self._server_info = None
+            self._server_hello_event = None
+            self._group_state = None
+            self._session_state = None
+            self._current_pcm_format = None
+            self._current_player = None
 
-        # Notify disconnect callback
-        await self._notify_disconnect_callback()
+            # Notify disconnect callback
+            await self._notify_disconnect_callback()
+        finally:
+            async with self._lifecycle_lock:
+                self._disconnected = True
 
     async def send_player_state(
         self,
@@ -419,8 +440,7 @@ class ResonateClient:
         except Exception:
             logger.exception("WebSocket reader encountered an error")
         finally:
-            if self._connected:
-                await self.disconnect()
+            await self.disconnect()
 
     async def _handle_ws_message(self, msg: WSMessage) -> None:
         if msg.type is WSMsgType.TEXT:
