@@ -56,11 +56,11 @@ class Roles(Enum):
     Has its own volume and mute state and preferred format settings.
     """
     CONTROLLER = "controller"
-    """Controls Resonate groups."""
+    """Controls the Resonate group this client is part of."""
     METADATA = "metadata"
     """Displays text metadata describing the currently playing audio."""
     ARTWORK = "artwork"
-    """Displays artwork images."""
+    """Displays artwork images. Has preferred format for images."""
     VISUALIZER = "visualizer"
     """
     Visualizes music.
