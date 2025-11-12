@@ -381,6 +381,20 @@ class ResonateClient:
                 if msg.type in (WSMsgType.CLOSE, WSMsgType.CLOSING, WSMsgType.CLOSED):
                     break
 
+                if msg.type == WSMsgType.BINARY:
+                    # Per spec, clients should not send binary messages
+                    # Binary messages should be rejected if there is no active stream
+                    if not self._group.has_active_stream:
+                        self._logger.warning(
+                            "Received binary message from client with no active stream, rejecting"
+                        )
+                    else:
+                        self._logger.warning(
+                            "Received binary message from client "
+                            "(clients should not send binary data)"
+                        )
+                    continue
+
                 if msg.type != WSMsgType.TEXT:
                     continue
 

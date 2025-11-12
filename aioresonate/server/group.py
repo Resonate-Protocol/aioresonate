@@ -1029,6 +1029,11 @@ class ResonateGroup:
         """All clients that are part of this group."""
         return self._clients
 
+    @property
+    def has_active_stream(self) -> bool:
+        """Check if there is an active stream running."""
+        return self._stream_task is not None
+
     def players(self) -> list[PlayerClient]:
         """Return player helpers for all members that support the role."""
         return [client.player for client in self._clients if client.player is not None]
