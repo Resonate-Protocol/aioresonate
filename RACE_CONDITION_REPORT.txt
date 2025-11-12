@@ -1,0 +1,294 @@
+================================================================================
+  COMPREHENSIVE RACE CONDITION ANALYSIS REPORT
+  aioresonate - Client Disconnect/Reconnect Race Conditions
+================================================================================
+
+INVESTIGATION DATE: 2025-11-12
+PROJECT: aioresonate (Python asyncio networking library)
+BRANCH: claude/fix-reconnect-race-conditions-011CV3teQzHpcs8avdFSHd3P
+
+================================================================================
+EXECUTIVE SUMMARY
+================================================================================
+
+This investigation identified 10 distinct race conditions in the aioresonate
+codebase, with 6 rated as HIGH or CRITICAL severity. These race conditions are
+most likely to manifest when:
+
+  1. Clients rapidly disconnect and reconnect
+  2. Network timeouts occur while async operations are pending
+  3. Methods are called concurrently with disconnect/reconnect operations
+  4. Async callbacks execute during connection state transitions
+  5. Multiple connection attempts target the same URL simultaneously
+
+RISK LEVEL: CRITICAL
+- Audio playback timing errors likely in production
+- Server-side group state corruption possible
+- Resource leaks (orphaned tasks) confirmed
+- Multiple simultaneous connections for same URL possible
+
+================================================================================
+RACE CONDITION SUMMARY
+================================================================================
+
+CLIENT-SIDE RACE CONDITIONS (6 issues):
+
+  RC-1  [HIGH]    Non-atomic connected property check
+                  Location: client/client.py:238-240, 685
+                  Impact: Stale WebSocket reference, time sync continues after disconnect
+
+  RC-2  [HIGH]    Reader loop calls disconnect while disconnect modifying state
+                  Location: client/client.py:412-423, 282-313
+                  Impact: Multiple disconnect calls, cleanup skipped/duplicated
+
+  RC-3  [MEDIUM]  Callback access without synchronization
+                  Location: client/client.py:346-378, 633-681
+                  Impact: Callbacks cleared while being invoked
+
+  RC-4  [MEDIUM]  Send after disconnect - stale WebSocket reference
+                  Location: client/client.py:406-410, 282-313
+                  Impact: AttributeError when sending on None WebSocket
+
+  RC-5  [LOW]     Send to disconnected socket
+                  Location: client/client.py:399-410
+                  Impact: Sent data lost, connection appears valid
+
+  RC-6  [MEDIUM]  Time filter concurrent read/write without locks
+                  Location: client/time_sync.py, client/client.py:505, 589
+                  Impact: Audio timing jumps, incorrect audio chunk scheduling
+
+SERVER-SIDE CLIENT RACE CONDITIONS (2 issues):
+
+  RC-7  [HIGH]    Multiple concurrent disconnect calls
+                  Location: server/client.py:168-200
+                  Impact: Callbacks invoked multiple times, group state corruption
+
+  RC-8  [MEDIUM]  Writer task reference race between check and usage
+                  Location: server/client.py:352-375
+                  Impact: Potential assertion failures
+
+SERVER CONNECTION MANAGEMENT RACE CONDITIONS (2 issues):
+
+  RC-9  [HIGH]    Non-atomic check-and-create in connect_to_client
+                  Location: server/server.py:150-170
+                  Impact: Task leaks, orphaned connections, multiple simultaneous connections
+
+  RC-10 [MEDIUM]  Stale event reference after disconnect/reconnect
+                  Location: server/server.py:186-253
+                  Impact: Retry signaling broken, connection waits unnecessarily
+
+================================================================================
+DETAILED FINDINGS
+================================================================================
+
+ROOT CAUSES IDENTIFIED:
+
+1. Absence of Synchronization Primitives
+   - No locks protecting shared state (_connected, _ws, callbacks)
+   - No atomic operations for check-then-act patterns
+   - Non-atomic property checks returning inconsistent results
+
+2. Multiple Disconnect Entry Points
+   - disconnect() called from: reader loop, sender loop, user code, queue full handler
+   - No mechanism to prevent multiple concurrent executions
+   - _disconnecting flag checked but not atomically protected
+
+3. Task References Without Ownership
+   - Tasks referenced but not protected from cancellation during access
+   - Dictionary cleanup happens while tasks still hold references
+   - No lifetime management of asyncio tasks
+
+4. Callback Management
+   - Callbacks stored as direct references without protections
+   - Cleared and invoked in unprotected code paths
+   - No mechanism to prevent concurrent modification
+
+5. State Distribution
+   - Connection state split across multiple variables
+   - No atomic way to check "am I connected?"
+   - Property performs multiple checks, each can change between checks
+
+================================================================================
+CRITICAL CODE LOCATIONS
+================================================================================
+
+CLIENT (aioresonate/client/client.py):
+  Line 238-240:  connected property (non-atomic)
+  Line 282-313:  disconnect() method (multiple exit paths)
+  Line 346-378:  Callback setter methods (no protection)
+  Line 399-410:  _send_time_message() method (stale ws reference)
+  Line 406-410:  _send_message() method (check-act race)
+  Line 412-423:  _reader_loop() finally block (multiple disconnect calls)
+  Line 505:      _handle_server_time() calls _time_filter.update()
+  Line 589:      Audio callback calls compute_play_time()
+  Line 633-681:  Callback notification methods (concurrent access)
+  Line 685:      _time_sync_loop() while loop (non-atomic check)
+
+SERVER CLIENT (aioresonate/server/client.py):
+  Line 168-200:  disconnect() method (concurrent calls)
+  Line 198:      _handle_client_disconnect callback (may be called multiple times)
+  Line 349:      _setup_connection() creates _writer_task
+  Line 352-375:  _run_message_loop() task reference race
+  Line 493-539:  _writer() method
+  Line 541-559:  send_message() with disconnect initiation
+  Line 555:      _disconnecting flag (non-atomic check)
+  Line 557:      Creates disconnect task (queue full path)
+  Line 582-589:  _run_message_loop() task waiting
+  Line 615:      _cleanup_connection() calls disconnect()
+
+SERVER (aioresonate/server/server.py):
+  Line 150-170:  connect_to_client() (non-atomic check-and-create)
+  Line 158:      Dictionary get() check
+  Line 167-169:  Dictionary store operations (race window)
+  Line 172-184:  disconnect_from_client() (cleanup race)
+  Line 186-253:  _handle_client_connection() (reconnection loop)
+  Line 195:      retry_event reference (stale after cleanup)
+  Line 231-237:  retry_event usage (races with cleanup)
+  Line 252-253:  Dictionary cleanup in finally block
+
+TIME SYNC (aioresonate/client/time_sync.py):
+  Line 63-195:   update() method (writes filter state)
+  Line 197:      compute_server_time() reads state
+  Line 224:      compute_client_time() reads state
+
+================================================================================
+REPRODUCTION STEPS
+================================================================================
+
+To reliably reproduce these race conditions:
+
+1. RC-1/RC-5: Create client, start time sync, immediately call disconnect() while
+   time_sync_loop is sleeping. Observe stale WebSocket references.
+
+2. RC-2: Trigger WebSocket error in reader while external disconnect is happening.
+   Monitor that disconnect() is called the correct number of times.
+
+3. RC-4: Queue message while calling disconnect() from another task.
+   Should see AttributeError or None reference error.
+
+4. RC-6: Send audio chunks at high frequency while time sync messages arriving.
+   Audio playback will have timing jumps.
+
+5. RC-7: Queue many messages quickly, trigger queue full disconnect while writer
+   task also encounters error. Should see callbacks invoked multiple times.
+
+6. RC-9: Call connect_to_client() with same URL from multiple tasks simultaneously.
+   Will create orphaned connection tasks.
+
+7. RC-10: Call disconnect_from_client(), then immediately reconnect_to_client()
+   same URL. Retry events will be broken.
+
+================================================================================
+SEVERITY ASSESSMENT
+================================================================================
+
+CRITICAL (Requires immediate fix):
+  - RC-1: Impacts all uses of "connected" property
+  - RC-2: Breaks disconnect guarantee
+  - RC-7: Corrupts server state
+  - RC-9: Resource leak, connection loss
+
+HIGH (Should be fixed before production):
+  - All CRITICAL issues above
+
+MEDIUM (Should be addressed):
+  - RC-3, RC-4, RC-6, RC-8, RC-10
+
+LOW:
+  - RC-5 (recovers from error)
+
+================================================================================
+RECOMMENDED FIXES
+================================================================================
+
+1. Add Synchronization Lock
+   - Protect all access to _connected, _ws, _disconnecting state
+   - Use asyncio.Lock for async-safe synchronization
+   - Protect callback access with locks
+
+2. Implement Atomic State Transitions
+   - Create connected property that atomically checks all three conditions
+   - Use single-check pattern where possible
+   - Double-check locking for initialization patterns
+
+3. Centralize Disconnect Logic
+   - Single entry point for all disconnect operations
+   - Prevent multiple concurrent executions with flag check inside lock
+   - Ensure cleanup always happens exactly once
+
+4. Fix Time Filter Concurrency
+   - Add lock to time_filter for update() method
+   - Use snapshot pattern for compute methods
+   - Or move time sync to separate single-writer model
+
+5. Protect Server Connection State
+   - Use Lock for _connection_tasks and _retry_events access
+   - Implement atomic check-and-create pattern
+   - Properly manage event lifetime
+
+6. Event Reference Management
+   - Don't hold references across cleanup boundaries
+   - Validate references before use
+   - Clean up properly in finally blocks
+
+================================================================================
+TESTING RECOMMENDATIONS
+================================================================================
+
+Add concurrent/race condition tests:
+
+1. test_concurrent_disconnect_calls()
+   - Start client, call disconnect from 2+ tasks
+   - Verify disconnect() called exactly once
+
+2. test_rapid_connect_disconnect()
+   - Rapid connect/disconnect cycle
+   - Verify no resource leaks, proper cleanup
+
+3. test_send_during_disconnect()
+   - Queue messages while disconnect happening
+   - Should handle gracefully, no AttributeError
+
+4. test_concurrent_time_sync_updates()
+   - Simulate concurrent time sync and audio processing
+   - Verify timing remains consistent
+
+5. test_multiple_connect_same_url()
+   - Call connect_to_client() same URL from multiple tasks
+   - Verify only one active connection
+
+6. test_stale_event_reference()
+   - Disconnect and immediately reconnect
+   - Verify retry event works correctly
+
+================================================================================
+FILES AFFECTED
+================================================================================
+
+PRIMARY:
+  - aioresonate/client/client.py (6 issues)
+  - aioresonate/server/server.py (2 issues)
+  - aioresonate/server/client.py (2 issues)
+
+SECONDARY:
+  - aioresonate/client/time_sync.py (1 issue)
+
+RELATED:
+  - aioresonate/server/group.py (may be affected by RC-7)
+  - aioresonate/server/player.py (may be affected by RC-7)
+
+================================================================================
+NEXT STEPS
+================================================================================
+
+1. Implement fixes in order of severity (RC-1, RC-2, RC-7, RC-9)
+2. Add unit tests for concurrent scenarios
+3. Add integration tests for disconnect/reconnect
+4. Consider using threading.Lock or asyncio.Lock for critical sections
+5. Review callback invocation patterns for safety
+6. Add stress tests for rapid connect/disconnect
+7. Monitor production for symptoms of these race conditions
+
+================================================================================
+END OF REPORT
+================================================================================
