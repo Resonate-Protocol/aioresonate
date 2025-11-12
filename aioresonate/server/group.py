@@ -828,8 +828,10 @@ class ResonateGroup:
         # Store the current media art for new clients that join later
         self._current_media_art = image
 
-        for client in self._clients:
-            await self._send_media_art_to_client(client, image)
+        await asyncio.gather(
+            *[self._send_media_art_to_client(client, image) for client in self._clients],
+            return_exceptions=True,
+        )
 
     def _letterbox_image(
         self, image: Image.Image, target_width: int, target_height: int
