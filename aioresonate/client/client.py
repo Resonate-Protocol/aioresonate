@@ -180,6 +180,11 @@ class ResonateClient:
     _disconnect_callback: DisconnectCallback | None = None
     """Callback invoked when the client disconnects."""
 
+    _initial_volume: int
+    """Initial volume level for player role (0-100)."""
+    _initial_muted: bool
+    """Initial mute state for player role."""
+
     def __init__(
         self,
         client_id: str,
@@ -191,6 +196,8 @@ class ResonateClient:
         artwork_support: ClientHelloArtworkSupport | None = None,
         session: ClientSession | None = None,
         static_delay_ms: float = 0.0,
+        initial_volume: int = 100,
+        initial_muted: bool = False,
     ) -> None:
         """
         Create a new Resonate client instance.
@@ -211,6 +218,11 @@ class ResonateClient:
                 and managed by this client.
             static_delay_ms: Static playback delay in milliseconds applied after
                 clock synchronization. Defaults to 0.0.
+            initial_volume: Initial volume level (0-100) for player role.
+                Defaults to 100. Sent automatically after handshake if PLAYER
+                role is supported.
+            initial_muted: Initial mute state for player role. Defaults to False.
+                Sent automatically after handshake if PLAYER role is supported.
 
         Raises:
             ValueError: If PLAYER in roles but player_support is None, or if
@@ -241,6 +253,8 @@ class ResonateClient:
         self._loop = asyncio.get_running_loop()
         self._send_lock = asyncio.Lock()
         self._time_filter = ResonateTimeFilter()
+        self._initial_volume = initial_volume
+        self._initial_muted = initial_muted
         self.set_static_delay_ms(static_delay_ms)
 
     @property
@@ -288,6 +302,14 @@ class ResonateClient:
         except TimeoutError as err:
             await self.disconnect()
             raise TimeoutError("Timed out waiting for server/hello response") from err
+
+        # Send initial player state if player role is supported
+        if Roles.PLAYER in self._roles:
+            await self.send_player_state(
+                state=PlayerStateType.SYNCHRONIZED,
+                volume=self._initial_volume,
+                muted=self._initial_muted,
+            )
 
         await self._send_time_message()
         self._time_task = self._loop.create_task(self._time_sync_loop())
