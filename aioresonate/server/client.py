@@ -96,6 +96,8 @@ class ResonateClient:
     _closing: bool = False
     _disconnecting: bool = False
     """Flag to prevent multiple concurrent disconnect tasks."""
+    _server_hello_sent: bool = False
+    """Flag to track if server/hello has been sent to complete handshake."""
     disconnect_behaviour: DisconnectBehaviour
     """
     Controls the disconnect behavior for this client.
@@ -155,6 +157,7 @@ class ResonateClient:
         self._event_cbs = []
         self._closing = False
         self._disconnecting = False
+        self._server_hello_sent = False
         self._roles = []
         self.disconnect_behaviour = DisconnectBehaviour.UNGROUP
 
@@ -428,6 +431,15 @@ class ResonateClient:
         """Handle incoming commands from the client."""
         if self._client_info is None and not isinstance(message, ClientHelloMessage):
             raise ValueError("First message must be client/hello")
+
+        # Check that other messages are not sent before server/hello
+        if (
+            self._client_info is not None
+            and not self._server_hello_sent
+            and not isinstance(message, ClientHelloMessage)
+        ):
+            raise ValueError("Cannot send messages before receiving server/hello")
+
         match message:
             # Core messages
             case ClientHelloMessage(client_info):
@@ -457,6 +469,7 @@ class ResonateClient:
                         )
                     )
                 )
+                self._server_hello_sent = True
             case ClientTimeMessage(client_time):
                 self.send_message(
                     ServerTimeMessage(
