@@ -63,6 +63,8 @@ class ResonateServer:
     This event is used to signal an immediate retry of the connection, in case the connection is
     sleeping during a backoff period.
     """
+    _connection_lock: asyncio.Lock
+    """Lock to guard _connection_tasks and _retry_events maps."""
     _id: str
     _name: str
     _client_session: ClientSession
@@ -116,6 +118,7 @@ class ResonateServer:
             self._owns_session = False
         self._connection_tasks = {}
         self._retry_events = {}
+        self._connection_lock = asyncio.Lock()
         self._app = None
         self._app_runner = None
         self._tcp_site = None
@@ -155,19 +158,30 @@ class ResonateServer:
         In case a connection attempt fails, a new connection will be attempted automatically.
         """
         logger.debug("Connecting to client at URL: %s", url)
-        prev_task = self._connection_tasks.get(url)
-        if prev_task is not None:
-            logger.debug("Connection is already active for URL: %s", url)
-            # Signal immediate retry if we have a retry event (connection is in backoff)
-            if retry_event := self._retry_events.get(url):
-                logger.debug("Signaling immediate retry for URL: %s", url)
-                retry_event.set()
-        else:
-            # Create retry event for this connection
-            self._retry_events[url] = asyncio.Event()
-            self._connection_tasks[url] = self._loop.create_task(
-                self._handle_client_connection(url)
-            )
+
+        # Schedule the connection task creation in the event loop to avoid blocking
+        def _create_connection() -> None:
+            task = asyncio.create_task(self._connect_to_client_async(url))
+            task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
+
+        self._loop.call_soon_threadsafe(_create_connection)
+
+    async def _connect_to_client_async(self, url: str) -> None:
+        """Async helper for connect_to_client to properly guard task creation."""
+        async with self._connection_lock:
+            prev_task = self._connection_tasks.get(url)
+            if prev_task is not None:
+                logger.debug("Connection is already active for URL: %s", url)
+                # Signal immediate retry if we have a retry event (connection is in backoff)
+                if retry_event := self._retry_events.get(url):
+                    logger.debug("Signaling immediate retry for URL: %s", url)
+                    retry_event.set()
+            else:
+                # Create retry event for this connection
+                self._retry_events[url] = asyncio.Event()
+                self._connection_tasks[url] = self._loop.create_task(
+                    self._handle_client_connection(url)
+                )
 
     def disconnect_from_client(self, url: str) -> None:
         """
@@ -178,10 +192,21 @@ class ResonateServer:
 
         NOTE: this will only disconnect connections that were established via connect_to_client.
         """
-        connection_task = self._connection_tasks.pop(url, None)
-        if connection_task is not None:
-            logger.debug("Disconnecting from client at URL: %s", url)
-            connection_task.cancel()
+
+        # Schedule the disconnection in the event loop to avoid blocking
+        def _disconnect() -> None:
+            task = asyncio.create_task(self._disconnect_from_client_async(url))
+            task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
+
+        self._loop.call_soon_threadsafe(_disconnect)
+
+    async def _disconnect_from_client_async(self, url: str) -> None:
+        """Async helper for disconnect_from_client to properly guard task removal."""
+        async with self._connection_lock:
+            connection_task = self._connection_tasks.pop(url, None)
+            if connection_task is not None:
+                logger.debug("Disconnecting from client at URL: %s", url)
+                connection_task.cancel()
 
     async def _handle_client_connection(self, url: str) -> None:
         """Handle the actual connection to a client."""
@@ -249,8 +274,9 @@ class ResonateServer:
             # NOTE: Intentional catch-all to log unexpected exceptions so they are visible.
             logger.exception("Unexpected error occurred")
         finally:
-            self._connection_tasks.pop(url, None)  # Cleanup connection tasks dict
-            self._retry_events.pop(url, None)  # Cleanup retry events dict
+            async with self._connection_lock:
+                self._connection_tasks.pop(url, None)  # Cleanup connection tasks dict
+                self._retry_events.pop(url, None)  # Cleanup retry events dict
 
     def add_event_listener(
         self, callback: Callable[[ResonateEvent], Coroutine[None, None, None]]
