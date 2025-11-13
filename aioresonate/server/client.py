@@ -10,6 +10,10 @@ from typing import TYPE_CHECKING, cast
 from aiohttp import ClientWebSocketResponse, WSMessage, WSMsgType, web
 
 from aioresonate.models import unpack_binary_header
+from aioresonate.models.controller import (
+    GroupUpdateServerMessage,
+    GroupUpdateServerPayload,
+)
 from aioresonate.models.core import (
     ClientCommandMessage,
     ClientHelloMessage,
@@ -22,7 +26,13 @@ from aioresonate.models.core import (
     ServerTimePayload,
     StreamRequestFormatMessage,
 )
-from aioresonate.models.types import BinaryMessageType, ClientMessage, Roles, ServerMessage
+from aioresonate.models.types import (
+    BinaryMessageType,
+    ClientMessage,
+    PlaybackStateType,
+    Roles,
+    ServerMessage,
+)
 
 from .controller import ControllerClient
 from .events import ClientEvent, ClientGroupChangedEvent
@@ -484,6 +494,17 @@ class ResonateClient:
                     )
                 )
                 self._server_hello_sent = True
+                # Send initial group/update after handshake
+                self._logger.debug("Sending initial group/update after handshake")
+                self.send_message(
+                    GroupUpdateServerMessage(
+                        payload=GroupUpdateServerPayload(
+                            playback_state=PlaybackStateType.STOPPED,
+                            group_id=self._group._group_id,  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+                            group_name=self._group._group_name,  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+                        )
+                    )
+                )
             case ClientTimeMessage(client_time):
                 self.send_message(
                     ServerTimeMessage(
