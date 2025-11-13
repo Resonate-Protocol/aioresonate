@@ -10,16 +10,14 @@ from typing import TYPE_CHECKING, cast
 from aiohttp import ClientWebSocketResponse, WSMessage, WSMsgType, web
 
 from aioresonate.models import unpack_binary_header
-from aioresonate.models.controller import (
-    GroupUpdateServerMessage,
-    GroupUpdateServerPayload,
-)
 from aioresonate.models.core import (
     ClientCommandMessage,
     ClientHelloMessage,
     ClientHelloPayload,
     ClientStateMessage,
     ClientTimeMessage,
+    GroupUpdateServerMessage,
+    GroupUpdateServerPayload,
     ServerHelloMessage,
     ServerHelloPayload,
     ServerTimeMessage,

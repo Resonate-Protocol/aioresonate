@@ -30,7 +30,7 @@ from .player import (
     StreamStartPlayer,
     StreamUpdatePlayer,
 )
-from .types import ClientMessage, Roles, ServerMessage
+from .types import ClientMessage, PlaybackStateType, Roles, ServerMessage
 from .visualizer import (
     ClientHelloVisualizerSupport,
     StreamStartVisualizer,
@@ -245,6 +245,32 @@ class ServerStateMessage(ServerMessage):
 
     payload: ServerStatePayload
     type: Literal["server/state"] = "server/state"
+
+
+# Server -> Client: group/update
+@dataclass
+class GroupUpdateServerPayload(DataClassORJSONMixin):
+    """State update of the group this client is part of."""
+
+    playback_state: PlaybackStateType | None = None
+    """Playback state of the group."""
+    group_id: str | None = None
+    """Group identifier."""
+    group_name: str | None = None
+    """Friendly name of the group."""
+
+    class Config(BaseConfig):
+        """Config for parsing json messages."""
+
+        omit_none = True
+
+
+@dataclass
+class GroupUpdateServerMessage(ServerMessage):
+    """Message sent by the server to update group state."""
+
+    payload: GroupUpdateServerPayload
+    type: Literal["group/update"] = "group/update"
 
 
 # Server -> Client: server/command

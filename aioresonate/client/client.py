@@ -12,11 +12,7 @@ from aiohttp import ClientSession, ClientWebSocketResponse, WSMessage, WSMsgType
 
 from aioresonate.models import BINARY_HEADER_SIZE, BinaryMessageType, unpack_binary_header
 from aioresonate.models.artwork import ClientHelloArtworkSupport
-from aioresonate.models.controller import (
-    ControllerCommandPayload,
-    GroupUpdateServerMessage,
-    GroupUpdateServerPayload,
-)
+from aioresonate.models.controller import ControllerCommandPayload
 from aioresonate.models.core import (
     ClientCommandMessage,
     ClientCommandPayload,
@@ -27,6 +23,8 @@ from aioresonate.models.core import (
     ClientTimeMessage,
     ClientTimePayload,
     DeviceInfo,
+    GroupUpdateServerMessage,
+    GroupUpdateServerPayload,
     ServerHelloMessage,
     ServerHelloPayload,
     ServerStateMessage,

@@ -29,10 +29,10 @@ from aioresonate.models.artwork import (
 from aioresonate.models.controller import (
     ControllerCommandPayload,
     ControllerStatePayload,
-    GroupUpdateServerMessage,
-    GroupUpdateServerPayload,
 )
 from aioresonate.models.core import (
+    GroupUpdateServerMessage,
+    GroupUpdateServerPayload,
     ServerStateMessage,
     ServerStatePayload,
     StreamEndMessage,

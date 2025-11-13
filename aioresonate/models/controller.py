@@ -9,12 +9,11 @@ between groups.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal
 
 from mashumaro.config import BaseConfig
 from mashumaro.mixins.orjson import DataClassORJSONMixin
 
-from .types import MediaCommand, PlaybackStateType, ServerMessage
+from .types import MediaCommand
 
 
 # Client -> Server: client/command controller object
@@ -73,29 +72,3 @@ class ControllerStatePayload(DataClassORJSONMixin):
         """Validate field values."""
         if not 0 <= self.volume <= 100:
             raise ValueError(f"Volume must be in range 0-100, got {self.volume}")
-
-
-# Server -> Client: group/update
-@dataclass
-class GroupUpdateServerPayload(DataClassORJSONMixin):
-    """State update of the group this client is part of."""
-
-    playback_state: PlaybackStateType | None = None
-    """Playback state of the group."""
-    group_id: str | None = None
-    """Group identifier."""
-    group_name: str | None = None
-    """Friendly name of the group."""
-
-    class Config(BaseConfig):
-        """Config for parsing json messages."""
-
-        omit_none = True
-
-
-@dataclass
-class GroupUpdateServerMessage(ServerMessage):
-    """Message sent by the server to update group state."""
-
-    payload: GroupUpdateServerPayload
-    type: Literal["group/update"] = "group/update"

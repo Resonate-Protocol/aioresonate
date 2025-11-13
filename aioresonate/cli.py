@@ -27,9 +27,9 @@ from zeroconf.asyncio import AsyncServiceBrowser, AsyncZeroconf
 
 from aioresonate.cli_audio import AudioPlayer
 from aioresonate.client import PCMFormat, ResonateClient
-from aioresonate.models.controller import GroupUpdateServerPayload
 from aioresonate.models.core import (
     DeviceInfo,
+    GroupUpdateServerPayload,
     ServerStatePayload,
     StreamStartMessage,
 )
