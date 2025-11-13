@@ -950,7 +950,7 @@ class ResonateGroup:
         if metadata is not None and metadata.track_progress is not None:
             self._track_progress_timestamp_us = timestamp
 
-    def set_media_art(
+    async def set_media_art(
         self, image: Image.Image | None, source: ArtworkSource = ArtworkSource.ALBUM
     ) -> None:
         """Set or clear artwork image for the current media.
@@ -967,12 +967,19 @@ class ResonateGroup:
         else:
             self._current_media_art[source] = image
 
+        # Gather all send tasks for matching channels
+        send_tasks = []
         for client in self._clients:
             client_state = self._client_artwork_state.get(client.client_id)
             if client_state:
                 for channel_num, channel_config in client_state.items():
                     if channel_config.source == source:
-                        self._send_media_art_to_client(client, image, channel_num)
+                        send_tasks.append(
+                            self._send_media_art_to_client(client, image, channel_num)
+                        )
+
+        if send_tasks:
+            await asyncio.gather(*send_tasks, return_exceptions=True)
 
     def _letterbox_image(
         self, image: Image.Image, target_width: int, target_height: int
@@ -1018,7 +1025,7 @@ class ResonateGroup:
 
         return letterboxed
 
-    def _send_media_art_to_client(
+    async def _send_media_art_to_client(
         self, client: ResonateClient, image: Image.Image | None, channel: int
     ) -> None:
         """Send or clear media art to a specific client channel.
@@ -1054,22 +1061,42 @@ class ResonateGroup:
             client.send_message(header)
         else:
             channel_state = client_state[channel]
-            resized_image = self._letterbox_image(
-                image, channel_state.media_width, channel_state.media_height
+            # Process and encode image in thread to avoid blocking event loop
+            img_data = await asyncio.to_thread(
+                self._process_and_encode_image,
+                image,
+                channel_state.media_width,
+                channel_state.media_height,
+                channel_state.format,
             )
+            client.send_message(header + img_data)
 
-            with BytesIO() as img_bytes:
-                if channel_state.format == PictureFormat.JPEG:
-                    resized_image.save(img_bytes, format="JPEG", quality=85)
-                elif channel_state.format == PictureFormat.PNG:
-                    resized_image.save(img_bytes, format="PNG", compress_level=6)
-                elif channel_state.format == PictureFormat.BMP:
-                    resized_image.save(img_bytes, format="BMP")
-                else:
-                    raise NotImplementedError(f"Unsupported artwork format: {channel_state.format}")
-                img_bytes.seek(0)
-                img_data = img_bytes.read()
-                client.send_message(header + img_data)
+    def _process_and_encode_image(
+        self,
+        image: Image.Image,
+        width: int,
+        height: int,
+        art_format: PictureFormat,
+    ) -> bytes:
+        """
+        Process and encode image for client.
+
+        NOTE: This method is not async friendly.
+        """
+        # Use letterboxing to preserve aspect ratio
+        resized_image = self._letterbox_image(image, width, height)
+
+        with BytesIO() as img_bytes:
+            if art_format == PictureFormat.JPEG:
+                resized_image.save(img_bytes, format="JPEG", quality=85)
+            elif art_format == PictureFormat.PNG:
+                resized_image.save(img_bytes, format="PNG", compress_level=6)
+            elif art_format == PictureFormat.BMP:
+                resized_image.save(img_bytes, format="BMP")
+            else:
+                raise NotImplementedError(f"Unsupported artwork format: {art_format}")
+            img_bytes.seek(0)
+            return img_bytes.read()
 
     @property
     def clients(self) -> list[ResonateClient]:
@@ -1169,7 +1196,12 @@ class ResonateGroup:
         Returns a function to remove the listener.
         """
         self._event_cbs.append(callback)
-        return lambda: self._event_cbs.remove(callback)
+
+        def _remove() -> None:
+            with suppress(ValueError):
+                self._event_cbs.remove(callback)
+
+        return _remove
 
     def _signal_event(self, event: GroupEvent) -> None:
         for cb in self._event_cbs:
@@ -1345,14 +1377,17 @@ class ResonateGroup:
         # Send current media art to the new client if available
         client_state = self._client_artwork_state.get(client.client_id)
         if client_state:
+            send_tasks = []
             for channel_num, channel_config in client_state.items():
                 if channel_config.source == ArtworkSource.NONE:
                     continue
                 artwork = self._current_media_art.get(channel_config.source)
                 if artwork:
-                    self._send_media_art_to_client(client, artwork, channel_num)
+                    send_tasks.append(self._send_media_art_to_client(client, artwork, channel_num))
+            if send_tasks:
+                await asyncio.gather(*send_tasks, return_exceptions=True)
 
-    def handle_stream_format_request(
+    async def handle_stream_format_request(
         self,
         client: ResonateClient,
         request: StreamRequestFormatPayload,
@@ -1424,7 +1459,7 @@ class ResonateGroup:
             if updated_channel.source != ArtworkSource.NONE:
                 artwork = self._current_media_art.get(updated_channel.source)
                 if artwork:
-                    self._send_media_art_to_client(client, artwork, artwork_request.channel)
+                    await self._send_media_art_to_client(client, artwork, artwork_request.channel)
 
         if request.player:
             if not client.check_role(Roles.PLAYER):

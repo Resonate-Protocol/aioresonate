@@ -499,7 +499,7 @@ class ResonateClient:
                 if payload.player:
                     self.require_player.handle_player_update(payload.player)
             case StreamRequestFormatMessage(payload):
-                self.group.handle_stream_format_request(self, payload)
+                await self.group.handle_stream_format_request(self, payload)
             # Controller messages
             case ClientCommandMessage(payload):
                 if payload.controller:
@@ -591,7 +591,12 @@ class ResonateClient:
         Returns a function to remove the listener.
         """
         self._event_cbs.append(callback)
-        return lambda: self._event_cbs.remove(callback)
+
+        def _remove() -> None:
+            with suppress(ValueError):
+                self._event_cbs.remove(callback)
+
+        return _remove
 
     def _signal_event(self, event: ClientEvent) -> None:
         for cb in self._event_cbs:

@@ -4,6 +4,7 @@ import asyncio
 import logging
 import socket
 from collections.abc import Callable, Coroutine
+from contextlib import suppress
 from dataclasses import dataclass
 
 from aiohttp import ClientConnectionError, ClientResponseError, ClientTimeout, ClientWSTimeout, web
@@ -264,7 +265,12 @@ class ResonateServer:
         Returns a function to remove the listener.
         """
         self._event_cbs.append(callback)
-        return lambda: self._event_cbs.remove(callback)
+
+        def _remove() -> None:
+            with suppress(ValueError):
+                self._event_cbs.remove(callback)
+
+        return _remove
 
     def _signal_event(self, event: ResonateEvent) -> None:
         """Signal an event to all registered listeners."""
@@ -438,10 +444,16 @@ class ResonateServer:
         name: str,
         state_change: ServiceStateChange,
     ) -> None:
-        """Handle mDNS service state callback."""
+        """Handle mDNS service state callback (called from zeroconf thread)."""
         if state_change in (ServiceStateChange.Added, ServiceStateChange.Updated):
-            task = self._loop.create_task(self._handle_service_added(zeroconf, service_type, name))
-            task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
+
+            def _schedule() -> None:
+                task = self._loop.create_task(
+                    self._handle_service_added(zeroconf, service_type, name)
+                )
+                task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
+
+            self._loop.call_soon_threadsafe(_schedule)
         # We don't listen on removals since connect_to_client has its own disconnect/retry logic
 
     async def _handle_service_added(self, zeroconf: Zeroconf, service_type: str, name: str) -> None:
