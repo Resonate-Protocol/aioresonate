@@ -305,14 +305,9 @@ class ResonateGroup:
 
     def _send_group_update_to_clients(self) -> None:
         """Send group/update and server/state messages to all clients."""
-        playback_state = (
-            PlaybackStateType.PLAYING
-            if self._current_state == PlaybackStateType.PLAYING
-            else PlaybackStateType.PAUSED
-        )
         group_message = GroupUpdateServerMessage(
             GroupUpdateServerPayload(
-                playback_state=playback_state,
+                playback_state=self._current_state,
                 group_id=self.group_id,
                 group_name=self.group_name,
             )
@@ -914,14 +909,9 @@ class ResonateGroup:
             metadata_update = metadata.diff_update(last_metadata, timestamp)
 
         # Send updates to all clients in the group
-        playback_state = (
-            PlaybackStateType.PLAYING
-            if self._current_state == PlaybackStateType.PLAYING
-            else PlaybackStateType.PAUSED
-        )
         group_message = GroupUpdateServerMessage(
             GroupUpdateServerPayload(
-                playback_state=playback_state,
+                playback_state=self._current_state,
                 group_id=self.group_id,
                 group_name=self.group_name,
             )
@@ -1348,14 +1338,9 @@ class ResonateGroup:
                 self._send_stream_start_msg(client, None)
 
         # Send current state to the new client
-        playback_state = (
-            PlaybackStateType.PLAYING
-            if self._current_state == PlaybackStateType.PLAYING
-            else PlaybackStateType.PAUSED
-        )
         group_message = GroupUpdateServerMessage(
             GroupUpdateServerPayload(
-                playback_state=playback_state,
+                playback_state=self._current_state,
                 group_id=self.group_id,
                 group_name=self.group_name,
             )
