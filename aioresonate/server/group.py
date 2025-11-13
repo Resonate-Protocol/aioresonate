@@ -312,8 +312,8 @@ class ResonateGroup:
         group_message = GroupUpdateServerMessage(
             GroupUpdateServerPayload(
                 playback_state=playback_state,
-                group_id=self._group_id,
-                group_name=self._group_name,
+                group_id=self.group_id,
+                group_name=self.group_name,
             )
         )
         controller_state = ControllerStatePayload(
@@ -772,8 +772,8 @@ class ResonateGroup:
         group_message = GroupUpdateServerMessage(
             GroupUpdateServerPayload(
                 playback_state=PlaybackStateType.STOPPED,
-                group_id=self._group_id,
-                group_name=self._group_name,
+                group_id=self.group_id,
+                group_name=self.group_name,
             )
         )
         controller_state = ControllerStatePayload(
@@ -921,8 +921,8 @@ class ResonateGroup:
         group_message = GroupUpdateServerMessage(
             GroupUpdateServerPayload(
                 playback_state=playback_state,
-                group_id=self._group_id,
-                group_name=self._group_name,
+                group_id=self.group_id,
+                group_name=self.group_name,
             )
         )
 
@@ -1209,6 +1209,16 @@ class ResonateGroup:
             task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
 
     @property
+    def group_id(self) -> str:
+        """Unique identifier for this group."""
+        return self._group_id
+
+    @property
+    def group_name(self) -> str | None:
+        """Friendly name for this group."""
+        return self._group_name
+
+    @property
     def state(self) -> PlaybackStateType:
         """Current playback state of the group."""
         return self._current_state
@@ -1345,8 +1355,8 @@ class ResonateGroup:
         group_message = GroupUpdateServerMessage(
             GroupUpdateServerPayload(
                 playback_state=playback_state,
-                group_id=self._group_id,
-                group_name=self._group_name,
+                group_id=self.group_id,
+                group_name=self.group_name,
             )
         )
         logger.debug("Sending group update to new client %s", client.client_id)

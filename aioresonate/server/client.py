@@ -500,8 +500,8 @@ class ResonateClient:
                     GroupUpdateServerMessage(
                         payload=GroupUpdateServerPayload(
                             playback_state=PlaybackStateType.STOPPED,
-                            group_id=self._group._group_id,  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
-                            group_name=self._group._group_name,  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+                            group_id=self._group.group_id,
+                            group_name=self._group.group_name,
                         )
                     )
                 )
