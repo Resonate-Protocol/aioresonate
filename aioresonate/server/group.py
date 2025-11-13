@@ -285,8 +285,15 @@ class ResonateGroup:
         for client in self._clients:
             if client.check_role(Roles.PLAYER):
                 continue
-            if client.check_role(Roles.METADATA) or client.check_role(Roles.VISUALIZER):
+            if (
+                client.check_role(Roles.METADATA)
+                or client.check_role(Roles.VISUALIZER)
+                or client.check_role(Roles.ARTWORK)
+            ):
                 self._send_stream_start_msg(client, None)
+
+        # Send any pre-existing artwork to artwork clients
+        await self._send_existing_artwork_to_clients()
 
         self._current_state = PlaybackStateType.PLAYING
         self._signal_event(GroupStateChangedEvent(PlaybackStateType.PLAYING))
@@ -1015,6 +1022,23 @@ class ResonateGroup:
         letterboxed.paste(resized, (x_offset, y_offset))
 
         return letterboxed
+
+    async def _send_existing_artwork_to_clients(self) -> None:
+        """Send any pre-existing artwork images to all artwork clients."""
+        for client in self._clients:
+            client_state = self._client_artwork_state.get(client.client_id)
+            if client_state:
+                send_tasks = []
+                for channel_num, channel_config in client_state.items():
+                    if channel_config.source == ArtworkSource.NONE:
+                        continue
+                    artwork = self._current_media_art.get(channel_config.source)
+                    if artwork:
+                        send_tasks.append(
+                            self._send_media_art_to_client(client, artwork, channel_num)
+                        )
+                if send_tasks:
+                    await asyncio.gather(*send_tasks, return_exceptions=True)
 
     async def _send_media_art_to_client(
         self, client: ResonateClient, image: Image.Image | None, channel: int
