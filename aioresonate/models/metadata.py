@@ -31,7 +31,7 @@ class SessionUpdateMetadata(DataClassORJSONMixin):
     year: int | None | UndefinedField = field(default_factory=undefined_field)
     track: int | None | UndefinedField = field(default_factory=undefined_field)
     track_progress: int | None | UndefinedField = field(default_factory=undefined_field)
-    """Track progress in milliseconds."""
+    """Track progress in milliseconds, since start of track, at the given timestamp."""
     track_duration: int | None | UndefinedField = field(default_factory=undefined_field)
     """Track duration in milliseconds."""
     playback_speed: int | None | UndefinedField = field(default_factory=undefined_field)

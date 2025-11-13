@@ -67,7 +67,11 @@ class PlayerStatePayload(DataClassORJSONMixin):
     """Player object in client/state message."""
 
     state: PlayerStateType
-    """State of the player - synchronized or error."""
+    """
+    State of the player - should always be 'synchronized' unless there is
+    an error preventing current or future playback (unable to keep up,
+    issues keeping the clock in sync, etc).
+    """
     volume: int
     """Volume range 0-100."""
     muted: bool
@@ -85,7 +89,10 @@ class PlayerCommandPayload(DataClassORJSONMixin):
     """Player object in server/command message."""
 
     command: PlayerCommand
-    """Command - must be 'volume' or 'mute'."""
+    """
+    Command - must be 'volume' or 'mute', and must be one of the values
+    listed in supported_commands from player_support in client/hello.
+    """
     volume: int | None = None
     """Volume range 0-100, only set if command is volume."""
     mute: bool | None = None
