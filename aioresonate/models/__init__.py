@@ -53,7 +53,7 @@ from .types import (
 )
 
 # Binary header (big-endian): message_type(1) + timestamp_us(8) = 9 bytes
-BINARY_HEADER_FORMAT = ">BQ"
+BINARY_HEADER_FORMAT = ">Bq"
 BINARY_HEADER_SIZE = struct.calcsize(BINARY_HEADER_FORMAT)
 
 
