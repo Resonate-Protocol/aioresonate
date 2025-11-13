@@ -347,7 +347,13 @@ class StreamRequestFormatMessage(ClientMessage):
 
 # Server -> Client: stream/end
 @dataclass
+class StreamEndPayload(DataClassORJSONMixin):
+    """Empty payload for stream/end message."""
+
+
+@dataclass
 class StreamEndMessage(ServerMessage):
     """Message sent by the server to end a stream."""
 
+    payload: StreamEndPayload
     type: Literal["stream/end"] = "stream/end"

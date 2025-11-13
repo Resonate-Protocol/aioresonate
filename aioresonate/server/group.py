@@ -36,6 +36,7 @@ from aioresonate.models.core import (
     ServerStateMessage,
     ServerStatePayload,
     StreamEndMessage,
+    StreamEndPayload,
     StreamRequestFormatPayload,
     StreamStartMessage,
     StreamStartPayload,
@@ -687,7 +688,7 @@ class ResonateGroup:
         logger.debug("ending stream for %s (%s)", client.name, client.client_id)
         # Lifetime of artwork state is bound to the stream
         self._client_artwork_state.pop(client.client_id, None)
-        client.send_message(StreamEndMessage())
+        client.send_message(StreamEndMessage(payload=StreamEndPayload()))
 
     def _schedule_delayed_stop(self, stop_time_us: int, active: bool, needs_cleanup: bool) -> bool:  # noqa: FBT001
         """Schedule a delayed stop at the specified timestamp.
