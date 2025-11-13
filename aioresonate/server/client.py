@@ -482,7 +482,6 @@ class ResonateClient:
                 if Roles.VISUALIZER in self._roles:
                     self._visualizer = VisualizerClient(self)
 
-                self._handle_client_connect(self)
                 self._logger.debug("Sending server/hello in response to client/hello")
                 self.send_message(
                     ServerHelloMessage(
@@ -503,6 +502,7 @@ class ResonateClient:
                         )
                     )
                 )
+                self._handle_client_connect(self)
             case ClientTimeMessage(client_time):
                 self.send_message(
                     ServerTimeMessage(
