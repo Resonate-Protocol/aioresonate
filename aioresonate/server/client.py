@@ -106,6 +106,10 @@ class ResonateClient:
     """Flag to prevent multiple concurrent disconnect tasks."""
     _server_hello_sent: bool = False
     """Flag to track if server/hello has been sent to complete handshake."""
+    _initial_state_received: bool = False
+    """Flag to track if initial client/state has been received (for roles that require it)."""
+    _initial_state_timeout_handle: asyncio.TimerHandle | None = None
+    """Timeout handle for initial state reception (for roles that require it)."""
     disconnect_behaviour: DisconnectBehaviour
     """
     Controls the disconnect behavior for this client.
@@ -166,6 +170,8 @@ class ResonateClient:
         self._closing = False
         self._disconnecting = False
         self._server_hello_sent = False
+        self._initial_state_received = False
+        self._initial_state_timeout_handle = None
         self._roles = []
         self.disconnect_behaviour = DisconnectBehaviour.UNGROUP
 
@@ -308,6 +314,28 @@ class ResonateClient:
         if self._visualizer is None:
             raise ValueError(f"Client does not support role: {Roles.VISUALIZER}")
         return self._visualizer
+
+    def requires_initial_state(self) -> bool:
+        """Check if this client's roles require sending initial state."""
+        return Roles.PLAYER in self._roles
+
+    def _initial_state_timeout_callback(self) -> None:
+        """
+        Handle initial state timeout.
+
+        Logs a warning and disconnects the client for spec violation.
+        """
+        if self._initial_state_received:
+            # State was received just as timeout fired
+            return
+
+        self._logger.warning(
+            "Client %s failed to send required initial state within timeout (spec violation)",
+            self._client_id or "unknown",
+        )
+        # Disconnect and allow retry in case of transient network issues
+        task = self._server.loop.create_task(self.disconnect(retry_connection=True))
+        task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
 
     def _set_group(self, group: "ResonateGroup") -> None:
         """
@@ -510,7 +538,16 @@ class ResonateClient:
                         )
                     )
                 )
-                self._handle_client_connect(self)
+
+                # For roles requiring a initial state update per spect,
+                # only register the client once we have received it
+                if self.requires_initial_state():
+                    # Start timeout (5 seconds) for initial state reception
+                    self._initial_state_timeout_handle = self._server.loop.call_later(
+                        5.0, self._initial_state_timeout_callback
+                    )
+                else:
+                    self._handle_client_connect(self)
             case ClientTimeMessage(client_time):
                 self.send_message(
                     ServerTimeMessage(
@@ -523,6 +560,19 @@ class ResonateClient:
                 )
             # Player messages
             case ClientStateMessage(payload):
+                # Track initial state reception for roles that require it
+                if self.requires_initial_state() and not self._initial_state_received:
+                    self._initial_state_received = True
+                    self._logger.debug("Received initial client state")
+
+                    # Cancel timeout if set
+                    if self._initial_state_timeout_handle:
+                        self._initial_state_timeout_handle.cancel()
+                        self._initial_state_timeout_handle = None
+
+                    # Now that we have initial state, register client
+                    self._handle_client_connect(self)
+
                 if payload.player:
                     self.require_player.handle_player_update(payload.player)
             case StreamRequestFormatMessage(payload):
