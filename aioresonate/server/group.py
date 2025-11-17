@@ -189,6 +189,7 @@ class ResonateGroup:
             *args: Clients to add to this group.
         """
         self._clients = list(args)
+        assert len(self._clients) > 0, "A group must have at least one client"
         self._client_artwork_state = {}
         self._server = server
         self._stream_task: Task[int] | None = None
