@@ -175,6 +175,10 @@ class ResonateGroup:
     """Group mute state."""
     _last_sent_volume: int | None
     """Last volume sent to controller clients, for change detection."""
+    _last_sent_muted: bool | None
+    """Last muted state sent to controller clients, for change detection."""
+    _last_sent_supported_commands: list[MediaCommand] | None
+    """Last supported commands sent to controller clients, for change detection."""
     _supported_commands: list[MediaCommand]
     """Commands supported by the application."""
 
@@ -209,6 +213,8 @@ class ResonateGroup:
         self._scheduled_stop_handle: asyncio.TimerHandle | None = None
         self._muted = False
         self._last_sent_volume: int | None = None
+        self._last_sent_muted: bool | None = None
+        self._last_sent_supported_commands: list[MediaCommand] | None = None
         self._supported_commands: list[MediaCommand] = []
         logger.debug(
             "ResonateGroup initialized with %d client(s): %s",
@@ -319,11 +325,16 @@ class ResonateGroup:
                 group_name=self.group_name,
             )
         )
+        supported_commands = self._get_supported_commands()
         controller_state = ControllerStatePayload(
-            supported_commands=self._get_supported_commands(),
+            supported_commands=supported_commands,
             volume=self.volume,
             muted=self._muted,
         )
+        # Update tracking variables
+        self._last_sent_volume = self.volume
+        self._last_sent_muted = self._muted
+        self._last_sent_supported_commands = supported_commands
 
         for client in self._clients:
             # Send group/update to all clients
@@ -349,18 +360,27 @@ class ResonateGroup:
                 state_message = ServerStateMessage(ServerStatePayload(controller=controller_state))
                 client.send_message(state_message)
 
-    async def _send_controller_state_to_clients(self) -> None:
+    def _send_controller_state_to_clients(self) -> None:
         """Send server/state with controller payload to all controller clients."""
         current_volume = self.volume
-        # Only send if rounded volume changed
-        if self._last_sent_volume is not None and self._last_sent_volume == current_volume:
+        current_muted = self._muted
+        current_supported_commands = self._get_supported_commands()
+
+        # Only send if any field changed
+        if (
+            self._last_sent_volume == current_volume
+            and self._last_sent_muted == current_muted
+            and self._last_sent_supported_commands == current_supported_commands
+        ):
             return
 
         self._last_sent_volume = current_volume
+        self._last_sent_muted = current_muted
+        self._last_sent_supported_commands = current_supported_commands
         controller_state = ControllerStatePayload(
-            supported_commands=self._get_supported_commands(),
+            supported_commands=current_supported_commands,
             volume=current_volume,
-            muted=self._muted,
+            muted=current_muted,
         )
         for client in self._clients:
             if client.check_role(Roles.CONTROLLER):
@@ -784,11 +804,16 @@ class ResonateGroup:
                 group_name=self.group_name,
             )
         )
+        supported_commands = self._get_supported_commands()
         controller_state = ControllerStatePayload(
-            supported_commands=self._get_supported_commands(),
+            supported_commands=supported_commands,
             volume=self.volume,
             muted=self._muted,
         )
+        # Update tracking variables
+        self._last_sent_volume = self.volume
+        self._last_sent_muted = self._muted
+        self._last_sent_supported_commands = supported_commands
 
         for client in self._clients:
             # Send group/update to all clients
@@ -1250,7 +1275,7 @@ class ResonateGroup:
             player.set_volume(new_player_volume)
 
         # Send state update to controller clients if rounded volume changed
-        await self._send_controller_state_to_clients()
+        self._send_controller_state_to_clients()
 
     async def set_mute(self, muted: bool) -> None:  # noqa: FBT001
         """Set group mute state and propagate to all players."""
@@ -1262,7 +1287,7 @@ class ResonateGroup:
             else:
                 player.unmute()
         # Send state update to controller clients
-        await self._send_controller_state_to_clients()
+        self._send_controller_state_to_clients()
 
     def set_supported_commands(self, commands: list[MediaCommand]) -> None:
         """
@@ -1273,6 +1298,7 @@ class ResonateGroup:
                 Empty list means no commands are supported.
         """
         self._supported_commands = commands
+        self._send_controller_state_to_clients()
 
     async def remove_client(self, client: ResonateClient) -> None:
         """
