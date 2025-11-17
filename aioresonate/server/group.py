@@ -1164,8 +1164,10 @@ class ResonateGroup:
         # Handle volume and mute commands directly
         if cmd.command == MediaCommand.VOLUME and cmd.volume is not None:
             await self.set_volume(cmd.volume)
-        elif cmd.command == MediaCommand.MUTE and cmd.mute is not None:
+            return
+        if cmd.command == MediaCommand.MUTE and cmd.mute is not None:
             await self.set_mute(cmd.mute)
+            return
 
         # Signal the event for other commands
         event = GroupCommandEvent(
