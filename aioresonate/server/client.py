@@ -488,7 +488,7 @@ class ResonateClient:
             and not self._server_hello_sent
             and not isinstance(message, ClientHelloMessage)
         ):
-            raise ValueError("Cannot send messages before receiving server/hello")
+            raise ValueError("Client must wait for server/hello before sending other messages")
 
         match message:
             # Core messages
