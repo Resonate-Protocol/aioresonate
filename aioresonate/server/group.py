@@ -1158,34 +1158,24 @@ class ResonateGroup:
         return [client.player for client in self._clients if client.player is not None]
 
     def _get_supported_commands(self) -> list[MediaCommand]:
-        """Get list of commands supported in the current state."""
-        # Handled internally by this library
+        """Get list of commands supported based on application capabilities."""
+        # Commands handled internally by this library (always supported)
         # TODO: differentiate between protocol and application supported commands?
         # Now it's not clear if MediaCommand.SWITCH or VOLUME needs to be handled by the app
-        commands: list[MediaCommand] = [
+        protocol_commands = [
             MediaCommand.VOLUME,
             MediaCommand.MUTE,
             MediaCommand.SWITCH,
         ]
 
-        # Filter by application-supported commands
         if self._supported_commands:
-            commands = [cmd for cmd in commands if cmd in self._supported_commands]
+            # Return union of protocol commands and app-declared commands
+            return list(set(protocol_commands) | set(self._supported_commands))
 
-        return commands
+        # If app didn't declare any commands, only protocol commands are supported
+        return protocol_commands
 
     async def _handle_group_command(self, cmd: ControllerCommandPayload) -> None:
-        # Verify that this command is actually supported for the current state
-        supported = self._get_supported_commands()
-        if cmd.command not in supported:
-            logger.warning(
-                "Ignoring unsupported command %s in state %s (supported: %s)",
-                cmd.command,
-                self._current_state,
-                supported,
-            )
-            return
-
         # Handle volume and mute commands directly
         if cmd.command == MediaCommand.VOLUME and cmd.volume is not None:
             await self.set_volume(cmd.volume)
@@ -1194,7 +1184,7 @@ class ResonateGroup:
             await self.set_mute(cmd.mute)
             return
 
-        # Signal the event for other commands
+        # Signal the event for application commands (PLAY, PAUSE, STOP, etc.)
         event = GroupCommandEvent(
             command=cmd.command,
             volume=cmd.volume,

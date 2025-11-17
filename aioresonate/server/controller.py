@@ -23,8 +23,8 @@ class ControllerClient:
 
     async def handle_command(self, payload: ControllerCommandPayload) -> None:
         """Handle controller commands."""
-        # Get supported commands for current group state
-        supported_commands = self._get_supported_commands()
+        # Get supported commands from the group
+        supported_commands = self.client.group._get_supported_commands()  # noqa: SLF001
 
         # Validate command is supported
         if payload.command not in supported_commands:
@@ -42,17 +42,6 @@ class ControllerClient:
         else:
             # Forward other commands to the group
             await self.client.group._handle_group_command(payload)  # noqa: SLF001
-
-    def _get_supported_commands(self) -> list[MediaCommand]:
-        """Get list of commands supported in the current group state."""
-        # TODO: Make this dynamic based on actual group capabilities
-        # For now, return a basic set of always-supported commands
-        return [
-            MediaCommand.PLAY,
-            MediaCommand.PAUSE,
-            MediaCommand.STOP,
-            MediaCommand.SWITCH,
-        ]
 
     async def _handle_switch(self) -> None:
         """Handle the switch command to cycle through groups."""
