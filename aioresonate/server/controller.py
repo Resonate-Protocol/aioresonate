@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from aioresonate.models.controller import ControllerCommandPayload
-from aioresonate.models.types import MediaCommand, PlaybackStateType
+from aioresonate.models.types import MediaCommand, PlaybackStateType, Roles
 
 if TYPE_CHECKING:
     from .client import ResonateClient
@@ -45,7 +45,6 @@ class ControllerClient:
 
     async def _handle_switch(self) -> None:
         """Handle the switch command to cycle through groups."""
-        # TODO: this is untested, who knows if it works as described in the spec
         server = self.client._server  # noqa: SLF001
         current_group = self.client.group
 
@@ -75,7 +74,7 @@ class ControllerClient:
             self._logger.info(
                 "Switching client %s to group %s",
                 self.client.client_id,
-                next_group._group_id,  # noqa: SLF001
+                next_group.group_id,
             )
             await current_group.remove_client(self.client)
             await next_group.add_client(self.client)
@@ -87,7 +86,7 @@ class ControllerClient:
 
         for client in server._clients:  # noqa: SLF001
             group = client.group
-            group_id = group._group_id  # noqa: SLF001
+            group_id = group.group_id
             if group_id not in groups_seen:
                 groups_seen.add(group_id)
                 unique_groups.append(group)
@@ -107,20 +106,27 @@ class ControllerClient:
         current_solo: list[ResonateGroup] = []
 
         for group in all_groups:
-            client_count = len(group._clients)  # noqa: SLF001
-            is_playing = group._current_state == PlaybackStateType.PLAYING  # noqa: SLF001
+            client_count = len(group.clients)
+            is_playing = group.state == PlaybackStateType.PLAYING
 
             if client_count > 1 and is_playing:
-                multi_client_playing.append(group)
+                # Verify the group has at least one player
+                # (groups with only controllers/metadata can't actually be "playing")
+                has_player = any(c.check_role(Roles.PLAYER) for c in group.clients)
+                if has_player:
+                    multi_client_playing.append(group)
             elif client_count == 1:
+                # Get the single client in this group
+                single_client_obj = group.clients[0]
                 if group == current_group:
                     current_solo.append(group)
-                else:
+                elif single_client_obj.check_role(Roles.PLAYER):
+                    # Only include single-client groups where the client has player role
                     single_client.append(group)
 
         # Sort for stable ordering (by group ID)
-        multi_client_playing.sort(key=lambda g: g._group_id)  # noqa: SLF001
-        single_client.sort(key=lambda g: g._group_id)  # noqa: SLF001
+        multi_client_playing.sort(key=lambda g: g.group_id)
+        single_client.sort(key=lambda g: g.group_id)
 
         # Build cycle based on client's player role
         if has_player_role:
