@@ -157,6 +157,8 @@ class ResonateClient:
     """Current active player configuration."""
     _current_pcm_format: PCMFormat | None = None
     """Current PCM audio format for active stream."""
+    _stream_active: bool = False
+    """True if stream is active (stream/start received, stream/end not yet received)."""
 
     _group_state: GroupUpdateServerPayload | None = None
     """Latest group state received from server."""
@@ -340,6 +342,7 @@ class ResonateClient:
         self._server_hello_event = None
         self._group_state = None
         self._server_state = None
+        self._stream_active = False
         self._current_pcm_format = None
         self._current_player = None
 
@@ -514,6 +517,12 @@ class ResonateClient:
             logger.warning("Unknown binary message type: %s", header.message_type)
             return
 
+        if not self._stream_active:
+            logger.warning(
+                "Ignoring binary message of type %s since no stream is active", message_type
+            )
+            return
+
         if message_type is BinaryMessageType.AUDIO_CHUNK:
             await self._handle_audio_chunk(header.timestamp_us, payload[BINARY_HEADER_SIZE:])
         else:
@@ -548,6 +557,7 @@ class ResonateClient:
 
     async def _handle_stream_start(self, message: StreamStartMessage) -> None:
         logger.info("Stream started")
+        self._stream_active = True
         player = message.payload.player
         if player is None:
             logger.warning("Stream start message missing player payload")
@@ -601,6 +611,7 @@ class ResonateClient:
 
     async def _handle_stream_end(self) -> None:
         logger.info("Stream ended")
+        self._stream_active = False
         self._current_player = None
         self._current_pcm_format = None
         await self._notify_stream_end()
