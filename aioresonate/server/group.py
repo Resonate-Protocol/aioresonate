@@ -175,6 +175,8 @@ class ResonateGroup:
     """Group mute state."""
     _last_sent_volume: int | None
     """Last volume sent to controller clients, for change detection."""
+    _supported_commands: list[MediaCommand]
+    """Commands supported by the application."""
 
     def __init__(self, server: ResonateServer, *args: ResonateClient) -> None:
         """
@@ -207,6 +209,7 @@ class ResonateGroup:
         self._scheduled_stop_handle: asyncio.TimerHandle | None = None
         self._muted = False
         self._last_sent_volume: int | None = None
+        self._supported_commands: list[MediaCommand] = []
         logger.debug(
             "ResonateGroup initialized with %d client(s): %s",
             len(self._clients),
@@ -1131,46 +1134,18 @@ class ResonateGroup:
 
     def _get_supported_commands(self) -> list[MediaCommand]:
         """Get list of commands supported in the current state."""
-        # TODO: ask library user instead what is supported and what not
-        # also, what if volume/mute/switch is not supported?
-        # Always available
+        # Handled internally by this library
+        # TODO: differentiate between protocol and application supported commands?
+        # Now it's not clear if MediaCommand.SWITCH or VOLUME needs to be handled by the app
         commands: list[MediaCommand] = [
             MediaCommand.VOLUME,
             MediaCommand.MUTE,
             MediaCommand.SWITCH,
         ]
 
-        # State-dependent commands
-        if self._current_state == PlaybackStateType.PLAYING:
-            commands.extend(
-                [
-                    MediaCommand.PAUSE,
-                    MediaCommand.STOP,
-                    MediaCommand.NEXT,
-                    MediaCommand.PREVIOUS,
-                    MediaCommand.REPEAT_OFF,
-                    MediaCommand.REPEAT_ONE,
-                    MediaCommand.REPEAT_ALL,
-                    MediaCommand.SHUFFLE,
-                    MediaCommand.UNSHUFFLE,
-                ]
-            )
-        elif self._current_state == PlaybackStateType.PAUSED:
-            commands.extend(
-                [
-                    MediaCommand.PLAY,
-                    MediaCommand.STOP,
-                    MediaCommand.NEXT,
-                    MediaCommand.PREVIOUS,
-                    MediaCommand.REPEAT_OFF,
-                    MediaCommand.REPEAT_ONE,
-                    MediaCommand.REPEAT_ALL,
-                    MediaCommand.SHUFFLE,
-                    MediaCommand.UNSHUFFLE,
-                ]
-            )
-        elif self._current_state == PlaybackStateType.STOPPED:
-            commands.append(MediaCommand.PLAY)
+        # Filter by application-supported commands
+        if self._supported_commands:
+            commands = [cmd for cmd in commands if cmd in self._supported_commands]
 
         return commands
 
@@ -1286,6 +1261,16 @@ class ResonateGroup:
                 player.unmute()
         # Send state update to controller clients
         await self._send_controller_state_to_clients()
+
+    def set_supported_commands(self, commands: list[MediaCommand]) -> None:
+        """
+        Set the media commands supported by the application.
+
+        Args:
+            commands: List of MediaCommand values that the application can handle.
+                Empty list means no commands are supported.
+        """
+        self._supported_commands = commands
 
     async def remove_client(self, client: ResonateClient) -> None:
         """
