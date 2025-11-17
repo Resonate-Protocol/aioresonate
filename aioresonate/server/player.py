@@ -48,6 +48,10 @@ class PlayerClient:
 
     def set_volume(self, volume: int) -> None:
         """Set the volume of this player."""
+        if not self.support or PlayerCommand.VOLUME not in self.support.supported_commands:
+            self._logger.warning("Player does not support the 'volume' command")
+            return
+
         self._logger.debug("Setting volume from %d to %d", self._volume, volume)
         self.client.send_message(
             ServerCommandMessage(
@@ -62,6 +66,10 @@ class PlayerClient:
 
     def mute(self) -> None:
         """Mute this player."""
+        if not self.support or PlayerCommand.MUTE not in self.support.supported_commands:
+            self._logger.warning("Player does not support the 'mute' command")
+            return
+
         self._logger.debug("Muting player")
         self.client.send_message(
             ServerCommandMessage(
@@ -76,6 +84,10 @@ class PlayerClient:
 
     def unmute(self) -> None:
         """Unmute this player."""
+        if not self.support or PlayerCommand.MUTE not in self.support.supported_commands:
+            self._logger.warning("Player does not support the 'mute' command")
+            return
+
         self._logger.debug("Unmuting player")
         self.client.send_message(
             ServerCommandMessage(
