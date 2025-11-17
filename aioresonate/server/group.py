@@ -286,11 +286,7 @@ class ResonateGroup:
         for client in self._clients:
             if client.check_role(Roles.PLAYER):
                 continue
-            if (
-                client.check_role(Roles.METADATA)
-                or client.check_role(Roles.VISUALIZER)
-                or client.check_role(Roles.ARTWORK)
-            ):
+            if client.check_role(Roles.VISUALIZER) or client.check_role(Roles.ARTWORK):
                 self._send_stream_start_msg(client, None)
 
         # Send any pre-existing artwork to artwork clients
@@ -762,7 +758,12 @@ class ResonateGroup:
         self._stream_commands = None
 
         for client in self._clients:
-            self._send_stream_end_msg(client)
+            if (
+                client.check_role(Roles.PLAYER)
+                or client.check_role(Roles.VISUALIZER)
+                or client.check_role(Roles.ARTWORK)
+            ):
+                self._send_stream_end_msg(client)
 
         self._audio_encoders.clear()
         self._current_media_art.clear()
@@ -1354,12 +1355,9 @@ class ResonateGroup:
         if self._stream_task is not None and self._media_stream:
             logger.debug("Joining client %s to current stream", client.client_id)
             if client.check_role(Roles.PLAYER):
+                # This will also send a stream start message
                 self._reconfigure_streamer()
-            elif (
-                client.check_role(Roles.METADATA)
-                or client.check_role(Roles.VISUALIZER)
-                or client.check_role(Roles.ARTWORK)
-            ):
+            elif client.check_role(Roles.VISUALIZER) or client.check_role(Roles.ARTWORK):
                 self._send_stream_start_msg(client, None)
 
         # Send current state to the new client
