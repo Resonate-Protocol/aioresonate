@@ -178,9 +178,9 @@ class ResonateGroup:
     _last_sent_muted: bool | None
     """Last muted state sent to controller clients, for change detection."""
     _last_sent_supported_commands: list[MediaCommand] | None
-    """Last supported commands sent to controller clients, for change detection."""
+    """Last computed supported commands sent to clients (output of _get_supported_commands())."""
     _supported_commands: list[MediaCommand]
-    """Commands supported by the application."""
+    """Commands supported by the application (input to _get_supported_commands())."""
 
     def __init__(self, server: ResonateServer, *args: ResonateClient) -> None:
         """
