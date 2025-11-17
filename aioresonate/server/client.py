@@ -466,6 +466,14 @@ class ResonateClient:
             # Core messages
             case ClientHelloMessage(client_info):
                 self._logger.info("Received client/hello")
+                if client_info.version != 1:
+                    self._logger.error(
+                        "Incompatible protocol version %s (only '1' is supported)",
+                        client_info.version,
+                    )
+                    await self.disconnect(retry_connection=False)
+                    return
+
                 self._client_info = client_info
                 self._roles = client_info.supported_roles
                 self._client_id = client_info.client_id
