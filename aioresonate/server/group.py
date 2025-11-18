@@ -181,6 +181,7 @@ class ResonateGroup:
         self._stream_commands: asyncio.Queue[_StreamerReconfigureCommand] | None = None
         self._play_start_time_us: int | None = None
         self._scheduled_stop_handle: asyncio.TimerHandle | None = None
+        self._state_lock = asyncio.Lock()
         logger.debug(
             "ResonateGroup initialized with %d client(s): %s",
             len(self._clients),
@@ -199,81 +200,90 @@ class ResonateGroup:
             play_start_time_us,
         )
 
-        # Cancel any previously scheduled stop to prevent race conditions
-        if self._scheduled_stop_handle is not None:
-            logger.debug("Canceling previously scheduled stop")
-            self._scheduled_stop_handle.cancel()
-            self._scheduled_stop_handle = None
+        # Acquire lock to atomically initialize stream state
+        # Lock will be released before awaiting task to allow stop() to cancel it
+        async with self._state_lock:
+            # Cancel any previously scheduled stop to prevent race conditions
+            if self._scheduled_stop_handle is not None:
+                logger.debug("Canceling previously scheduled stop")
+                self._scheduled_stop_handle.cancel()
+                self._scheduled_stop_handle = None
 
-        self._media_stream = media_stream
-        self._streamer = None
+            self._media_stream = media_stream
+            self._streamer = None
 
-        start_time_us = (
-            play_start_time_us
-            if play_start_time_us is not None
-            else int(self._server.loop.time() * 1_000_000) + INITIAL_PLAYBACK_DELAY_US
-        )
-        self._play_start_time_us = start_time_us
+            start_time_us = (
+                play_start_time_us
+                if play_start_time_us is not None
+                else int(self._server.loop.time() * 1_000_000) + INITIAL_PLAYBACK_DELAY_US
+            )
+            self._play_start_time_us = start_time_us
 
-        group_players = self.players()
-        if not group_players:
-            logger.info("No player clients in group; skipping playback")
-            self._current_state = PlaybackStateType.STOPPED
-            return start_time_us
+            group_players = self.players()
+            if not group_players:
+                logger.info("No player clients in group; skipping playback")
+                self._current_state = PlaybackStateType.STOPPED
+                return start_time_us
 
-        streamer = Streamer(
-            loop=self._server.loop,
-            play_start_time_us=start_time_us,
-        )
-        self._streamer = streamer
-        self._media_stream = media_stream
+            streamer = Streamer(
+                loop=self._server.loop,
+                play_start_time_us=start_time_us,
+            )
+            self._streamer = streamer
+            self._media_stream = media_stream
 
-        # Build configs for all players (all are new for initial setup)
-        all_player_configs: list[ClientStreamConfig] = []
-        for player in group_players:
-            assert player.support
-            target_format = player.determine_optimal_format(media_stream.main_channel[1])
-            all_player_configs.append(
-                ClientStreamConfig(
-                    client_id=player.client.client_id,
-                    target_format=target_format,
-                    buffer_capacity_bytes=player.support.buffer_capacity,
-                    send=player.client.send_message,
+            # Build configs for all players (all are new for initial setup)
+            all_player_configs: list[ClientStreamConfig] = []
+            for player in group_players:
+                assert player.support
+                target_format = player.determine_optimal_format(media_stream.main_channel[1])
+                all_player_configs.append(
+                    ClientStreamConfig(
+                        client_id=player.client.client_id,
+                        target_format=target_format,
+                        buffer_capacity_bytes=player.support.buffer_capacity,
+                        send=player.client.send_message,
+                    )
                 )
+
+            start_payloads, channel_sources = await streamer.configure(
+                all_player_configs, media_stream
+            )
+            self._stream_commands = asyncio.Queue()
+            self._stream_task = self._server.loop.create_task(
+                self._run_streamer(streamer, media_stream, channel_sources)
             )
 
-        start_payloads, channel_sources = await streamer.configure(all_player_configs, media_stream)
-        self._stream_commands = asyncio.Queue()
-        self._stream_task = self._server.loop.create_task(
-            self._run_streamer(streamer, media_stream, channel_sources)
-        )
+            # Notify clients about the upcoming stream configuration
+            for player in group_players:
+                player_payload = start_payloads.get(player.client.client_id)
+                assert player_payload is not None
+                self._send_stream_start_msg(
+                    player.client,
+                    player_payload,
+                )
 
-        # Notify clients about the upcoming stream configuration
-        for player in group_players:
-            player_payload = start_payloads.get(player.client.client_id)
-            assert player_payload is not None
-            self._send_stream_start_msg(
-                player.client,
-                player_payload,
-            )
+            for client in self._clients:
+                if client.check_role(Roles.PLAYER):
+                    continue
+                if client.check_role(Roles.METADATA) or client.check_role(Roles.VISUALIZER):
+                    self._send_stream_start_msg(client, None)
 
-        for client in self._clients:
-            if client.check_role(Roles.PLAYER):
-                continue
-            if client.check_role(Roles.METADATA) or client.check_role(Roles.VISUALIZER):
-                self._send_stream_start_msg(client, None)
+            self._current_state = PlaybackStateType.PLAYING
+            self._signal_event(GroupStateChangedEvent(PlaybackStateType.PLAYING))
 
-        self._current_state = PlaybackStateType.PLAYING
-        self._signal_event(GroupStateChangedEvent(PlaybackStateType.PLAYING))
+            # Capture task reference before releasing lock
+            stream_task = self._stream_task
 
-        end_time_us = start_time_us
-        if self._stream_task is not None:
-            end_time_us = await self._stream_task
-            self._stream_task = None
+        end_time_us = await stream_task
 
-        self._streamer = None
-        self._media_stream = None
-        self._stream_commands = None
+        async with self._state_lock:
+            # Cleanup (only runs if task completed normally)
+            if self._stream_task is not None:
+                self._stream_task = None
+                self._streamer = None
+                self._media_stream = None
+                self._stream_commands = None
 
         return end_time_us
 
@@ -497,7 +507,11 @@ class ResonateGroup:
             active_channels.clear()
 
     def _reconfigure_streamer(self) -> None:
-        """Reconfigure the running streamer with current client topology."""
+        """
+        Reconfigure the running streamer with current client topology.
+
+        NOTE: Must be called while holding _state_lock to prevent race conditions.
+        """
         if (
             self._streamer is None
             or self._stream_commands is None
@@ -734,37 +748,38 @@ class ResonateGroup:
             bool: True if an active stream was stopped (or scheduled to stop),
             False if no stream was active and no cleanup was required.
         """
-        # Cancel any existing scheduled stop first to prevent race conditions
-        if self._scheduled_stop_handle is not None:
-            logger.debug("Canceling previously scheduled stop in stop()")
-            self._scheduled_stop_handle.cancel()
-            self._scheduled_stop_handle = None
+        async with self._state_lock:
+            # Cancel any existing scheduled stop first to prevent race conditions
+            if self._scheduled_stop_handle is not None:
+                logger.debug("Canceling previously scheduled stop in stop()")
+                self._scheduled_stop_handle.cancel()
+                self._scheduled_stop_handle = None
 
-        active = self._stream_task is not None
-        needs_cleanup = self._current_state != PlaybackStateType.STOPPED
+            active = self._stream_task is not None
+            needs_cleanup = self._current_state != PlaybackStateType.STOPPED
 
-        # Handle delayed stop if requested
-        if stop_time_us is not None and self._schedule_delayed_stop(
-            stop_time_us, active, needs_cleanup
-        ):
-            return active or needs_cleanup
+            # Handle delayed stop if requested
+            if stop_time_us is not None and self._schedule_delayed_stop(
+                stop_time_us, active, needs_cleanup
+            ):
+                return active or needs_cleanup
 
-        if not active and not needs_cleanup:
-            return False
+            if not active and not needs_cleanup:
+                return False
 
-        logger.debug(
-            "Stopping playback for group with clients: %s",
-            [c.client_id for c in self._clients],
-        )
+            logger.debug(
+                "Stopping playback for group with clients: %s",
+                [c.client_id for c in self._clients],
+            )
 
-        try:
-            await self._cancel_stream_task()
-        finally:
-            await self._cleanup_streaming_resources()
+            try:
+                await self._cancel_stream_task()
+            finally:
+                await self._cleanup_streaming_resources()
 
-        if self._current_state != PlaybackStateType.STOPPED:
-            self._signal_event(GroupStateChangedEvent(PlaybackStateType.STOPPED))
-            self._current_state = PlaybackStateType.STOPPED
+            if self._current_state != PlaybackStateType.STOPPED:
+                self._signal_event(GroupStateChangedEvent(PlaybackStateType.STOPPED))
+                self._current_state = PlaybackStateType.STOPPED
 
         self._send_stopped_state_to_clients()
         return True
@@ -1012,18 +1027,20 @@ class ResonateGroup:
         if len(self._clients) == 1:
             # Delete this group if that was the last client
             await self.stop()
-            self._clients = []
+            async with self._state_lock:
+                self._clients = []
         else:
             self._clients.remove(client)
             self._send_stream_end_msg(client)
 
-            # Reconfigure streamer if actively streaming
-            if (
-                self._stream_task is not None
-                and self._media_stream is not None
-                and client.check_role(Roles.PLAYER)
-            ):
-                self._reconfigure_streamer()
+            async with self._state_lock:
+                # Reconfigure streamer if actively streaming
+                if (
+                    self._stream_task is not None
+                    and self._media_stream is not None
+                    and client.check_role(Roles.PLAYER)
+                ):
+                    self._reconfigure_streamer()
         if not self._clients:
             # Emit event for group deletion, no clients left
             self._signal_event(GroupDeletedEvent())
@@ -1059,43 +1076,48 @@ class ResonateGroup:
 
         # Then set the group (which will emit ClientGroupChangedEvent)
         client._set_group(self)  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
-        if self._stream_task is not None and self._media_stream:
-            logger.debug("Joining client %s to current stream", client.client_id)
-            if client.check_role(Roles.PLAYER):
-                self._reconfigure_streamer()
-            elif client.check_role(Roles.METADATA) or client.check_role(Roles.VISUALIZER):
-                self._send_stream_start_msg(client, None)
 
-        # Send current metadata to the new player if available
-        if self._current_metadata is not None:
-            if client.check_role(Roles.METADATA):
-                metadata_update = self._current_metadata.snapshot_update(
-                    int(self._server.loop.time() * 1_000_000)
-                )
-            else:
-                metadata_update = None
-            if client.check_role(Roles.CONTROLLER) or client.check_role(Roles.METADATA):
-                playback_state = (
-                    PlaybackStateType.PLAYING
-                    if self._current_state == PlaybackStateType.PLAYING
-                    else PlaybackStateType.PAUSED
-                )
-            else:
-                playback_state = None
-            message = SessionUpdateMessage(
-                SessionUpdatePayload(
-                    group_id=self._group_id,
-                    playback_state=playback_state,
-                    metadata=metadata_update,
-                )
-            )
+        async with self._state_lock:
+            if self._stream_task is not None and self._media_stream:
+                logger.debug("Joining client %s to current stream", client.client_id)
+                if client.check_role(Roles.PLAYER):
+                    self._reconfigure_streamer()
+                elif client.check_role(Roles.METADATA) or client.check_role(Roles.VISUALIZER):
+                    self._send_stream_start_msg(client, None)
 
-            logger.debug("Sending session update to new client %s", client.client_id)
-            client.send_message(message)
+            # Send current metadata to the new player if available
+            if self._current_metadata is not None:
+                if client.check_role(Roles.METADATA):
+                    metadata_update = self._current_metadata.snapshot_update(
+                        int(self._server.loop.time() * 1_000_000)
+                    )
+                else:
+                    metadata_update = None
+                if client.check_role(Roles.CONTROLLER) or client.check_role(Roles.METADATA):
+                    playback_state = (
+                        PlaybackStateType.PLAYING
+                        if self._current_state == PlaybackStateType.PLAYING
+                        else PlaybackStateType.PAUSED
+                    )
+                else:
+                    playback_state = None
+                message = SessionUpdateMessage(
+                    SessionUpdatePayload(
+                        group_id=self._group_id,
+                        playback_state=playback_state,
+                        metadata=metadata_update,
+                    )
+                )
 
-        # Send current media art to the new client if available
-        if self._current_media_art is not None:
-            await self._send_media_art_to_client(client, self._current_media_art)
+                logger.debug("Sending session update to new client %s", client.client_id)
+                client.send_message(message)
+
+            # Send current media art to the new client if available
+            current_media_art = self._current_media_art
+
+        # Send media art outside the lock to avoid holding lock during I/O
+        if current_media_art is not None:
+            await self._send_media_art_to_client(client, current_media_art)
 
     def handle_stream_format_request(
         self,
