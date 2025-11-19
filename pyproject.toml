@@ -31,6 +31,7 @@ version = "0.0.0"
 [project.optional-dependencies]
 cli = [
   "aioconsole>=0.8.0",
+  "numpy>=1.24.0",
   "sounddevice>=0.4.6",
 ]
 test = [

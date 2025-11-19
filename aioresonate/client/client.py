@@ -25,6 +25,8 @@ from aioresonate.models.core import (
     DeviceInfo,
     GroupUpdateServerMessage,
     GroupUpdateServerPayload,
+    ServerCommandMessage,
+    ServerCommandPayload,
     ServerHelloMessage,
     ServerHelloPayload,
     ServerStateMessage,
@@ -93,6 +95,9 @@ AudioChunkCallback = Callable[[int, bytes, PCMFormat], Awaitable[None] | None]
 
 # Callback invoked when the client disconnects from the server.
 DisconnectCallback = Callable[[], Awaitable[None] | None]
+
+# Callback invoked when server sends player commands (volume, mute).
+ServerCommandCallback = Callable[[ServerCommandPayload], Awaitable[None] | None]
 
 
 @dataclass(slots=True)
@@ -179,6 +184,8 @@ class ResonateClient:
     """Callback invoked when audio chunks are received."""
     _disconnect_callback: DisconnectCallback | None = None
     """Callback invoked when the client disconnects."""
+    _server_command_callback: ServerCommandCallback | None = None
+    """Callback invoked when server sends player commands."""
 
     _initial_volume: int
     """Initial volume level for player role (0-100)."""
@@ -421,6 +428,10 @@ class ResonateClient:
         """Set or clear (if None) the callback invoked when the client disconnects."""
         self._disconnect_callback = callback
 
+    def set_server_command_listener(self, callback: ServerCommandCallback | None) -> None:
+        """Set or clear (if None) the callback invoked when server sends player commands."""
+        self._server_command_callback = callback
+
     def is_time_synchronized(self) -> bool:
         """Return whether time synchronization with the server has converged."""
         return self._time_filter.is_synchronized
@@ -501,6 +512,8 @@ class ResonateClient:
                 await self._handle_group_update(payload)
             case ServerStateMessage(payload=payload):
                 await self._handle_server_state(payload)
+            case ServerCommandMessage(payload=payload):
+                await self._handle_server_command(payload)
             case _:
                 logger.debug("Unhandled server message type: %s", type(message).__name__)
 
@@ -628,6 +641,10 @@ class ResonateClient:
         if payload.metadata is not None:
             await self._notify_metadata_callback(payload)
 
+    async def _handle_server_command(self, payload: ServerCommandPayload) -> None:
+        """Handle server/command message."""
+        await self._notify_server_command_callback(payload)
+
     def _configure_audio_output(self, pcm_format: PCMFormat) -> None:
         """Store the current audio format for use in callbacks."""
         self._current_pcm_format = pcm_format
@@ -746,6 +763,16 @@ class ResonateClient:
                 await result
         except Exception:
             logger.exception("Error in disconnect callback %s", self._disconnect_callback)
+
+    async def _notify_server_command_callback(self, payload: ServerCommandPayload) -> None:
+        if self._server_command_callback is None:
+            return
+        try:
+            result = self._server_command_callback(payload)
+            if asyncio.iscoroutine(result):
+                await result
+        except Exception:
+            logger.exception("Error in server command callback %s", self._server_command_callback)
 
     async def _time_sync_loop(self) -> None:
         try:

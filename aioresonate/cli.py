@@ -30,16 +30,22 @@ from aioresonate.client import PCMFormat, ResonateClient
 from aioresonate.models.core import (
     DeviceInfo,
     GroupUpdateServerPayload,
+    ServerCommandPayload,
     ServerStatePayload,
     StreamStartMessage,
 )
 from aioresonate.models.metadata import SessionUpdateMetadata
-from aioresonate.models.player import ClientHelloPlayerSupport, SupportedAudioFormat
+from aioresonate.models.player import (
+    ClientHelloPlayerSupport,
+    PlayerCommandPayload,
+    SupportedAudioFormat,
+)
 from aioresonate.models.types import (
     AudioCodec,
     MediaCommand,
     PlaybackStateType,
     PlayerCommand,
+    PlayerStateType,
     Roles,
     UndefinedField,
 )
@@ -64,6 +70,8 @@ class CLIState:
     album: str | None = None
     track_progress: int | None = None
     track_duration: int | None = None
+    player_volume: int = 100
+    player_muted: bool = False
 
     def update_metadata(self, metadata: SessionUpdateMetadata) -> bool:
         """Merge new metadata into the state and report if anything changed."""
@@ -664,6 +672,9 @@ async def main_async(argv: Sequence[str] | None = None) -> int:  # noqa: PLR0915
         client.set_stream_start_listener(audio_handler.on_stream_start)
         client.set_stream_end_listener(audio_handler.on_stream_end)
         client.set_audio_chunk_listener(audio_handler.on_audio_chunk)
+        client.set_server_command_listener(
+            lambda payload: _handle_server_command(state, audio_handler, client, payload)
+        )
 
         # Audio player will be created when first audio chunk arrives
 
@@ -732,6 +743,37 @@ async def _handle_server_state(state: CLIState, payload: ServerStatePayload) -> 
             _print_event("Muted" if controller.muted else "Unmuted")
 
 
+async def _handle_server_command(
+    state: CLIState,
+    audio_handler: AudioStreamHandler,
+    client: ResonateClient,
+    payload: ServerCommandPayload,
+) -> None:
+    """Handle server/command messages for player volume/mute control."""
+    if payload.player is None:
+        return
+
+    player_cmd: PlayerCommandPayload = payload.player
+
+    if player_cmd.command == PlayerCommand.VOLUME and player_cmd.volume is not None:
+        state.player_volume = player_cmd.volume
+        if audio_handler.audio_player is not None:
+            audio_handler.audio_player.set_volume(state.player_volume, muted=state.player_muted)
+        _print_event(f"Server set player volume: {player_cmd.volume}%")
+    elif player_cmd.command == PlayerCommand.MUTE and player_cmd.mute is not None:
+        state.player_muted = player_cmd.mute
+        if audio_handler.audio_player is not None:
+            audio_handler.audio_player.set_volume(state.player_volume, muted=state.player_muted)
+        _print_event("Server muted player" if player_cmd.mute else "Server unmuted player")
+
+    # Send state update back to server per spec
+    await client.send_player_state(
+        state=PlayerStateType.SYNCHRONIZED,
+        volume=state.player_volume,
+        muted=state.player_muted,
+    )
+
+
 class CommandHandler:
     """Parses and executes user commands from the keyboard."""
 
@@ -792,6 +834,12 @@ class CommandHandler:
             await self._send_media_command(MediaCommand.UNSHUFFLE)
         elif command_lower in {"switch", "sw"}:
             await self._send_media_command(MediaCommand.SWITCH)
+        elif command_lower in {"pvol+", "pvolume+"}:
+            await self._change_player_volume(5)
+        elif command_lower in {"pvol-", "pvolume-"}:
+            await self._change_player_volume(-5)
+        elif command_lower in {"pmute", "pm"}:
+            await self._toggle_player_mute()
         elif keyword == "delay":
             self._handle_delay_command(parts)
         else:
@@ -829,6 +877,37 @@ class CommandHandler:
             return
         target = not bool(self._state.muted)
         await self._client.send_group_command(MediaCommand.MUTE, mute=target)
+
+    async def _change_player_volume(self, delta: int) -> None:
+        """Adjust player (system) volume by delta."""
+        target = max(0, min(100, self._state.player_volume + delta))
+        self._state.player_volume = target
+        # Apply volume to audio player
+        if self._audio_handler.audio_player is not None:
+            self._audio_handler.audio_player.set_volume(
+                self._state.player_volume, muted=self._state.player_muted
+            )
+        await self._client.send_player_state(
+            state=PlayerStateType.SYNCHRONIZED,
+            volume=self._state.player_volume,
+            muted=self._state.player_muted,
+        )
+        _print_event(f"Player volume: {target}%")
+
+    async def _toggle_player_mute(self) -> None:
+        """Toggle player (system) mute state."""
+        self._state.player_muted = not self._state.player_muted
+        # Apply mute to audio player
+        if self._audio_handler.audio_player is not None:
+            self._audio_handler.audio_player.set_volume(
+                self._state.player_volume, muted=self._state.player_muted
+            )
+        await self._client.send_player_state(
+            state=PlayerStateType.SYNCHRONIZED,
+            volume=self._state.player_volume,
+            muted=self._state.player_muted,
+        )
+        _print_event("Player muted" if self._state.player_muted else "Player unmuted")
 
     def _handle_delay_command(self, parts: list[str]) -> None:
         """Process delay commands."""
@@ -887,7 +966,8 @@ def _print_instructions() -> None:
         (
             "Commands: play(p), pause, stop(s), next(n), prev(b), vol+/-, mute(m), toggle,\n"
             "  repeat_off(ro), repeat_one(r1), repeat_all(ra), shuffle(sh), unshuffle(ush),\n"
-            "  switch(sw), delay, quit(q)\n"
+            "  switch(sw), pvol+/-, pmute(pm), delay, quit(q)\n"
+            "  vol+/- controls group volume, pvol+/- controls player volume\n"
             "  delay [<ms>|+ <ms>|- <ms>] shows or adjusts the static delay"
         ),
         flush=True,
