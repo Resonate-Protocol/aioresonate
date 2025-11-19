@@ -780,6 +780,18 @@ class CommandHandler:
             await self._toggle_mute()
         elif command_lower == "toggle":
             await self._toggle_play_pause()
+        elif command_lower in {"repeat_off", "repeat-off", "ro"}:
+            await self._send_media_command(MediaCommand.REPEAT_OFF)
+        elif command_lower in {"repeat_one", "repeat-one", "r1"}:
+            await self._send_media_command(MediaCommand.REPEAT_ONE)
+        elif command_lower in {"repeat_all", "repeat-all", "ra"}:
+            await self._send_media_command(MediaCommand.REPEAT_ALL)
+        elif command_lower in {"shuffle", "sh"}:
+            await self._send_media_command(MediaCommand.SHUFFLE)
+        elif command_lower in {"unshuffle", "ush"}:
+            await self._send_media_command(MediaCommand.UNSHUFFLE)
+        elif command_lower in {"switch", "sw"}:
+            await self._send_media_command(MediaCommand.SWITCH)
         elif keyword == "delay":
             self._handle_delay_command(parts)
         else:
@@ -873,8 +885,10 @@ def _print_event(message: str) -> None:
 def _print_instructions() -> None:
     print(  # noqa: T201
         (
-            "Commands: play(p), pause, stop(s), next(n), prev(b), vol+/-, mute, toggle, delay, "
-            "quit(q)\n  delay [<ms>|+ <ms>|- <ms>] shows or adjusts the static delay"
+            "Commands: play(p), pause, stop(s), next(n), prev(b), vol+/-, mute(m), toggle,\n"
+            "  repeat_off(ro), repeat_one(r1), repeat_all(ra), shuffle(sh), unshuffle(ush),\n"
+            "  switch(sw), delay, quit(q)\n"
+            "  delay [<ms>|+ <ms>|- <ms>] shows or adjusts the static delay"
         ),
         flush=True,
     )
