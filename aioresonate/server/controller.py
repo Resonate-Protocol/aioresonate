@@ -70,7 +70,14 @@ class ControllerClient:
         next_group = cycle_groups[next_index]
 
         # Move client to the next group
-        if next_group != current_group:
+        if next_group is None:
+            # The group.remove_client will create a new solo group for the client
+            self._logger.info(
+                "Switching client %s to solo group",
+                self.client.client_id,
+            )
+            await current_group.remove_client(self.client)
+        elif next_group != current_group:
             self._logger.info(
                 "Switching client %s to group %s",
                 self.client.client_id,
@@ -98,12 +105,16 @@ class ControllerClient:
         all_groups: list[ResonateGroup],
         current_group: ResonateGroup,
         has_player_role: bool,  # noqa: FBT001
-    ) -> list[ResonateGroup]:
-        """Build the cycle of groups based on the spec."""
+    ) -> list[ResonateGroup | None]:
+        """
+        Build the cycle of groups based on the spec.
+
+        Returns a list of groups to cycle through. For player clients, the list
+        may contain None indicating to "go to a new solo group".
+        """
         # Separate groups into categories
         multi_client_playing: list[ResonateGroup] = []
         single_client: list[ResonateGroup] = []
-        current_solo: list[ResonateGroup] = []
 
         for group in all_groups:
             client_count = len(group.clients)
@@ -118,9 +129,8 @@ class ControllerClient:
             elif client_count == 1:
                 # Get the single client in this group
                 single_client_obj = group.clients[0]
-                if group == current_group:
-                    current_solo.append(group)
-                elif single_client_obj.check_role(Roles.PLAYER):
+                # Skip current group, it will be handled as solo option for player clients
+                if group != current_group and single_client_obj.check_role(Roles.PLAYER):
                     # Only include single-client groups where the client has player role
                     single_client.append(group)
 
@@ -131,6 +141,9 @@ class ControllerClient:
         # Build cycle based on client's player role
         if has_player_role:
             # With player role: multi-client playing -> single-client -> own solo
-            return multi_client_playing + single_client + current_solo
+            current_is_solo = len(current_group.clients) == 1
+            # Use current group if solo, otherwise switch to new solo group (None)
+            solo_option: list[ResonateGroup | None] = [current_group] if current_is_solo else [None]
+            return multi_client_playing + single_client + solo_option
         # Without player role: multi-client playing -> single-client (no own solo)
-        return multi_client_playing + single_client
+        return [*multi_client_playing, *single_client]
