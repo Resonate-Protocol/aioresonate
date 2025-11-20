@@ -40,6 +40,62 @@ class Metadata:
     """Whether shuffle is enabled."""
     track_progress: int | None = None
     """Track progress in milliseconds at the last update time."""
+    timestamp_us: int | None = None
+    """Timestamp in microseconds when this metadata was captured."""
+
+    def equals(self, other: Metadata | None, progress_tolerance_ms: int = 500) -> bool:
+        """
+        Check if metadata is meaningfully equal.
+
+        Args:
+            other: The other Metadata object to compare with.
+            progress_tolerance_ms: Tolerance in milliseconds for track progress comparison.
+
+        Returns:
+            True if metadata is meaningfully equal, False otherwise.
+        """
+        if other is None:
+            return False
+
+        # Compare all non-progress fields
+        if not (
+            self.title == other.title
+            and self.artist == other.artist
+            and self.album_artist == other.album_artist
+            and self.album == other.album
+            and self.artwork_url == other.artwork_url
+            and self.year == other.year
+            and self.track == other.track
+            and self.track_duration == other.track_duration
+            and self.playback_speed == other.playback_speed
+            and self.repeat == other.repeat
+            and self.shuffle == other.shuffle
+        ):
+            return False
+
+        # If both have no progress info, they're equal
+        if self.track_progress is None and other.track_progress is None:
+            return True
+
+        # If only one has progress info, they're different
+        if self.track_progress is None or other.track_progress is None:
+            return False
+
+        # If we don't have timestamps, fall back to simple tolerance check
+        if self.timestamp_us is None or other.timestamp_us is None:
+            return abs(self.track_progress - other.track_progress) <= progress_tolerance_ms
+
+        # Calculate expected progress change based on elapsed time and playback speed
+        time_diff_ms = (other.timestamp_us - self.timestamp_us) / 1000
+        playback_speed = (self.playback_speed or 1000) / 1000  # Convert to float multiplier
+        expected_progress_change = time_diff_ms * playback_speed
+
+        # Calculate actual progress change
+        actual_progress_change = other.track_progress - self.track_progress
+
+        # Check if the difference between expected and actual is within tolerance
+        progress_drift = abs(actual_progress_change - expected_progress_change)
+        return progress_drift <= progress_tolerance_ms
 
     def diff_update(self, last: Metadata | None, timestamp: int) -> SessionUpdateMetadata:
         """Build a SessionUpdateMetadata containing only changed fields compared to last."""
