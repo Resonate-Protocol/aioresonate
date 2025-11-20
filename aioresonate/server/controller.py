@@ -126,7 +126,7 @@ class ControllerClient:
                 has_player = any(c.check_role(Roles.PLAYER) for c in group.clients)
                 if has_player:
                     multi_client_playing.append(group)
-            elif client_count == 1:
+            elif client_count == 1 and is_playing:
                 # Get the single client in this group
                 single_client_obj = group.clients[0]
                 # Skip current group, it will be handled as solo option for player clients
