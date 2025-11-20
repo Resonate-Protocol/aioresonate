@@ -102,10 +102,27 @@ class PlayerClient:
 
     def handle_player_update(self, state: PlayerStatePayload) -> None:
         """Update internal mute/volume state from client report and emit event."""
-        self._logger.debug("Received player state: volume=%d, muted=%s", state.volume, state.muted)
-        if self._muted != state.muted or self._volume != state.volume:
-            self._volume = state.volume
-            self._muted = state.muted
+        changed = False
+
+        if state.volume is not None:
+            if not self.support or PlayerCommand.VOLUME not in self.support.supported_commands:
+                self._logger.warning(
+                    "Client sent volume field without declaring 'volume' in supported_commands"
+                )
+            elif self._volume != state.volume:
+                self._volume = state.volume
+                changed = True
+
+        if state.muted is not None:
+            if not self.support or PlayerCommand.MUTE not in self.support.supported_commands:
+                self._logger.warning(
+                    "Client sent muted field without declaring 'mute' in supported_commands"
+                )
+            elif self._muted != state.muted:
+                self._muted = state.muted
+                changed = True
+
+        if changed:
             self.client._signal_event(  # noqa: SLF001
                 VolumeChangedEvent(volume=self._volume, muted=self._muted)
             )

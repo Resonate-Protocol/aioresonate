@@ -72,15 +72,20 @@ class PlayerStatePayload(DataClassORJSONMixin):
     an error preventing current or future playback (unable to keep up,
     issues keeping the clock in sync, etc).
     """
-    volume: int
-    """Volume range 0-100."""
-    muted: bool
-    """Mute state."""
+    volume: int | None = None
+    """Volume range 0-100, only included if 'volume' in supported_commands."""
+    muted: bool | None = None
+    """Mute state, only included if 'mute' in supported_commands."""
 
     def __post_init__(self) -> None:
         """Validate field values."""
-        if not 0 <= self.volume <= 100:
+        if self.volume is not None and not 0 <= self.volume <= 100:
             raise ValueError(f"Volume must be in range 0-100, got {self.volume}")
+
+    class Config(BaseConfig):
+        """Config for parsing json messages."""
+
+        omit_none = True
 
 
 # Server -> Client: server/command player object
