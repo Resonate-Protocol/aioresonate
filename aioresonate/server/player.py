@@ -127,11 +127,11 @@ class PlayerClient:
             AudioFormat: The optimal format for this client.
         """
         support = self.support
-        if not support or not support.support_formats:
+        if not support or not support.supported_formats:
             raise ValueError(f"Client {self.client.client_id} has no supported formats")
 
         # Get available codecs
-        support_codecs = {fmt.codec for fmt in support.support_formats}
+        support_codecs = {fmt.codec for fmt in support.supported_formats}
 
         # Determine optimal codec with fallback chain
         codec_fallbacks = [AudioCodec.FLAC, AudioCodec.OPUS, AudioCodec.PCM]
@@ -145,8 +145,8 @@ class PlayerClient:
         if selected_codec is None:
             raise ValueError(f"Client {self.client.client_id} does not support any known codec")
 
-        # Filter support_formats by the selected codec to get per-codec capabilities
-        codec_formats = [fmt for fmt in support.support_formats if fmt.codec == selected_codec]
+        # Filter supported_formats by the selected codec to get per-codec capabilities
+        codec_formats = [fmt for fmt in support.supported_formats if fmt.codec == selected_codec]
 
         # Get supported values for this specific codec
         codec_sample_rates = {fmt.sample_rate for fmt in codec_formats}

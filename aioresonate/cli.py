@@ -619,7 +619,7 @@ async def main_async(argv: Sequence[str] | None = None) -> int:  # noqa: PLR0915
         roles=[Roles.CONTROLLER, Roles.PLAYER, Roles.METADATA],
         device_info=_get_device_info(),
         player_support=ClientHelloPlayerSupport(
-            support_formats=[
+            supported_formats=[
                 SupportedAudioFormat(
                     codec=AudioCodec.PCM, channels=2, sample_rate=44_100, bit_depth=16
                 ),

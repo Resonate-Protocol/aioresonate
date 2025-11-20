@@ -45,7 +45,7 @@ class SupportedAudioFormat(DataClassORJSONMixin):
 class ClientHelloPlayerSupport(DataClassORJSONMixin):
     """Player support configuration - only if player role is set."""
 
-    support_formats: list[SupportedAudioFormat]
+    supported_formats: list[SupportedAudioFormat]
     """List of supported audio formats in priority order (first is preferred)."""
     buffer_capacity: int
     """Max size in bytes of compressed audio messages in the buffer that are yet to be played."""
@@ -57,8 +57,8 @@ class ClientHelloPlayerSupport(DataClassORJSONMixin):
         if self.buffer_capacity <= 0:
             raise ValueError(f"buffer_capacity must be positive, got {self.buffer_capacity}")
 
-        if not self.support_formats:
-            raise ValueError("support_formats cannot be empty")
+        if not self.supported_formats:
+            raise ValueError("supported_formats cannot be empty")
 
 
 # Client -> Server: client/state player object
