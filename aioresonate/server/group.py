@@ -848,6 +848,9 @@ class ResonateGroup:
             bool: True if an active stream was stopped (or scheduled to stop),
             False if no stream was active and no cleanup was required.
         """
+        if len(self._clients) == 0:
+            # An empty group cannot have active playback
+            return False
         # Cancel any existing scheduled stop first to prevent race conditions
         if self._scheduled_stop_handle is not None:
             logger.debug("Canceling previously scheduled stop in stop()")
