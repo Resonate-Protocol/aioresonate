@@ -16,6 +16,37 @@ from mashumaro.mixins.orjson import DataClassORJSONMixin
 from .types import RepeatMode, UndefinedField, undefined_field
 
 
+@dataclass
+class Progress(DataClassORJSONMixin):
+    """Playback progress information."""
+
+    track_progress: int
+    """Track progress in milliseconds, since start of track."""
+    track_duration: int
+    """Track duration in milliseconds. 0 for unlimited/unknown duration (e.g., live streams)."""
+    playback_speed: int
+    """Playback speed multiplier * 1000 (e.g., 1000 = normal, 1500 = 1.5x, 0 = paused)."""
+
+    def __post_init__(self) -> None:
+        """Validate field values."""
+        # Validate track_progress is non-negative
+        if self.track_progress < 0:
+            raise ValueError(f"track_progress must be non-negative, got {self.track_progress}")
+
+        # Validate track_duration is non-negative (0 allowed for live streams)
+        if self.track_duration < 0:
+            raise ValueError(f"track_duration must be non-negative, got {self.track_duration}")
+
+        # Validate playback_speed is non-negative
+        if self.playback_speed < 0:
+            raise ValueError(f"playback_speed must be non-negative, got {self.playback_speed}")
+
+    class Config(BaseConfig):
+        """Config for parsing json messages."""
+
+        omit_default = True
+
+
 # Server -> Client: server/state metadata object
 @dataclass
 class SessionUpdateMetadata(DataClassORJSONMixin):
@@ -30,41 +61,17 @@ class SessionUpdateMetadata(DataClassORJSONMixin):
     artwork_url: str | None | UndefinedField = field(default_factory=undefined_field)
     year: int | None | UndefinedField = field(default_factory=undefined_field)
     track: int | None | UndefinedField = field(default_factory=undefined_field)
-    track_progress: int | None | UndefinedField = field(default_factory=undefined_field)
-    """Track progress in milliseconds, since start of track, at the given timestamp."""
-    track_duration: int | None | UndefinedField = field(default_factory=undefined_field)
-    """Track duration in milliseconds."""
-    playback_speed: int | None | UndefinedField = field(default_factory=undefined_field)
-    """Playback speed multiplier * 1000."""
+    progress: Progress | None | UndefinedField = field(default_factory=undefined_field)
+    """
+    Playback progress information.
+
+    The server must send this object whenever playback state changes.
+    """
     repeat: RepeatMode | None | UndefinedField = field(default_factory=undefined_field)
     shuffle: bool | None | UndefinedField = field(default_factory=undefined_field)
 
     def __post_init__(self) -> None:
         """Validate field values."""
-        # Validate track_progress is non-negative
-        if (
-            not isinstance(self.track_progress, UndefinedField)
-            and self.track_progress is not None
-            and self.track_progress < 0
-        ):
-            raise ValueError(f"track_progress must be non-negative, got {self.track_progress}")
-
-        # Validate track_duration is positive
-        if (
-            not isinstance(self.track_duration, UndefinedField)
-            and self.track_duration is not None
-            and self.track_duration <= 0
-        ):
-            raise ValueError(f"track_duration must be positive, got {self.track_duration}")
-
-        # Validate playback_speed is positive
-        if (
-            not isinstance(self.playback_speed, UndefinedField)
-            and self.playback_speed is not None
-            and self.playback_speed <= 0
-        ):
-            raise ValueError(f"playback_speed must be positive, got {self.playback_speed}")
-
         # Validate year is reasonable (between 1000 and current year + 10)
         if (
             not isinstance(self.year, UndefinedField)

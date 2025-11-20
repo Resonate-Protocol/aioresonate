@@ -76,13 +76,31 @@ class CLIState:
     def update_metadata(self, metadata: SessionUpdateMetadata) -> bool:
         """Merge new metadata into the state and report if anything changed."""
         changed = False
-        for attr in ("title", "artist", "album", "track_progress", "track_duration"):
+        for attr in ("title", "artist", "album"):
             value = getattr(metadata, attr)
             if isinstance(value, UndefinedField):
                 continue
             if getattr(self, attr) != value:
                 setattr(self, attr, value)
                 changed = True
+
+        # Update progress fields from nested progress object
+        if not isinstance(metadata.progress, UndefinedField):
+            if metadata.progress is None:
+                # Clear progress fields
+                if self.track_progress is not None or self.track_duration is not None:
+                    self.track_progress = None
+                    self.track_duration = None
+                    changed = True
+            else:
+                # Update from nested progress object
+                if self.track_progress != metadata.progress.track_progress:
+                    self.track_progress = metadata.progress.track_progress
+                    changed = True
+                if self.track_duration != metadata.progress.track_duration:
+                    self.track_duration = metadata.progress.track_duration
+                    changed = True
+
         return changed
 
     def describe(self) -> str:

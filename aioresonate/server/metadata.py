@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from aioresonate.models.metadata import SessionUpdateMetadata
+from aioresonate.models.metadata import Progress, SessionUpdateMetadata
 from aioresonate.models.types import RepeatMode
 
 if TYPE_CHECKING:
@@ -30,16 +30,20 @@ class Metadata:
     """Release year of the current media."""
     track: int | None = None
     """Track number of the current media."""
-    track_duration: int | None = None
-    """Track duration in milliseconds."""
-    playback_speed: int | None = None
-    """Playback speed multiplier * 1000 (e.g., 1000 = normal speed, 1500 = 1.5x speed)."""
     repeat: RepeatMode | None = None
     """Current repeat mode."""
     shuffle: bool | None = None
     """Whether shuffle is enabled."""
+
+    # Progress fields:
+    # When sending to clients, all three fields must be set or none will be sent
     track_progress: int | None = None
     """Track progress in milliseconds at the last update time."""
+    track_duration: int | None = None
+    """Track duration in milliseconds. Use 0 for unlimited/unknown duration (e.g., live streams)."""
+    playback_speed: int | None = None
+    """Playback speed multiplier * 1000 (e.g., 1000 = normal, 1500 = 1.5x, 0 = paused)."""
+
     timestamp_us: int | None = None
     """
     Timestamp in microseconds when this metadata was captured.
@@ -121,17 +125,30 @@ class Metadata:
             metadata_update.year = self.year
         if last is None or last.track != self.track:
             metadata_update.track = self.track
-        if last is None or last.track_duration != self.track_duration:
-            metadata_update.track_duration = self.track_duration
-        if last is None or last.playback_speed != self.playback_speed:
-            metadata_update.playback_speed = self.playback_speed
         if last is None or last.repeat != self.repeat:
             metadata_update.repeat = self.repeat
         if last is None or last.shuffle != self.shuffle:
             metadata_update.shuffle = self.shuffle
-        # Always send track_progress if set (clients need fresh timestamp for progress calculation)
-        if self.track_progress is not None:
-            metadata_update.track_progress = self.track_progress
+
+        # Send progress object if any progress field changed or if track_progress is set
+        # (clients need fresh timestamp for progress calculation)
+        progress_changed = (
+            last is None
+            or last.track_duration != self.track_duration
+            or last.playback_speed != self.playback_speed
+            or self.track_progress is not None
+        )
+        if (
+            progress_changed
+            and self.track_progress is not None
+            and self.track_duration is not None
+            and self.playback_speed is not None
+        ):
+            metadata_update.progress = Progress(
+                track_progress=self.track_progress,
+                track_duration=self.track_duration,
+                playback_speed=self.playback_speed,
+            )
 
         return metadata_update
 
@@ -146,11 +163,9 @@ class Metadata:
         metadata_update.artwork_url = None
         metadata_update.year = None
         metadata_update.track = None
-        metadata_update.track_duration = None
-        metadata_update.playback_speed = None
+        metadata_update.progress = None
         metadata_update.repeat = None
         metadata_update.shuffle = None
-        metadata_update.track_progress = None
         return metadata_update
 
     def snapshot_update(self, timestamp: int) -> SessionUpdateMetadata:
@@ -163,11 +178,19 @@ class Metadata:
         metadata_update.artwork_url = self.artwork_url
         metadata_update.year = self.year
         metadata_update.track = self.track
-        metadata_update.track_duration = self.track_duration
-        metadata_update.playback_speed = self.playback_speed
         metadata_update.repeat = self.repeat
         metadata_update.shuffle = self.shuffle
-        metadata_update.track_progress = self.track_progress
+        # Build progress object if all progress fields are set
+        if (
+            self.track_progress is not None
+            and self.track_duration is not None
+            and self.playback_speed is not None
+        ):
+            metadata_update.progress = Progress(
+                track_progress=self.track_progress,
+                track_duration=self.track_duration,
+                playback_speed=self.playback_speed,
+            )
         return metadata_update
 
 

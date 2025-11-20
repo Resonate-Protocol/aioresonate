@@ -43,6 +43,7 @@ from aioresonate.models.core import (
     StreamUpdateMessage,
     StreamUpdatePayload,
 )
+from aioresonate.models.metadata import Progress
 from aioresonate.models.player import (
     StreamStartPlayer,
 )
@@ -351,8 +352,19 @@ class ResonateGroup:
                     else None
                 )
                 # Use calculated track progress for actively playing content
-                if metadata_update is not None:
-                    metadata_update.track_progress = self._get_current_track_progress()
+                if metadata_update is not None and self._current_metadata is not None:
+                    current_progress = self._get_current_track_progress()
+                    # Update the progress object with current calculated progress
+                    if (
+                        current_progress is not None
+                        and self._current_metadata.track_duration is not None
+                        and self._current_metadata.playback_speed is not None
+                    ):
+                        metadata_update.progress = Progress(
+                            track_progress=current_progress,
+                            track_duration=self._current_metadata.track_duration,
+                            playback_speed=self._current_metadata.playback_speed,
+                        )
                 metadata_for_client = metadata_update
 
             controller_for_client = None
@@ -925,12 +937,19 @@ class ResonateGroup:
             elapsed_ms = (elapsed_us * self._current_metadata.playback_speed) // 1_000_000
             calculated_progress = self._current_metadata.track_progress + elapsed_ms
 
-            # Clamp to valid range [0, track_duration]
-            if self._current_metadata.track_duration is not None:
+            # Clamp to valid range
+            # If track_duration is 0, it indicates unlimited/unknown duration (e.g., live streams)
+            # In this case, only clamp to >= 0
+            if (
+                self._current_metadata.track_duration is not None
+                and self._current_metadata.track_duration > 0
+            ):
+                # Normal track with known duration: clamp to [0, track_duration]
                 calculated_progress = max(
                     0, min(calculated_progress, self._current_metadata.track_duration)
                 )
             else:
+                # Live stream (track_duration == 0) or unknown duration: only clamp to >= 0
                 calculated_progress = max(0, calculated_progress)
 
             return calculated_progress
@@ -1387,7 +1406,18 @@ class ResonateGroup:
                 int(self._server.loop.time() * 1_000_000)
             )
             # Use calculated track progress for actively playing content
-            metadata_update.track_progress = self._get_current_track_progress()
+            current_progress = self._get_current_track_progress()
+            # Update the progress object with current calculated progress
+            if (
+                current_progress is not None
+                and self._current_metadata.track_duration is not None
+                and self._current_metadata.playback_speed is not None
+            ):
+                metadata_update.progress = Progress(
+                    track_progress=current_progress,
+                    track_duration=self._current_metadata.track_duration,
+                    playback_speed=self._current_metadata.playback_speed,
+                )
             metadata_for_client = metadata_update
 
         controller_for_client = None
