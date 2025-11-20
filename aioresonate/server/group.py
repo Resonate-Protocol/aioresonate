@@ -8,7 +8,7 @@ import uuid
 from asyncio import Task
 from collections.abc import AsyncGenerator, Callable, Coroutine
 from contextlib import suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from io import BytesIO
 from typing import TYPE_CHECKING
 from uuid import UUID
@@ -938,7 +938,7 @@ class ResonateGroup:
         # Otherwise return the stored value
         return self._current_metadata.track_progress
 
-    def set_metadata(self, metadata: Metadata | None, timestamp: int | None = None) -> None:
+    def set_metadata(self, metadata: Metadata | None) -> None:
         """
         Set metadata for the group and send to all clients.
 
@@ -946,12 +946,15 @@ class ResonateGroup:
 
         Args:
             metadata: The new metadata to send to clients.
-            timestamp: Optional timestamp in microseconds for the metadata update.
-                If None, uses the current server time.
         """
         # TODO: integrate this more closely with play_media?
-        if timestamp is None:
-            timestamp = int(self._server.loop.time() * 1_000_000)
+        timestamp = int(self._server.loop.time() * 1_000_000)
+
+        if metadata is not None:
+            if metadata.timestamp_us is None:
+                metadata = replace(metadata, timestamp_us=timestamp)
+            else:
+                timestamp = metadata.timestamp_us
 
         if metadata is not None and metadata.equals(self._current_metadata):
             # No meaningful change, skip this update

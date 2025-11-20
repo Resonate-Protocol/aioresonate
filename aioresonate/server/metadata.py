@@ -41,7 +41,12 @@ class Metadata:
     track_progress: int | None = None
     """Track progress in milliseconds at the last update time."""
     timestamp_us: int | None = None
-    """Timestamp in microseconds when this metadata was captured."""
+    """
+    Timestamp in microseconds when this metadata was captured.
+
+    You don't need to set this, since it will be set automatically by set_metadata() if not
+    provided.
+    """
 
     def equals(self, other: Metadata | None, progress_tolerance_ms: int = 500) -> bool:
         """
