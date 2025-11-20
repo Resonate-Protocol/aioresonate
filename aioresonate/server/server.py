@@ -49,7 +49,7 @@ class ResonateServer:
     _clients: set[ResonateClient]
     """All groups managed by this server."""
     _loop: asyncio.AbstractEventLoop
-    _event_cbs: list[Callable[[ResonateEvent], Coroutine[None, None, None]]]
+    _event_cbs: list[Callable[["ResonateServer", ResonateEvent], Coroutine[None, None, None]]]
     _connection_tasks: dict[str, asyncio.Task[None]]
     """
     All tasks managing client connections.
@@ -253,7 +253,7 @@ class ResonateServer:
             self._retry_events.pop(url, None)  # Cleanup retry events dict
 
     def add_event_listener(
-        self, callback: Callable[[ResonateEvent], Coroutine[None, None, None]]
+        self, callback: Callable[["ResonateServer", ResonateEvent], Coroutine[None, None, None]]
     ) -> Callable[[], None]:
         """
         Register a callback to listen for state changes of the server.
@@ -275,7 +275,7 @@ class ResonateServer:
     def _signal_event(self, event: ResonateEvent) -> None:
         """Signal an event to all registered listeners."""
         for cb in self._event_cbs:
-            task = self._loop.create_task(cb(event))
+            task = self._loop.create_task(cb(self, event))
             task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
 
     def _handle_client_connect(self, client: ResonateClient) -> None:

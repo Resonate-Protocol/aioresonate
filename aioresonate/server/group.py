@@ -151,7 +151,7 @@ class ResonateGroup:
     """Mapping of audio formats to their base64 encoded headers."""
     _preferred_stream_codec: AudioCodec = AudioCodec.OPUS
     """Preferred codec used by the current stream."""
-    _event_cbs: list[Callable[[GroupEvent], Coroutine[None, None, None]]]
+    _event_cbs: list[Callable[[ResonateGroup, GroupEvent], Coroutine[None, None, None]]]
     """List of event callbacks for this group."""
     _current_state: PlaybackStateType = PlaybackStateType.STOPPED
     """Current playback state of the group."""
@@ -1193,7 +1193,7 @@ class ResonateGroup:
         self._signal_event(event)
 
     def add_event_listener(
-        self, callback: Callable[[GroupEvent], Coroutine[None, None, None]]
+        self, callback: Callable[[ResonateGroup, GroupEvent], Coroutine[None, None, None]]
     ) -> Callable[[], None]:
         """
         Register a callback to listen for state changes of this group.
@@ -1214,7 +1214,7 @@ class ResonateGroup:
 
     def _signal_event(self, event: GroupEvent) -> None:
         for cb in self._event_cbs:
-            task = self._server.loop.create_task(cb(event))
+            task = self._server.loop.create_task(cb(self, event))
             task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
 
     @property

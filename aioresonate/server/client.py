@@ -100,7 +100,7 @@ class ResonateClient:
     _to_write: asyncio.Queue[ServerMessage | bytes]
     """Queue for messages to be sent to the client through the WebSocket."""
     _group: ResonateGroup
-    _event_cbs: list[Callable[[ClientEvent], Coroutine[None, None, None]]]
+    _event_cbs: list[Callable[["ResonateClient", ClientEvent], Coroutine[None, None, None]]]
     _closing: bool = False
     _disconnecting: bool = False
     """Flag to prevent multiple concurrent disconnect tasks."""
@@ -656,7 +656,7 @@ class ResonateClient:
             self._logger.debug("Enqueueing message: %s", type(message).__name__)
 
     def add_event_listener(
-        self, callback: Callable[[ClientEvent], Coroutine[None, None, None]]
+        self, callback: Callable[["ResonateClient", ClientEvent], Coroutine[None, None, None]]
     ) -> Callable[[], None]:
         """
         Register a callback to listen for state changes of this client.
@@ -677,5 +677,5 @@ class ResonateClient:
 
     def _signal_event(self, event: ClientEvent) -> None:
         for cb in self._event_cbs:
-            task = self._server.loop.create_task(cb(event))
+            task = self._server.loop.create_task(cb(self, event))
             task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
