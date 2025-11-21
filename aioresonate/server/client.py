@@ -165,7 +165,6 @@ class ResonateClient:
         else:
             raise ValueError("Either request or wsock_client must be provided")
         self._to_write = asyncio.Queue(maxsize=MAX_PENDING_MSG)
-        self._group = ResonateGroup(server, self)
         self._event_cbs = []
         self._closing = False
         self._disconnecting = False
@@ -174,6 +173,7 @@ class ResonateClient:
         self._initial_state_timeout_handle = None
         self._roles = []
         self.disconnect_behaviour = DisconnectBehaviour.UNGROUP
+        self._set_group(ResonateGroup(server, self))
 
     async def disconnect(self, *, retry_connection: bool = True) -> None:
         """Disconnect this client from the server."""
@@ -346,7 +346,14 @@ class ResonateClient:
         Args:
             group: The ResonateGroup to assign this client to.
         """
+        if hasattr(self, "_group"):
+            # Don't unregister if this is the initial setup in __init__
+            self._group._unregister_client_events(self)  # noqa: SLF001
+
         self._group = group
+
+        # Register event listeners with new group
+        self._group._register_client_events(self)  # noqa: SLF001
 
         # Emit event for group change
         self._signal_event(ClientGroupChangedEvent(group))

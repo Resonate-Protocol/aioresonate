@@ -56,6 +56,7 @@ from aioresonate.models.types import (
 )
 from aioresonate.models.visualizer import StreamStartVisualizer
 
+from .events import ClientEvent, VolumeChangedEvent
 from .metadata import Metadata
 from .stream import AudioCodec, AudioFormat, ClientStreamConfig, MediaStream, Streamer
 
@@ -217,6 +218,7 @@ class ResonateGroup:
         self._last_sent_muted: bool | None = None
         self._last_sent_supported_commands: list[MediaCommand] | None = None
         self._supported_commands: list[MediaCommand] = []
+        self._client_event_unsubs: dict[ResonateClient, Callable[[], None]] = {}
         logger.debug(
             "ResonateGroup initialized with %d client(s): %s",
             len(self._clients),
@@ -1241,6 +1243,24 @@ class ResonateGroup:
         for cb in self._event_cbs:
             task = self._server.loop.create_task(cb(self, event))
             task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
+
+    def _register_client_events(self, client: ResonateClient) -> None:
+        """Register event listeners for client events like volume changes."""
+
+        # Inline function to capture self
+        async def on_client_event(_client: ResonateClient, event: ClientEvent) -> None:
+            if isinstance(event, VolumeChangedEvent):
+                # When any player's volume changes, update controller clients
+                self._send_controller_state_to_clients()
+
+        unsub = client.add_event_listener(on_client_event)
+        self._client_event_unsubs[client] = unsub
+
+    def _unregister_client_events(self, client: ResonateClient) -> None:
+        """Unregister event listeners for a client."""
+        if client in self._client_event_unsubs:
+            self._client_event_unsubs[client]()
+            del self._client_event_unsubs[client]
 
     @property
     def group_id(self) -> str:
