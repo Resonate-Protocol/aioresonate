@@ -11,35 +11,38 @@ from dataclasses import dataclass
 from aiohttp import ClientSession, ClientWebSocketResponse, WSMessage, WSMsgType
 
 from aioresonate.models import BINARY_HEADER_SIZE, BinaryMessageType, unpack_binary_header
-from aioresonate.models.controller import (
-    GroupCommandClientMessage,
-    GroupCommandClientPayload,
-    GroupUpdateServerMessage,
-    GroupUpdateServerPayload,
-)
+from aioresonate.models.artwork import ClientHelloArtworkSupport
+from aioresonate.models.controller import ControllerCommandPayload
 from aioresonate.models.core import (
+    ClientCommandMessage,
+    ClientCommandPayload,
     ClientHelloMessage,
     ClientHelloPayload,
+    ClientStateMessage,
+    ClientStatePayload,
     ClientTimeMessage,
     ClientTimePayload,
+    DeviceInfo,
+    GroupUpdateServerMessage,
+    GroupUpdateServerPayload,
+    ServerCommandMessage,
+    ServerCommandPayload,
     ServerHelloMessage,
     ServerHelloPayload,
+    ServerStateMessage,
+    ServerStatePayload,
     ServerTimeMessage,
     ServerTimePayload,
-    SessionUpdateMessage,
-    SessionUpdatePayload,
     StreamEndMessage,
     StreamStartMessage,
     StreamUpdateMessage,
 )
-from aioresonate.models.metadata import ClientHelloMetadataSupport
 from aioresonate.models.player import (
     ClientHelloPlayerSupport,
-    PlayerUpdateMessage,
-    PlayerUpdatePayload,
+    PlayerStatePayload,
     StreamStartPlayer,
 )
-from aioresonate.models.types import MediaCommand, PlayerStateType, Roles, ServerMessage
+from aioresonate.models.types import AudioCodec, MediaCommand, PlayerStateType, Roles, ServerMessage
 
 from .time_sync import ResonateTimeFilter
 
@@ -72,11 +75,14 @@ class PCMFormat:
         return self.channels * (self.bit_depth // 8)
 
 
-# Callback invoked when session metadata updates are received.
-MetadataCallback = Callable[[SessionUpdatePayload], Awaitable[None] | None]
+# Callback invoked when server state metadata updates are received.
+MetadataCallback = Callable[[ServerStatePayload], Awaitable[None] | None]
 
 # Callback invoked when group state updates are received.
 GroupUpdateCallback = Callable[[GroupUpdateServerPayload], Awaitable[None] | None]
+
+# Callback invoked when controller state updates are received.
+ControllerStateCallback = Callable[[ServerStatePayload], Awaitable[None] | None]
 
 # Callback invoked when audio streaming begins.
 StreamStartCallback = Callable[[StreamStartMessage], Awaitable[None] | None]
@@ -89,6 +95,9 @@ AudioChunkCallback = Callable[[int, bytes, PCMFormat], Awaitable[None] | None]
 
 # Callback invoked when the client disconnects from the server.
 DisconnectCallback = Callable[[], Awaitable[None] | None]
+
+# Callback invoked when server sends player commands (volume, mute).
+ServerCommandCallback = Callable[[ServerCommandPayload], Awaitable[None] | None]
 
 
 @dataclass(slots=True)
@@ -113,12 +122,14 @@ class ResonateClient:
     """Unique identifier for this client."""
     _client_name: str
     """Human-readable name for this client."""
+    _device_info: DeviceInfo | None
+    """Optional device information."""
     _roles: list[Roles]
     """List of roles this client supports."""
     _player_support: ClientHelloPlayerSupport | None
     """Player capabilities (only set if PLAYER role is supported)."""
-    _metadata_support: ClientHelloMetadataSupport | None
-    """Metadata capabilities (only set if METADATA role is supported)."""
+    _artwork_support: ClientHelloArtworkSupport | None
+    """Artwork capabilities (only set if ARTWORK role is supported)."""
     _session: ClientSession | None
     """Optional aiohttp ClientSession for WebSocket connection."""
 
@@ -151,16 +162,20 @@ class ResonateClient:
     """Current active player configuration."""
     _current_pcm_format: PCMFormat | None = None
     """Current PCM audio format for active stream."""
+    _stream_active: bool = False
+    """True if stream is active (stream/start received, stream/end not yet received)."""
 
     _group_state: GroupUpdateServerPayload | None = None
     """Latest group state received from server."""
-    _session_state: SessionUpdatePayload | None = None
-    """Latest session state received from server."""
+    _server_state: ServerStatePayload | None = None
+    """Latest server state received from server."""
 
     _metadata_callback: MetadataCallback | None = None
-    """Callback invoked on session/update messages."""
+    """Callback invoked on server/state messages with metadata."""
     _group_callback: GroupUpdateCallback | None = None
     """Callback invoked on group/update messages."""
+    _controller_callback: ControllerStateCallback | None = None
+    """Callback invoked on server/state messages."""
     _stream_start_callback: StreamStartCallback | None = None
     """Callback invoked when a stream starts."""
     _stream_end_callback: StreamEndCallback | None = None
@@ -169,6 +184,13 @@ class ResonateClient:
     """Callback invoked when audio chunks are received."""
     _disconnect_callback: DisconnectCallback | None = None
     """Callback invoked when the client disconnects."""
+    _server_command_callback: ServerCommandCallback | None = None
+    """Callback invoked when server sends player commands."""
+
+    _initial_volume: int
+    """Initial volume level for player role (0-100)."""
+    _initial_muted: bool
+    """Initial mute state for player role."""
 
     def __init__(
         self,
@@ -176,10 +198,13 @@ class ResonateClient:
         client_name: str,
         roles: Sequence[Roles],
         *,
+        device_info: DeviceInfo | None = None,
         player_support: ClientHelloPlayerSupport | None = None,
-        metadata_support: ClientHelloMetadataSupport | None = None,
+        artwork_support: ClientHelloArtworkSupport | None = None,
         session: ClientSession | None = None,
         static_delay_ms: float = 0.0,
+        initial_volume: int = 100,
+        initial_muted: bool = False,
     ) -> None:
         """
         Create a new Resonate client instance.
@@ -188,23 +213,31 @@ class ResonateClient:
             client_id: Unique identifier for this client.
             client_name: Human-readable name for this client.
             roles: Sequence of roles this client supports. Must include PLAYER
-                if player_support is provided; must include METADATA if
-                metadata_support is provided.
+                if player_support is provided; must include ARTWORK if
+                artwork_support is provided.
+            device_info: Optional device information (product name, manufacturer,
+                software version).
             player_support: Custom player capabilities. Required if PLAYER role
                 is specified; raises ValueError if missing.
-            metadata_support: Custom metadata capabilities. Required if METADATA
+            artwork_support: Custom artwork capabilities. Required if ARTWORK
                 role is specified; raises ValueError if missing.
             session: Optional aiohttp ClientSession. If None, a session is created
                 and managed by this client.
             static_delay_ms: Static playback delay in milliseconds applied after
                 clock synchronization. Defaults to 0.0.
+            initial_volume: Initial volume level (0-100) for player role.
+                Defaults to 100. Sent automatically after handshake if PLAYER
+                role is supported.
+            initial_muted: Initial mute state for player role. Defaults to False.
+                Sent automatically after handshake if PLAYER role is supported.
 
         Raises:
             ValueError: If PLAYER in roles but player_support is None, or if
-                METADATA in roles but metadata_support is None.
+                ARTWORK in roles but artwork_support is None.
         """
         self._client_id = client_id
         self._client_name = client_name
+        self._device_info = device_info
         self._roles = list(roles)
 
         # Validate and store player support
@@ -215,18 +248,20 @@ class ResonateClient:
         else:
             self._player_support = None
 
-        # Validate and store metadata support
-        if Roles.METADATA in self._roles:
-            if metadata_support is None:
-                raise ValueError("metadata_support is required when METADATA role is specified")
-            self._metadata_support = metadata_support
+        # Validate and store artwork support
+        if Roles.ARTWORK in self._roles:
+            if artwork_support is None:
+                raise ValueError("artwork_support is required when ARTWORK role is specified")
+            self._artwork_support = artwork_support
         else:
-            self._metadata_support = None
+            self._artwork_support = None
         self._session = session
         self._owns_session = session is None
         self._loop = asyncio.get_running_loop()
         self._send_lock = asyncio.Lock()
         self._time_filter = ResonateTimeFilter()
+        self._initial_volume = initial_volume
+        self._initial_muted = initial_muted
         self.set_static_delay_ms(static_delay_ms)
 
     @property
@@ -275,6 +310,14 @@ class ResonateClient:
             await self.disconnect()
             raise TimeoutError("Timed out waiting for server/hello response") from err
 
+        # Send initial player state if player role is supported
+        if Roles.PLAYER in self._roles:
+            await self.send_player_state(
+                state=PlayerStateType.SYNCHRONIZED,
+                volume=self._initial_volume,
+                muted=self._initial_muted,
+            )
+
         await self._send_time_message()
         self._time_task = self._loop.create_task(self._time_sync_loop())
         logger.info("Handshake with server complete")
@@ -305,7 +348,8 @@ class ResonateClient:
         self._server_info = None
         self._server_hello_event = None
         self._group_state = None
-        self._session_state = None
+        self._server_state = None
+        self._stream_active = False
         self._current_pcm_format = None
         self._current_player = None
 
@@ -322,8 +366,10 @@ class ResonateClient:
         """Send the current player state to the server."""
         if not self.connected:
             raise RuntimeError("Client is not connected")
-        message = PlayerUpdateMessage(
-            payload=PlayerUpdatePayload(state=state, volume=volume, muted=muted)
+        message = ClientStateMessage(
+            payload=ClientStatePayload(
+                player=PlayerStatePayload(state=state, volume=volume, muted=muted)
+            )
         )
         await self._send_message(message.to_json())
 
@@ -337,17 +383,22 @@ class ResonateClient:
         """Send a group command (playback control) to the server."""
         if not self.connected:
             raise RuntimeError("Client is not connected")
-        payload = GroupCommandClientPayload(command=command, volume=volume, mute=mute)
-        message = GroupCommandClientMessage(payload=payload)
+        controller_payload = ControllerCommandPayload(command=command, volume=volume, mute=mute)
+        payload = ClientCommandPayload(controller=controller_payload)
+        message = ClientCommandMessage(payload=payload)
         await self._send_message(message.to_json())
 
     def set_metadata_listener(self, callback: MetadataCallback | None) -> None:
-        """Set or clear (if None) the callback invoked on session/update messages."""
+        """Set or clear (if None) the callback invoked on server/state messages with metadata."""
         self._metadata_callback = callback
 
     def set_group_update_listener(self, callback: GroupUpdateCallback | None) -> None:
         """Set or clear (if None) the callback invoked on group/update messages."""
         self._group_callback = callback
+
+    def set_controller_state_listener(self, callback: ControllerStateCallback | None) -> None:
+        """Set or clear (if None) the callback invoked on server/state messages."""
+        self._controller_callback = callback
 
     def set_stream_start_listener(self, callback: StreamStartCallback | None) -> None:
         """Set or clear (if None) the callback invoked when a stream starts."""
@@ -377,6 +428,10 @@ class ResonateClient:
         """Set or clear (if None) the callback invoked when the client disconnects."""
         self._disconnect_callback = callback
 
+    def set_server_command_listener(self, callback: ServerCommandCallback | None) -> None:
+        """Set or clear (if None) the callback invoked when server sends player commands."""
+        self._server_command_callback = callback
+
     def is_time_synchronized(self) -> bool:
         """Return whether time synchronization with the server has converged."""
         return self._time_filter.is_synchronized
@@ -387,8 +442,9 @@ class ResonateClient:
             name=self._client_name,
             version=1,
             supported_roles=self._roles,
+            device_info=self._device_info,
             player_support=self._player_support,
-            metadata_support=self._metadata_support,
+            artwork_support=self._artwork_support,
         )
         return ClientHelloMessage(payload=payload)
 
@@ -452,10 +508,12 @@ class ResonateClient:
                 await self._handle_stream_update(message)
             case StreamEndMessage():
                 await self._handle_stream_end()
-            case SessionUpdateMessage(payload=payload):
-                await self._handle_session_update(payload)
             case GroupUpdateServerMessage(payload=payload):
                 await self._handle_group_update(payload)
+            case ServerStateMessage(payload=payload):
+                await self._handle_server_state(payload)
+            case ServerCommandMessage(payload=payload):
+                await self._handle_server_command(payload)
             case _:
                 logger.debug("Unhandled server message type: %s", type(message).__name__)
 
@@ -470,6 +528,12 @@ class ResonateClient:
             message_type = BinaryMessageType(header.message_type)
         except ValueError:
             logger.warning("Unknown binary message type: %s", header.message_type)
+            return
+
+        if not self._stream_active:
+            logger.warning(
+                "Ignoring binary message of type %s since no stream is active", message_type
+            )
             return
 
         if message_type is BinaryMessageType.AUDIO_CHUNK:
@@ -506,13 +570,14 @@ class ResonateClient:
 
     async def _handle_stream_start(self, message: StreamStartMessage) -> None:
         logger.info("Stream started")
+        self._stream_active = True
         player = message.payload.player
         if player is None:
             logger.warning("Stream start message missing player payload")
             return
 
-        if player.codec != "pcm":
-            logger.error("Unsupported codec '%s' - only PCM is supported", player.codec)
+        if player.codec != AudioCodec.PCM:
+            logger.error("Unsupported codec '%s' - only PCM is supported", player.codec.value)
             return
 
         pcm_format = PCMFormat(
@@ -540,8 +605,8 @@ class ResonateClient:
             return
 
         codec = player_update.codec or self._current_player.codec
-        if codec != "pcm":
-            logger.error("Unsupported codec update '%s' - only PCM is supported", codec)
+        if codec != AudioCodec.PCM:
+            logger.error("Unsupported codec update '%s' - only PCM is supported", codec.value)
             return
 
         sample_rate = player_update.sample_rate or self._current_player.sample_rate
@@ -559,17 +624,26 @@ class ResonateClient:
 
     async def _handle_stream_end(self) -> None:
         logger.info("Stream ended")
+        self._stream_active = False
         self._current_player = None
         self._current_pcm_format = None
         await self._notify_stream_end()
 
-    async def _handle_session_update(self, payload: SessionUpdatePayload) -> None:
-        self._session_state = payload
-        await self._notify_metadata_callback(payload)
-
     async def _handle_group_update(self, payload: GroupUpdateServerPayload) -> None:
         self._group_state = payload
         await self._notify_group_callback(payload)
+
+    async def _handle_server_state(self, payload: ServerStatePayload) -> None:
+        self._server_state = payload
+        # Notify controller callback for controller state
+        await self._notify_controller_callback(payload)
+        # Notify metadata callback when metadata is present
+        if payload.metadata is not None:
+            await self._notify_metadata_callback(payload)
+
+    async def _handle_server_command(self, payload: ServerCommandPayload) -> None:
+        """Handle server/command message."""
+        await self._notify_server_command_callback(payload)
 
     def _configure_audio_output(self, pcm_format: PCMFormat) -> None:
         """Store the current audio format for use in callbacks."""
@@ -630,7 +704,7 @@ class ResonateClient:
         adjusted_client_time = client_timestamp_us - self._static_delay_us
         return self._time_filter.compute_server_time(adjusted_client_time)
 
-    async def _notify_metadata_callback(self, payload: SessionUpdatePayload) -> None:
+    async def _notify_metadata_callback(self, payload: ServerStatePayload) -> None:
         if self._metadata_callback is None:
             return
         try:
@@ -649,6 +723,16 @@ class ResonateClient:
                 await result
         except Exception:
             logger.exception("Error in group callback %s", self._group_callback)
+
+    async def _notify_controller_callback(self, payload: ServerStatePayload) -> None:
+        if self._controller_callback is None:
+            return
+        try:
+            result = self._controller_callback(payload)
+            if asyncio.iscoroutine(result):
+                await result
+        except Exception:
+            logger.exception("Error in controller callback %s", self._controller_callback)
 
     async def _notify_stream_start(self, message: StreamStartMessage) -> None:
         if self._stream_start_callback is None:
@@ -679,6 +763,16 @@ class ResonateClient:
                 await result
         except Exception:
             logger.exception("Error in disconnect callback %s", self._disconnect_callback)
+
+    async def _notify_server_command_callback(self, payload: ServerCommandPayload) -> None:
+        if self._server_command_callback is None:
+            return
+        try:
+            result = self._server_command_callback(payload)
+            if asyncio.iscoroutine(result):
+                await result
+        except Exception:
+            logger.exception("Error in server command callback %s", self._server_command_callback)
 
     async def _time_sync_loop(self) -> None:
         try:

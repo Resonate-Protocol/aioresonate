@@ -56,13 +56,11 @@ class Roles(Enum):
     Has its own volume and mute state and preferred format settings.
     """
     CONTROLLER = "controller"
-    """Controls Resonate groups."""
+    """Controls the Resonate group this client is part of."""
     METADATA = "metadata"
-    """
-    Displays metadata.
-
-    Has preferred format for cover art.
-    """
+    """Displays text metadata describing the currently playing audio."""
+    ARTWORK = "artwork"
+    """Displays artwork images. Has preferred format for images."""
     VISUALIZER = "visualizer"
     """
     Visualizes music.
@@ -74,12 +72,23 @@ class Roles(Enum):
 class BinaryMessageType(Enum):
     """Enum for Binary Message Types."""
 
-    AUDIO_CHUNK = 1
-    """Audio chunks with timestamps."""
-    MEDIA_ART = 2
-    """Media art (images)."""
-    VISUALIZATION_DATA = 3
-    """Visualization data."""
+    # Player role (bits 000000xx):
+    AUDIO_CHUNK = 0
+    """Audio chunks with timestamps (Player role, slot 0)."""
+
+    # Artwork role (bits 000001xx):
+    ARTWORK_CHANNEL_0 = 4
+    """Artwork channel 0 (Artwork role, slot 0)."""
+    ARTWORK_CHANNEL_1 = 5
+    """Artwork channel 1 (Artwork role, slot 1)."""
+    ARTWORK_CHANNEL_2 = 6
+    """Artwork channel 2 (Artwork role, slot 2)."""
+    ARTWORK_CHANNEL_3 = 7
+    """Artwork channel 3 (Artwork role, slot 3)."""
+
+    # Visualizer role (bits 000010xx):
+    VISUALIZATION_DATA = 8
+    """Visualization data (Visualizer role, slot 0)."""
 
 
 class RepeatMode(Enum):
@@ -93,8 +102,8 @@ class RepeatMode(Enum):
 class PlayerStateType(Enum):
     """Enum for Player States."""
 
-    PLAYING = "playing"
-    IDLE = "idle"
+    SYNCHRONIZED = "synchronized"
+    ERROR = "error"
 
 
 class PlaybackStateType(Enum):
@@ -105,6 +114,21 @@ class PlaybackStateType(Enum):
     STOPPED = "stopped"
 
 
+class AudioCodec(Enum):
+    """Enum for Audio Codecs."""
+
+    OPUS = "opus"
+    FLAC = "flac"
+    PCM = "pcm"
+
+
+class PlayerCommand(Enum):
+    """Enum for Player Commands."""
+
+    VOLUME = "volume"
+    MUTE = "mute"
+
+
 class MediaCommand(Enum):
     """Enum for Media Commands."""
 
@@ -113,9 +137,14 @@ class MediaCommand(Enum):
     STOP = "stop"
     NEXT = "next"
     PREVIOUS = "previous"
-    SEEK = "seek"
     VOLUME = "volume"
     MUTE = "mute"
+    REPEAT_OFF = "repeat_off"
+    REPEAT_ONE = "repeat_one"
+    REPEAT_ALL = "repeat_all"
+    SHUFFLE = "shuffle"
+    UNSHUFFLE = "unshuffle"
+    SWITCH = "switch"
 
 
 class PictureFormat(Enum):
@@ -124,3 +153,14 @@ class PictureFormat(Enum):
     BMP = "bmp"
     JPEG = "jpeg"
     PNG = "png"
+
+
+class ArtworkSource(Enum):
+    """Artwork source type."""
+
+    ALBUM = "album"
+    """Album artwork."""
+    ARTIST = "artist"
+    """Artist artwork."""
+    NONE = "none"
+    """No artwork - channel disabled."""
