@@ -1273,23 +1273,60 @@ class ResonateGroup:
         return self._muted
 
     async def set_volume(self, volume_level: int) -> None:
-        """
-        Set group volume by applying the difference to all players.
-
-        Similar to how Music Assistant handles group volume - calculates the
-        difference from current group volume and applies it to each player.
-        """
+        """Set group volume using redistribution algorithm from spec."""
         volume_level = max(0, min(100, volume_level))
-        cur_volume = self.volume
-        volume_dif = volume_level - cur_volume
+        players = self.players()
+        if not players:
+            return
 
-        # Apply volume difference to all players
-        for player in self.players():
-            cur_player_volume = player.volume
-            new_player_volume = max(0, min(100, cur_player_volume + volume_dif))
-            player.set_volume(new_player_volume)
+        # Initialize working state with current volumes
+        # We work entirely on this dict until the end
+        player_volumes = {p: float(p.volume) for p in players}
 
-        # Send state update to controller clients if rounded volume changed
+        # Calculate initial target delta
+        current_avg = sum(player_volumes.values()) / len(player_volumes)
+        delta = volume_level - current_avg
+
+        # Track who is still participating in redistribution
+        active_players = list(players)
+
+        for _ in range(5):
+            # Apply delta to all active players and calculate lost delta (overflow)
+            lost_delta_sum = 0.0
+            next_active_players = []
+
+            for player in active_players:
+                current_vol = player_volumes[player]
+                proposed = current_vol + delta
+
+                # Clamp and calculate loss
+                if proposed > 100:
+                    clamped = 100.0
+                    lost_delta_sum += proposed - clamped
+                elif proposed < 0:
+                    clamped = 0.0
+                    lost_delta_sum += proposed - clamped
+                else:
+                    clamped = proposed
+                    next_active_players.append(player)
+
+                # Update our working state
+                player_volumes[player] = clamped
+
+            # If everyone is clamped or no delta lost, we are done
+            if not next_active_players or abs(lost_delta_sum) < 0.01:
+                break
+
+            # Prepare for next iteration
+            # Redistribute the lost delta among the remaining active players
+            delta = lost_delta_sum / len(next_active_players)
+            active_players = next_active_players
+
+        # Apply final calculated volumes to the actual players
+        for player, volume in player_volumes.items():
+            player.set_volume(round(volume))
+
+        # Send state update to controller clients
         self._send_controller_state_to_clients()
 
     async def set_mute(self, muted: bool) -> None:  # noqa: FBT001
