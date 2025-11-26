@@ -3,7 +3,7 @@ Core messages for the Resonate protocol.
 
 This module contains the fundamental messages that establish communication between
 clients and the server. These messages handle initial handshakes, ongoing clock
-synchronization, and stream lifecycle management.
+synchronization, stream lifecycle management, and role-based state updates and commands.
 """
 
 from __future__ import annotations
@@ -14,14 +14,19 @@ from typing import Literal
 from mashumaro.config import BaseConfig
 from mashumaro.mixins.orjson import DataClassORJSONMixin
 
-from .metadata import (
-    ClientHelloMetadataSupport,
-    SessionUpdateMetadata,
-    StreamStartMetadata,
-    StreamUpdateMetadata,
+from .artwork import (
+    ClientHelloArtworkSupport,
+    StreamRequestFormatArtwork,
+    StreamStartArtwork,
+    StreamUpdateArtwork,
 )
+from .controller import ControllerCommandPayload, ControllerStatePayload
+from .metadata import SessionUpdateMetadata
 from .player import (
     ClientHelloPlayerSupport,
+    PlayerCommandPayload,
+    PlayerStatePayload,
+    StreamRequestFormatPlayer,
     StreamStartPlayer,
     StreamUpdatePlayer,
 )
@@ -31,6 +36,23 @@ from .visualizer import (
     StreamStartVisualizer,
     StreamUpdateVisualizer,
 )
+
+
+@dataclass
+class DeviceInfo(DataClassORJSONMixin):
+    """Optional information about the device."""
+
+    product_name: str | None = None
+    """Device model/product name."""
+    manufacturer: str | None = None
+    """Device manufacturer name."""
+    software_version: str | None = None
+    """Software version of the client (not the Resonate version)."""
+
+    class Config(BaseConfig):
+        """Config for parsing json messages."""
+
+        omit_none = True
 
 
 # Client -> Server: client/hello
@@ -46,10 +68,12 @@ class ClientHelloPayload(DataClassORJSONMixin):
     """Version that the Resonate client implements."""
     supported_roles: list[Roles]
     """List of roles the client supports."""
+    device_info: DeviceInfo | None = None
+    """Optional information about the device."""
     player_support: ClientHelloPlayerSupport | None = None
     """Player support configuration - only if player role is in supported_roles."""
-    metadata_support: ClientHelloMetadataSupport | None = None
-    """Metadata support configuration - only if metadata role is in supported_roles."""
+    artwork_support: ClientHelloArtworkSupport | None = None
+    """Artwork support configuration - only if artwork role is in supported_roles."""
     visualizer_support: ClientHelloVisualizerSupport | None = None
     """Visualizer support configuration - only if visualizer role is in supported_roles."""
 
@@ -64,14 +88,14 @@ class ClientHelloPayload(DataClassORJSONMixin):
         if not player_role_supported:
             self.player_support = None
 
-        # Validate metadata role and support configuration
-        metadata_role_supported = Roles.METADATA in self.supported_roles
-        if metadata_role_supported and self.metadata_support is None:
+        # Validate artwork role and support configuration
+        artwork_role_supported = Roles.ARTWORK in self.supported_roles
+        if artwork_role_supported and self.artwork_support is None:
             raise ValueError(
-                "metadata_support must be provided when 'metadata' role is in supported_roles"
+                "artwork_support must be provided when 'artwork' role is in supported_roles"
             )
-        if not metadata_role_supported:
-            self.metadata_support = None
+        if not artwork_role_supported:
+            self.artwork_support = None
 
         # Validate visualizer role and support configuration
         visualizer_role_supported = Roles.VISUALIZER in self.supported_roles
@@ -111,6 +135,50 @@ class ClientTimeMessage(ClientMessage):
 
     payload: ClientTimePayload
     type: Literal["client/time"] = "client/time"
+
+
+# Client -> Server: client/state
+@dataclass
+class ClientStatePayload(DataClassORJSONMixin):
+    """Client sends state updates to the server."""
+
+    player: PlayerStatePayload | None = None
+    """Player state - only if client has player role."""
+
+    class Config(BaseConfig):
+        """Config for parsing json messages."""
+
+        omit_none = True
+
+
+@dataclass
+class ClientStateMessage(ClientMessage):
+    """Message sent by the client to report state changes."""
+
+    payload: ClientStatePayload
+    type: Literal["client/state"] = "client/state"
+
+
+# Client -> Server: client/command
+@dataclass
+class ClientCommandPayload(DataClassORJSONMixin):
+    """Client sends commands to the server."""
+
+    controller: ControllerCommandPayload | None = None
+    """Controller commands - only if client has controller role."""
+
+    class Config(BaseConfig):
+        """Config for parsing json messages."""
+
+        omit_none = True
+
+
+@dataclass
+class ClientCommandMessage(ClientMessage):
+    """Message sent by the client to send commands."""
+
+    payload: ClientCommandPayload
+    type: Literal["client/command"] = "client/command"
 
 
 # Server -> Client: server/hello
@@ -155,6 +223,78 @@ class ServerTimeMessage(ServerMessage):
     type: Literal["server/time"] = "server/time"
 
 
+# Server -> Client: server/state
+@dataclass
+class ServerStatePayload(DataClassORJSONMixin):
+    """Server sends state updates to the client."""
+
+    metadata: SessionUpdateMetadata | None = None
+    """Metadata state - only sent to clients with metadata role."""
+    controller: ControllerStatePayload | None = None
+    """Controller state - only sent to clients with controller role."""
+
+    class Config(BaseConfig):
+        """Config for parsing json messages."""
+
+        omit_none = True
+
+
+@dataclass
+class ServerStateMessage(ServerMessage):
+    """Message sent by the server to send state updates."""
+
+    payload: ServerStatePayload
+    type: Literal["server/state"] = "server/state"
+
+
+# Server -> Client: group/update
+@dataclass
+class GroupUpdateServerPayload(DataClassORJSONMixin):
+    """State update of the group this client is part of."""
+
+    playback_state: PlaybackStateType | None = None
+    """Playback state of the group."""
+    group_id: str | None = None
+    """Group identifier."""
+    group_name: str | None = None
+    """Friendly name of the group."""
+
+    class Config(BaseConfig):
+        """Config for parsing json messages."""
+
+        omit_none = True
+
+
+@dataclass
+class GroupUpdateServerMessage(ServerMessage):
+    """Message sent by the server to update group state."""
+
+    payload: GroupUpdateServerPayload
+    type: Literal["group/update"] = "group/update"
+
+
+# Server -> Client: server/command
+@dataclass
+class ServerCommandPayload(DataClassORJSONMixin):
+    """Server sends commands to the client."""
+
+    player: PlayerCommandPayload | None = None
+    """Player commands - only sent to clients with player role."""
+
+    class Config(BaseConfig):
+        """Config for parsing json messages."""
+
+        omit_none = True
+
+
+@dataclass
+class ServerCommandMessage(ServerMessage):
+    """Message sent by the server to send commands to the client."""
+
+    payload: ServerCommandPayload
+    type: Literal["server/command"] = "server/command"
+
+
 # Server -> Client: stream/start
 @dataclass
 class StreamStartPayload(DataClassORJSONMixin):
@@ -162,8 +302,8 @@ class StreamStartPayload(DataClassORJSONMixin):
 
     player: StreamStartPlayer | None = None
     """Information about the player."""
-    metadata: StreamStartMetadata | None = None
-    """Metadata information (sent to clients that specified supported picture formats)."""
+    artwork: StreamStartArtwork | None = None
+    """Artwork information (sent to clients with artwork role)."""
     visualizer: StreamStartVisualizer | None = None
     """Visualizer information (sent to clients with visualizer role)."""
 
@@ -188,8 +328,8 @@ class StreamUpdatePayload(DataClassORJSONMixin):
 
     player: StreamUpdatePlayer | None = None
     """Player updates."""
-    metadata: StreamUpdateMetadata | None = None
-    """Metadata updates."""
+    artwork: StreamUpdateArtwork | None = None
+    """Artwork updates."""
     visualizer: StreamUpdateVisualizer | None = None
     """Visualizer updates."""
 
@@ -207,25 +347,15 @@ class StreamUpdateMessage(ServerMessage):
     type: Literal["stream/update"] = "stream/update"
 
 
-# Server -> Client: stream/end
+# Client -> Server: stream/request-format
 @dataclass
-class StreamEndMessage(ServerMessage):
-    """Message sent by the server to end a stream."""
+class StreamRequestFormatPayload(DataClassORJSONMixin):
+    """Request different stream format (upgrade or downgrade)."""
 
-    type: Literal["stream/end"] = "stream/end"
-
-
-# Server -> Client: session/update
-@dataclass
-class SessionUpdatePayload(DataClassORJSONMixin):
-    """Delta updates for session state."""
-
-    group_id: str
-    """Group identifier."""
-    playback_state: PlaybackStateType | None = None
-    """Only sent to clients with controller or metadata roles."""
-    metadata: SessionUpdateMetadata | None = None
-    """Only sent to clients with metadata role."""
+    player: StreamRequestFormatPlayer | None = None
+    """Player format request (only for clients with player role)."""
+    artwork: StreamRequestFormatArtwork | None = None
+    """Artwork format request (only for clients with artwork role)."""
 
     class Config(BaseConfig):
         """Config for parsing json messages."""
@@ -234,8 +364,22 @@ class SessionUpdatePayload(DataClassORJSONMixin):
 
 
 @dataclass
-class SessionUpdateMessage(ServerMessage):
-    """Message sent by the server to update session state."""
+class StreamRequestFormatMessage(ClientMessage):
+    """Message sent by the client to request different stream format."""
 
-    payload: SessionUpdatePayload
-    type: Literal["session/update"] = "session/update"
+    payload: StreamRequestFormatPayload
+    type: Literal["stream/request-format"] = "stream/request-format"
+
+
+# Server -> Client: stream/end
+@dataclass
+class StreamEndPayload(DataClassORJSONMixin):
+    """Empty payload for stream/end message."""
+
+
+@dataclass
+class StreamEndMessage(ServerMessage):
+    """Message sent by the server to end a stream."""
+
+    payload: StreamEndPayload
+    type: Literal["stream/end"] = "stream/end"

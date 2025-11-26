@@ -2,9 +2,8 @@
 Metadata messages for the Resonate protocol.
 
 This module contains messages specific to clients with the metadata role, which
-handle display of track information, artwork, and playback state. Metadata clients
-receive session updates with track details and can optionally receive artwork in
-their preferred format and resolution.
+handle display of track information and playback progress. Metadata clients
+receive state updates with track details.
 """
 
 from __future__ import annotations
@@ -14,64 +13,47 @@ from dataclasses import dataclass, field
 from mashumaro.config import BaseConfig
 from mashumaro.mixins.orjson import DataClassORJSONMixin
 
-from .types import PictureFormat, RepeatMode, UndefinedField, undefined_field
+from .types import RepeatMode, UndefinedField, undefined_field
 
 
-# Client -> Server: client/hello metadata support object
 @dataclass
-class ClientHelloMetadataSupport(DataClassORJSONMixin):
-    """Metadata support configuration - only if metadata role is set."""
+class Progress(DataClassORJSONMixin):
+    """Playback progress information."""
 
-    support_picture_formats: list[str]
-    """Supported media art image formats (empty array if no art desired)."""
-    media_width: int | None = None
-    """Max width in pixels (if only width set, scales preserving aspect ratio)."""
-    media_height: int | None = None
-    """Max height in pixels (if only height set, scales preserving aspect ratio)."""
+    track_progress: int
+    """Track progress in milliseconds, since start of track."""
+    track_duration: int
+    """Track duration in milliseconds. 0 for unlimited/unknown duration (e.g., live streams)."""
+    playback_speed: int
+    """Playback speed multiplier * 1000 (e.g., 1000 = normal, 1500 = 1.5x, 0 = paused)."""
 
     def __post_init__(self) -> None:
         """Validate field values."""
-        if self.media_width is not None and self.media_width <= 0:
-            raise ValueError(f"media_width must be positive, got {self.media_width}")
+        # Validate track_progress is non-negative
+        if self.track_progress < 0:
+            raise ValueError(f"track_progress must be non-negative, got {self.track_progress}")
 
-        if self.media_height is not None and self.media_height <= 0:
-            raise ValueError(f"media_height must be positive, got {self.media_height}")
+        # Validate track_duration is non-negative (0 allowed for live streams)
+        if self.track_duration < 0:
+            raise ValueError(f"track_duration must be non-negative, got {self.track_duration}")
+
+        # Validate playback_speed is non-negative
+        if self.playback_speed < 0:
+            raise ValueError(f"playback_speed must be non-negative, got {self.playback_speed}")
 
     class Config(BaseConfig):
         """Config for parsing json messages."""
 
-        omit_none = True
+        omit_default = True
 
 
-# Server -> Client: stream/start metadata object
-@dataclass
-class StreamStartMetadata(DataClassORJSONMixin):
-    """
-    Metadata object in stream/start message.
-
-    Sent to clients that specified supported picture formats.
-    """
-
-    art_format: PictureFormat
-    """Format of the encoded image."""
-
-
-# Server -> Client: stream/update metadata object
-@dataclass
-class StreamUpdateMetadata(DataClassORJSONMixin):
-    """Metadata object in stream/update message with delta updates."""
-
-    art_format: PictureFormat
-    """Format of the encoded image."""
-
-
-# Server -> Client: session/update metadata object
+# Server -> Client: server/state metadata object
 @dataclass
 class SessionUpdateMetadata(DataClassORJSONMixin):
-    """Metadata object in session/update message."""
+    """Metadata object in server/state message."""
 
     timestamp: int
-    """Server timestamp for when this metadata is valid."""
+    """Server clock time in microseconds for when this metadata is valid."""
     title: str | None | UndefinedField = field(default_factory=undefined_field)
     artist: str | None | UndefinedField = field(default_factory=undefined_field)
     album_artist: str | None | UndefinedField = field(default_factory=undefined_field)
@@ -79,41 +61,17 @@ class SessionUpdateMetadata(DataClassORJSONMixin):
     artwork_url: str | None | UndefinedField = field(default_factory=undefined_field)
     year: int | None | UndefinedField = field(default_factory=undefined_field)
     track: int | None | UndefinedField = field(default_factory=undefined_field)
-    track_progress: int | None | UndefinedField = field(default_factory=undefined_field)
-    """Track progress in seconds."""
-    track_duration: int | None | UndefinedField = field(default_factory=undefined_field)
-    """Track duration in seconds."""
-    playback_speed: int | None | UndefinedField = field(default_factory=undefined_field)
-    """Speed factor."""
+    progress: Progress | None | UndefinedField = field(default_factory=undefined_field)
+    """
+    Playback progress information.
+
+    The server must send this object whenever playback state changes.
+    """
     repeat: RepeatMode | None | UndefinedField = field(default_factory=undefined_field)
     shuffle: bool | None | UndefinedField = field(default_factory=undefined_field)
 
     def __post_init__(self) -> None:
         """Validate field values."""
-        # Validate track_progress is non-negative
-        if (
-            not isinstance(self.track_progress, UndefinedField)
-            and self.track_progress is not None
-            and self.track_progress < 0
-        ):
-            raise ValueError(f"track_progress must be non-negative, got {self.track_progress}")
-
-        # Validate track_duration is positive
-        if (
-            not isinstance(self.track_duration, UndefinedField)
-            and self.track_duration is not None
-            and self.track_duration <= 0
-        ):
-            raise ValueError(f"track_duration must be positive, got {self.track_duration}")
-
-        # Validate playback_speed is positive
-        if (
-            not isinstance(self.playback_speed, UndefinedField)
-            and self.playback_speed is not None
-            and self.playback_speed <= 0
-        ):
-            raise ValueError(f"playback_speed must be positive, got {self.playback_speed}")
-
         # Validate year is reasonable (between 1000 and current year + 10)
         if (
             not isinstance(self.year, UndefinedField)

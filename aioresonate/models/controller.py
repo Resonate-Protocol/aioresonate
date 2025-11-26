@@ -2,61 +2,30 @@
 Controller messages for the Resonate protocol.
 
 This module contains messages specific to clients with the controller role, which
-enables remote control of groups and playback. Controller clients can browse
-available groups, join/leave groups, and send playback commands.
+enables the client to control the Resonate group this client is part of, and switch
+between groups.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal
 
 from mashumaro.config import BaseConfig
 from mashumaro.mixins.orjson import DataClassORJSONMixin
 
-from .types import ClientMessage, MediaCommand, ServerMessage
+from .types import MediaCommand
 
 
-# Client -> Server: group/get-list
+# Client -> Server: client/command controller object
 @dataclass
-class GroupGetListClientMessage(ClientMessage):
-    """Message sent by the client to request all groups available to join."""
-
-    type: Literal["group/get-list"] = "group/get-list"
-
-
-# Client -> Server: group/join
-@dataclass
-class GroupJoinClientPayload(DataClassORJSONMixin):
-    """Payload for joining a group."""
-
-    group_id: str
-    """Identifier of group to join."""
-
-
-@dataclass
-class GroupJoinClientMessage(ClientMessage):
-    """Message sent by the client to join a group."""
-
-    payload: GroupJoinClientPayload
-    type: Literal["group/join"] = "group/join"
-
-
-# Client -> Server: group/unjoin
-@dataclass
-class GroupUnjoinClientMessage(ClientMessage):
-    """Message sent by the client to leave current group."""
-
-    type: Literal["group/unjoin"] = "group/unjoin"
-
-
-# Client -> Server: group/command
-@dataclass
-class GroupCommandClientPayload(DataClassORJSONMixin):
+class ControllerCommandPayload(DataClassORJSONMixin):
     """Control the group that's playing."""
 
     command: MediaCommand
-    """Command must be one of the values listed in group/update field supported_commands."""
+    """
+    Command must be one of the values listed in supported_commands from server/state controller
+    object.
+    """
     volume: int | None = None
     """Volume range 0-100, only set if command is volume."""
     mute: bool | None = None
@@ -84,80 +53,22 @@ class GroupCommandClientPayload(DataClassORJSONMixin):
         omit_none = True
 
 
+# Server -> Client: server/state controller object
 @dataclass
-class GroupCommandClientMessage(ClientMessage):
-    """Message sent by the client to control the group."""
+class ControllerStatePayload(DataClassORJSONMixin):
+    """Controller state object in server/state message."""
 
-    payload: GroupCommandClientPayload
-    type: Literal["group/command"] = "group/command"
-
-
-# Server -> Client: group/list
-@dataclass
-class GroupInfoServerPayload(DataClassORJSONMixin):
-    """Information about a group."""
-
-    group_id: str
-    """Group identifier."""
-    name: str
-    """Group name."""
-    state: Literal["playing", "paused", "idle"]
-    """Group state."""
-    member_count: int
-    """Number of clients in group."""
-
-
-@dataclass
-class GroupListServerPayload(DataClassORJSONMixin):
-    """All groups available to join on the server."""
-
-    groups: list[GroupInfoServerPayload]
-    """List of available groups."""
-
-
-@dataclass
-class GroupListServerMessage(ServerMessage):
-    """Message sent by the server with list of available groups."""
-
-    payload: GroupListServerPayload
-    type: Literal["group/list"] = "group/list"
-
-
-# Server -> Client: group/update
-@dataclass
-class GroupMemberServerPayload(DataClassORJSONMixin):
-    """Represents a group member."""
-
-    client_id: str
-    """Client identifier."""
-    name: str
-    """Client friendly name."""
-
-
-@dataclass
-class GroupUpdateServerPayload(DataClassORJSONMixin):
-    """Group state update."""
-
-    supported_commands: list[MediaCommand | str]
-    """Subset of: play, pause, stop, next, previous, seek, volume, mute."""
-    members: list[GroupMemberServerPayload]
-    """List of group members."""
-    session_id: str | None
-    """Null if no active session."""
+    supported_commands: list[MediaCommand]
+    """
+    Subset of: play, pause, stop, next, previous, volume, mute, repeat_off, repeat_one,
+    repeat_all, shuffle, unshuffle, switch.
+    """
     volume: int
-    """Volume range 0-100."""
+    """Volume of the whole group, range 0-100."""
     muted: bool
-    """Mute state."""
+    """Mute state of the whole group."""
 
     def __post_init__(self) -> None:
         """Validate field values."""
         if not 0 <= self.volume <= 100:
             raise ValueError(f"Volume must be in range 0-100, got {self.volume}")
-
-
-@dataclass
-class GroupUpdateServerMessage(ServerMessage):
-    """Message sent by the server to update group state."""
-
-    payload: GroupUpdateServerPayload
-    type: Literal["group/update"] = "group/update"
