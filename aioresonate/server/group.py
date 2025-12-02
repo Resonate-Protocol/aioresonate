@@ -187,8 +187,6 @@ class ResonateGroup:
     """Timestamp in microseconds when track_progress was last updated, for progress calculation."""
     _scheduled_stop_handle: asyncio.TimerHandle | None
     """Timer handle for scheduled stop, None when no stop is scheduled."""
-    _muted: bool
-    """Group mute state."""
     _last_sent_volume: int | None
     """Last volume sent to controller clients, for change detection."""
     _last_sent_muted: bool | None
@@ -227,7 +225,6 @@ class ResonateGroup:
         self._play_start_time_us: int | None = None
         self._track_progress_timestamp_us: int | None = None
         self._scheduled_stop_handle: asyncio.TimerHandle | None = None
-        self._muted = False
         self._last_sent_volume: int | None = None
         self._last_sent_muted: bool | None = None
         self._last_sent_supported_commands: list[MediaCommand] | None = None
@@ -346,11 +343,11 @@ class ResonateGroup:
         controller_state = ControllerStatePayload(
             supported_commands=supported_commands,
             volume=self.volume,
-            muted=self._muted,
+            muted=self.muted,
         )
         # Update tracking variables
         self._last_sent_volume = self.volume
-        self._last_sent_muted = self._muted
+        self._last_sent_muted = self.muted
         self._last_sent_supported_commands = supported_commands
 
         for client in self._clients:
@@ -399,7 +396,7 @@ class ResonateGroup:
     def _send_controller_state_to_clients(self) -> None:
         """Send server/state with controller payload to all controller clients."""
         current_volume = self.volume
-        current_muted = self._muted
+        current_muted = self.muted
         current_supported_commands = self._get_supported_commands()
 
         # Only send if any field changed
@@ -834,11 +831,11 @@ class ResonateGroup:
         controller_state = ControllerStatePayload(
             supported_commands=supported_commands,
             volume=self.volume,
-            muted=self._muted,
+            muted=self.muted,
         )
         # Update tracking variables
         self._last_sent_volume = self.volume
-        self._last_sent_muted = self._muted
+        self._last_sent_muted = self.muted
         self._last_sent_supported_commands = supported_commands
 
         for client in self._clients:
@@ -1293,8 +1290,11 @@ class ResonateGroup:
 
     @property
     def muted(self) -> bool:
-        """Current group mute state."""
-        return self._muted
+        """Current group mute state - true only when ALL players are muted."""
+        players = self.players()
+        if not players:
+            return False
+        return all(player.muted for player in players)
 
     async def set_volume(self, volume_level: int) -> None:
         """Set group volume using redistribution algorithm from spec."""
@@ -1355,7 +1355,6 @@ class ResonateGroup:
 
     async def set_mute(self, muted: bool) -> None:  # noqa: FBT001
         """Set group mute state and propagate to all players."""
-        self._muted = muted
         # Propagate to all player clients
         for player in self.players():
             if muted:
@@ -1486,7 +1485,7 @@ class ResonateGroup:
             controller_for_client = ControllerStatePayload(
                 supported_commands=self._get_supported_commands(),
                 volume=self.volume,
-                muted=self._muted,
+                muted=self.muted,
             )
 
         # Send single server/state message with all relevant payloads
