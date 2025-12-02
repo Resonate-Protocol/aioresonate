@@ -720,6 +720,7 @@ async def main_async(argv: Sequence[str] | None = None) -> int:  # noqa: PLR0915
         # Signal handlers aren't supported on this platform (e.g., Windows)
         with contextlib.suppress(NotImplementedError):
             loop.add_signal_handler(signal.SIGINT, signal_handler)
+            loop.add_signal_handler(signal.SIGTERM, signal_handler)
 
         try:
             # Run connection loop with auto-reconnect
@@ -727,10 +728,11 @@ async def main_async(argv: Sequence[str] | None = None) -> int:  # noqa: PLR0915
         except asyncio.CancelledError:
             logger.debug("Connection loop cancelled")
         finally:
-            # Remove signal handler
+            # Remove signal handlers
             # Signal handlers aren't supported on this platform (e.g., Windows)
             with contextlib.suppress(NotImplementedError):
                 loop.remove_signal_handler(signal.SIGINT)
+                loop.remove_signal_handler(signal.SIGTERM)
             await audio_handler.cleanup()
             await client.disconnect()
 
@@ -971,6 +973,12 @@ async def _keyboard_loop(
 ) -> None:
     handler = CommandHandler(client, state, audio_handler)
     try:
+        if not sys.stdin.isatty():
+            logger.info("Running as daemon without interactive input")
+            await asyncio.Event().wait()
+            return
+
+        # Interactive mode: read commands from stdin
         while True:
             try:
                 line = await aioconsole.ainput()
@@ -979,7 +987,7 @@ async def _keyboard_loop(
             if await handler.execute(line):
                 break
     except asyncio.CancelledError:
-        # Graceful shutdown on Ctrl+C
+        # Graceful shutdown on Ctrl+C or SIGTERM
         logger.debug("Keyboard loop cancelled, exiting gracefully")
         raise
 
