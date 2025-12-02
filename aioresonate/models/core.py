@@ -18,7 +18,6 @@ from .artwork import (
     ClientHelloArtworkSupport,
     StreamRequestFormatArtwork,
     StreamStartArtwork,
-    StreamUpdateArtwork,
 )
 from .controller import ControllerCommandPayload, ControllerStatePayload
 from .metadata import SessionUpdateMetadata
@@ -28,7 +27,6 @@ from .player import (
     PlayerStatePayload,
     StreamRequestFormatPlayer,
     StreamStartPlayer,
-    StreamUpdatePlayer,
 )
 from .types import (
     ClientMessage,
@@ -41,7 +39,6 @@ from .types import (
 from .visualizer import (
     ClientHelloVisualizerSupport,
     StreamStartVisualizer,
-    StreamUpdateVisualizer,
 )
 
 
@@ -347,17 +344,27 @@ class StreamStartMessage(ServerMessage):
     type: Literal["stream/start"] = "stream/start"
 
 
-# Server -> Client: stream/update
-@dataclass
-class StreamUpdatePayload(DataClassORJSONMixin):
-    """Delta updates for the ongoing stream."""
+# Roles that support stream/clear (have buffers to clear)
+STREAM_CLEAR_ROLES = frozenset({Roles.PLAYER, Roles.VISUALIZER})
 
-    player: StreamUpdatePlayer | None = None
-    """Player updates."""
-    artwork: StreamUpdateArtwork | None = None
-    """Artwork updates."""
-    visualizer: StreamUpdateVisualizer | None = None
-    """Visualizer updates."""
+
+# Server -> Client: stream/clear
+@dataclass
+class StreamClearPayload(DataClassORJSONMixin):
+    """Instructs clients to clear buffers without ending the stream."""
+
+    roles: list[Roles] | None = None
+    """Roles to clear: player, visualizer, or both. If omitted, clears both roles."""
+
+    def __post_init__(self) -> None:
+        """Validate that only player and visualizer roles are specified."""
+        if self.roles is not None:
+            invalid_roles = set(self.roles) - STREAM_CLEAR_ROLES
+            if invalid_roles:
+                raise ValueError(
+                    f"stream/clear only supports roles {[r.value for r in STREAM_CLEAR_ROLES]}, "
+                    f"got invalid roles: {[r.value for r in invalid_roles]}"
+                )
 
     class Config(BaseConfig):
         """Config for parsing json messages."""
@@ -366,11 +373,11 @@ class StreamUpdatePayload(DataClassORJSONMixin):
 
 
 @dataclass
-class StreamUpdateMessage(ServerMessage):
-    """Message sent by the server to update stream format."""
+class StreamClearMessage(ServerMessage):
+    """Message sent by the server to clear stream buffers (e.g., for seek operations)."""
 
-    payload: StreamUpdatePayload
-    type: Literal["stream/update"] = "stream/update"
+    payload: StreamClearPayload
+    type: Literal["stream/clear"] = "stream/clear"
 
 
 # Client -> Server: stream/request-format
@@ -400,7 +407,15 @@ class StreamRequestFormatMessage(ClientMessage):
 # Server -> Client: stream/end
 @dataclass
 class StreamEndPayload(DataClassORJSONMixin):
-    """Empty payload for stream/end message."""
+    """Payload for stream/end message."""
+
+    roles: list[Roles] | None = None
+    """Roles to end streams for. If omitted, ends all active streams."""
+
+    class Config(BaseConfig):
+        """Config for parsing json messages."""
+
+        omit_none = True
 
 
 @dataclass

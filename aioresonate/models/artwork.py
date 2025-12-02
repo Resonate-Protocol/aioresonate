@@ -65,25 +65,6 @@ class StreamArtworkChannelConfig(DataClassORJSONMixin):
     """Height in pixels of the encoded image."""
 
 
-@dataclass
-class StreamArtworkChannelConfigUpdate(DataClassORJSONMixin):
-    """Configuration updates for an artwork channel in stream/update."""
-
-    source: ArtworkSource | None = None
-    """Artwork source type."""
-    format: PictureFormat | None = None
-    """Format of the encoded image."""
-    width: int | None = None
-    """Width in pixels of the encoded image."""
-    height: int | None = None
-    """Height in pixels of the encoded image."""
-
-    class Config(BaseConfig):
-        """Config for parsing json messages."""
-
-        omit_none = True
-
-
 # Server -> Client: stream/start artwork object
 @dataclass
 class StreamStartArtwork(DataClassORJSONMixin):
@@ -95,20 +76,6 @@ class StreamStartArtwork(DataClassORJSONMixin):
 
     channels: list[StreamArtworkChannelConfig]
     """Configuration for each active artwork channel, array index is the channel number."""
-
-
-# Server -> Client: stream/update artwork object
-@dataclass
-class StreamUpdateArtwork(DataClassORJSONMixin):
-    """Artwork object in stream/update message with delta updates."""
-
-    channels: list[StreamArtworkChannelConfigUpdate] | None = None
-    """Configuration updates for artwork channels, array index is the channel number."""
-
-    class Config(BaseConfig):
-        """Config for parsing json messages."""
-
-        omit_none = True
 
 
 # Client -> Server: stream/request-format artwork object

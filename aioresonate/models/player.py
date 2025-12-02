@@ -165,25 +165,3 @@ class StreamStartPlayer(DataClassORJSONMixin):
         """Config for parsing json messages."""
 
         omit_none = True
-
-
-# Server -> Client stream/update player object
-@dataclass
-class StreamUpdatePlayer(DataClassORJSONMixin):
-    """Player object in stream/update message with delta updates."""
-
-    codec: AudioCodec | None = None
-    """Codec to be used."""
-    sample_rate: int | None = None
-    """Sample rate to be used."""
-    channels: int | None = None
-    """Channels to be used."""
-    bit_depth: int | None = None
-    """Bit depth to be used."""
-    codec_header: str | None = None
-    """Base64 encoded codec header (if necessary; e.g., FLAC)."""
-
-    class Config(BaseConfig):
-        """Config for parsing json messages."""
-
-        omit_none = True

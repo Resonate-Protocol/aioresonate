@@ -22,9 +22,7 @@ from aioresonate.models import (
 from aioresonate.models.artwork import (
     ArtworkChannel,
     StreamArtworkChannelConfig,
-    StreamArtworkChannelConfigUpdate,
     StreamStartArtwork,
-    StreamUpdateArtwork,
 )
 from aioresonate.models.controller import (
     ControllerCommandPayload,
@@ -40,8 +38,6 @@ from aioresonate.models.core import (
     StreamRequestFormatPayload,
     StreamStartMessage,
     StreamStartPayload,
-    StreamUpdateMessage,
-    StreamUpdatePayload,
 )
 from aioresonate.models.metadata import Progress
 from aioresonate.models.player import (
@@ -126,6 +122,24 @@ class _StreamerReconfigureCommand:
 
     all_player_configs: list[ClientStreamConfig]
     """List of ClientStreamConfig for all players (existing and new)."""
+
+
+def _build_artwork_stream_info(
+    client_state: dict[int, ArtworkChannel],
+) -> StreamStartArtwork:
+    """Build StreamStartArtwork from client artwork channel state."""
+    stream_channels = []
+    for channel_num in sorted(client_state.keys()):
+        channel = client_state[channel_num]
+        stream_channels.append(
+            StreamArtworkChannelConfig(
+                source=channel.source,
+                format=channel.format,
+                width=channel.media_width,
+                height=channel.media_height,
+            )
+        )
+    return StreamStartArtwork(channels=stream_channels)
 
 
 class ResonateGroup:
@@ -683,32 +697,14 @@ class ResonateGroup:
     ) -> None:
         """Send a stream start message to a client with the specified audio format for players."""
         assert client.check_role(Roles.PLAYER) == (player_stream_info is not None)
+        artwork_stream_info: StreamStartArtwork | None = None
         if client.check_role(Roles.ARTWORK) and client.info.artwork_support:
             # Initialize artwork state for all channels
             channels = client.info.artwork_support.channels
             if channels:
-                stream_channels = []
-                client_channel_state = {}
-
-                for channel_num, channel in enumerate(channels):
-                    # Create stream channel config
-                    stream_channel = StreamArtworkChannelConfig(
-                        source=channel.source,
-                        format=channel.format,
-                        width=channel.media_width,
-                        height=channel.media_height,
-                    )
-                    stream_channels.append(stream_channel)
-
-                    # Store channel state (reuse ArtworkChannel)
-                    client_channel_state[channel_num] = channel
-
+                client_channel_state = dict(enumerate(channels))
                 self._client_artwork_state[client.client_id] = client_channel_state
-                artwork_stream_info = StreamStartArtwork(channels=stream_channels)
-            else:
-                artwork_stream_info = None
-        else:
-            artwork_stream_info = None
+                artwork_stream_info = _build_artwork_stream_info(client_channel_state)
 
         # TODO: finish once spec is finalized
         visualizer_stream_info = (
@@ -727,12 +723,20 @@ class ResonateGroup:
         )
         client.send_message(StreamStartMessage(stream_info))
 
-    def _send_stream_end_msg(self, client: ResonateClient) -> None:
-        """Send a stream end message to a client to stop playback."""
-        logger.debug("ending stream for %s (%s)", client.name, client.client_id)
+    def _send_stream_end_msg(
+        self, client: ResonateClient, roles: list[Roles] | None = None
+    ) -> None:
+        """Send a stream end message to a client.
+
+        Args:
+            client: The client to send the message to.
+            roles: Optional list of roles to end streams for. If None, ends all streams.
+        """
+        logger.debug("ending stream for %s (%s), roles=%s", client.name, client.client_id, roles)
         # Lifetime of artwork state is bound to the stream
-        self._client_artwork_state.pop(client.client_id, None)
-        client.send_message(StreamEndMessage(payload=StreamEndPayload()))
+        if roles is None or Roles.ARTWORK in roles:
+            self._client_artwork_state.pop(client.client_id, None)
+        client.send_message(StreamEndMessage(payload=StreamEndPayload(roles=roles)))
 
     def _schedule_delayed_stop(self, stop_time_us: int, active: bool, needs_cleanup: bool) -> bool:  # noqa: FBT001
         """Schedule a delayed stop at the specified timestamp.
@@ -1511,7 +1515,7 @@ class ResonateGroup:
         client: ResonateClient,
         request: StreamRequestFormatPayload,
     ) -> None:
-        """Handle stream/request-format from a client and send stream/update."""
+        """Handle stream/request-format from a client and send stream/start."""
         if request.artwork:
             if not client.check_role(Roles.ARTWORK):
                 raise ValueError(
@@ -1556,24 +1560,16 @@ class ResonateGroup:
 
             client_state[artwork_request.channel] = updated_channel
 
-            updates = [StreamArtworkChannelConfigUpdate()] * len(client_state)
-            updates[artwork_request.channel] = StreamArtworkChannelConfigUpdate(
-                source=artwork_request.source,
-                format=artwork_request.format,
-                width=artwork_request.media_width,
-                height=artwork_request.media_height,
-            )
-
-            stream_update = StreamUpdatePayload(
-                artwork=StreamUpdateArtwork(channels=updates),
+            stream_start = StreamStartPayload(
+                artwork=_build_artwork_stream_info(client_state),
             )
 
             logger.debug(
-                "Sending stream/update to client %s for artwork channel %d",
+                "Sending stream/start to client %s for artwork format change on channel %d",
                 client.client_id,
                 artwork_request.channel,
             )
-            client.send_message(StreamUpdateMessage(stream_update))
+            client.send_message(StreamStartMessage(stream_start))
 
             if updated_channel.source != ArtworkSource.NONE:
                 artwork = self._current_media_art.get(updated_channel.source)

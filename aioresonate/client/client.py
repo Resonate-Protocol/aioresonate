@@ -33,9 +33,9 @@ from aioresonate.models.core import (
     ServerStatePayload,
     ServerTimeMessage,
     ServerTimePayload,
+    StreamClearMessage,
     StreamEndMessage,
     StreamStartMessage,
-    StreamUpdateMessage,
 )
 from aioresonate.models.player import (
     ClientHelloPlayerSupport,
@@ -88,7 +88,12 @@ ControllerStateCallback = Callable[[ServerStatePayload], Awaitable[None] | None]
 StreamStartCallback = Callable[[StreamStartMessage], Awaitable[None] | None]
 
 # Callback invoked when audio streaming ends.
-StreamEndCallback = Callable[[], Awaitable[None] | None]
+# Receives list of roles to end, or None if all roles should be ended.
+StreamEndCallback = Callable[[list[Roles] | None], Awaitable[None] | None]
+
+# Callback invoked when stream buffers should be cleared (e.g., seek operation).
+# Receives list of roles to clear, or None if all roles should be cleared.
+StreamClearCallback = Callable[[list[Roles] | None], Awaitable[None] | None]
 
 # Callback invoked with (server_timestamp_us, audio_data, format) when audio chunks arrive.
 AudioChunkCallback = Callable[[int, bytes, PCMFormat], Awaitable[None] | None]
@@ -180,6 +185,8 @@ class ResonateClient:
     """Callback invoked when a stream starts."""
     _stream_end_callback: StreamEndCallback | None = None
     """Callback invoked when a stream ends."""
+    _stream_clear_callback: StreamClearCallback | None = None
+    """Callback invoked when stream buffers should be cleared."""
     _audio_chunk_callback: AudioChunkCallback | None = None
     """Callback invoked when audio chunks are received."""
     _disconnect_callback: DisconnectCallback | None = None
@@ -408,6 +415,10 @@ class ResonateClient:
         """Set or clear (if None) the callback invoked when a stream ends."""
         self._stream_end_callback = callback
 
+    def set_stream_clear_listener(self, callback: StreamClearCallback | None) -> None:
+        """Set or clear (if None) the callback invoked when stream buffers should be cleared."""
+        self._stream_clear_callback = callback
+
     def set_audio_chunk_listener(self, callback: AudioChunkCallback | None) -> None:
         """
         Set or clear (if None) the callback invoked when audio chunks are received.
@@ -504,10 +515,10 @@ class ResonateClient:
                 self._handle_server_time(payload)
             case StreamStartMessage():
                 await self._handle_stream_start(message)
-            case StreamUpdateMessage():
-                await self._handle_stream_update(message)
+            case StreamClearMessage():
+                await self._handle_stream_clear(message)
             case StreamEndMessage():
-                await self._handle_stream_end()
+                await self._handle_stream_end(message)
             case GroupUpdateServerMessage(payload=payload):
                 await self._handle_group_update(payload)
             case ServerStateMessage(payload=payload):
@@ -569,16 +580,22 @@ class ResonateClient:
         self._time_filter.update(round(offset), round(delay), now_us)
 
     async def _handle_stream_start(self, message: StreamStartMessage) -> None:
-        logger.info("Stream started")
-        self._stream_active = True
         player = message.payload.player
         if player is None:
-            logger.warning("Stream start message missing player payload")
+            # stream/start without player payload - may be for artwork/visualizer only
+            logger.debug("Stream start message without player payload")
             return
 
         if player.codec != AudioCodec.PCM:
             logger.error("Unsupported codec '%s' - only PCM is supported", player.codec.value)
             return
+
+        is_format_update = self._stream_active and self._current_player is not None
+        if is_format_update:
+            logger.info("Stream format updated")
+        else:
+            logger.info("Stream started")
+            self._stream_active = True
 
         pcm_format = PCMFormat(
             sample_rate=player.sample_rate,
@@ -593,41 +610,27 @@ class ResonateClient:
             bit_depth=player.bit_depth,
             codec_header=player.codec_header,
         )
-        await self._notify_stream_start(message)
-        await self._send_time_message()
 
-    async def _handle_stream_update(self, message: StreamUpdateMessage) -> None:
-        player_update = message.payload.player
-        if player_update is None:
-            return
-        if self._current_player is None:
-            logger.debug("Ignoring stream update without active stream")
-            return
+        if not is_format_update:
+            await self._notify_stream_start(message)
+            await self._send_time_message()
 
-        codec = player_update.codec or self._current_player.codec
-        if codec != AudioCodec.PCM:
-            logger.error("Unsupported codec update '%s' - only PCM is supported", codec.value)
-            return
+    async def _handle_stream_clear(self, message: StreamClearMessage) -> None:
+        roles = message.payload.roles
+        logger.info("Stream clear received for roles: %s", roles or "all")
+        await self._notify_stream_clear(roles)
 
-        sample_rate = player_update.sample_rate or self._current_player.sample_rate
-        channels = player_update.channels or self._current_player.channels
-        bit_depth = player_update.bit_depth or self._current_player.bit_depth
+    async def _handle_stream_end(self, message: StreamEndMessage) -> None:
+        roles = message.payload.roles
+        logger.info("Stream ended for roles: %s", roles or "all")
 
-        pcm_format = PCMFormat(sample_rate=sample_rate, channels=channels, bit_depth=bit_depth)
-        self._configure_audio_output(pcm_format)
-        self._current_player.codec = codec
-        self._current_player.sample_rate = sample_rate
-        self._current_player.channels = channels
-        self._current_player.bit_depth = bit_depth
-        if player_update.codec_header is not None:
-            self._current_player.codec_header = player_update.codec_header
+        # If roles is None or includes player role, end the player stream
+        if roles is None or Roles.PLAYER in roles:
+            self._stream_active = False
+            self._current_player = None
+            self._current_pcm_format = None
 
-    async def _handle_stream_end(self) -> None:
-        logger.info("Stream ended")
-        self._stream_active = False
-        self._current_player = None
-        self._current_pcm_format = None
-        await self._notify_stream_end()
+        await self._notify_stream_end(roles)
 
     async def _handle_group_update(self, payload: GroupUpdateServerPayload) -> None:
         self._group_state = payload
@@ -744,15 +747,25 @@ class ResonateClient:
         except Exception:
             logger.exception("Error in stream start callback %s", self._stream_start_callback)
 
-    async def _notify_stream_end(self) -> None:
+    async def _notify_stream_end(self, roles: list[Roles] | None) -> None:
         if self._stream_end_callback is None:
             return
         try:
-            result = self._stream_end_callback()
+            result = self._stream_end_callback(roles)
             if asyncio.iscoroutine(result):
                 await result
         except Exception:
             logger.exception("Error in stream end callback %s", self._stream_end_callback)
+
+    async def _notify_stream_clear(self, roles: list[Roles] | None) -> None:
+        if self._stream_clear_callback is None:
+            return
+        try:
+            result = self._stream_clear_callback(roles)
+            if asyncio.iscoroutine(result):
+                await result
+        except Exception:
+            logger.exception("Error in stream clear callback %s", self._stream_clear_callback)
 
     async def _notify_disconnect_callback(self) -> None:
         if self._disconnect_callback is None:

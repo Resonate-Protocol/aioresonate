@@ -39,14 +39,3 @@ class ClientHelloVisualizerSupport(DataClassORJSONMixin):
 @dataclass
 class StreamStartVisualizer(DataClassORJSONMixin):
     """Visualizer object in stream/start message."""
-
-
-# Server -> Client: stream/update visualizer object
-@dataclass
-class StreamUpdateVisualizer(DataClassORJSONMixin):
-    """Visualizer object in stream/update message with delta updates."""
-
-    class Config(BaseConfig):
-        """Config for parsing json messages."""
-
-        omit_none = True

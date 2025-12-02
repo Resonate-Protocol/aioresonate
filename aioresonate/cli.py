@@ -590,12 +590,20 @@ class AudioStreamHandler:
             logger.debug("Cleared audio queue on stream start")
         _print_event("Stream started")
 
-    def on_stream_end(self) -> None:
+    def on_stream_end(self, roles: list[Roles] | None) -> None:
         """Handle stream end by clearing audio queue to prevent desync on resume."""
-        if self.audio_player is not None:
+        # For the CLI player, we only care about the player role
+        if (roles is None or Roles.PLAYER in roles) and self.audio_player is not None:
             self.audio_player.clear()
             logger.debug("Cleared audio queue on stream end")
-        _print_event("Stream ended")
+            _print_event("Stream ended")
+
+    def on_stream_clear(self, roles: list[Roles] | None) -> None:
+        """Handle stream clear by clearing audio queue (e.g., for seek operations)."""
+        # For the CLI player, we only care about the player role
+        if (roles is None or Roles.PLAYER in roles) and self.audio_player is not None:
+            self.audio_player.clear()
+            logger.debug("Cleared audio queue on stream clear")
 
     def clear_queue(self) -> None:
         """Clear the audio queue to prevent desync."""
@@ -689,6 +697,7 @@ async def main_async(argv: Sequence[str] | None = None) -> int:  # noqa: PLR0915
         client.set_controller_state_listener(lambda payload: _handle_server_state(state, payload))
         client.set_stream_start_listener(audio_handler.on_stream_start)
         client.set_stream_end_listener(audio_handler.on_stream_end)
+        client.set_stream_clear_listener(audio_handler.on_stream_clear)
         client.set_audio_chunk_listener(audio_handler.on_audio_chunk)
         client.set_server_command_listener(
             lambda payload: _handle_server_command(state, audio_handler, client, payload)
