@@ -806,8 +806,10 @@ class AudioPlayer:
 
         # Create view of buffer as int16 samples (no copy)
         samples = np.frombuffer(output_buffer[:num_bytes], dtype=np.int16).copy()
-        # Scale and clip to int16 range
-        samples = (samples * (volume / 100.0)).astype(np.int16)
+        # Convert perceived loudness (0-100) to amplitude using dB curve
+        db_reduction = 49.5 * (1 - volume / 100.0)
+        amplitude = 2 ** (-db_reduction / 6.014)
+        samples = (samples * amplitude).astype(np.int16)
         # Write back to buffer
         output_buffer[:num_bytes] = samples.tobytes()
 
