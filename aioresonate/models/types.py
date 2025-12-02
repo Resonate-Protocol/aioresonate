@@ -164,3 +164,25 @@ class ArtworkSource(Enum):
     """Artist artwork."""
     NONE = "none"
     """No artwork - channel disabled."""
+
+
+class ConnectionReason(Enum):
+    """Reason for server connection (multi-server support)."""
+
+    DISCOVERY = "discovery"
+    """Server is connecting for general availability (e.g., initial discovery, reconnection)."""
+    PLAYBACK = "playback"
+    """Server needs client for active or upcoming playback."""
+
+
+class GoodbyeReason(Enum):
+    """Reason for client disconnect (multi-server support)."""
+
+    ANOTHER_SERVER = "another_server"
+    """Client is switching to a different Resonate server."""
+    SHUTDOWN = "shutdown"
+    """Client is shutting down."""
+    RESTART = "restart"
+    """Client is restarting and will reconnect."""
+    USER_REQUEST = "user_request"
+    """User explicitly requested to disconnect from this server."""

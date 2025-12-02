@@ -12,6 +12,7 @@ from aiohttp import ClientWebSocketResponse, WSMessage, WSMsgType, web
 from aioresonate.models import unpack_binary_header
 from aioresonate.models.core import (
     ClientCommandMessage,
+    ClientGoodbyeMessage,
     ClientHelloMessage,
     ClientHelloPayload,
     ClientStateMessage,
@@ -27,6 +28,8 @@ from aioresonate.models.core import (
 from aioresonate.models.types import (
     BinaryMessageType,
     ClientMessage,
+    ConnectionReason,
+    GoodbyeReason,
     PlaybackStateType,
     Roles,
     ServerMessage,
@@ -484,7 +487,9 @@ class ResonateClient:
             # Clean up connection and tasks
             await self._cleanup_connection()
 
-    async def _handle_message(self, message: ClientMessage, timestamp: int) -> None:
+    async def _handle_message(  # noqa: PLR0915
+        self, message: ClientMessage, timestamp: int
+    ) -> None:
         """Handle incoming commands from the client."""
         if self._client_info is None and not isinstance(message, ClientHelloMessage):
             raise ValueError("First message must be client/hello")
@@ -529,7 +534,10 @@ class ResonateClient:
                 self.send_message(
                     ServerHelloMessage(
                         payload=ServerHelloPayload(
-                            server_id=self._server.id, name=self._server.name, version=1
+                            server_id=self._server.id,
+                            name=self._server.name,
+                            version=1,
+                            connection_reason=ConnectionReason.DISCOVERY,
                         )
                     )
                 )
@@ -588,6 +596,12 @@ class ResonateClient:
             case ClientCommandMessage(payload):
                 if payload.controller:
                     await self.require_controller.handle_command(payload.controller)
+            # Goodbye message (multi-server support)
+            case ClientGoodbyeMessage(payload):
+                self._logger.info("Received client/goodbye with reason: %s", payload.reason)
+                # Per spec: auto-reconnect only for 'restart' reason
+                retry = payload.reason == GoodbyeReason.RESTART
+                await self.disconnect(retry_connection=retry)
 
     async def _writer(self) -> None:
         """Write outgoing messages from the queue."""

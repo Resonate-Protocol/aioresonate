@@ -30,7 +30,14 @@ from .player import (
     StreamStartPlayer,
     StreamUpdatePlayer,
 )
-from .types import ClientMessage, PlaybackStateType, Roles, ServerMessage
+from .types import (
+    ClientMessage,
+    ConnectionReason,
+    GoodbyeReason,
+    PlaybackStateType,
+    Roles,
+    ServerMessage,
+)
 from .visualizer import (
     ClientHelloVisualizerSupport,
     StreamStartVisualizer,
@@ -181,6 +188,23 @@ class ClientCommandMessage(ClientMessage):
     type: Literal["client/command"] = "client/command"
 
 
+# Client -> Server: client/goodbye
+@dataclass
+class ClientGoodbyePayload(DataClassORJSONMixin):
+    """Payload for client goodbye message."""
+
+    reason: GoodbyeReason
+    """Reason for disconnecting."""
+
+
+@dataclass
+class ClientGoodbyeMessage(ClientMessage):
+    """Message sent by the client before gracefully closing the connection."""
+
+    payload: ClientGoodbyePayload
+    type: Literal["client/goodbye"] = "client/goodbye"
+
+
 # Server -> Client: server/hello
 @dataclass
 class ServerHelloPayload(DataClassORJSONMixin):
@@ -192,6 +216,8 @@ class ServerHelloPayload(DataClassORJSONMixin):
     """Friendly name of the server"""
     version: int
     """Latest supported version of Resonate."""
+    connection_reason: ConnectionReason
+    """Reason for this connection (relevant for multi-server environments)."""
 
 
 @dataclass
