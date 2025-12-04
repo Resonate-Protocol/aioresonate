@@ -53,8 +53,8 @@ from aioresonate.models.types import (
 logger = logging.getLogger(__name__)
 
 
-SERVICE_TYPE = "_resonate-server._tcp.local."
-DEFAULT_PATH = "/resonate"
+SERVICE_TYPE = "_sendspin-server._tcp.local."
+DEFAULT_PATH = "/sendspin"
 
 
 @dataclass

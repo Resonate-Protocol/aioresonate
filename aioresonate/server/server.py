@@ -345,7 +345,7 @@ class ResonateServer:
             logger.warning("Server is already running")
             return
 
-        api_path = "/resonate"
+        api_path = "/sendspin"
         logger.info("Starting Resonate server on port %d", port)
         self._app = web.Application()
         # Create perpetual WebSocket route for client connections
@@ -412,7 +412,7 @@ class ResonateServer:
             await self._zc.async_unregister_service(self._mdns_service)
 
         properties = {"path": path}
-        service_type = "_resonate-server._tcp.local."
+        service_type = "_sendspin-server._tcp.local."
         info = AsyncServiceInfo(
             type_=service_type,
             name=f"{self._name}.{service_type}",
@@ -429,7 +429,7 @@ class ResonateServer:
         """Automatically connect to Resonate clients when discovered via mDNS."""
         assert self._zc is not None
 
-        service_type = "_resonate._tcp.local."
+        service_type = "_sendspin._tcp.local."
         self._mdns_browser = AsyncServiceBrowser(
             self._zc.zeroconf,
             service_type,
