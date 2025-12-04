@@ -9,8 +9,8 @@ from typing import TYPE_CHECKING, cast
 
 from aiohttp import ClientWebSocketResponse, WSMessage, WSMsgType, web
 
-from aioresonate.models import unpack_binary_header
-from aioresonate.models.core import (
+from aiosendspin.models import unpack_binary_header
+from aiosendspin.models.core import (
     ClientCommandMessage,
     ClientGoodbyeMessage,
     ClientHelloMessage,
@@ -25,7 +25,7 @@ from aioresonate.models.core import (
     ServerTimePayload,
     StreamRequestFormatMessage,
 )
-from aioresonate.models.types import (
+from aiosendspin.models.types import (
     BinaryMessageType,
     ClientMessage,
     ConnectionReason,
@@ -37,7 +37,7 @@ from aioresonate.models.types import (
 
 from .controller import ControllerClient
 from .events import ClientEvent, ClientGroupChangedEvent
-from .group import ResonateGroup
+from .group import SendspinGroup
 from .metadata import MetadataClient
 from .player import PlayerClient
 from .visualizer import VisualizerClient
@@ -50,7 +50,7 @@ logger = logging.getLogger(__name__)
 # The cyclic import is not an issue during runtime, so hide it
 # pyright: reportImportCycles=none
 if TYPE_CHECKING:
-    from .server import ResonateServer
+    from .server import SendspinServer
 
 
 class DisconnectBehaviour(Enum):
@@ -68,16 +68,16 @@ class DisconnectBehaviour(Enum):
     """
 
 
-class ResonateClient:
+class SendspinClient:
     """
-    A Client that is connected to a ResonateServer.
+    A Client that is connected to a SendspinServer.
 
     Playback is handled through groups, use Client.group to get the
     assigned group.
     """
 
-    _server: "ResonateServer"
-    """Reference to the ResonateServer instance this client belongs to."""
+    _server: "SendspinServer"
+    """Reference to the SendspinServer instance this client belongs to."""
     _wsock_client: ClientWebSocketResponse | None = None
     """
     WebSocket connection from the server to the client.
@@ -102,8 +102,8 @@ class ResonateClient:
     """Task responsible for sending JSON and binary data."""
     _to_write: asyncio.Queue[ServerMessage | bytes]
     """Queue for messages to be sent to the client through the WebSocket."""
-    _group: ResonateGroup
-    _event_cbs: list[Callable[["ResonateClient", ClientEvent], Coroutine[None, None, None]]]
+    _group: SendspinGroup
+    _event_cbs: list[Callable[["SendspinClient", ClientEvent], Coroutine[None, None, None]]]
     _closing: bool = False
     _disconnecting: bool = False
     """Flag to prevent multiple concurrent disconnect tasks."""
@@ -121,8 +121,8 @@ class ResonateClient:
         on remaining group members.
     STOP: Client stops playback for the entire group when disconnecting.
     """
-    _handle_client_connect: Callable[["ResonateClient"], None]
-    _handle_client_disconnect: Callable[["ResonateClient"], None]
+    _handle_client_connect: Callable[["SendspinClient"], None]
+    _handle_client_disconnect: Callable[["SendspinClient"], None]
     _logger: logging.Logger
     _roles: list[Roles]
     _player: PlayerClient | None = None
@@ -132,19 +132,19 @@ class ResonateClient:
 
     def __init__(
         self,
-        server: "ResonateServer",
-        handle_client_connect: Callable[["ResonateClient"], None],
-        handle_client_disconnect: Callable[["ResonateClient"], None],
+        server: "SendspinServer",
+        handle_client_connect: Callable[["SendspinClient"], None],
+        handle_client_disconnect: Callable[["SendspinClient"], None],
         request: web.Request | None = None,
         wsock_client: ClientWebSocketResponse | None = None,
     ) -> None:
         """
         DO NOT CALL THIS CONSTRUCTOR. INTERNAL USE ONLY.
 
-        Use ResonateServer.on_client_connect or ResonateServer.connect_to_client instead.
+        Use SendspinServer.on_client_connect or SendspinServer.connect_to_client instead.
 
         Args:
-            server: The ResonateServer instance this client belongs to.
+            server: The SendspinServer instance this client belongs to.
             handle_client_connect: Callback function called when the client's handshake is complete.
             handle_client_disconnect: Callback function called when the client disconnects.
             request: Optional web request object for client-initiated connections.
@@ -176,7 +176,7 @@ class ResonateClient:
         self._initial_state_timeout_handle = None
         self._roles = []
         self.disconnect_behaviour = DisconnectBehaviour.UNGROUP
-        self._set_group(ResonateGroup(server, self))
+        self._set_group(SendspinGroup(server, self))
 
     async def disconnect(self, *, retry_connection: bool = True) -> None:
         """Disconnect this client from the server."""
@@ -213,7 +213,7 @@ class ResonateClient:
         self._logger.info("Client disconnected")
 
     @property
-    def group(self) -> ResonateGroup:
+    def group(self) -> SendspinGroup:
         """Get the group assigned to this client."""
         return self._group
 
@@ -340,14 +340,14 @@ class ResonateClient:
         task = self._server.loop.create_task(self.disconnect(retry_connection=True))
         task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
 
-    def _set_group(self, group: "ResonateGroup") -> None:
+    def _set_group(self, group: "SendspinGroup") -> None:
         """
-        Set the group for this client. For internal use by ResonateGroup only.
+        Set the group for this client. For internal use by SendspinGroup only.
 
         NOTE: this does not update the group's client list
 
         Args:
-            group: The ResonateGroup to assign this client to.
+            group: The SendspinGroup to assign this client to.
         """
         if hasattr(self, "_group"):
             # Don't unregister if this is the initial setup in __init__
@@ -474,7 +474,7 @@ class ResonateClient:
         """
         Handle the complete websocket connection lifecycle.
 
-        This method is private and should only be called by ResonateServer
+        This method is private and should only be called by SendspinServer
         during client connection handling.
         """
         try:
@@ -678,7 +678,7 @@ class ResonateClient:
             self._logger.debug("Enqueueing message: %s", type(message).__name__)
 
     def add_event_listener(
-        self, callback: Callable[["ResonateClient", ClientEvent], Coroutine[None, None, None]]
+        self, callback: Callable[["SendspinClient", ClientEvent], Coroutine[None, None, None]]
     ) -> Callable[[], None]:
         """
         Register a callback to listen for state changes of this client.

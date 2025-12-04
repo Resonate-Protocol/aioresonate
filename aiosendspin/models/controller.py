@@ -1,8 +1,8 @@
 """
-Controller messages for the Resonate protocol.
+Controller messages for the Sendspin protocol.
 
 This module contains messages specific to clients with the controller role, which
-enables the client to control the Resonate group this client is part of, and switch
+enables the client to control the Sendspin group this client is part of, and switch
 between groups.
 """
 

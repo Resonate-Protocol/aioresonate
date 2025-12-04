@@ -1,7 +1,7 @@
 """
-Resonate Server implementation to connect to and manage Resonate Clients.
+Sendspin Server implementation to connect to and manage Sendspin Clients.
 
-ResonateServer is the core of the music listening experience, responsible for:
+SendspinServer is the core of the music listening experience, responsible for:
 - Managing connected clients
 - Orchestrating synchronized grouped playback
 """
@@ -20,14 +20,14 @@ __all__ = [
     "GroupMemberAddedEvent",
     "GroupMemberRemovedEvent",
     "GroupStateChangedEvent",
-    "ResonateClient",
-    "ResonateEvent",
-    "ResonateGroup",
-    "ResonateServer",
+    "SendspinClient",
+    "SendspinEvent",
+    "SendspinGroup",
+    "SendspinServer",
     "VolumeChangedEvent",
 ]
 
-from .client import DisconnectBehaviour, ResonateClient
+from .client import DisconnectBehaviour, SendspinClient
 from .events import ClientEvent, ClientGroupChangedEvent, VolumeChangedEvent
 from .group import (
     GroupCommandEvent,
@@ -36,7 +36,7 @@ from .group import (
     GroupMemberAddedEvent,
     GroupMemberRemovedEvent,
     GroupStateChangedEvent,
-    ResonateGroup,
+    SendspinGroup,
 )
-from .server import ClientAddedEvent, ClientRemovedEvent, ResonateEvent, ResonateServer
+from .server import ClientAddedEvent, ClientRemovedEvent, SendspinEvent, SendspinServer
 from .stream import AudioCodec, AudioFormat

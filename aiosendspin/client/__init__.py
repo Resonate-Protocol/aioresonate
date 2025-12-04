@@ -1,4 +1,4 @@
-"""Public interface for the Resonate client package."""
+"""Public interface for the Sendspin client package."""
 
 from .client import (
     AudioChunkCallback,
@@ -6,12 +6,12 @@ from .client import (
     GroupUpdateCallback,
     MetadataCallback,
     PCMFormat,
-    ResonateClient,
+    SendspinClient,
     ServerInfo,
     StreamEndCallback,
     StreamStartCallback,
 )
-from .time_sync import ResonateTimeFilter
+from .time_sync import SendspinTimeFilter
 
 __all__ = [
     "AudioChunkCallback",
@@ -19,8 +19,8 @@ __all__ = [
     "GroupUpdateCallback",
     "MetadataCallback",
     "PCMFormat",
-    "ResonateClient",
-    "ResonateTimeFilter",
+    "SendspinClient",
+    "SendspinTimeFilter",
     "ServerInfo",
     "StreamEndCallback",
     "StreamStartCallback",

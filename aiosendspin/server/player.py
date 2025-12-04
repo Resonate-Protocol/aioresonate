@@ -4,29 +4,29 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from aioresonate.models.core import ServerCommandMessage, ServerCommandPayload
-from aioresonate.models.player import (
+from aiosendspin.models.core import ServerCommandMessage, ServerCommandPayload
+from aiosendspin.models.player import (
     ClientHelloPlayerSupport,
     PlayerCommandPayload,
     PlayerStatePayload,
 )
-from aioresonate.models.types import PlayerCommand
+from aiosendspin.models.types import PlayerCommand
 
 from .events import VolumeChangedEvent
 from .stream import AudioCodec, AudioFormat
 
 if TYPE_CHECKING:
-    from .client import ResonateClient
+    from .client import SendspinClient
 
 
 class PlayerClient:
     """Player."""
 
-    client: ResonateClient
+    client: SendspinClient
     _volume: int = 100
     _muted: bool = False
 
-    def __init__(self, client: ResonateClient) -> None:
+    def __init__(self, client: SendspinClient) -> None:
         """Initialize player wrapper for a client."""
         self.client = client
         self._logger = client._logger.getChild("player")  # noqa: SLF001

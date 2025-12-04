@@ -15,20 +15,20 @@ from uuid import UUID
 
 from PIL import Image
 
-from aioresonate.models import (
+from aiosendspin.models import (
     BinaryMessageType,
     pack_binary_header_raw,
 )
-from aioresonate.models.artwork import (
+from aiosendspin.models.artwork import (
     ArtworkChannel,
     StreamArtworkChannelConfig,
     StreamStartArtwork,
 )
-from aioresonate.models.controller import (
+from aiosendspin.models.controller import (
     ControllerCommandPayload,
     ControllerStatePayload,
 )
-from aioresonate.models.core import (
+from aiosendspin.models.core import (
     GroupUpdateServerMessage,
     GroupUpdateServerPayload,
     ServerStateMessage,
@@ -39,18 +39,18 @@ from aioresonate.models.core import (
     StreamStartMessage,
     StreamStartPayload,
 )
-from aioresonate.models.metadata import Progress
-from aioresonate.models.player import (
+from aiosendspin.models.metadata import Progress
+from aiosendspin.models.player import (
     StreamStartPlayer,
 )
-from aioresonate.models.types import (
+from aiosendspin.models.types import (
     ArtworkSource,
     MediaCommand,
     PictureFormat,
     PlaybackStateType,
     Roles,
 )
-from aioresonate.models.visualizer import StreamStartVisualizer
+from aiosendspin.models.visualizer import StreamStartVisualizer
 
 from .events import ClientEvent, VolumeChangedEvent
 from .metadata import Metadata
@@ -61,9 +61,9 @@ from .stream import AudioCodec, AudioFormat, ClientStreamConfig, MediaStream, St
 if TYPE_CHECKING:
     import av
 
-    from .client import ResonateClient
+    from .client import SendspinClient
     from .player import PlayerClient
-    from .server import ResonateServer
+    from .server import SendspinServer
 
 INITIAL_PLAYBACK_DELAY_US = 1_000_000
 
@@ -71,7 +71,7 @@ logger = logging.getLogger(__name__)
 
 
 class GroupEvent:
-    """Base event type used by ResonateGroup.add_event_listener()."""
+    """Base event type used by SendspinGroup.add_event_listener()."""
 
 
 # TODO: make types more fancy
@@ -142,7 +142,7 @@ def _build_artwork_stream_info(
     return StreamStartArtwork(channels=stream_channels)
 
 
-class ResonateGroup:
+class SendspinGroup:
     """
     A group of one or more clients for synchronized playback.
 
@@ -151,12 +151,12 @@ class ResonateGroup:
     a group to simplify grouping requests.
     """
 
-    _clients: list[ResonateClient]
+    _clients: list[SendspinClient]
     """List of all clients in this group."""
     _client_artwork_state: dict[str, dict[int, ArtworkChannel]]
     """Mapping of client IDs to their per-channel artwork state (channel 0-3)."""
-    _server: ResonateServer
-    """Reference to the ResonateServer instance."""
+    _server: SendspinServer
+    """Reference to the SendspinServer instance."""
     _stream_task: Task[int] | None = None
     """Task handling the audio streaming loop, None when not streaming."""
     _current_metadata: Metadata | None = None
@@ -167,7 +167,7 @@ class ResonateGroup:
     """Mapping of audio formats to their base64 encoded headers."""
     _preferred_stream_codec: AudioCodec = AudioCodec.OPUS
     """Preferred codec used by the current stream."""
-    _event_cbs: list[Callable[[ResonateGroup, GroupEvent], Coroutine[None, None, None]]]
+    _event_cbs: list[Callable[[SendspinGroup, GroupEvent], Coroutine[None, None, None]]]
     """List of event callbacks for this group."""
     _current_state: PlaybackStateType = PlaybackStateType.STOPPED
     """Current playback state of the group."""
@@ -196,16 +196,16 @@ class ResonateGroup:
     _supported_commands: list[MediaCommand]
     """Commands supported by the application (input to _get_supported_commands())."""
 
-    def __init__(self, server: ResonateServer, *args: ResonateClient) -> None:
+    def __init__(self, server: SendspinServer, *args: SendspinClient) -> None:
         """
         DO NOT CALL THIS CONSTRUCTOR. INTERNAL USE ONLY.
 
         Groups are managed automatically by the server.
 
-        Initialize a new ResonateGroup.
+        Initialize a new SendspinGroup.
 
         Args:
-            server: The ResonateServer instance this group belongs to.
+            server: The SendspinServer instance this group belongs to.
             *args: Clients to add to this group.
         """
         self._clients = list(args)
@@ -229,9 +229,9 @@ class ResonateGroup:
         self._last_sent_muted: bool | None = None
         self._last_sent_supported_commands: list[MediaCommand] | None = None
         self._supported_commands: list[MediaCommand] = []
-        self._client_event_unsubs: dict[ResonateClient, Callable[[], None]] = {}
+        self._client_event_unsubs: dict[SendspinClient, Callable[[], None]] = {}
         logger.debug(
-            "ResonateGroup initialized with %d client(s): %s",
+            "SendspinGroup initialized with %d client(s): %s",
             len(self._clients),
             [type(c).__name__ for c in self._clients],
         )
@@ -689,7 +689,7 @@ class ResonateGroup:
 
     def _send_stream_start_msg(
         self,
-        client: ResonateClient,
+        client: SendspinClient,
         player_stream_info: StreamStartPlayer | None = None,
     ) -> None:
         """Send a stream start message to a client with the specified audio format for players."""
@@ -721,7 +721,7 @@ class ResonateGroup:
         client.send_message(StreamStartMessage(stream_info))
 
     def _send_stream_end_msg(
-        self, client: ResonateClient, roles: list[Roles] | None = None
+        self, client: SendspinClient, roles: list[Roles] | None = None
     ) -> None:
         """Send a stream end message to a client.
 
@@ -1099,7 +1099,7 @@ class ResonateGroup:
                     await asyncio.gather(*send_tasks, return_exceptions=True)
 
     async def _send_media_art_to_client(
-        self, client: ResonateClient, image: Image.Image | None, channel: int
+        self, client: SendspinClient, image: Image.Image | None, channel: int
     ) -> None:
         """Send or clear media art to a specific client channel.
 
@@ -1172,7 +1172,7 @@ class ResonateGroup:
             return img_bytes.read()
 
     @property
-    def clients(self) -> list[ResonateClient]:
+    def clients(self) -> list[SendspinClient]:
         """All clients that are part of this group."""
         return self._clients
 
@@ -1221,7 +1221,7 @@ class ResonateGroup:
         self._signal_event(event)
 
     def add_event_listener(
-        self, callback: Callable[[ResonateGroup, GroupEvent], Coroutine[None, None, None]]
+        self, callback: Callable[[SendspinGroup, GroupEvent], Coroutine[None, None, None]]
     ) -> Callable[[], None]:
         """
         Register a callback to listen for state changes of this group.
@@ -1245,11 +1245,11 @@ class ResonateGroup:
             task = self._server.loop.create_task(cb(self, event))
             task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
 
-    def _register_client_events(self, client: ResonateClient) -> None:
+    def _register_client_events(self, client: SendspinClient) -> None:
         """Register event listeners for client events like volume changes."""
 
         # Inline function to capture self
-        async def on_client_event(_client: ResonateClient, event: ClientEvent) -> None:
+        async def on_client_event(_client: SendspinClient, event: ClientEvent) -> None:
             if isinstance(event, VolumeChangedEvent):
                 # When any player's volume changes, update controller clients
                 self._send_controller_state_to_clients()
@@ -1257,7 +1257,7 @@ class ResonateGroup:
         unsub = client.add_event_listener(on_client_event)
         self._client_event_unsubs[client] = unsub
 
-    def _unregister_client_events(self, client: ResonateClient) -> None:
+    def _unregister_client_events(self, client: SendspinClient) -> None:
         """Unregister event listeners for a client."""
         if client in self._client_event_unsubs:
             self._client_event_unsubs[client]()
@@ -1375,7 +1375,7 @@ class ResonateGroup:
         self._supported_commands = commands
         self._send_controller_state_to_clients()
 
-    async def remove_client(self, client: ResonateClient) -> None:
+    async def remove_client(self, client: SendspinClient) -> None:
         """
         Remove a client from this group.
 
@@ -1412,9 +1412,9 @@ class ResonateGroup:
             # Emit event for client removal
             self._signal_event(GroupMemberRemovedEvent(client.client_id))
         # Each client needs to be in a group, add it to a new one
-        client._set_group(ResonateGroup(self._server, client))  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+        client._set_group(SendspinGroup(self._server, client))  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
 
-    async def add_client(self, client: ResonateClient) -> None:
+    async def add_client(self, client: SendspinClient) -> None:
         """
         Add a client to this group.
 
@@ -1511,7 +1511,7 @@ class ResonateGroup:
 
     async def handle_stream_format_request(
         self,
-        client: ResonateClient,
+        client: SendspinClient,
         request: StreamRequestFormatPayload,
     ) -> None:
         """Handle stream/request-format from a client and send stream/start."""

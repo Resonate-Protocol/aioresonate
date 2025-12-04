@@ -1,4 +1,4 @@
-"""Models for the resonate audio protocol."""
+"""Models for the Sendspin audio protocol."""
 
 from __future__ import annotations
 

@@ -1,5 +1,5 @@
 """
-Artwork messages for the Resonate protocol.
+Artwork messages for the Sendspin protocol.
 
 This module contains messages specific to clients with the artwork role, which
 handle display of artwork images. Artwork clients receive images in their

@@ -1,5 +1,5 @@
 """
-Time synchronization utilities for Resonate clients.
+Time synchronization utilities for Sendspin clients.
 
 1 to 1 port of the ESPHome implementation.
 """
@@ -24,7 +24,7 @@ class TimeElement:
     drift: float = 0.0
 
 
-class ResonateTimeFilter:
+class SendspinTimeFilter:
     """
     Two-dimensional Kalman filter for NTP-style time synchronization.
 

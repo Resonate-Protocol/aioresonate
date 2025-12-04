@@ -14,8 +14,8 @@ from uuid import UUID, uuid4
 import av
 from av.logging import Capture
 
-from aioresonate.models import AudioCodec, BinaryMessageType, pack_binary_header_raw
-from aioresonate.models.player import StreamStartPlayer
+from aiosendspin.models import AudioCodec, BinaryMessageType, pack_binary_header_raw
+from aiosendspin.models.player import StreamStartPlayer
 
 logger = logging.getLogger(__name__)
 

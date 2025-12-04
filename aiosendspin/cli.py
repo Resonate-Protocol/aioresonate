@@ -1,4 +1,4 @@
-"""Command-line interface for running a Resonate client."""
+"""Command-line interface for running a Sendspin client."""
 
 from __future__ import annotations
 
@@ -25,22 +25,22 @@ import sounddevice
 from aiohttp import ClientError
 from zeroconf.asyncio import AsyncServiceBrowser, AsyncZeroconf
 
-from aioresonate.cli_audio import AudioPlayer
-from aioresonate.client import PCMFormat, ResonateClient
-from aioresonate.models.core import (
+from aiosendspin.cli_audio import AudioPlayer
+from aiosendspin.client import PCMFormat, SendspinClient
+from aiosendspin.models.core import (
     DeviceInfo,
     GroupUpdateServerPayload,
     ServerCommandPayload,
     ServerStatePayload,
     StreamStartMessage,
 )
-from aioresonate.models.metadata import SessionUpdateMetadata
-from aioresonate.models.player import (
+from aiosendspin.models.metadata import SessionUpdateMetadata
+from aiosendspin.models.player import (
     ClientHelloPlayerSupport,
     PlayerCommandPayload,
     SupportedAudioFormat,
 )
-from aioresonate.models.types import (
+from aiosendspin.models.types import (
     AudioCodec,
     MediaCommand,
     PlaybackStateType,
@@ -127,12 +127,12 @@ class CLIState:
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
-    """Parse CLI arguments for the resonate client."""
-    parser = argparse.ArgumentParser(description="Run a Resonate CLI client")
+    """Parse CLI arguments for the Sendspin client."""
+    parser = argparse.ArgumentParser(description="Run a Sendspin CLI client")
     parser.add_argument(
         "--url",
         default=None,
-        help=("WebSocket URL of the Resonate server. If omitted, discover via mDNS."),
+        help=("WebSocket URL of the Sendspin server. If omitted, discover via mDNS."),
     )
     parser.add_argument(
         "--name",
@@ -142,7 +142,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--id",
         default=None,
-        help="Unique identifier for this client (defaults to resonate-cli-<hostname>)",
+        help="Unique identifier for this client (defaults to sendspin-cli-<hostname>)",
     )
     parser.add_argument(
         "--log-level",
@@ -220,9 +220,9 @@ def _get_device_info() -> DeviceInfo:
 
     # Get software version
     try:
-        software_version = f"aioresonate {version('aioresonate')}"
+        software_version = f"aiosendspin {version('aiosendspin')}"
     except Exception:  # noqa: BLE001
-        software_version = "aioresonate (unknown version)"
+        software_version = "aiosendspin (unknown version)"
 
     return DeviceInfo(
         product_name=product_name,
@@ -276,7 +276,7 @@ def resolve_audio_device(device_id: int | None) -> int | None:
 
 
 class _ServiceDiscoveryListener:
-    """Listens for Resonate server advertisements via mDNS."""
+    """Listens for Sendspin server advertisements via mDNS."""
 
     def __init__(self, loop: asyncio.AbstractEventLoop) -> None:
         self._loop = loop
@@ -329,7 +329,7 @@ class _ServiceDiscoveryListener:
 
 
 class ServiceDiscovery:
-    """Manages continuous discovery of Resonate servers via mDNS."""
+    """Manages continuous discovery of Sendspin servers via mDNS."""
 
     def __init__(self) -> None:
         """Initialize the service discovery manager."""
@@ -461,7 +461,7 @@ class ConnectionManager:
 
 
 async def _connection_loop(
-    client: ResonateClient,
+    client: SendspinClient,
     discovery: ServiceDiscovery,
     audio_handler: AudioStreamHandler,
     initial_url: str,
@@ -475,7 +475,7 @@ async def _connection_loop(
     server reappears. Uses exponential backoff (up to 5 min) for errors.
 
     Args:
-        client: Resonate client instance.
+        client: Sendspin client instance.
         discovery: Service discovery manager.
         audio_handler: Audio stream handler.
         initial_url: Initial server URL.
@@ -553,11 +553,11 @@ async def _connection_loop(
 class AudioStreamHandler:
     """Manages audio playback state and stream lifecycle."""
 
-    def __init__(self, client: ResonateClient, audio_device: int | None = None) -> None:
+    def __init__(self, client: SendspinClient, audio_device: int | None = None) -> None:
         """Initialize the audio stream handler.
 
         Args:
-            client: The Resonate client instance.
+            client: The Sendspin client instance.
             audio_device: Audio device ID to use. None for default device.
         """
         self._client = client
@@ -629,7 +629,7 @@ async def main_async(argv: Sequence[str] | None = None) -> int:  # noqa: PLR0915
             logger.error("Unable to determine hostname. Please specify --id and/or --name")
             return 1
         # Auto-generate client ID and name from hostname
-        client_id = args.id if args.id is not None else f"resonate-cli-{hostname}"
+        client_id = args.id if args.id is not None else f"sendspin-cli-{hostname}"
         client_name = args.name if args.name is not None else hostname
     else:
         # Both explicitly provided
@@ -639,7 +639,7 @@ async def main_async(argv: Sequence[str] | None = None) -> int:  # noqa: PLR0915
     _print_event(f"Using client ID: {client_id}")
 
     state = CLIState()
-    client = ResonateClient(
+    client = SendspinClient(
         client_id=client_id,
         client_name=client_name,
         roles=[Roles.CONTROLLER, Roles.PLAYER, Roles.METADATA],
@@ -667,11 +667,11 @@ async def main_async(argv: Sequence[str] | None = None) -> int:  # noqa: PLR0915
         # Get initial server URL
         url = args.url
         if url is None:
-            logger.info("Waiting for mDNS discovery of Resonate server...")
-            _print_event("Searching for Resonate server...")
+            logger.info("Waiting for mDNS discovery of Sendspin server...")
+            _print_event("Searching for Sendspin server...")
             try:
                 url = await discovery.wait_for_first_server()
-                logger.info("Discovered Resonate server at %s", url)
+                logger.info("Discovered Sendspin server at %s", url)
                 _print_event(f"Found server at {url}")
             except Exception:
                 logger.exception("Failed to discover server")
@@ -775,7 +775,7 @@ async def _handle_server_state(state: CLIState, payload: ServerStatePayload) -> 
 async def _handle_server_command(
     state: CLIState,
     audio_handler: AudioStreamHandler,
-    client: ResonateClient,
+    client: SendspinClient,
     payload: ServerCommandPayload,
 ) -> None:
     """Handle server/command messages for player volume/mute control."""
@@ -808,7 +808,7 @@ class CommandHandler:
 
     def __init__(
         self,
-        client: ResonateClient,
+        client: SendspinClient,
         state: CLIState,
         audio_handler: AudioStreamHandler,
     ) -> None:
@@ -967,7 +967,7 @@ class CommandHandler:
 
 
 async def _keyboard_loop(
-    client: ResonateClient,
+    client: SendspinClient,
     state: CLIState,
     audio_handler: AudioStreamHandler,
 ) -> None:

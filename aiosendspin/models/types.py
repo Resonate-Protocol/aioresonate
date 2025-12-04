@@ -1,4 +1,4 @@
-"""Models for enum types used by resonate."""
+"""Models for enum types used by Sendspin."""
 
 from dataclasses import dataclass
 from enum import Enum
@@ -56,7 +56,7 @@ class Roles(Enum):
     Has its own volume and mute state and preferred format settings.
     """
     CONTROLLER = "controller@v1"
-    """Controls the Resonate group this client is part of."""
+    """Controls the Sendspin group this client is part of."""
     METADATA = "metadata@v1"
     """Displays text metadata describing the currently playing audio."""
     ARTWORK = "artwork@v1"
@@ -179,7 +179,7 @@ class GoodbyeReason(Enum):
     """Reason for client disconnect (multi-server support)."""
 
     ANOTHER_SERVER = "another_server"
-    """Client is switching to a different Resonate server."""
+    """Client is switching to a different Sendspin server."""
     SHUTDOWN = "shutdown"
     """Client is shutting down."""
     RESTART = "restart"

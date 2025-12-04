@@ -49,4 +49,4 @@ jobs:
   #         python -m pip install --upgrade pip build setuptools
   #         pip install .[test]
   #     - name: Pytest
-  #       run: pytest --durations 10 --cov-report term-missing --cov=aioresonate --cov-report=xml tests/
+  #       run: pytest --durations 10 --cov-report term-missing --cov=aiosendspin --cov-report=xml tests/

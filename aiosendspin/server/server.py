@@ -1,4 +1,4 @@
-"""Resonate Server implementation to connect to and manage many Resonate Clients."""
+"""Sendspin Server implementation to connect to and manage many Sendspin Clients."""
 
 import asyncio
 import logging
@@ -12,24 +12,24 @@ from aiohttp.client import ClientSession
 from zeroconf import InterfaceChoice, IPVersion, ServiceStateChange, Zeroconf
 from zeroconf.asyncio import AsyncServiceBrowser, AsyncServiceInfo, AsyncZeroconf
 
-from .client import ResonateClient
+from .client import SendspinClient
 
 logger = logging.getLogger(__name__)
 
 
-class ResonateEvent:
-    """Base event type used by ResonateServer.add_event_listener()."""
+class SendspinEvent:
+    """Base event type used by SendspinServer.add_event_listener()."""
 
 
 @dataclass
-class ClientAddedEvent(ResonateEvent):
+class ClientAddedEvent(SendspinEvent):
     """A new client was added."""
 
     client_id: str
 
 
 @dataclass
-class ClientRemovedEvent(ResonateEvent):
+class ClientRemovedEvent(SendspinEvent):
     """A client disconnected from the server."""
 
     client_id: str
@@ -43,13 +43,13 @@ async def _get_ip_pton(ip_string: str) -> bytes:
         return await asyncio.to_thread(socket.inet_pton, socket.AF_INET6, ip_string)
 
 
-class ResonateServer:
-    """Resonate Server implementation to connect to and manage many Resonate Clients."""
+class SendspinServer:
+    """Sendspin Server implementation to connect to and manage many Sendspin Clients."""
 
-    _clients: set[ResonateClient]
+    _clients: set[SendspinClient]
     """All groups managed by this server."""
     _loop: asyncio.AbstractEventLoop
-    _event_cbs: list[Callable[["ResonateServer", ResonateEvent], Coroutine[None, None, None]]]
+    _event_cbs: list[Callable[["SendspinServer", SendspinEvent], Coroutine[None, None, None]]]
     _connection_tasks: dict[str, asyncio.Task[None]]
     """
     All tasks managing client connections.
@@ -94,7 +94,7 @@ class ResonateServer:
         client_session: ClientSession | None = None,
     ) -> None:
         """
-        Initialize a new Resonate Server.
+        Initialize a new Sendspin Server.
 
         Args:
             loop: The asyncio event loop to use for asynchronous operations.
@@ -122,7 +122,7 @@ class ResonateServer:
         self._zc = None
         self._mdns_service = None
         self._mdns_browser = None
-        logger.debug("ResonateServer initialized: id=%s, name=%s", server_id, server_name)
+        logger.debug("SendspinServer initialized: id=%s, name=%s", server_id, server_name)
 
     @property
     def loop(self) -> asyncio.AbstractEventLoop:
@@ -130,10 +130,10 @@ class ResonateServer:
         return self._loop
 
     async def on_client_connect(self, request: web.Request) -> web.StreamResponse:
-        """Handle an incoming WebSocket connection from a Resonate client."""
+        """Handle an incoming WebSocket connection from a Sendspin client."""
         logger.debug("Incoming client connection from %s", request.remote)
 
-        client = ResonateClient(
+        client = SendspinClient(
             self,
             handle_client_connect=self._handle_client_connect,
             handle_client_disconnect=self._handle_client_disconnect,
@@ -149,7 +149,7 @@ class ResonateServer:
 
     def connect_to_client(self, url: str) -> None:
         """
-        Connect to the Resonate client at the given URL.
+        Connect to the Sendspin client at the given URL.
 
         If an active connection already exists for this URL, nothing will happen.
         In case a connection attempt fails, a new connection will be attempted automatically.
@@ -171,7 +171,7 @@ class ResonateServer:
 
     def disconnect_from_client(self, url: str) -> None:
         """
-        Disconnect from the Resonate client that was previously connected at the given URL.
+        Disconnect from the Sendspin client that was previously connected at the given URL.
 
         If no connection was established at this URL, or the connection is already closed,
         this will do nothing.
@@ -191,7 +191,7 @@ class ResonateServer:
 
         try:
             while True:
-                client: ResonateClient | None = None
+                client: SendspinClient | None = None
                 retry_event = self._retry_events.get(url)
 
                 try:
@@ -203,7 +203,7 @@ class ResonateServer:
                     ) as wsock:
                         # Reset backoff on successful connect
                         backoff = 1.0
-                        client = ResonateClient(
+                        client = SendspinClient(
                             self,
                             handle_client_connect=self._handle_client_connect,
                             handle_client_disconnect=self._handle_client_disconnect,
@@ -253,7 +253,7 @@ class ResonateServer:
             self._retry_events.pop(url, None)  # Cleanup retry events dict
 
     def add_event_listener(
-        self, callback: Callable[["ResonateServer", ResonateEvent], Coroutine[None, None, None]]
+        self, callback: Callable[["SendspinServer", SendspinEvent], Coroutine[None, None, None]]
     ) -> Callable[[], None]:
         """
         Register a callback to listen for state changes of the server.
@@ -272,13 +272,13 @@ class ResonateServer:
 
         return _remove
 
-    def _signal_event(self, event: ResonateEvent) -> None:
+    def _signal_event(self, event: SendspinEvent) -> None:
         """Signal an event to all registered listeners."""
         for cb in self._event_cbs:
             task = self._loop.create_task(cb(self, event))
             task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
 
-    def _handle_client_connect(self, client: ResonateClient) -> None:
+    def _handle_client_connect(self, client: SendspinClient) -> None:
         """
         Register the client to the server.
 
@@ -291,7 +291,7 @@ class ResonateServer:
         self._clients.add(client)
         self._signal_event(ClientAddedEvent(client.client_id))
 
-    def _handle_client_disconnect(self, client: ResonateClient) -> None:
+    def _handle_client_disconnect(self, client: SendspinClient) -> None:
         """Unregister the client from the server."""
         if client not in self._clients:
             return
@@ -301,11 +301,11 @@ class ResonateServer:
         self._signal_event(ClientRemovedEvent(client.client_id))
 
     @property
-    def clients(self) -> set[ResonateClient]:
+    def clients(self) -> set[SendspinClient]:
         """Get the set of all clients connected to this server."""
         return self._clients
 
-    def get_client(self, client_id: str) -> ResonateClient | None:
+    def get_client(self, client_id: str) -> SendspinClient | None:
         """Get the client with the given id."""
         logger.debug("Looking for client with id: %s", client_id)
         for client in self.clients:
@@ -329,11 +329,11 @@ class ResonateServer:
         self, port: int = 8927, host: str = "0.0.0.0", advertise_host: str = "0.0.0.0"
     ) -> None:
         """
-        Start the Resonate Server.
+        Start the Sendspin Server.
 
-        This will start the Resonate server to connect to clients for both:
-        - Client initiated connections: This will advertise this server via mDNS as _resonate_server
-        - Server initiated connections: This will listen for all _resonate._tcp mDNS services and
+        This will start the Sendspin server to connect to clients for both:
+        - Client initiated connections: This will advertise this server via mDNS as _sendspin-server
+        - Server initiated connections: This will listen for all _sendspin._tcp mDNS services and
           automatically connect to them.
 
         :param port: The TCP port to bind the server to.
@@ -346,7 +346,7 @@ class ResonateServer:
             return
 
         api_path = "/sendspin"
-        logger.info("Starting Resonate server on port %d", port)
+        logger.info("Starting Sendspin server on port %d", port)
         self._app = web.Application()
         # Create perpetual WebSocket route for client connections
         self._app.router.add_get(api_path, self.on_client_connect)
@@ -360,7 +360,7 @@ class ResonateServer:
                 port=port,
             )
             await self._tcp_site.start()
-            logger.info("Resonate server started successfully on %s:%d", host, port)
+            logger.info("Sendspin server started successfully on %s:%d", host, port)
             # Start mDNS advertise and discovery
             self._zc = AsyncZeroconf(
                 ip_version=IPVersion.V4Only, interfaces=InterfaceChoice.Default
@@ -426,7 +426,7 @@ class ResonateServer:
         logger.debug("mDNS advertising server on port %d with path %s", port, path)
 
     async def _start_mdns_discovery(self) -> None:
-        """Automatically connect to Resonate clients when discovered via mDNS."""
+        """Automatically connect to Sendspin clients when discovered via mDNS."""
         assert self._zc is not None
 
         service_type = "_sendspin._tcp.local."
@@ -476,11 +476,11 @@ class ResonateServer:
                     break
 
         if port is None:
-            logger.warning("Resonate client discovered at %s has no port, ignoring", address)
+            logger.warning("Sendspin client discovered at %s has no port, ignoring", address)
             return
         if path is None or not str(path).startswith("/"):
             logger.warning(
-                "Resonate client discovered at %s:%i has no or invalid path property, ignoring",
+                "Sendspin client discovered at %s:%i has no or invalid path property, ignoring",
                 address,
                 port,
             )

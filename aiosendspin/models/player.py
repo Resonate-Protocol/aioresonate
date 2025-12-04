@@ -1,5 +1,5 @@
 """
-Player messages for the Resonate protocol.
+Player messages for the Sendspin protocol.
 
 This module contains messages specific to clients with the player role, which
 handle audio output and synchronized playback. Player clients receive timestamped

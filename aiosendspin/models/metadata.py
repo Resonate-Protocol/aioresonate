@@ -1,5 +1,5 @@
 """
-Metadata messages for the Resonate protocol.
+Metadata messages for the Sendspin protocol.
 
 This module contains messages specific to clients with the metadata role, which
 handle display of track information and playback progress. Metadata clients

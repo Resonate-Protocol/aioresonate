@@ -1,4 +1,4 @@
-"""Resonate Client implementation to connect to a Resonate Server."""
+"""Sendspin Client implementation to connect to a Sendspin Server."""
 
 from __future__ import annotations
 
@@ -10,10 +10,10 @@ from dataclasses import dataclass
 
 from aiohttp import ClientSession, ClientWebSocketResponse, WSMessage, WSMsgType
 
-from aioresonate.models import BINARY_HEADER_SIZE, BinaryMessageType, unpack_binary_header
-from aioresonate.models.artwork import ClientHelloArtworkSupport
-from aioresonate.models.controller import ControllerCommandPayload
-from aioresonate.models.core import (
+from aiosendspin.models import BINARY_HEADER_SIZE, BinaryMessageType, unpack_binary_header
+from aiosendspin.models.artwork import ClientHelloArtworkSupport
+from aiosendspin.models.controller import ControllerCommandPayload
+from aiosendspin.models.core import (
     ClientCommandMessage,
     ClientCommandPayload,
     ClientHelloMessage,
@@ -37,14 +37,14 @@ from aioresonate.models.core import (
     StreamEndMessage,
     StreamStartMessage,
 )
-from aioresonate.models.player import (
+from aiosendspin.models.player import (
     ClientHelloPlayerSupport,
     PlayerStatePayload,
     StreamStartPlayer,
 )
-from aioresonate.models.types import AudioCodec, MediaCommand, PlayerStateType, Roles, ServerMessage
+from aiosendspin.models.types import AudioCodec, MediaCommand, PlayerStateType, Roles, ServerMessage
 
-from .time_sync import ResonateTimeFilter
+from .time_sync import SendspinTimeFilter
 
 logger = logging.getLogger(__name__)
 
@@ -114,9 +114,9 @@ class ServerInfo:
     version: int
 
 
-class ResonateClient:
+class SendspinClient:
     """
-    Async Resonate client for handling playback and metadata.
+    Async Sendspin client for handling playback and metadata.
 
     The client must be created within an async context and requires explicit
     role specification. Player and metadata support configs are required if
@@ -160,7 +160,7 @@ class ResonateClient:
     """Static playback delay in microseconds."""
     _send_lock: asyncio.Lock
     """Lock for serializing WebSocket message sends."""
-    _time_filter: ResonateTimeFilter
+    _time_filter: SendspinTimeFilter
     """Kalman filter for time synchronization."""
 
     _current_player: StreamStartPlayer | None = None
@@ -214,7 +214,7 @@ class ResonateClient:
         initial_muted: bool = False,
     ) -> None:
         """
-        Create a new Resonate client instance.
+        Create a new Sendspin client instance.
 
         Args:
             client_id: Unique identifier for this client.
@@ -266,7 +266,7 @@ class ResonateClient:
         self._owns_session = session is None
         self._loop = asyncio.get_running_loop()
         self._send_lock = asyncio.Lock()
-        self._time_filter = ResonateTimeFilter()
+        self._time_filter = SendspinTimeFilter()
         self._initial_volume = initial_volume
         self._initial_muted = initial_muted
         self.set_static_delay_ms(static_delay_ms)
@@ -295,7 +295,7 @@ class ResonateClient:
         logger.info("Set static playback delay to %.1f ms", self.static_delay_ms)
 
     async def connect(self, url: str) -> None:
-        """Connect to a Resonate server via WebSocket."""
+        """Connect to a Sendspin server via WebSocket."""
         if self.connected:
             logger.debug("Already connected")
             return
@@ -304,7 +304,7 @@ class ResonateClient:
             self._session = ClientSession()
         self._server_hello_event = asyncio.Event()
 
-        logger.info("Connecting to Resonate server at %s", url)
+        logger.info("Connecting to Sendspin server at %s", url)
         self._ws = await self._session.ws_connect(url, heartbeat=30)
         self._connected = True
 

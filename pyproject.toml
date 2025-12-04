@@ -3,10 +3,10 @@ build-backend = "setuptools.build_meta"
 requires = ["setuptools>=62.3"]
 
 [project]
-name = "aioresonate"
+name = "aiosendspin"
 # The version is set by GH action on release
 authors = [
-  { name = "The Resonate Protocol Authors", email = "resonate@openhomefoundation.org" },
+  { name = "Sendspin Protocol Authors", email = "sendspin@openhomefoundation.org" },
 ]
 classifiers = [
   "Environment :: Console",
@@ -22,7 +22,7 @@ dependencies = [
   "zeroconf>=0.147",
 ]
 
-description = "Async Python implementation of the Resonate Protocol."
+description = "Async Python implementation of the Sendspin Protocol."
 license = { text = "Apache-2.0" }
 readme = "README.md"
 requires-python = ">=3.12"
@@ -49,7 +49,7 @@ test = [
 ]
 
 [project.scripts]
-resonate-cli = "aioresonate.cli:main"
+sendspin-cli = "aiosendspin.cli:main"
 
 [tool.codespell]
 # ignore-words-list = ""
@@ -104,7 +104,7 @@ warn_unreachable = true
 warn_unused_configs = true
 warn_unused_ignores = true
 
-packages = ["aioresonate"]
+packages = ["aiosendspin"]
 
 [tool.ruff.format]
 # Force Linux/macOS line endings
@@ -147,7 +147,7 @@ fixture-parentheses = false
 mark-parentheses = false
 
 [tool.ruff.lint.isort]
-known-first-party = ["aioresonate"]
+known-first-party = ["aiosendspin"]
 
 [tool.ruff.lint.mccabe]
 max-complexity = 25

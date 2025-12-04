@@ -1,5 +1,5 @@
 """
-Core messages for the Resonate protocol.
+Core messages for the Sendspin protocol.
 
 This module contains the fundamental messages that establish communication between
 clients and the server. These messages handle initial handshakes, ongoing clock
@@ -51,7 +51,7 @@ class DeviceInfo(DataClassORJSONMixin):
     manufacturer: str | None = None
     """Device manufacturer name."""
     software_version: str | None = None
-    """Software version of the client (not the Resonate version)."""
+    """Software version of the client (not the Sendspin version)."""
 
     class Config(BaseConfig):
         """Config for parsing json messages."""
@@ -69,7 +69,7 @@ class ClientHelloPayload(DataClassORJSONMixin):
     name: str
     """Friendly name of the client."""
     version: int
-    """Version that the Resonate client implements."""
+    """Version that the Sendspin client implements."""
     supported_roles: list[Roles]
     """List of roles the client supports."""
     device_info: DeviceInfo | None = None

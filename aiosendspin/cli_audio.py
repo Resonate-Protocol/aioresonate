@@ -1,4 +1,4 @@
-"""Audio playback for the Resonate CLI with time synchronization.
+"""Audio playback for the Sendspin CLI with time synchronization.
 
 This module provides an AudioPlayer that handles time-synchronized audio playback
 with DAC-level timing precision. It manages buffering, scheduled start times,
@@ -19,8 +19,8 @@ import numpy as np
 import sounddevice
 from sounddevice import CallbackFlags
 
-from aioresonate.client import PCMFormat
-from aioresonate.client.time_sync import ResonateTimeFilter
+from aiosendspin.client import PCMFormat
+from aiosendspin.client.time_sync import SendspinTimeFilter
 
 logger = logging.getLogger(__name__)
 
@@ -67,7 +67,7 @@ class _QueuedChunk:
 
 class AudioPlayer:
     """
-    Audio player for the Resonate CLI with time synchronization support.
+    Audio player for the Sendspin CLI with time synchronization support.
 
     This player accepts audio chunks with server timestamps and dynamically
     computes playback times using a time synchronization function. This allows
@@ -204,7 +204,7 @@ class AudioPlayer:
         self._last_output_frame: bytes = b""
 
         # Sync error smoothing (Kalman filter) and re-anchor cooldown
-        self._sync_error_filter = ResonateTimeFilter(process_std_dev=0.01, forget_factor=1.001)
+        self._sync_error_filter = SendspinTimeFilter(process_std_dev=0.01, forget_factor=1.001)
         self._sync_error_filtered_us: float = 0.0  # Cached filtered error value
         self._last_reanchor_loop_time_us: int = 0
         self._last_sync_error_log_us: int = 0  # Rate limit sync error logging

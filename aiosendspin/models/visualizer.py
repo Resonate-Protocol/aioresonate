@@ -1,5 +1,5 @@
 """
-Visualizer messages for the Resonate protocol.
+Visualizer messages for the Sendspin protocol.
 
 This module contains messages specific to clients with the visualizer role, which
 create visual representations of the audio being played. Visualizer clients receive

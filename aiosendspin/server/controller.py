@@ -4,19 +4,19 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from aioresonate.models.controller import ControllerCommandPayload
-from aioresonate.models.types import MediaCommand, PlaybackStateType, Roles
+from aiosendspin.models.controller import ControllerCommandPayload
+from aiosendspin.models.types import MediaCommand, PlaybackStateType, Roles
 
 if TYPE_CHECKING:
-    from .client import ResonateClient
-    from .group import ResonateGroup
-    from .server import ResonateServer
+    from .client import SendspinClient
+    from .group import SendspinGroup
+    from .server import SendspinServer
 
 
 class ControllerClient:
     """Encapsulates controller role behaviour for a client."""
 
-    def __init__(self, client: ResonateClient) -> None:
+    def __init__(self, client: SendspinClient) -> None:
         """Attach to a client that exposes controller capabilities."""
         self.client = client
         self._logger = client._logger.getChild("controller")  # noqa: SLF001
@@ -86,10 +86,10 @@ class ControllerClient:
             await current_group.remove_client(self.client)
             await next_group.add_client(self.client)
 
-    def _get_all_groups(self, server: ResonateServer) -> list[ResonateGroup]:
+    def _get_all_groups(self, server: SendspinServer) -> list[SendspinGroup]:
         """Get all unique groups from all connected clients."""
         groups_seen: set[str] = set()
-        unique_groups: list[ResonateGroup] = []
+        unique_groups: list[SendspinGroup] = []
 
         for client in server._clients:  # noqa: SLF001
             group = client.group
@@ -102,10 +102,10 @@ class ControllerClient:
 
     def _build_group_cycle(
         self,
-        all_groups: list[ResonateGroup],
-        current_group: ResonateGroup,
+        all_groups: list[SendspinGroup],
+        current_group: SendspinGroup,
         has_player_role: bool,  # noqa: FBT001
-    ) -> list[ResonateGroup | None]:
+    ) -> list[SendspinGroup | None]:
         """
         Build the cycle of groups based on the spec.
 
@@ -113,8 +113,8 @@ class ControllerClient:
         may contain None indicating to "go to a new solo group".
         """
         # Separate groups into categories
-        multi_client_playing: list[ResonateGroup] = []
-        single_client: list[ResonateGroup] = []
+        multi_client_playing: list[SendspinGroup] = []
+        single_client: list[SendspinGroup] = []
 
         for group in all_groups:
             client_count = len(group.clients)
@@ -143,7 +143,7 @@ class ControllerClient:
             # With player role: multi-client playing -> single-client -> own solo
             current_is_solo = len(current_group.clients) == 1
             # Use current group if solo, otherwise switch to new solo group (None)
-            solo_option: list[ResonateGroup | None] = [current_group] if current_is_solo else [None]
+            solo_option: list[SendspinGroup | None] = [current_group] if current_is_solo else [None]
             return multi_client_playing + single_client + solo_option
         # Without player role: multi-client playing -> single-client (no own solo)
         return [*multi_client_playing, *single_client]
