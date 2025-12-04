@@ -47,21 +47,21 @@ def undefined_field() -> UndefinedField:
 
 
 class Roles(Enum):
-    """Client roles."""
+    """Client roles with explicit versioning."""
 
-    PLAYER = "player"
+    PLAYER = "player@v1"
     """
     Receives audio and plays it in sync.
 
     Has its own volume and mute state and preferred format settings.
     """
-    CONTROLLER = "controller"
+    CONTROLLER = "controller@v1"
     """Controls the Resonate group this client is part of."""
-    METADATA = "metadata"
+    METADATA = "metadata@v1"
     """Displays text metadata describing the currently playing audio."""
-    ARTWORK = "artwork"
+    ARTWORK = "artwork@v1"
     """Displays artwork images. Has preferred format for images."""
-    VISUALIZER = "visualizer"
+    VISUALIZER = "visualizer@v1"
     """
     Visualizes music.
 
@@ -72,22 +72,22 @@ class Roles(Enum):
 class BinaryMessageType(Enum):
     """Enum for Binary Message Types."""
 
-    # Player role (bits 000000xx):
-    AUDIO_CHUNK = 0
+    # Player role (bits 000001xx, IDs 4-7):
+    AUDIO_CHUNK = 4
     """Audio chunks with timestamps (Player role, slot 0)."""
 
-    # Artwork role (bits 000001xx):
-    ARTWORK_CHANNEL_0 = 4
+    # Artwork role (bits 000010xx, IDs 8-11):
+    ARTWORK_CHANNEL_0 = 8
     """Artwork channel 0 (Artwork role, slot 0)."""
-    ARTWORK_CHANNEL_1 = 5
+    ARTWORK_CHANNEL_1 = 9
     """Artwork channel 1 (Artwork role, slot 1)."""
-    ARTWORK_CHANNEL_2 = 6
+    ARTWORK_CHANNEL_2 = 10
     """Artwork channel 2 (Artwork role, slot 2)."""
-    ARTWORK_CHANNEL_3 = 7
+    ARTWORK_CHANNEL_3 = 11
     """Artwork channel 3 (Artwork role, slot 3)."""
 
-    # Visualizer role (bits 000010xx):
-    VISUALIZATION_DATA = 8
+    # Visualizer role (bits 00010xxx, IDs 16-23):
+    VISUALIZATION_DATA = 16
     """Visualization data (Visualizer role, slot 0)."""
 
 

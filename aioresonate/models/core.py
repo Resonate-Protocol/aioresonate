@@ -212,7 +212,9 @@ class ServerHelloPayload(DataClassORJSONMixin):
     name: str
     """Friendly name of the server"""
     version: int
-    """Latest supported version of Resonate."""
+    """Version of the core message format (independent of role versions)."""
+    active_roles: list[Roles]
+    """Versioned roles that are active for this client (e.g., player@v1, controller@v1)."""
     connection_reason: ConnectionReason
     """Reason for this connection (relevant for multi-server environments)."""
 

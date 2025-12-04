@@ -537,6 +537,7 @@ class ResonateClient:
                             server_id=self._server.id,
                             name=self._server.name,
                             version=1,
+                            active_roles=self._roles,
                             connection_reason=ConnectionReason.DISCOVERY,
                         )
                     )
