@@ -1,5 +1,5 @@
 """
-Visualizer messages for the Resonate protocol.
+Visualizer messages for the Sendspin protocol.
 
 This module contains messages specific to clients with the visualizer role, which
 create visual representations of the audio being played. Visualizer clients receive
@@ -20,7 +20,9 @@ class ClientHelloVisualizerSupport(DataClassORJSONMixin):
     """Visualizer support configuration - only if visualizer role is set."""
 
     buffer_capacity: int
-    """Buffer capacity size in bytes."""
+    """
+    Max size in bytes of visualization data messages in the buffer that are yet to be displayed.
+    """
 
     def __post_init__(self) -> None:
         """Validate field values."""
@@ -37,14 +39,3 @@ class ClientHelloVisualizerSupport(DataClassORJSONMixin):
 @dataclass
 class StreamStartVisualizer(DataClassORJSONMixin):
     """Visualizer object in stream/start message."""
-
-
-# Server -> Client: stream/update visualizer object
-@dataclass
-class StreamUpdateVisualizer(DataClassORJSONMixin):
-    """Visualizer object in stream/update message with delta updates."""
-
-    class Config(BaseConfig):
-        """Config for parsing json messages."""
-
-        omit_none = True

@@ -1,21 +1,25 @@
-"""Models for the resonate audio protocol."""
+"""Models for the Sendspin audio protocol."""
 
 from __future__ import annotations
 
 __all__ = [
     "BINARY_HEADER_FORMAT",
     "BINARY_HEADER_SIZE",
+    "AudioCodec",
     "BinaryHeader",
     "BinaryMessageType",
     "ClientMessage",
+    "DeviceInfo",
     "MediaCommand",
     "PictureFormat",
     "PlaybackStateType",
+    "PlayerCommand",
     "PlayerStateType",
     "RepeatMode",
     "Roles",
     "ServerMessage",
     "UndefinedField",
+    "artwork",
     "controller",
     "core",
     "metadata",
@@ -30,13 +34,16 @@ __all__ = [
 import struct
 from typing import NamedTuple
 
-from . import controller, core, metadata, player, types, visualizer
+from . import artwork, controller, core, metadata, player, types, visualizer
+from .core import DeviceInfo
 from .types import (
+    AudioCodec,
     BinaryMessageType,
     ClientMessage,
     MediaCommand,
     PictureFormat,
     PlaybackStateType,
+    PlayerCommand,
     PlayerStateType,
     RepeatMode,
     Roles,
@@ -46,7 +53,7 @@ from .types import (
 )
 
 # Binary header (big-endian): message_type(1) + timestamp_us(8) = 9 bytes
-BINARY_HEADER_FORMAT = ">BQ"
+BINARY_HEADER_FORMAT = ">Bq"
 BINARY_HEADER_SIZE = struct.calcsize(BINARY_HEADER_FORMAT)
 
 

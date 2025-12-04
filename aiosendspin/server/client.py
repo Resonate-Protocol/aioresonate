@@ -9,31 +9,35 @@ from typing import TYPE_CHECKING, cast
 
 from aiohttp import ClientWebSocketResponse, WSMessage, WSMsgType, web
 
-from aioresonate.models import unpack_binary_header
-from aioresonate.models.controller import (
-    GroupCommandClientMessage,
-    GroupGetListClientMessage,
-    GroupJoinClientMessage,
-    GroupUnjoinClientMessage,
-)
-from aioresonate.models.core import (
+from aiosendspin.models import unpack_binary_header
+from aiosendspin.models.core import (
+    ClientCommandMessage,
+    ClientGoodbyeMessage,
     ClientHelloMessage,
     ClientHelloPayload,
+    ClientStateMessage,
     ClientTimeMessage,
+    GroupUpdateServerMessage,
+    GroupUpdateServerPayload,
     ServerHelloMessage,
     ServerHelloPayload,
     ServerTimeMessage,
     ServerTimePayload,
-)
-from aioresonate.models.player import (
-    PlayerUpdateMessage,
     StreamRequestFormatMessage,
 )
-from aioresonate.models.types import BinaryMessageType, ClientMessage, Roles, ServerMessage
+from aiosendspin.models.types import (
+    BinaryMessageType,
+    ClientMessage,
+    ConnectionReason,
+    GoodbyeReason,
+    PlaybackStateType,
+    Roles,
+    ServerMessage,
+)
 
 from .controller import ControllerClient
 from .events import ClientEvent, ClientGroupChangedEvent
-from .group import ResonateGroup
+from .group import SendspinGroup
 from .metadata import MetadataClient
 from .player import PlayerClient
 from .visualizer import VisualizerClient
@@ -46,7 +50,7 @@ logger = logging.getLogger(__name__)
 # The cyclic import is not an issue during runtime, so hide it
 # pyright: reportImportCycles=none
 if TYPE_CHECKING:
-    from .server import ResonateServer
+    from .server import SendspinServer
 
 
 class DisconnectBehaviour(Enum):
@@ -64,16 +68,16 @@ class DisconnectBehaviour(Enum):
     """
 
 
-class ResonateClient:
+class SendspinClient:
     """
-    A Client that is connected to a ResonateServer.
+    A Client that is connected to a SendspinServer.
 
     Playback is handled through groups, use Client.group to get the
     assigned group.
     """
 
-    _server: "ResonateServer"
-    """Reference to the ResonateServer instance this client belongs to."""
+    _server: "SendspinServer"
+    """Reference to the SendspinServer instance this client belongs to."""
     _wsock_client: ClientWebSocketResponse | None = None
     """
     WebSocket connection from the server to the client.
@@ -98,11 +102,17 @@ class ResonateClient:
     """Task responsible for sending JSON and binary data."""
     _to_write: asyncio.Queue[ServerMessage | bytes]
     """Queue for messages to be sent to the client through the WebSocket."""
-    _group: ResonateGroup
-    _event_cbs: list[Callable[[ClientEvent], Coroutine[None, None, None]]]
+    _group: SendspinGroup
+    _event_cbs: list[Callable[["SendspinClient", ClientEvent], Coroutine[None, None, None]]]
     _closing: bool = False
     _disconnecting: bool = False
     """Flag to prevent multiple concurrent disconnect tasks."""
+    _server_hello_sent: bool = False
+    """Flag to track if server/hello has been sent to complete handshake."""
+    _initial_state_received: bool = False
+    """Flag to track if initial client/state has been received (for roles that require it)."""
+    _initial_state_timeout_handle: asyncio.TimerHandle | None = None
+    """Timeout handle for initial state reception (for roles that require it)."""
     disconnect_behaviour: DisconnectBehaviour
     """
     Controls the disconnect behavior for this client.
@@ -111,8 +121,8 @@ class ResonateClient:
         on remaining group members.
     STOP: Client stops playback for the entire group when disconnecting.
     """
-    _handle_client_connect: Callable[["ResonateClient"], None]
-    _handle_client_disconnect: Callable[["ResonateClient"], None]
+    _handle_client_connect: Callable[["SendspinClient"], None]
+    _handle_client_disconnect: Callable[["SendspinClient"], None]
     _logger: logging.Logger
     _roles: list[Roles]
     _player: PlayerClient | None = None
@@ -122,19 +132,19 @@ class ResonateClient:
 
     def __init__(
         self,
-        server: "ResonateServer",
-        handle_client_connect: Callable[["ResonateClient"], None],
-        handle_client_disconnect: Callable[["ResonateClient"], None],
+        server: "SendspinServer",
+        handle_client_connect: Callable[["SendspinClient"], None],
+        handle_client_disconnect: Callable[["SendspinClient"], None],
         request: web.Request | None = None,
         wsock_client: ClientWebSocketResponse | None = None,
     ) -> None:
         """
         DO NOT CALL THIS CONSTRUCTOR. INTERNAL USE ONLY.
 
-        Use ResonateServer.on_client_connect or ResonateServer.connect_to_client instead.
+        Use SendspinServer.on_client_connect or SendspinServer.connect_to_client instead.
 
         Args:
-            server: The ResonateServer instance this client belongs to.
+            server: The SendspinServer instance this client belongs to.
             handle_client_connect: Callback function called when the client's handshake is complete.
             handle_client_disconnect: Callback function called when the client disconnects.
             request: Optional web request object for client-initiated connections.
@@ -158,12 +168,15 @@ class ResonateClient:
         else:
             raise ValueError("Either request or wsock_client must be provided")
         self._to_write = asyncio.Queue(maxsize=MAX_PENDING_MSG)
-        self._group = ResonateGroup(server, self)
         self._event_cbs = []
         self._closing = False
         self._disconnecting = False
+        self._server_hello_sent = False
+        self._initial_state_received = False
+        self._initial_state_timeout_handle = None
         self._roles = []
         self.disconnect_behaviour = DisconnectBehaviour.UNGROUP
+        self._set_group(SendspinGroup(server, self))
 
     async def disconnect(self, *, retry_connection: bool = True) -> None:
         """Disconnect this client from the server."""
@@ -200,7 +213,7 @@ class ResonateClient:
         self._logger.info("Client disconnected")
 
     @property
-    def group(self) -> ResonateGroup:
+    def group(self) -> SendspinGroup:
         """Get the group assigned to this client."""
         return self._group
 
@@ -305,16 +318,45 @@ class ResonateClient:
             raise ValueError(f"Client does not support role: {Roles.VISUALIZER}")
         return self._visualizer
 
-    def _set_group(self, group: "ResonateGroup") -> None:
+    def requires_initial_state(self) -> bool:
+        """Check if this client's roles require sending initial state."""
+        return Roles.PLAYER in self._roles
+
+    def _initial_state_timeout_callback(self) -> None:
         """
-        Set the group for this client. For internal use by ResonateGroup only.
+        Handle initial state timeout.
+
+        Logs a warning and disconnects the client for spec violation.
+        """
+        if self._initial_state_received:
+            # State was received just as timeout fired
+            return
+
+        self._logger.warning(
+            "Client %s failed to send required initial state within timeout (spec violation)",
+            self._client_id or "unknown",
+        )
+        # Disconnect and allow retry in case of transient network issues
+        task = self._server.loop.create_task(self.disconnect(retry_connection=True))
+        task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
+
+    def _set_group(self, group: "SendspinGroup") -> None:
+        """
+        Set the group for this client. For internal use by SendspinGroup only.
 
         NOTE: this does not update the group's client list
 
         Args:
-            group: The ResonateGroup to assign this client to.
+            group: The SendspinGroup to assign this client to.
         """
+        if hasattr(self, "_group"):
+            # Don't unregister if this is the initial setup in __init__
+            self._group._unregister_client_events(self)  # noqa: SLF001
+
         self._group = group
+
+        # Register event listeners with new group
+        self._group._register_client_events(self)  # noqa: SLF001
 
         # Emit event for group change
         self._signal_event(ClientGroupChangedEvent(group))
@@ -385,6 +427,20 @@ class ResonateClient:
                 if msg.type in (WSMsgType.CLOSE, WSMsgType.CLOSING, WSMsgType.CLOSED):
                     break
 
+                if msg.type == WSMsgType.BINARY:
+                    # Per spec, clients should not send binary messages
+                    # Binary messages should be rejected if there is no active stream
+                    if not self._group.has_active_stream:
+                        self._logger.warning(
+                            "Received binary message from client with no active stream, rejecting"
+                        )
+                    else:
+                        self._logger.warning(
+                            "Received binary message from client "
+                            "(clients should not send binary data)"
+                        )
+                    continue
+
                 if msg.type != WSMsgType.TEXT:
                     continue
 
@@ -418,7 +474,7 @@ class ResonateClient:
         """
         Handle the complete websocket connection lifecycle.
 
-        This method is private and should only be called by ResonateServer
+        This method is private and should only be called by SendspinServer
         during client connection handling.
         """
         try:
@@ -431,14 +487,33 @@ class ResonateClient:
             # Clean up connection and tasks
             await self._cleanup_connection()
 
-    async def _handle_message(self, message: ClientMessage, timestamp: int) -> None:
+    async def _handle_message(  # noqa: PLR0915
+        self, message: ClientMessage, timestamp: int
+    ) -> None:
         """Handle incoming commands from the client."""
         if self._client_info is None and not isinstance(message, ClientHelloMessage):
             raise ValueError("First message must be client/hello")
+
+        # Check that other messages are not sent before server/hello
+        if (
+            self._client_info is not None
+            and not self._server_hello_sent
+            and not isinstance(message, ClientHelloMessage)
+        ):
+            raise ValueError("Client must wait for server/hello before sending other messages")
+
         match message:
             # Core messages
             case ClientHelloMessage(client_info):
                 self._logger.info("Received client/hello")
+                if client_info.version != 1:
+                    self._logger.error(
+                        "Incompatible protocol version %s (only '1' is supported)",
+                        client_info.version,
+                    )
+                    await self.disconnect(retry_connection=False)
+                    return
+
                 self._client_info = client_info
                 self._roles = client_info.supported_roles
                 self._client_id = client_info.client_id
@@ -455,15 +530,40 @@ class ResonateClient:
                 if Roles.VISUALIZER in self._roles:
                     self._visualizer = VisualizerClient(self)
 
-                self._handle_client_connect(self)
                 self._logger.debug("Sending server/hello in response to client/hello")
                 self.send_message(
                     ServerHelloMessage(
                         payload=ServerHelloPayload(
-                            server_id=self._server.id, name=self._server.name, version=1
+                            server_id=self._server.id,
+                            name=self._server.name,
+                            version=1,
+                            active_roles=self._roles,
+                            connection_reason=ConnectionReason.DISCOVERY,
                         )
                     )
                 )
+                self._server_hello_sent = True
+                # Send initial group/update after handshake
+                self._logger.debug("Sending initial group/update after handshake")
+                self.send_message(
+                    GroupUpdateServerMessage(
+                        payload=GroupUpdateServerPayload(
+                            playback_state=PlaybackStateType.STOPPED,
+                            group_id=self._group.group_id,
+                            group_name=self._group.group_name,
+                        )
+                    )
+                )
+
+                # For roles requiring a initial state update per spect,
+                # only register the client once we have received it
+                if self.requires_initial_state():
+                    # Start timeout (5 seconds) for initial state reception
+                    self._initial_state_timeout_handle = self._server.loop.call_later(
+                        5.0, self._initial_state_timeout_callback
+                    )
+                else:
+                    self._handle_client_connect(self)
             case ClientTimeMessage(client_time):
                 self.send_message(
                     ServerTimeMessage(
@@ -475,20 +575,34 @@ class ResonateClient:
                     )
                 )
             # Player messages
-            case PlayerUpdateMessage(state):
-                self.require_player.handle_player_update(state)
+            case ClientStateMessage(payload):
+                # Track initial state reception for roles that require it
+                if self.requires_initial_state() and not self._initial_state_received:
+                    self._initial_state_received = True
+                    self._logger.debug("Received initial client state")
+
+                    # Cancel timeout if set
+                    if self._initial_state_timeout_handle:
+                        self._initial_state_timeout_handle.cancel()
+                        self._initial_state_timeout_handle = None
+
+                    # Now that we have initial state, register client
+                    self._handle_client_connect(self)
+
+                if payload.player:
+                    self.require_player.handle_player_update(payload.player)
             case StreamRequestFormatMessage(payload):
-                self._ensure_role(Roles.PLAYER)
-                self.group.handle_stream_format_request(self, payload)
+                await self.group.handle_stream_format_request(self, payload)
             # Controller messages
-            case GroupGetListClientMessage() as group_get_list:
-                self.require_controller.handle_get_list(group_get_list)
-            case GroupJoinClientMessage(payload):
-                self.require_controller.handle_join(payload)
-            case GroupUnjoinClientMessage() as group_unjoin:
-                self.require_controller.handle_unjoin(group_unjoin)
-            case GroupCommandClientMessage(group_command):
-                self.require_controller.handle_command(group_command)
+            case ClientCommandMessage(payload):
+                if payload.controller:
+                    await self.require_controller.handle_command(payload.controller)
+            # Goodbye message (multi-server support)
+            case ClientGoodbyeMessage(payload):
+                self._logger.info("Received client/goodbye with reason: %s", payload.reason)
+                # Per spec: auto-reconnect only for 'restart' reason
+                retry = payload.reason == GoodbyeReason.RESTART
+                await self.disconnect(retry_connection=retry)
 
     async def _writer(self) -> None:
         """Write outgoing messages from the queue."""
@@ -564,7 +678,7 @@ class ResonateClient:
             self._logger.debug("Enqueueing message: %s", type(message).__name__)
 
     def add_event_listener(
-        self, callback: Callable[[ClientEvent], Coroutine[None, None, None]]
+        self, callback: Callable[["SendspinClient", ClientEvent], Coroutine[None, None, None]]
     ) -> Callable[[], None]:
         """
         Register a callback to listen for state changes of this client.
@@ -585,5 +699,5 @@ class ResonateClient:
 
     def _signal_event(self, event: ClientEvent) -> None:
         for cb in self._event_cbs:
-            task = self._server.loop.create_task(cb(event))
+            task = self._server.loop.create_task(cb(self, event))
             task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)

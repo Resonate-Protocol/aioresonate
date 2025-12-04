@@ -1,4 +1,4 @@
-"""Audio playback for the Resonate CLI with time synchronization.
+"""Audio playback for the Sendspin CLI with time synchronization.
 
 This module provides an AudioPlayer that handles time-synchronized audio playback
 with DAC-level timing precision. It manages buffering, scheduled start times,
@@ -15,11 +15,12 @@ from dataclasses import dataclass
 from enum import Enum, auto
 from typing import Final, Protocol, cast
 
+import numpy as np
 import sounddevice
 from sounddevice import CallbackFlags
 
-from aioresonate.client import PCMFormat
-from aioresonate.client.time_sync import ResonateTimeFilter
+from aiosendspin.client import PCMFormat
+from aiosendspin.client.time_sync import SendspinTimeFilter
 
 logger = logging.getLogger(__name__)
 
@@ -66,7 +67,7 @@ class _QueuedChunk:
 
 class AudioPlayer:
     """
-    Audio player for the Resonate CLI with time synchronization support.
+    Audio player for the Sendspin CLI with time synchronization support.
 
     This player accepts audio chunks with server timestamps and dynamically
     computes playback times using a time synchronization function. This allows
@@ -151,6 +152,9 @@ class AudioPlayer:
         self._stream_started = False
         self._first_real_chunk = True  # Flag to initialize timing from first chunk
 
+        self._volume: int = 100  # 0-100 range
+        self._muted: bool = False
+
         # Partial chunk tracking (to avoid discarding partial chunks)
         self._current_chunk: _QueuedChunk | None = None
         self._current_chunk_offset = 0
@@ -200,7 +204,7 @@ class AudioPlayer:
         self._last_output_frame: bytes = b""
 
         # Sync error smoothing (Kalman filter) and re-anchor cooldown
-        self._sync_error_filter = ResonateTimeFilter(process_std_dev=0.01, forget_factor=1.001)
+        self._sync_error_filter = SendspinTimeFilter(process_std_dev=0.01, forget_factor=1.001)
         self._sync_error_filtered_us: float = 0.0  # Cached filtered error value
         self._last_reanchor_loop_time_us: int = 0
         self._last_sync_error_log_us: int = 0  # Rate limit sync error logging
@@ -240,6 +244,17 @@ class AudioPlayer:
         logger.info(
             "Audio stream configured: blocksize=%d, latency=high%s", self._BLOCKSIZE, device_info
         )
+
+    def set_volume(self, volume: int, *, muted: bool) -> None:
+        """
+        Set the player volume and mute state.
+
+        Args:
+            volume: Volume level 0-100.
+            muted: Whether audio is muted.
+        """
+        self._volume = max(0, min(100, volume))
+        self._muted = muted
 
     async def stop(self) -> None:
         """Stop playback and release resources."""
@@ -437,6 +452,9 @@ class AudioPlayer:
             # Reset partial chunk state on error
             self._current_chunk = None
             self._current_chunk_offset = 0
+
+        # Apply volume scaling to the output
+        self._apply_volume(output_buffer, bytes_needed)
 
         # Track callback execution time for performance monitoring
         callback_end_us = int(self._loop.time() * 1_000_000)
@@ -768,6 +786,32 @@ class AudioPlayer:
         """Fill output buffer range with silence."""
         if num_bytes > 0:
             output_buffer[offset : offset + num_bytes] = b"\x00" * num_bytes
+
+    def _apply_volume(self, output_buffer: memoryview, num_bytes: int) -> None:
+        """
+        Apply volume scaling to the output buffer.
+
+        Scales 16-bit audio samples by the current volume level.
+        """
+        muted = self._muted
+        volume = self._volume
+
+        if muted or volume == 0:
+            # Fill with silence
+            output_buffer[:num_bytes] = b"\x00" * num_bytes
+            return
+
+        if volume == 100:
+            return
+
+        # Create view of buffer as int16 samples (no copy)
+        samples = np.frombuffer(output_buffer[:num_bytes], dtype=np.int16).copy()
+        # Convert perceived loudness (0-100) to amplitude using dB curve
+        db_reduction = 49.5 * (1 - volume / 100.0)
+        amplitude = 2 ** (-db_reduction / 6.014)
+        samples = (samples * amplitude).astype(np.int16)
+        # Write back to buffer
+        output_buffer[:num_bytes] = samples.tobytes()
 
     def _compute_and_set_loop_start(self, server_timestamp_us: int) -> None:
         """Compute and set scheduled start time from server timestamp."""

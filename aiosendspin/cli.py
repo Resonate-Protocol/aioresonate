@@ -1,4 +1,4 @@
-"""Command-line interface for running a Resonate client."""
+"""Command-line interface for running a Sendspin client."""
 
 from __future__ import annotations
 
@@ -6,12 +6,15 @@ import argparse
 import asyncio
 import contextlib
 import logging
+import platform
 import signal
 import socket
 import sys
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from functools import partial
+from importlib.metadata import version
+from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 if TYPE_CHECKING:
@@ -22,19 +25,36 @@ import sounddevice
 from aiohttp import ClientError
 from zeroconf.asyncio import AsyncServiceBrowser, AsyncZeroconf
 
-from aioresonate.cli_audio import AudioPlayer
-from aioresonate.client import PCMFormat, ResonateClient
-from aioresonate.models.controller import GroupUpdateServerPayload
-from aioresonate.models.core import SessionUpdatePayload, StreamStartMessage
-from aioresonate.models.metadata import ClientHelloMetadataSupport, SessionUpdateMetadata
-from aioresonate.models.player import ClientHelloPlayerSupport
-from aioresonate.models.types import MediaCommand, PlaybackStateType, Roles, UndefinedField
+from aiosendspin.cli_audio import AudioPlayer
+from aiosendspin.client import PCMFormat, SendspinClient
+from aiosendspin.models.core import (
+    DeviceInfo,
+    GroupUpdateServerPayload,
+    ServerCommandPayload,
+    ServerStatePayload,
+    StreamStartMessage,
+)
+from aiosendspin.models.metadata import SessionUpdateMetadata
+from aiosendspin.models.player import (
+    ClientHelloPlayerSupport,
+    PlayerCommandPayload,
+    SupportedAudioFormat,
+)
+from aiosendspin.models.types import (
+    AudioCodec,
+    MediaCommand,
+    PlaybackStateType,
+    PlayerCommand,
+    PlayerStateType,
+    Roles,
+    UndefinedField,
+)
 
 logger = logging.getLogger(__name__)
 
 
-SERVICE_TYPE = "_resonate-server._tcp.local."
-DEFAULT_PATH = "/resonate"
+SERVICE_TYPE = "_sendspin-server._tcp.local."
+DEFAULT_PATH = "/sendspin"
 
 
 @dataclass
@@ -50,17 +70,37 @@ class CLIState:
     album: str | None = None
     track_progress: int | None = None
     track_duration: int | None = None
+    player_volume: int = 100
+    player_muted: bool = False
 
     def update_metadata(self, metadata: SessionUpdateMetadata) -> bool:
         """Merge new metadata into the state and report if anything changed."""
         changed = False
-        for attr in ("title", "artist", "album", "track_progress", "track_duration"):
+        for attr in ("title", "artist", "album"):
             value = getattr(metadata, attr)
             if isinstance(value, UndefinedField):
                 continue
             if getattr(self, attr) != value:
                 setattr(self, attr, value)
                 changed = True
+
+        # Update progress fields from nested progress object
+        if not isinstance(metadata.progress, UndefinedField):
+            if metadata.progress is None:
+                # Clear progress fields
+                if self.track_progress is not None or self.track_duration is not None:
+                    self.track_progress = None
+                    self.track_duration = None
+                    changed = True
+            else:
+                # Update from nested progress object
+                if self.track_progress != metadata.progress.track_progress:
+                    self.track_progress = metadata.progress.track_progress
+                    changed = True
+                if self.track_duration != metadata.progress.track_duration:
+                    self.track_duration = metadata.progress.track_duration
+                    changed = True
+
         return changed
 
     def describe(self) -> str:
@@ -73,8 +113,9 @@ class CLIState:
         if self.album:
             lines.append(f"Album: {self.album}")
         if self.track_duration:
-            progress = self.track_progress or 0
-            lines.append(f"Progress: {progress:>2} / {self.track_duration:>2} s")
+            progress_s = (self.track_progress or 0) / 1000
+            duration_s = self.track_duration / 1000
+            lines.append(f"Progress: {progress_s:>5.1f} / {duration_s:>5.1f} s")
         if self.volume is not None:
             vol_line = f"Volume: {self.volume}%"
             if self.muted:
@@ -86,12 +127,12 @@ class CLIState:
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
-    """Parse CLI arguments for the resonate client."""
-    parser = argparse.ArgumentParser(description="Run a Resonate CLI client")
+    """Parse CLI arguments for the Sendspin client."""
+    parser = argparse.ArgumentParser(description="Run a Sendspin CLI client")
     parser.add_argument(
         "--url",
         default=None,
-        help=("WebSocket URL of the Resonate server. If omitted, discover via mDNS."),
+        help=("WebSocket URL of the Sendspin server. If omitted, discover via mDNS."),
     )
     parser.add_argument(
         "--name",
@@ -101,7 +142,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--id",
         default=None,
-        help="Unique identifier for this client (defaults to resonate-cli-<hostname>)",
+        help="Unique identifier for this client (defaults to sendspin-cli-<hostname>)",
     )
     parser.add_argument(
         "--log-level",
@@ -142,6 +183,52 @@ def _build_service_url(host: str, port: int, properties: dict[bytes, bytes | Non
         path = "/" + path
     host_fmt = f"[{host}]" if ":" in host else host
     return f"ws://{host_fmt}:{port}{path}"
+
+
+def _get_device_info() -> DeviceInfo:
+    """Get device information for the client hello message."""
+    # Get OS/platform information
+    system = platform.system()
+    product_name = f"{system}"
+
+    # Try to get more specific product info
+    if system == "Linux":
+        # Try reading /etc/os-release for distribution info
+        try:
+            os_release = Path("/etc/os-release")
+            if os_release.exists():
+                with os_release.open() as f:
+                    for line in f:
+                        if line.startswith("PRETTY_NAME="):
+                            product_name = line.split("=", 1)[1].strip().strip('"')
+                            break
+        except (OSError, IndexError):
+            pass
+    elif system == "Darwin":
+        mac_version = platform.mac_ver()[0]
+        product_name = f"macOS {mac_version}" if mac_version else "macOS"
+    elif system == "Windows":
+        try:
+            win_ver = platform.win32_ver()
+            # Check build number to distinguish Windows 11 (build 22000+) from Windows 10
+            if win_ver[0] == "10" and win_ver[1] and int(win_ver[1].split(".")[2]) >= 22000:
+                product_name = "Windows 11"
+            else:
+                product_name = f"Windows {win_ver[0]}"
+        except (ValueError, IndexError, AttributeError):
+            product_name = f"Windows {platform.release()}"
+
+    # Get software version
+    try:
+        software_version = f"aiosendspin {version('aiosendspin')}"
+    except Exception:  # noqa: BLE001
+        software_version = "aiosendspin (unknown version)"
+
+    return DeviceInfo(
+        product_name=product_name,
+        manufacturer=None,  # Could add manufacturer detection if needed
+        software_version=software_version,
+    )
 
 
 def list_audio_devices() -> None:
@@ -189,7 +276,7 @@ def resolve_audio_device(device_id: int | None) -> int | None:
 
 
 class _ServiceDiscoveryListener:
-    """Listens for Resonate server advertisements via mDNS."""
+    """Listens for Sendspin server advertisements via mDNS."""
 
     def __init__(self, loop: asyncio.AbstractEventLoop) -> None:
         self._loop = loop
@@ -242,7 +329,7 @@ class _ServiceDiscoveryListener:
 
 
 class ServiceDiscovery:
-    """Manages continuous discovery of Resonate servers via mDNS."""
+    """Manages continuous discovery of Sendspin servers via mDNS."""
 
     def __init__(self) -> None:
         """Initialize the service discovery manager."""
@@ -374,7 +461,7 @@ class ConnectionManager:
 
 
 async def _connection_loop(
-    client: ResonateClient,
+    client: SendspinClient,
     discovery: ServiceDiscovery,
     audio_handler: AudioStreamHandler,
     initial_url: str,
@@ -388,7 +475,7 @@ async def _connection_loop(
     server reappears. Uses exponential backoff (up to 5 min) for errors.
 
     Args:
-        client: Resonate client instance.
+        client: Sendspin client instance.
         discovery: Service discovery manager.
         audio_handler: Audio stream handler.
         initial_url: Initial server URL.
@@ -466,11 +553,11 @@ async def _connection_loop(
 class AudioStreamHandler:
     """Manages audio playback state and stream lifecycle."""
 
-    def __init__(self, client: ResonateClient, audio_device: int | None = None) -> None:
+    def __init__(self, client: SendspinClient, audio_device: int | None = None) -> None:
         """Initialize the audio stream handler.
 
         Args:
-            client: The Resonate client instance.
+            client: The Sendspin client instance.
             audio_device: Audio device ID to use. None for default device.
         """
         self._client = client
@@ -503,12 +590,20 @@ class AudioStreamHandler:
             logger.debug("Cleared audio queue on stream start")
         _print_event("Stream started")
 
-    def on_stream_end(self) -> None:
+    def on_stream_end(self, roles: list[Roles] | None) -> None:
         """Handle stream end by clearing audio queue to prevent desync on resume."""
-        if self.audio_player is not None:
+        # For the CLI player, we only care about the player role
+        if (roles is None or Roles.PLAYER in roles) and self.audio_player is not None:
             self.audio_player.clear()
             logger.debug("Cleared audio queue on stream end")
-        _print_event("Stream ended")
+            _print_event("Stream ended")
+
+    def on_stream_clear(self, roles: list[Roles] | None) -> None:
+        """Handle stream clear by clearing audio queue (e.g., for seek operations)."""
+        # For the CLI player, we only care about the player role
+        if (roles is None or Roles.PLAYER in roles) and self.audio_player is not None:
+            self.audio_player.clear()
+            logger.debug("Cleared audio queue on stream clear")
 
     def clear_queue(self) -> None:
         """Clear the audio queue to prevent desync."""
@@ -534,7 +629,7 @@ async def main_async(argv: Sequence[str] | None = None) -> int:  # noqa: PLR0915
             logger.error("Unable to determine hostname. Please specify --id and/or --name")
             return 1
         # Auto-generate client ID and name from hostname
-        client_id = args.id if args.id is not None else f"resonate-cli-{hostname}"
+        client_id = args.id if args.id is not None else f"sendspin-cli-{hostname}"
         client_name = args.name if args.name is not None else hostname
     else:
         # Both explicitly provided
@@ -544,21 +639,22 @@ async def main_async(argv: Sequence[str] | None = None) -> int:  # noqa: PLR0915
     _print_event(f"Using client ID: {client_id}")
 
     state = CLIState()
-    client = ResonateClient(
+    client = SendspinClient(
         client_id=client_id,
         client_name=client_name,
         roles=[Roles.CONTROLLER, Roles.PLAYER, Roles.METADATA],
+        device_info=_get_device_info(),
         player_support=ClientHelloPlayerSupport(
-            support_codecs=["pcm"],
-            support_channels=[2, 1],
-            support_sample_rates=[44_100],
-            support_bit_depth=[16],
+            supported_formats=[
+                SupportedAudioFormat(
+                    codec=AudioCodec.PCM, channels=2, sample_rate=44_100, bit_depth=16
+                ),
+                SupportedAudioFormat(
+                    codec=AudioCodec.PCM, channels=1, sample_rate=44_100, bit_depth=16
+                ),
+            ],
             buffer_capacity=32_000_000,
-        ),
-        metadata_support=ClientHelloMetadataSupport(
-            support_picture_formats=[],
-            media_width=None,
-            media_height=None,
+            supported_commands=[PlayerCommand.VOLUME, PlayerCommand.MUTE],
         ),
         static_delay_ms=args.static_delay_ms,
     )
@@ -571,11 +667,11 @@ async def main_async(argv: Sequence[str] | None = None) -> int:  # noqa: PLR0915
         # Get initial server URL
         url = args.url
         if url is None:
-            logger.info("Waiting for mDNS discovery of Resonate server...")
-            _print_event("Searching for Resonate server...")
+            logger.info("Waiting for mDNS discovery of Sendspin server...")
+            _print_event("Searching for Sendspin server...")
             try:
                 url = await discovery.wait_for_first_server()
-                logger.info("Discovered Resonate server at %s", url)
+                logger.info("Discovered Sendspin server at %s", url)
                 _print_event(f"Found server at {url}")
             except Exception:
                 logger.exception("Failed to discover server")
@@ -596,11 +692,16 @@ async def main_async(argv: Sequence[str] | None = None) -> int:  # noqa: PLR0915
         # Create audio and stream handlers
         audio_handler = AudioStreamHandler(client, audio_device=audio_device)
 
-        client.set_metadata_listener(lambda payload: _handle_session_update(state, payload))
+        client.set_metadata_listener(lambda payload: _handle_metadata_update(state, payload))
         client.set_group_update_listener(lambda payload: _handle_group_update(state, payload))
+        client.set_controller_state_listener(lambda payload: _handle_server_state(state, payload))
         client.set_stream_start_listener(audio_handler.on_stream_start)
         client.set_stream_end_listener(audio_handler.on_stream_end)
+        client.set_stream_clear_listener(audio_handler.on_stream_clear)
         client.set_audio_chunk_listener(audio_handler.on_audio_chunk)
+        client.set_server_command_listener(
+            lambda payload: _handle_server_command(state, audio_handler, client, payload)
+        )
 
         # Audio player will be created when first audio chunk arrives
 
@@ -642,30 +743,64 @@ async def main_async(argv: Sequence[str] | None = None) -> int:  # noqa: PLR0915
     return 0
 
 
-async def _handle_session_update(state: CLIState, payload: SessionUpdatePayload) -> None:
-    if payload.playback_state is not None and payload.playback_state != state.playback_state:
-        state.playback_state = payload.playback_state
-        _print_event(f"Playback state: {payload.playback_state.value}")
-
+async def _handle_metadata_update(state: CLIState, payload: ServerStatePayload) -> None:
+    """Handle server/state messages with metadata."""
     if payload.metadata is not None and state.update_metadata(payload.metadata):
         _print_event(state.describe())
 
 
-async def _handle_group_update(state: CLIState, payload: GroupUpdateServerPayload) -> None:
-    supported: set[MediaCommand] = set()
-    for command in payload.supported_commands:
-        try:
-            supported.add(command if isinstance(command, MediaCommand) else MediaCommand(command))
-        except ValueError:
-            continue
-    state.supported_commands = supported
+async def _handle_group_update(_state: CLIState, payload: GroupUpdateServerPayload) -> None:
+    if payload.playback_state:
+        _print_event(f"Playback state: {payload.playback_state.value}")
+    if payload.group_id:
+        _print_event(f"Group ID: {payload.group_id}")
+    if payload.group_name:
+        _print_event(f"Group name: {payload.group_name}")
 
-    if payload.volume != state.volume:
-        state.volume = payload.volume
-        _print_event(f"Volume: {payload.volume}%")
-    if payload.muted != state.muted:
-        state.muted = payload.muted
-        _print_event("Muted" if payload.muted else "Unmuted")
+
+async def _handle_server_state(state: CLIState, payload: ServerStatePayload) -> None:
+    """Handle server/state messages with controller state."""
+    if payload.controller:
+        controller = payload.controller
+        state.supported_commands = set(controller.supported_commands)
+
+        if controller.volume != state.volume:
+            state.volume = controller.volume
+            _print_event(f"Volume: {controller.volume}%")
+        if controller.muted != state.muted:
+            state.muted = controller.muted
+            _print_event("Muted" if controller.muted else "Unmuted")
+
+
+async def _handle_server_command(
+    state: CLIState,
+    audio_handler: AudioStreamHandler,
+    client: SendspinClient,
+    payload: ServerCommandPayload,
+) -> None:
+    """Handle server/command messages for player volume/mute control."""
+    if payload.player is None:
+        return
+
+    player_cmd: PlayerCommandPayload = payload.player
+
+    if player_cmd.command == PlayerCommand.VOLUME and player_cmd.volume is not None:
+        state.player_volume = player_cmd.volume
+        if audio_handler.audio_player is not None:
+            audio_handler.audio_player.set_volume(state.player_volume, muted=state.player_muted)
+        _print_event(f"Server set player volume: {player_cmd.volume}%")
+    elif player_cmd.command == PlayerCommand.MUTE and player_cmd.mute is not None:
+        state.player_muted = player_cmd.mute
+        if audio_handler.audio_player is not None:
+            audio_handler.audio_player.set_volume(state.player_volume, muted=state.player_muted)
+        _print_event("Server muted player" if player_cmd.mute else "Server unmuted player")
+
+    # Send state update back to server per spec
+    await client.send_player_state(
+        state=PlayerStateType.SYNCHRONIZED,
+        volume=state.player_volume,
+        muted=state.player_muted,
+    )
 
 
 class CommandHandler:
@@ -673,7 +808,7 @@ class CommandHandler:
 
     def __init__(
         self,
-        client: ResonateClient,
+        client: SendspinClient,
         state: CLIState,
         audio_handler: AudioStreamHandler,
     ) -> None:
@@ -716,6 +851,24 @@ class CommandHandler:
             await self._toggle_mute()
         elif command_lower == "toggle":
             await self._toggle_play_pause()
+        elif command_lower in {"repeat_off", "repeat-off", "ro"}:
+            await self._send_media_command(MediaCommand.REPEAT_OFF)
+        elif command_lower in {"repeat_one", "repeat-one", "r1"}:
+            await self._send_media_command(MediaCommand.REPEAT_ONE)
+        elif command_lower in {"repeat_all", "repeat-all", "ra"}:
+            await self._send_media_command(MediaCommand.REPEAT_ALL)
+        elif command_lower in {"shuffle", "sh"}:
+            await self._send_media_command(MediaCommand.SHUFFLE)
+        elif command_lower in {"unshuffle", "ush"}:
+            await self._send_media_command(MediaCommand.UNSHUFFLE)
+        elif command_lower in {"switch", "sw"}:
+            await self._send_media_command(MediaCommand.SWITCH)
+        elif command_lower in {"pvol+", "pvolume+"}:
+            await self._change_player_volume(5)
+        elif command_lower in {"pvol-", "pvolume-"}:
+            await self._change_player_volume(-5)
+        elif command_lower in {"pmute", "pm"}:
+            await self._toggle_player_mute()
         elif keyword == "delay":
             self._handle_delay_command(parts)
         else:
@@ -754,6 +907,37 @@ class CommandHandler:
         target = not bool(self._state.muted)
         await self._client.send_group_command(MediaCommand.MUTE, mute=target)
 
+    async def _change_player_volume(self, delta: int) -> None:
+        """Adjust player (system) volume by delta."""
+        target = max(0, min(100, self._state.player_volume + delta))
+        self._state.player_volume = target
+        # Apply volume to audio player
+        if self._audio_handler.audio_player is not None:
+            self._audio_handler.audio_player.set_volume(
+                self._state.player_volume, muted=self._state.player_muted
+            )
+        await self._client.send_player_state(
+            state=PlayerStateType.SYNCHRONIZED,
+            volume=self._state.player_volume,
+            muted=self._state.player_muted,
+        )
+        _print_event(f"Player volume: {target}%")
+
+    async def _toggle_player_mute(self) -> None:
+        """Toggle player (system) mute state."""
+        self._state.player_muted = not self._state.player_muted
+        # Apply mute to audio player
+        if self._audio_handler.audio_player is not None:
+            self._audio_handler.audio_player.set_volume(
+                self._state.player_volume, muted=self._state.player_muted
+            )
+        await self._client.send_player_state(
+            state=PlayerStateType.SYNCHRONIZED,
+            volume=self._state.player_volume,
+            muted=self._state.player_muted,
+        )
+        _print_event("Player muted" if self._state.player_muted else "Player unmuted")
+
     def _handle_delay_command(self, parts: list[str]) -> None:
         """Process delay commands."""
         if len(parts) == 1:
@@ -783,7 +967,7 @@ class CommandHandler:
 
 
 async def _keyboard_loop(
-    client: ResonateClient,
+    client: SendspinClient,
     state: CLIState,
     audio_handler: AudioStreamHandler,
 ) -> None:
@@ -815,8 +999,11 @@ def _print_event(message: str) -> None:
 def _print_instructions() -> None:
     print(  # noqa: T201
         (
-            "Commands: play(p), pause, stop(s), next(n), prev(b), vol+/-, mute, toggle, delay, "
-            "quit(q)\n  delay [<ms>|+ <ms>|- <ms>] shows or adjusts the static delay"
+            "Commands: play(p), pause, stop(s), next(n), prev(b), vol+/-, mute(m), toggle,\n"
+            "  repeat_off(ro), repeat_one(r1), repeat_all(ra), shuffle(sh), unshuffle(ush),\n"
+            "  switch(sw), pvol+/-, pmute(pm), delay, quit(q)\n"
+            "  vol+/- controls group volume, pvol+/- controls player volume\n"
+            "  delay [<ms>|+ <ms>|- <ms>] shows or adjusts the static delay"
         ),
         flush=True,
     )
