@@ -32,15 +32,15 @@ version = "0.0.0"
 test = [
   "codespell==2.4.1",
   "isort==7.0.0",
-  "mypy==1.18.2",
-  "pre-commit==4.4.0",
+  "mypy==1.19.0",
+  "pre-commit==4.5.0",
   "pre-commit-hooks==6.0.0",
-  "pytest==9.0.1",
+  "pytest==9.0.2",
   "pytest-aiohttp==1.1.0",
   "pytest-cov==7.0.0",
   "syrupy==5.0.0",
   "tomli==2.3.0",
-  "ruff==0.14.5",
+  "ruff==0.14.8",
 ]
 
 [tool.codespell]
