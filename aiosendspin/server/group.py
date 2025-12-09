@@ -66,6 +66,10 @@ if TYPE_CHECKING:
     from .server import SendspinServer
 
 INITIAL_PLAYBACK_DELAY_US = 1_000_000
+# Maximum time to spend prefilling buffers before starting playback.
+# This allows live/radio streams (which arrive at real-time rate) to start
+# with a partial buffer rather than blocking indefinitely.
+MAX_PREFILL_DURATION_S = 3.0
 
 logger = logging.getLogger(__name__)
 
@@ -475,36 +479,20 @@ class SendspinGroup:
                 just_started_channels.discard(channel_id)
                 continue
             # Pre-fill this channel's buffer before starting playback
+            prefill_start = self._server.loop.time()
             while streamer.channel_needs_data(channel_id):
+                # Check if we've spent too long prefilling (so we don't end up blocking forever
+                # on live/radio streams)
+                if self._server.loop.time() - prefill_start > MAX_PREFILL_DURATION_S:
+                    logger.debug(
+                        "Channel %s prefill timeout after %.1fs, continuing with partial buffer",
+                        channel_id,
+                        MAX_PREFILL_DURATION_S,
+                    )
+                    break
                 source = active_channels[channel_id]
                 try:
                     chunk = await asyncio.wait_for(anext(source), timeout=30.0)
-
-                    # Skip preparing chunks that are already in the past to avoid wasted work
-                    channel_state = streamer._channels.get(channel_id)  # noqa: SLF001
-                    if channel_state:
-                        # Calculate what this chunk's start timestamp would be
-                        sample_count = len(chunk) // channel_state.source_format_params.frame_stride
-                        start_samples = channel_state.samples_produced
-                        start_us = streamer._play_start_time_us + int(  # noqa: SLF001
-                            start_samples
-                            * 1_000_000
-                            / channel_state.source_format_params.audio_format.sample_rate
-                        )
-
-                        # Check if chunk is already outdated
-                        now_us = int(self._server.loop.time() * 1_000_000)
-
-                        if start_us < now_us:
-                            # Skip outdated chunk but update sample counter to maintain sync
-                            channel_state.samples_produced += sample_count
-                            logger.debug(
-                                "Skipping outdated chunk for channel %s (start: %d us, now: %d us)",
-                                channel_id,
-                                start_us,
-                                now_us,
-                            )
-                            continue
 
                     streamer.prepare(channel_id, chunk, during_initial_buffering=True)
                     continue  # Continue filling buffer
