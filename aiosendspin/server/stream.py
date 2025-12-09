@@ -1023,22 +1023,20 @@ class Streamer:
         Continues until all pending audio has been delivered and source buffer is below target.
         """
         while True:
-            # Stage 1: Check for stale chunks on MAIN_CHANNEL only
+            # Stage 1: Check for stale chunks across all channels
             # Newly joined players are excluded via grace period to avoid false positives
             # from sync-point chunks with past timestamps
-            # Dedicated player channels can have arbitrary timestamps from player_channel()
             now_us = self._now_us()
             send_transmission_margin_us = 100_000  # 100ms for network + client processing
             join_grace_period_us = 2_000_000  # 2s grace period for newly joined players
 
-            # Find the earliest chunk on MAIN_CHANNEL only, excluding newly joined players
+            # Find the earliest chunk across all channels, excluding newly joined players
             # Newly joined players receive sync-point chunks with past timestamps by design
-            earliest_main_chunk_start = min(
+            earliest_chunk_start = min(
                 (
                     ps.queue[0].start_time_us
                     for ps in self._players.values()
-                    if ps.channel_id == MAIN_CHANNEL_ID
-                    and ps.queue
+                    if ps.queue
                     and (
                         ps.join_wall_time_us is None  # Old player (no join time tracked)
                         or now_us - ps.join_wall_time_us
@@ -1048,18 +1046,18 @@ class Streamer:
                 default=None,
             )
 
-            # If main channel chunk is stale, adjust timing globally
+            # If any chunk is stale, adjust timing globally
             if (
-                earliest_main_chunk_start is not None
-                and earliest_main_chunk_start < now_us + send_transmission_margin_us
+                earliest_chunk_start is not None
+                and earliest_chunk_start < now_us + send_transmission_margin_us
             ):
                 logger.warning(
-                    "Main channel chunk is stale (starts at %d us, now is %d us). "
+                    "Audio chunk is stale (starts at %d us, now is %d us). "
                     "Adjusting timing globally.",
-                    earliest_main_chunk_start,
+                    earliest_chunk_start,
                     now_us,
                 )
-                self._adjust_timing_for_stale_chunk(now_us, earliest_main_chunk_start)
+                self._adjust_timing_for_stale_chunk(now_us, earliest_chunk_start)
                 # After adjustment, continue to next iteration with updated timing
                 continue
 
