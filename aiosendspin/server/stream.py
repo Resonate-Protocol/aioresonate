@@ -955,7 +955,7 @@ class Streamer:
         """
         target_buffer_us = self._source_buffer_target_duration_us
 
-        # Calculate minimum buffer depth across all channels
+        # Calculate minimum buffer depth across all channel source buffers
         min_buffer_us = None
         for channel_state in self._channels.values():
             if channel_state.source_buffer:
@@ -963,6 +963,14 @@ class Streamer:
                 current_buffer_us = max(0, last_chunk_end - now_us)
                 if min_buffer_us is None or current_buffer_us < min_buffer_us:
                     min_buffer_us = current_buffer_us
+
+        # Also consider player queues (chunks move from source buffer to player queues)
+        for player_state in self._players.values():
+            if player_state.queue:
+                last_chunk_end = player_state.queue[-1].end_time_us
+                queue_buffer_us = max(0, last_chunk_end - now_us)
+                if min_buffer_us is None or queue_buffer_us < min_buffer_us:
+                    min_buffer_us = queue_buffer_us
 
         current_buffer_us = min_buffer_us if min_buffer_us is not None else 0
 
@@ -1004,6 +1012,16 @@ class Streamer:
             for prepared_chunk in pipeline.prepared:
                 prepared_chunk.start_time_us += timing_adjustment_us
                 prepared_chunk.end_time_us += timing_adjustment_us
+
+        # Update chunks in player queues that are no longer in pipeline.prepared
+        # Track by object id() to avoid double-updating the same chunk object
+        updated_chunks: set[int] = {id(c) for p in self._pipelines.values() for c in p.prepared}
+        for player_state in self._players.values():
+            for queued_chunk in player_state.queue:
+                if id(queued_chunk) not in updated_chunks:
+                    queued_chunk.start_time_us += timing_adjustment_us
+                    queued_chunk.end_time_us += timing_adjustment_us
+                    updated_chunks.add(id(queued_chunk))
 
     async def send(self) -> None:
         """
