@@ -520,8 +520,17 @@ class SendspinGroup:
         Returns:
             True if there are still active channels, False if all channels are exhausted.
         """
+        fill_start = self._server.loop.time()
         any_channel_needs_data = True
         while any_channel_needs_data and active_channels:
+            # Avoid blocking indefinitely on live/radio streams that can never
+            # build the full target buffer ahead of real-time.
+            if self._server.loop.time() - fill_start > MAX_PREFILL_DURATION_S:
+                logger.debug(
+                    "Pending read timeout after %.1fs, continuing with partial buffer",
+                    MAX_PREFILL_DURATION_S,
+                )
+                break
             any_channel_needs_data = False
             for channel_id in list(active_channels.keys()):
                 if not streamer.channel_needs_data(channel_id):
