@@ -456,8 +456,8 @@ class Streamer:
     """End timestamp of the most recently prepared chunk, None if no chunks prepared yet."""
     _source_buffer_target_duration_us: int = 5_000_000
     """Target duration for source buffer in microseconds."""
-    _prepare_buffer_margin_us: int = 1_000_000
-    """Time margin for stale chunk detection during prepare() (1 second)."""
+    _prepare_buffer_margin_us: int = 2_500_000
+    """Time margin for stale chunk detection during prepare() (2.5 seconds)."""
 
     def __init__(
         self,
@@ -963,14 +963,6 @@ class Streamer:
                 current_buffer_us = max(0, last_chunk_end - now_us)
                 if min_buffer_us is None or current_buffer_us < min_buffer_us:
                     min_buffer_us = current_buffer_us
-
-        # Also consider player queues (chunks move from source buffer to player queues)
-        for player_state in self._players.values():
-            if player_state.queue:
-                last_chunk_end = player_state.queue[-1].end_time_us
-                queue_buffer_us = max(0, last_chunk_end - now_us)
-                if min_buffer_us is None or queue_buffer_us < min_buffer_us:
-                    min_buffer_us = queue_buffer_us
 
         current_buffer_us = min_buffer_us if min_buffer_us is not None else 0
 
