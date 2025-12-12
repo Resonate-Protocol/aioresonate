@@ -456,8 +456,8 @@ class Streamer:
     """End timestamp of the most recently prepared chunk, None if no chunks prepared yet."""
     _source_buffer_target_duration_us: int = 5_000_000
     """Target duration for source buffer in microseconds."""
-    _prepare_buffer_margin_us: int = 1_000_000
-    """Time margin for stale chunk detection during prepare() (1 second)."""
+    _prepare_buffer_margin_us: int = 2_500_000
+    """Time margin for stale chunk detection during prepare() (2.5 seconds)."""
 
     def __init__(
         self,
