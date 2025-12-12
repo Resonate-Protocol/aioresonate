@@ -66,11 +66,15 @@ class ClientHelloPlayerSupport(DataClassORJSONMixin):
 class PlayerStatePayload(DataClassORJSONMixin):
     """Player object in client/state message."""
 
-    state: PlayerStateType
+    # DEPRECATED(before-spec-pr-50): Remove once all clients send state at client level.
+    # State should now be sent at the ClientStatePayload level, not in the player object.
+    state: PlayerStateType | None = None
     """
     State of the player - should always be 'synchronized' unless there is
     an error preventing current or future playback (unable to keep up,
     issues keeping the clock in sync, etc).
+
+    DEPRECATED: State should now be sent at the client/state level, not here.
     """
     volume: int | None = None
     """Volume range 0-100, only included if 'volume' in supported_commands."""
