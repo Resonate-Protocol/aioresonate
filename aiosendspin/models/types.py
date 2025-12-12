@@ -99,11 +99,19 @@ class RepeatMode(Enum):
     ALL = "all"
 
 
-class PlayerStateType(Enum):
-    """Enum for Player States."""
+class ClientStateType(Enum):
+    """Enum for Client States."""
 
     SYNCHRONIZED = "synchronized"
+    """Client is operational and synchronized with server timestamps."""
     ERROR = "error"
+    """Client has a problem preventing normal operation."""
+    EXTERNAL_SOURCE = "external_source"
+    """Client is in use by an external system and cannot participate in Sendspin playback."""
+
+
+# DEPRECATED(before-spec-pr-50): Remove once all clients use client-level state
+PlayerStateType = ClientStateType
 
 
 class PlaybackStateType(Enum):

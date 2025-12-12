@@ -28,6 +28,7 @@ from aiosendspin.models.core import (
 from aiosendspin.models.types import (
     BinaryMessageType,
     ClientMessage,
+    ClientStateType,
     ConnectionReason,
     GoodbyeReason,
     PlaybackStateType,
@@ -129,6 +130,10 @@ class SendspinClient:
     _controller: ControllerClient | None = None
     _metadata_client: MetadataClient | None = None
     _visualizer: VisualizerClient | None = None
+    _client_state: ClientStateType
+    """Current operational state of the client."""
+    _previous_group_id: str | None = None
+    """Group ID to rejoin after external_source ends (for switch command priority)."""
 
     def __init__(
         self,
@@ -175,6 +180,8 @@ class SendspinClient:
         self._initial_state_received = False
         self._initial_state_timeout_handle = None
         self._roles = []
+        self._client_state = ClientStateType.SYNCHRONIZED
+        self._previous_group_id = None
         self.disconnect_behaviour = DisconnectBehaviour.UNGROUP
         self._set_group(SendspinGroup(server, self))
 
@@ -589,6 +596,17 @@ class SendspinClient:
                     # Now that we have initial state, register client
                     self._handle_client_connect(self)
 
+                # Handle client-level state (new spec location)
+                new_state = payload.state
+
+                # DEPRECATED(before-spec-pr-50): Remove once all clients use client-level state
+                # Fall back to player.state for backward compatibility with older clients
+                if new_state is None and payload.player is not None:
+                    new_state = payload.player.state
+
+                if new_state is not None and new_state != self._client_state:
+                    await self._handle_state_transition(new_state)
+
                 if payload.player:
                     self.require_player.handle_player_update(payload.player)
             case StreamRequestFormatMessage(payload):
@@ -701,3 +719,39 @@ class SendspinClient:
         for cb in self._event_cbs:
             task = self._server.loop.create_task(cb(self, event))
             task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
+
+    async def _handle_state_transition(self, new_state: ClientStateType) -> None:
+        """
+        Handle client state transitions.
+
+        When transitioning to external_source:
+        - If in multi-client group: remember previous group, move to solo group
+        - If already in solo group: just stop playback
+        """
+        old_state = self._client_state
+        self._client_state = new_state
+
+        self._logger.info(
+            "Client state transition: %s -> %s",
+            old_state.value,
+            new_state.value,
+        )
+
+        if new_state == ClientStateType.EXTERNAL_SOURCE:
+            is_multi_client_group = len(self._group.clients) > 1
+
+            if is_multi_client_group:
+                # Remember current group for later rejoin via switch command
+                self._previous_group_id = self._group.group_id
+                self._logger.debug(
+                    "Storing previous group %s for external_source client",
+                    self._previous_group_id,
+                )
+                # Move to solo group - remove_client sends stream/end automatically
+                await self._group.remove_client(self)
+            else:
+                # Already in solo group - just stop playback
+                self._logger.debug(
+                    "Client already in solo group, stopping playback for external_source"
+                )
+                await self._group.stop()
