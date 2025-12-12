@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from aiosendspin.models.controller import ControllerCommandPayload
-from aiosendspin.models.types import MediaCommand, PlaybackStateType, Roles
+from aiosendspin.models.types import ClientStateType, MediaCommand, PlaybackStateType, Roles
 
 if TYPE_CHECKING:
     from .client import SendspinClient
@@ -45,9 +45,14 @@ class ControllerClient:
 
     async def _handle_switch(self) -> None:
         """Handle the switch command to cycle through groups."""
+        # Clients in external_source can't participate in playback; don't allow switching groups
+        # until they report a normal operational state again.
+        if self.client._client_state == ClientStateType.EXTERNAL_SOURCE:  # noqa: SLF001
+            self._logger.warning("Ignoring switch command while client is in external_source state")
+            return
+
         # Check if client should rejoin previous group (external_source recovery priority)
-        if self._should_rejoin_previous_group():
-            await self._rejoin_previous_group()
+        if await self._try_rejoin_previous_group():
             return
 
         server = self.client._server  # noqa: SLF001
@@ -162,14 +167,20 @@ class ControllerClient:
         """
         return (
             self.client._previous_group_id is not None  # noqa: SLF001
-            and len(self.client.group.clients) == 1  # Still in solo group
+            and self.client._client_state != ClientStateType.EXTERNAL_SOURCE  # noqa: SLF001
+            and self.client._external_source_solo_group_id == self.client.group.group_id  # noqa: SLF001
+            and len(self.client.group.clients) == 1  # Still in the solo group
         )
 
-    async def _rejoin_previous_group(self) -> None:
-        """Rejoin the previous group after external_source ended."""
+    async def _try_rejoin_previous_group(self) -> bool:
+        """Try to rejoin the previous group after external_source ended."""
+        if not self._should_rejoin_previous_group():
+            return False
+
         previous_group_id = self.client._previous_group_id  # noqa: SLF001
-        # Clear previous group ID after attempt (regardless of success)
+        # Clear external_source tracking after attempt (regardless of success)
         self.client._previous_group_id = None  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+        self.client._external_source_solo_group_id = None  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
 
         previous_group = self._find_group_by_id(previous_group_id)
 
@@ -180,15 +191,13 @@ class ControllerClient:
             )
             await self.client.group.remove_client(self.client)
             await previous_group.add_client(self.client)
-        else:
-            self._logger.debug(
-                "Previous group %s no longer exists or is current group, "
-                "falling back to normal switch cycle",
-                previous_group_id,
-            )
-            # Fall through to normal switch logic by calling _handle_switch again
-            # But since we cleared _previous_group_id, it will use normal cycle
-            await self._handle_switch()
+            return True
+        self._logger.debug(
+            "Previous group %s no longer exists or is current group, "
+            "falling back to normal switch cycle",
+            previous_group_id,
+        )
+        return False
 
     def _find_group_by_id(self, group_id: str | None) -> SendspinGroup | None:
         """Find a group by its ID from all connected clients."""

@@ -134,6 +134,8 @@ class SendspinClient:
     """Current operational state of the client."""
     _previous_group_id: str | None = None
     """Group ID to rejoin after external_source ends (for switch command priority)."""
+    _external_source_solo_group_id: str | None = None
+    """Solo group ID created by an external_source transition."""
 
     def __init__(
         self,
@@ -182,6 +184,7 @@ class SendspinClient:
         self._roles = []
         self._client_state = ClientStateType.SYNCHRONIZED
         self._previous_group_id = None
+        self._external_source_solo_group_id = None
         self.disconnect_behaviour = DisconnectBehaviour.UNGROUP
         self._set_group(SendspinGroup(server, self))
 
@@ -357,6 +360,15 @@ class SendspinClient:
             group: The SendspinGroup to assign this client to.
         """
         if hasattr(self, "_group"):
+            # If we are leaving the solo group created by an external_source transition via any
+            # means other than the recovery switch logic, clear the stored previous group.
+            if (
+                self._external_source_solo_group_id is not None
+                and self._group.group_id == self._external_source_solo_group_id
+                and group.group_id != self._external_source_solo_group_id
+            ):
+                self._previous_group_id = None
+                self._external_source_solo_group_id = None
             # Don't unregister if this is the initial setup in __init__
             self._group._unregister_client_events(self)  # noqa: SLF001
 
@@ -726,7 +738,7 @@ class SendspinClient:
 
         When transitioning to external_source:
         - If in multi-client group: remember previous group, move to solo group
-        - If already in solo group: just stop playback
+        - If already in solo group: stop playback
         """
         old_state = self._client_state
         self._client_state = new_state
@@ -749,6 +761,7 @@ class SendspinClient:
                 )
                 # Move to solo group - remove_client sends stream/end automatically
                 await self._group.remove_client(self)
+                self._external_source_solo_group_id = self._group.group_id
             else:
                 # Already in solo group - just stop playback
                 self._logger.debug(
