@@ -1409,7 +1409,10 @@ class SendspinGroup:
             # Emit event for client removal
             self._signal_event(GroupMemberRemovedEvent(client.client_id))
         # Each client needs to be in a group, add it to a new one
-        client._set_group(SendspinGroup(self._server, client))  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+        new_group = SendspinGroup(self._server, client)
+        client._set_group(new_group)  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+        # Send group update to notify client of their new solo group
+        new_group._send_group_update_to_clients()  # noqa: SLF001
 
     async def add_client(self, client: SendspinClient) -> None:
         """
