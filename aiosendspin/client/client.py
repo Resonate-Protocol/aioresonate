@@ -633,6 +633,11 @@ class SendspinClient:
         await self._notify_stream_end(roles)
 
     async def _handle_group_update(self, payload: GroupUpdateServerPayload) -> None:
+        # Detect group change and clear cached metadata
+        old_group_id = self._group_state.group_id if self._group_state else None
+        if payload.group_id is not None and payload.group_id != old_group_id:
+            # Group changed - clear cached server state (metadata)
+            self._server_state = None
         self._group_state = payload
         await self._notify_group_callback(payload)
 
