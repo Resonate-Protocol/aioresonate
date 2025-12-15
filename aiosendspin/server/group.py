@@ -724,9 +724,8 @@ class SendspinGroup:
             visualizer=visualizer_stream_info,
         )
         logger.debug(
-            "Sending stream start message to client %s: %s",
+            "Sending stream start message to client %s",
             client.client_id,
-            stream_info,
         )
         client.send_message(StreamStartMessage(stream_info))
 
