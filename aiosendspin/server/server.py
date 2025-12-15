@@ -420,7 +420,7 @@ class SendspinServer:
             port=port,
             properties=properties,
         )
-        await self._zc.async_register_service(info)
+        await self._zc.async_register_service(info, allow_name_change=True)
         self._mdns_service = info
 
         logger.debug("mDNS advertising server on port %d with path %s", port, path)
