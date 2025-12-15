@@ -9,7 +9,13 @@ from dataclasses import dataclass
 
 from aiohttp import ClientConnectionError, ClientResponseError, ClientTimeout, ClientWSTimeout, web
 from aiohttp.client import ClientSession
-from zeroconf import InterfaceChoice, IPVersion, ServiceStateChange, Zeroconf
+from zeroconf import (
+    InterfaceChoice,
+    IPVersion,
+    NonUniqueNameException,
+    ServiceStateChange,
+    Zeroconf,
+)
 from zeroconf.asyncio import AsyncServiceBrowser, AsyncServiceInfo, AsyncZeroconf
 
 from .client import SendspinClient
@@ -411,19 +417,21 @@ class SendspinServer:
         if self._mdns_service is not None:
             await self._zc.async_unregister_service(self._mdns_service)
 
-        properties = {"path": path}
         service_type = "_sendspin-server._tcp.local."
+        properties = {"path": path}
         info = AsyncServiceInfo(
             type_=service_type,
-            name=f"{self._name}.{service_type}",
+            name=f"{self._id}.{service_type}",
             addresses=[await _get_ip_pton(host)] if host != "0.0.0.0" else None,
             port=port,
             properties=properties,
         )
-        await self._zc.async_register_service(info, allow_name_change=True)
-        self._mdns_service = info
-
-        logger.debug("mDNS advertising server on port %d with path %s", port, path)
+        try:
+            await self._zc.async_register_service(info)
+            self._mdns_service = info
+            logger.debug("mDNS advertising server on port %d with path %s", port, path)
+        except NonUniqueNameException:
+            logger.error("Sendspin server with identical name present in the local network!")
 
     async def _start_mdns_discovery(self) -> None:
         """Automatically connect to Sendspin clients when discovered via mDNS."""
