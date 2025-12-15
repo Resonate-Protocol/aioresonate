@@ -1412,7 +1412,7 @@ class SendspinGroup:
         new_group = SendspinGroup(self._server, client)
         client._set_group(new_group)  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
         # Send group update to notify client of their new solo group
-        new_group._send_group_update_to_clients()  # noqa: SLF001
+        new_group._send_group_update_to_clients()
 
     async def add_client(self, client: SendspinClient) -> None:
         """
