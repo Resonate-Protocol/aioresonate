@@ -23,6 +23,7 @@ from aiosendspin.models.core import (
     ServerHelloPayload,
     ServerTimeMessage,
     ServerTimePayload,
+    StreamEndMessage,
     StreamRequestFormatMessage,
 )
 from aiosendspin.models.types import (
@@ -136,6 +137,8 @@ class SendspinClient:
     """Group ID to rejoin after external_source ends (for switch command priority)."""
     _external_source_solo_group_id: str | None = None
     """Solo group ID created by an external_source transition."""
+    _stream_start_time_us: int | None = None
+    """Timestamp when first audio chunk was sent, for grace period on timing warnings."""
 
     def __init__(
         self,
@@ -650,12 +653,18 @@ class SendspinClient:
                     # Only validate timestamps for audio chunks, since they are time-sensitive
                     if header.message_type == BinaryMessageType.AUDIO_CHUNK.value:
                         now = int(self._server.loop.time() * 1_000_000)
+                        # Track stream start time for grace period on timing warnings
+                        if self._stream_start_time_us is None:
+                            self._stream_start_time_us = now
+                        # Grace period: skip timing warnings for first 2 seconds after stream start
+                        in_grace_period = (now - self._stream_start_time_us) < 2_000_000
                         if header.timestamp_us - now < 0:
-                            self._logger.error(
-                                "Audio chunk should have played already, skipping it"
-                            )
+                            if not in_grace_period:
+                                self._logger.warning(
+                                    "Audio chunk should have played already, skipping it"
+                                )
                             continue
-                        if header.timestamp_us - now < 500_000:
+                        if header.timestamp_us - now < 500_000 and not in_grace_period:
                             self._logger.warning(
                                 "sending audio chunk that needs to be played very soon (in %d us)",
                                 (header.timestamp_us - now),
@@ -704,6 +713,9 @@ class SendspinClient:
 
         if isinstance(message, bytes):
             pass
+        elif isinstance(message, StreamEndMessage):
+            # Reset stream start time so next stream gets a fresh grace period
+            self._stream_start_time_us = None
         elif not isinstance(message, ServerTimeMessage):
             self._logger.debug("Enqueueing message: %s", type(message).__name__)
 
