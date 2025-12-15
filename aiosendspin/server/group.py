@@ -829,9 +829,7 @@ class SendspinGroup:
         self._track_progress_timestamp_us = None
 
     def _send_stopped_state_to_clients(self) -> None:
-        """Send stopped state and cleared metadata to all clients."""
-        timestamp = int(self._server.loop.time() * 1_000_000)
-        cleared_metadata = Metadata.cleared_update(timestamp)
+        """Send stopped state to all clients."""
         group_message = GroupUpdateServerMessage(
             GroupUpdateServerPayload(
                 playback_state=PlaybackStateType.STOPPED,
@@ -854,22 +852,9 @@ class SendspinGroup:
             # Send group/update to all clients
             client.send_message(group_message)
 
-            # Build server/state payload with relevant fields for this client
-            metadata_for_client = None
-            if client.check_role(Roles.METADATA):
-                metadata_for_client = cleared_metadata
-
-            controller_for_client = None
+            # Send controller state to controller clients
             if client.check_role(Roles.CONTROLLER):
-                controller_for_client = controller_state
-
-            # Send single server/state message with all relevant payloads
-            if metadata_for_client is not None or controller_for_client is not None:
-                state_message = ServerStateMessage(
-                    ServerStatePayload(
-                        metadata=metadata_for_client, controller=controller_for_client
-                    )
-                )
+                state_message = ServerStateMessage(ServerStatePayload(controller=controller_state))
                 client.send_message(state_message)
 
     async def stop(self, stop_time_us: int | None = None) -> bool:
