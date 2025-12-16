@@ -374,15 +374,16 @@ class SendspinGroup:
             # Build server/state payload with relevant fields for this client
             metadata_for_client = None
             if client.check_role(Roles.METADATA):
-                metadata_update = (
-                    self._current_metadata.snapshot_update(
+                if self._current_metadata is not None:
+                    metadata_update = self._current_metadata.snapshot_update(
                         int(self._server.loop.time() * 1_000_000)
                     )
-                    if self._current_metadata is not None
-                    else None
-                )
+                else:
+                    metadata_update = Metadata.cleared_update(
+                        int(self._server.loop.time() * 1_000_000)
+                    )
                 # Use calculated track progress for actively playing content
-                if metadata_update is not None and self._current_metadata is not None:
+                if self._current_metadata is not None:
                     current_progress = self._get_current_track_progress()
                     # Update the progress object with current calculated progress
                     if (
@@ -1468,24 +1469,30 @@ class SendspinGroup:
 
         # Build server/state payload with relevant fields for this client
         metadata_for_client = None
-        if self._current_metadata is not None and client.check_role(Roles.METADATA):
-            metadata_update = self._current_metadata.snapshot_update(
-                int(self._server.loop.time() * 1_000_000)
-            )
-            # Use calculated track progress for actively playing content
-            current_progress = self._get_current_track_progress()
-            # Update the progress object with current calculated progress
-            if (
-                current_progress is not None
-                and self._current_metadata.track_duration is not None
-                and self._current_metadata.playback_speed is not None
-            ):
-                metadata_update.progress = Progress(
-                    track_progress=current_progress,
-                    track_duration=self._current_metadata.track_duration,
-                    playback_speed=self._current_metadata.playback_speed,
+        if client.check_role(Roles.METADATA):
+            if self._current_metadata is not None:
+                metadata_update = self._current_metadata.snapshot_update(
+                    int(self._server.loop.time() * 1_000_000)
                 )
-            metadata_for_client = metadata_update
+                # Use calculated track progress for actively playing content
+                current_progress = self._get_current_track_progress()
+                # Update the progress object with current calculated progress
+                if (
+                    current_progress is not None
+                    and self._current_metadata.track_duration is not None
+                    and self._current_metadata.playback_speed is not None
+                ):
+                    metadata_update.progress = Progress(
+                        track_progress=current_progress,
+                        track_duration=self._current_metadata.track_duration,
+                        playback_speed=self._current_metadata.playback_speed,
+                    )
+                metadata_for_client = metadata_update
+            else:
+                # Explicitly clear metadata for clients joining a group without existing metadata
+                metadata_for_client = Metadata.cleared_update(
+                    int(self._server.loop.time() * 1_000_000)
+                )
 
         controller_for_client = None
         if client.check_role(Roles.CONTROLLER):
