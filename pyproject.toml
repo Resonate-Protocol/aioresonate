@@ -40,7 +40,7 @@ test = [
   "pytest-cov==7.0.0",
   "syrupy==5.0.0",
   "tomli==2.3.0",
-  "ruff==0.14.8",
+  "ruff==0.14.9",
 ]
 
 [tool.codespell]
