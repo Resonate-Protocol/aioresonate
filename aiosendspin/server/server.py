@@ -284,14 +284,25 @@ class SendspinServer:
             task = self._loop.create_task(cb(self, event))
             task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
 
-    def _handle_client_connect(self, client: SendspinClient) -> None:
+    async def _handle_client_connect(self, client: SendspinClient) -> None:
         """
         Register the client to the server.
 
         Should only be called once all data like the client id was received.
+        If a client with the same ID already exists, the old connection is closed.
         """
         if client in self._clients:
             return
+
+        # Check for existing client with same ID and disconnect it
+        if (existing := self.get_client(client.client_id)) is not None:
+            logger.info("Client %s reconnected, closing previous connection", client.client_id)
+            # Fire removal event before awaiting disconnect to ensure correct event order
+            self._handle_client_disconnect(existing)
+            try:
+                await existing.disconnect()
+            except Exception:
+                logger.exception("Error disconnecting replaced client %s", client.client_id)
 
         logger.debug("Adding client %s (%s) to server", client.client_id, client.name)
         self._clients.add(client)

@@ -5,7 +5,7 @@ import logging
 from collections.abc import Callable, Coroutine
 from contextlib import suppress
 from enum import Enum
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from aiohttp import ClientWebSocketResponse, WSMessage, WSMsgType, web
 
@@ -123,7 +123,7 @@ class SendspinClient:
         on remaining group members.
     STOP: Client stops playback for the entire group when disconnecting.
     """
-    _handle_client_connect: Callable[["SendspinClient"], None]
+    _handle_client_connect: Callable[["SendspinClient"], Coroutine[Any, Any, None]]
     _handle_client_disconnect: Callable[["SendspinClient"], None]
     _logger: logging.Logger
     _roles: list[Roles]
@@ -143,7 +143,7 @@ class SendspinClient:
     def __init__(
         self,
         server: "SendspinServer",
-        handle_client_connect: Callable[["SendspinClient"], None],
+        handle_client_connect: Callable[["SendspinClient"], Coroutine[Any, Any, None]],
         handle_client_disconnect: Callable[["SendspinClient"], None],
         request: web.Request | None = None,
         wsock_client: ClientWebSocketResponse | None = None,
@@ -585,7 +585,7 @@ class SendspinClient:
                         5.0, self._initial_state_timeout_callback
                     )
                 else:
-                    self._handle_client_connect(self)
+                    await self._handle_client_connect(self)
             case ClientTimeMessage(client_time):
                 self.send_message(
                     ServerTimeMessage(
@@ -609,7 +609,7 @@ class SendspinClient:
                         self._initial_state_timeout_handle = None
 
                     # Now that we have initial state, register client
-                    self._handle_client_connect(self)
+                    await self._handle_client_connect(self)
 
                 # Handle client-level state (new spec location)
                 new_state = payload.state
