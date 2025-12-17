@@ -300,7 +300,7 @@ class SendspinServer:
             # Fire removal event before awaiting disconnect to ensure correct event order
             self._handle_client_disconnect(existing)
             try:
-                await existing.disconnect()
+                await existing.disconnect(retry_connection=False)
             except Exception:
                 logger.exception("Error disconnecting replaced client %s", client.client_id)
 
