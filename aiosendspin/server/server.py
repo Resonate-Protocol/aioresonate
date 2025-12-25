@@ -52,6 +52,8 @@ async def _get_ip_pton(ip_string: str) -> bytes:
 class SendspinServer:
     """Sendspin Server implementation to connect to and manage many Sendspin Clients."""
 
+    API_PATH = "/sendspin"  # Fixed by protocol
+
     _clients: set[SendspinClient]
     """All groups managed by this server."""
     _loop: asyncio.AbstractEventLoop
@@ -129,6 +131,17 @@ class SendspinServer:
         self._mdns_service = None
         self._mdns_browser = None
         logger.debug("SendspinServer initialized: id=%s, name=%s", server_id, server_name)
+
+    def _create_web_application(self) -> web.Application:
+        """
+        Create and configure the aiohttp web application.
+
+        Returns:
+            Configured aiohttp web.Application instance.
+        """
+        app = web.Application()
+        app.router.add_get(self.API_PATH, self.on_client_connect)
+        return app
 
     @property
     def loop(self) -> asyncio.AbstractEventLoop:
@@ -362,11 +375,8 @@ class SendspinServer:
             logger.warning("Server is already running")
             return
 
-        api_path = "/sendspin"
         logger.info("Starting Sendspin server on port %d", port)
-        self._app = web.Application()
-        # Create perpetual WebSocket route for client connections
-        self._app.router.add_get(api_path, self.on_client_connect)
+        self._app = self._create_web_application()
         self._app_runner = web.AppRunner(self._app)
         await self._app_runner.setup()
 
@@ -382,7 +392,7 @@ class SendspinServer:
             self._zc = AsyncZeroconf(
                 ip_version=IPVersion.V4Only, interfaces=InterfaceChoice.Default
             )
-            await self._start_mdns_advertising(host=advertise_host, port=port, path=api_path)
+            await self._start_mdns_advertising(host=advertise_host, port=port, path=self.API_PATH)
             await self._start_mdns_discovery()
         except OSError as e:
             logger.error("Failed to start server on %s:%d: %s", host, port, e)
