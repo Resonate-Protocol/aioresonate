@@ -356,7 +356,12 @@ class SendspinServer:
         return self._name
 
     async def start_server(
-        self, port: int = 8927, host: str = "0.0.0.0", advertise_host: str = "0.0.0.0"
+        self,
+        port: int = 8927,
+        host: str = "0.0.0.0",
+        advertise_host: str = "0.0.0.0",
+        *,
+        discover_clients: bool = True,
     ) -> None:
         """
         Start the Sendspin Server.
@@ -370,6 +375,9 @@ class SendspinServer:
         :param host: The IP address for the server to listen on
             (e.g., "0.0.0.0" for all interfaces).
         :param advertise_host: The IP address to advertise via mDNS.
+        :param discover_clients: If True, enable automatic mDNS discovery of clients.
+            If False, the server will still advertise itself and accept incoming connections,
+            but will not actively connect to discovered clients.
         """
         if self._app is not None:
             logger.warning("Server is already running")
@@ -393,7 +401,8 @@ class SendspinServer:
                 ip_version=IPVersion.V4Only, interfaces=InterfaceChoice.Default
             )
             await self._start_mdns_advertising(host=advertise_host, port=port, path=self.API_PATH)
-            await self._start_mdns_discovery()
+            if discover_clients:
+                await self._start_mdns_discovery()
         except OSError as e:
             logger.error("Failed to start server on %s:%d: %s", host, port, e)
             await self._stop_mdns()
