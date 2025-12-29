@@ -1422,7 +1422,7 @@ class SendspinGroup:
         # Send group update to notify client of their new solo group
         new_group._send_group_update_to_clients()
 
-    async def add_client(self, client: SendspinClient) -> None:
+    async def add_client(self, client: SendspinClient) -> None:  # noqa: PLR0915
         """
         Add a client to this group.
 
