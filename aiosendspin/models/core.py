@@ -8,11 +8,13 @@ synchronization, stream lifecycle management, and role-based state updates and c
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
-from typing import Literal
+from typing import Annotated, Any, Literal
 
 from mashumaro.config import BaseConfig
 from mashumaro.mixins.orjson import DataClassORJSONMixin
+from mashumaro.types import Alias
 
 from .artwork import (
     ClientHelloArtworkSupport,
@@ -41,6 +43,19 @@ from .visualizer import (
     ClientHelloVisualizerSupport,
     StreamStartVisualizer,
 )
+
+logger = logging.getLogger(__name__)
+
+
+# This server implementation accidentally used incorrect field names (player_support, etc.)
+# instead of the spec-compliant names (player@v1_support, etc.). This alias mapping allows
+# deserialization of JSON using either the old or new field names.
+# DEPRECATED(before-spec-1.0): Remove this mapping once all clients use spec-compliant names.
+_CLIENT_HELLO_LEGACY_FIELD_ALIASES: dict[str, str] = {
+    "player_support": "player@v1_support",
+    "artwork_support": "artwork@v1_support",
+    "visualizer_support": "visualizer@v1_support",
+}
 
 
 @dataclass
@@ -75,12 +90,33 @@ class ClientHelloPayload(DataClassORJSONMixin):
     """List of roles the client supports."""
     device_info: DeviceInfo | None = None
     """Optional information about the device."""
-    player_support: ClientHelloPlayerSupport | None = None
+    player_support: Annotated[ClientHelloPlayerSupport | None, Alias("player@v1_support")] = None
     """Player support configuration - only if player role is in supported_roles."""
-    artwork_support: ClientHelloArtworkSupport | None = None
+    artwork_support: Annotated[ClientHelloArtworkSupport | None, Alias("artwork@v1_support")] = None
     """Artwork support configuration - only if artwork role is in supported_roles."""
-    visualizer_support: ClientHelloVisualizerSupport | None = None
+    visualizer_support: Annotated[
+        ClientHelloVisualizerSupport | None, Alias("visualizer@v1_support")
+    ] = None
     """Visualizer support configuration - only if visualizer role is in supported_roles."""
+
+    @classmethod
+    def __pre_deserialize__(cls, d: dict[str, Any]) -> dict[str, Any]:
+        """Accept both legacy and spec-compliant field names."""
+        legacy_fields_used: list[tuple[str, str]] = []
+        for legacy_name, spec_name in _CLIENT_HELLO_LEGACY_FIELD_ALIASES.items():
+            if legacy_name in d and spec_name not in d:
+                legacy_fields_used.append((legacy_name, spec_name))
+                d[spec_name] = d.pop(legacy_name)
+        if legacy_fields_used:
+            old_names = ", ".join(old for old, _ in legacy_fields_used)
+            new_names = ", ".join(new for _, new in legacy_fields_used)
+            logger.info(
+                "client/hello message used deprecated field names (%s), "
+                "please update client to use (%s) instead",
+                old_names,
+                new_names,
+            )
+        return d
 
     def __post_init__(self) -> None:
         """Enforce that support configs match supported roles."""
@@ -115,6 +151,7 @@ class ClientHelloPayload(DataClassORJSONMixin):
         """Config for parsing json messages."""
 
         omit_none = True
+        serialize_by_alias = True
 
 
 @dataclass
