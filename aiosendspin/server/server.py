@@ -413,7 +413,18 @@ class SendspinServer:
                 addresses = [local_ip]
             else:
                 addresses = []
-            await self._start_mdns_advertising(addresses=addresses, port=port, path=self.API_PATH)
+
+            if addresses:
+                await self._start_mdns_advertising(
+                    addresses=addresses, port=port, path=self.API_PATH
+                )
+            else:
+                logger.warning(
+                    "No IP addresses available for mDNS advertising. "
+                    "Clients may not be able to discover this server. "
+                    "Consider specifying addresses manually via advertise_addresses parameter."
+                )
+
             if discover_clients:
                 await self._start_mdns_discovery()
         except OSError as e:
