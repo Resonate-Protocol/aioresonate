@@ -752,7 +752,7 @@ class SendspinClient:
 
         # Pass server timestamp directly to callback - it handles time conversion
         # to allow for dynamic time base updates
-        for callback in self._audio_chunk_callbacks:
+        for callback in list(self._audio_chunk_callbacks):
             try:
                 callback(timestamp_us, payload, self._current_pcm_format)
             except Exception:
@@ -797,56 +797,56 @@ class SendspinClient:
         return self._time_filter.compute_server_time(adjusted_client_time)
 
     def _notify_metadata_callback(self, payload: ServerStatePayload) -> None:
-        for callback in self._metadata_callbacks:
+        for callback in list(self._metadata_callbacks):
             try:
                 callback(payload)
             except Exception:
                 logger.exception("Error in metadata callback %s", callback)
 
     def _notify_group_callback(self, payload: GroupUpdateServerPayload) -> None:
-        for callback in self._group_callbacks:
+        for callback in list(self._group_callbacks):
             try:
                 callback(payload)
             except Exception:
                 logger.exception("Error in group callback %s", callback)
 
     def _notify_controller_callback(self, payload: ServerStatePayload) -> None:
-        for callback in self._controller_callbacks:
+        for callback in list(self._controller_callbacks):
             try:
                 callback(payload)
             except Exception:
                 logger.exception("Error in controller callback %s", callback)
 
     def _notify_stream_start(self, message: StreamStartMessage) -> None:
-        for callback in self._stream_start_callbacks:
+        for callback in list(self._stream_start_callbacks):
             try:
                 callback(message)
             except Exception:
                 logger.exception("Error in stream start callback %s", callback)
 
     def _notify_stream_end(self, roles: list[Roles] | None) -> None:
-        for callback in self._stream_end_callbacks:
+        for callback in list(self._stream_end_callbacks):
             try:
                 callback(roles)
             except Exception:
                 logger.exception("Error in stream end callback %s", callback)
 
     def _notify_stream_clear(self, roles: list[Roles] | None) -> None:
-        for callback in self._stream_clear_callbacks:
+        for callback in list(self._stream_clear_callbacks):
             try:
                 callback(roles)
             except Exception:
                 logger.exception("Error in stream clear callback %s", callback)
 
     def _notify_disconnect_callback(self) -> None:
-        for callback in self._disconnect_callbacks:
+        for callback in list(self._disconnect_callbacks):
             try:
                 callback()
             except Exception:
                 logger.exception("Error in disconnect callback %s", callback)
 
     def _notify_server_command_callback(self, payload: ServerCommandPayload) -> None:
-        for callback in self._server_command_callbacks:
+        for callback in list(self._server_command_callbacks):
             try:
                 callback(payload)
             except Exception:
