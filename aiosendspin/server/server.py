@@ -458,9 +458,23 @@ class SendspinServer:
 
     async def close(self) -> None:
         """Close the server and cleanup resources."""
+        # Cancel all connection tasks to prevent reconnection attempts
+        for task in self._connection_tasks.values():
+            task.cancel()
+
+        # Disconnect all clients before stopping the server
+        clients = list(self.clients)
+        disconnect_tasks = []
+        for client in clients:
+            logger.debug("Disconnecting client %s", client.client_id)
+            disconnect_tasks.append(client.disconnect(retry_connection=False))
+        if disconnect_tasks:
+            results = await asyncio.gather(*disconnect_tasks, return_exceptions=True)
+            for client, result in zip(clients, results, strict=True):
+                if isinstance(result, Exception):
+                    logger.warning("Error disconnecting client %s: %s", client.client_id, result)
+
         await self.stop_server()
-        # Stop mDNS if active
-        await self._stop_mdns()
         if self._owns_session and not self._client_session.closed:
             await self._client_session.close()
             logger.debug("Closed internal client session for server %s", self._name)
