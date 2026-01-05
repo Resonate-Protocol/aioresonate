@@ -425,6 +425,10 @@ class SendspinServer:
 
     async def close(self) -> None:
         """Close the server and cleanup resources."""
+        # Cancel all connection tasks to prevent reconnection attempts
+        for task in self._connection_tasks.values():
+            task.cancel()
+
         # Disconnect all clients before stopping the server
         clients = list(self.clients)
         disconnect_tasks = []
