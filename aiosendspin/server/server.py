@@ -425,9 +425,17 @@ class SendspinServer:
 
     async def close(self) -> None:
         """Close the server and cleanup resources."""
-        disconnect_tasks = [client.disconnect(retry_connection=False) for client in self.clients]
+        # Disconnect all clients before stopping the server
+        clients = list(self.clients)
+        disconnect_tasks = []
+        for client in clients:
+            logger.debug("Disconnecting client %s", client.client_id)
+            disconnect_tasks.append(client.disconnect(retry_connection=False))
         if disconnect_tasks:
-            await asyncio.gather(*disconnect_tasks, return_exceptions=True)
+            results = await asyncio.gather(*disconnect_tasks, return_exceptions=True)
+            for client, result in zip(clients, results, strict=True):
+                if isinstance(result, Exception):
+                    logger.warning("Error disconnecting client %s: %s", client.client_id, result)
 
         await self.stop_server()
         # Stop mDNS if active
