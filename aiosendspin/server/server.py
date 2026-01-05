@@ -442,8 +442,6 @@ class SendspinServer:
                     logger.warning("Error disconnecting client %s: %s", client.client_id, result)
 
         await self.stop_server()
-        # Stop mDNS if active
-        await self._stop_mdns()
         if self._owns_session and not self._client_session.closed:
             await self._client_session.close()
             logger.debug("Closed internal client session for server %s", self._name)
