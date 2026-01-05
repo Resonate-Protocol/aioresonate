@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import logging
-import socket
 from collections.abc import Awaitable, Callable
 from typing import Any
 
 from aiohttp import web
 from zeroconf import NonUniqueNameException
 from zeroconf.asyncio import AsyncServiceInfo, AsyncZeroconf
+
+from aiosendspin.util import get_local_ip
 
 logger = logging.getLogger(__name__)
 
@@ -143,10 +144,12 @@ class ClientListener:
         self._zc = AsyncZeroconf()
 
         # Get local IP address
-        addresses = self._get_local_addresses()
-        if not addresses:
+        local_ip = get_local_ip()
+        if local_ip is None:
             logger.warning("Could not determine local IP address, mDNS may not work properly")
             addresses = ["127.0.0.1"]
+        else:
+            addresses = [local_ip]
 
         service_type = "_sendspin._tcp.local."
         properties = {"path": self._path}
@@ -182,17 +185,3 @@ class ClientListener:
             await self._zc.async_close()
             self._zc = None
             self._mdns_service = None
-
-    def _get_local_addresses(self) -> list[str]:
-        """Get local IP addresses for mDNS advertising."""
-        addresses: list[str] = []
-        try:
-            # Try to get the primary IP by connecting to a public address
-            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
-                s.connect(("8.8.8.8", 80))
-                addresses.append(s.getsockname()[0])
-        except OSError:
-            # Network unreachable or other socket errors
-            pass
-
-        return addresses
