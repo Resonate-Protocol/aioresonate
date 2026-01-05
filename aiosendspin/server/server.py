@@ -1,11 +1,14 @@
 """Sendspin Server implementation to connect to and manage many Sendspin Clients."""
 
+from __future__ import annotations
+
 import asyncio
 import logging
 import socket
 from collections.abc import Callable, Coroutine
 from contextlib import suppress
 from dataclasses import dataclass
+from ipaddress import ip_address
 
 from aiohttp import ClientConnectionError, ClientResponseError, ClientTimeout, ClientWSTimeout, web
 from aiohttp.client import ClientSession
@@ -54,6 +57,20 @@ def _get_local_ip() -> str | None:
         return None
 
 
+def _get_first_valid_ip(addresses: list[str]) -> str | None:
+    """Get the first valid IP address, filtering out link-local and unspecified addresses."""
+    for addr_str in addresses:
+        try:
+            addr = ip_address(addr_str)
+        except ValueError:
+            continue
+        # Skip link-local addresses (169.254.x.x for IPv4, fe80:: for IPv6)
+        # and unspecified addresses (0.0.0.0, ::)
+        if not addr.is_link_local and not addr.is_unspecified:
+            return addr_str
+    return None
+
+
 class SendspinServer:
     """Sendspin Server implementation to connect to and manage many Sendspin Clients."""
 
@@ -62,7 +79,7 @@ class SendspinServer:
     _clients: set[SendspinClient]
     """All groups managed by this server."""
     _loop: asyncio.AbstractEventLoop
-    _event_cbs: list[Callable[["SendspinServer", SendspinEvent], Coroutine[None, None, None]]]
+    _event_cbs: list[Callable[[SendspinServer, SendspinEvent], Coroutine[None, None, None]]]
     _connection_tasks: dict[str, asyncio.Task[None]]
     """
     All tasks managing client connections.
@@ -277,7 +294,7 @@ class SendspinServer:
             self._retry_events.pop(url, None)  # Cleanup retry events dict
 
     def add_event_listener(
-        self, callback: Callable[["SendspinServer", SendspinEvent], Coroutine[None, None, None]]
+        self, callback: Callable[[SendspinServer, SendspinEvent], Coroutine[None, None, None]]
     ) -> Callable[[], None]:
         """
         Register a callback to listen for state changes of the server.
@@ -536,14 +553,23 @@ class SendspinServer:
 
     async def _handle_service_added(self, zeroconf: Zeroconf, service_type: str, name: str) -> None:
         """Handle a new mDNS service being added."""
-        # Get service info asynchronously
+        # Try cache first for faster discovery, fall back to network request
         info = AsyncServiceInfo(service_type, name)
-        await info.async_request(zeroconf, 3000)
+        if not info.load_from_cache(zeroconf):
+            await info.async_request(zeroconf, 3000)
 
-        if not info or not info.parsed_addresses():
+        if not info.parsed_addresses():
+            logger.debug("No addresses found for discovered service %s", name)
             return
 
-        address = info.parsed_addresses()[0]
+        # Filter out link-local and unspecified addresses
+        address = _get_first_valid_ip(info.parsed_addresses())
+        if address is None:
+            logger.debug(
+                "No valid (non-link-local) addresses found for discovered service %s", name
+            )
+            return
+
         port = info.port
         path = None
         if info.properties:
