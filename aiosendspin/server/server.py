@@ -421,7 +421,8 @@ class SendspinServer:
             logger.info("Sendspin server started successfully on %s:%d", host, port)
             # Start mDNS advertise and discovery
             self._zc = AsyncZeroconf(
-                ip_version=IPVersion.V4Only, interfaces=InterfaceChoice.Default
+                ip_version=IPVersion.V4Only,
+                interfaces=[host] if host != "0.0.0.0" else InterfaceChoice.Default,
             )
             # Determine IP addresses to advertise
             if advertise_addresses is not None:
