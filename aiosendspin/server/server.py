@@ -41,12 +41,17 @@ class ClientRemovedEvent(SendspinEvent):
     client_id: str
 
 
-async def _get_ip_pton(ip_string: str) -> bytes:
-    """Return socket pton for a local ip."""
+def _get_local_ip() -> str | None:
+    """Get a local IP address that can be used for mDNS advertising."""
     try:
-        return await asyncio.to_thread(socket.inet_pton, socket.AF_INET, ip_string)
+        # Create a UDP socket and connect to an external address
+        # This doesn't send any data, just determines which interface would be used
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.connect(("8.8.8.8", 80))
+            result: str = s.getsockname()[0]
+            return result
     except OSError:
-        return await asyncio.to_thread(socket.inet_pton, socket.AF_INET6, ip_string)
+        return None
 
 
 class SendspinServer:
@@ -356,7 +361,12 @@ class SendspinServer:
         return self._name
 
     async def start_server(
-        self, port: int = 8927, host: str = "0.0.0.0", advertise_host: str = "0.0.0.0"
+        self,
+        port: int = 8927,
+        host: str = "0.0.0.0",
+        advertise_addresses: list[str] | None = None,
+        *,
+        discover_clients: bool = True,
     ) -> None:
         """
         Start the Sendspin Server.
@@ -369,7 +379,11 @@ class SendspinServer:
         :param port: The TCP port to bind the server to.
         :param host: The IP address for the server to listen on
             (e.g., "0.0.0.0" for all interfaces).
-        :param advertise_host: The IP address to advertise via mDNS.
+        :param advertise_addresses: List of IP addresses to advertise via mDNS.
+            If None, auto-detects the local IP address.
+        :param discover_clients: If True, enable automatic mDNS discovery of clients.
+            If False, the server will still advertise itself and accept incoming connections,
+            but will not actively connect to discovered clients.
         """
         if self._app is not None:
             logger.warning("Server is already running")
@@ -392,8 +406,27 @@ class SendspinServer:
             self._zc = AsyncZeroconf(
                 ip_version=IPVersion.V4Only, interfaces=InterfaceChoice.Default
             )
-            await self._start_mdns_advertising(host=advertise_host, port=port, path=self.API_PATH)
-            await self._start_mdns_discovery()
+            # Determine IP addresses to advertise
+            if advertise_addresses is not None:
+                addresses = advertise_addresses
+            elif local_ip := _get_local_ip():
+                addresses = [local_ip]
+            else:
+                addresses = []
+
+            if addresses:
+                await self._start_mdns_advertising(
+                    addresses=addresses, port=port, path=self.API_PATH
+                )
+            else:
+                logger.warning(
+                    "No IP addresses available for mDNS advertising. "
+                    "Clients may not be able to discover this server. "
+                    "Consider specifying addresses manually via advertise_addresses parameter."
+                )
+
+            if discover_clients:
+                await self._start_mdns_discovery()
         except OSError as e:
             logger.error("Failed to start server on %s:%d: %s", host, port, e)
             await self._stop_mdns()
@@ -446,7 +479,7 @@ class SendspinServer:
             await self._client_session.close()
             logger.debug("Closed internal client session for server %s", self._name)
 
-    async def _start_mdns_advertising(self, host: str, port: int, path: str) -> None:
+    async def _start_mdns_advertising(self, addresses: list[str], port: int, path: str) -> None:
         """Start advertising this server via mDNS."""
         assert self._zc is not None
         if self._mdns_service is not None:
@@ -454,10 +487,12 @@ class SendspinServer:
 
         service_type = "_sendspin-server._tcp.local."
         properties = {"path": path}
+
         info = AsyncServiceInfo(
             type_=service_type,
             name=f"{self._id}.{service_type}",
-            addresses=[await _get_ip_pton(host)] if host != "0.0.0.0" else None,
+            server=f"{self._id}.local.",
+            parsed_addresses=addresses,
             port=port,
             properties=properties,
         )
