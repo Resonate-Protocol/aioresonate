@@ -5,19 +5,28 @@ from __future__ import annotations
 import asyncio
 import base64
 import logging
+import types
 from collections import deque
 from collections.abc import AsyncGenerator, Callable
 from dataclasses import dataclass, field
-from typing import NamedTuple, cast
+from typing import TYPE_CHECKING, NamedTuple
 from uuid import UUID, uuid4
-
-import av
-from av.logging import Capture
 
 from aiosendspin.models import AudioCodec, BinaryMessageType, pack_binary_header_raw
 from aiosendspin.models.player import StreamStartPlayer
 
+if TYPE_CHECKING:
+    import av
+
 logger = logging.getLogger(__name__)
+
+
+def _get_av() -> types.ModuleType:
+    """Lazy import of av module to avoid slow startup."""
+    import av as _av  # noqa: PLC0415
+
+    return _av
+
 
 # Universal main channel ID for the primary audio source.
 # Used as the canonical source for visualization and as a fallback when
@@ -219,14 +228,15 @@ def build_encoder_for_format(
 
     codec = "libopus" if audio_format.codec == AudioCodec.OPUS else audio_format.codec.value
 
-    encoder = cast("av.AudioCodecContext", av.AudioCodecContext.create(codec, "w"))
+    av = _get_av()
+    encoder: av.AudioCodecContext = av.AudioCodecContext.create(codec, "w")  # type: ignore[name-defined]
     encoder.sample_rate = audio_format.sample_rate
     encoder.layout = input_audio_layout
     encoder.format = input_audio_format
     if audio_format.codec == AudioCodec.FLAC:
         encoder.options = {"compression_level": "5"}
 
-    with Capture() as logs:
+    with av.logging.Capture() as logs:
         encoder.open()
     for log in logs:
         logger.debug("Opening AudioCodecContext log from av: %s", log)
@@ -627,6 +637,7 @@ class Streamer:
             audio_format
         )
 
+        av = _get_av()
         resampler = av.AudioResampler(
             format=target_av_format,
             layout=target_layout,
@@ -1279,6 +1290,7 @@ class Streamer:
         if pipeline.next_chunk_start_us is None and not pipeline.buffer:
             pipeline.next_chunk_start_us = source_chunk.start_time_us
 
+        av = _get_av()
         frame = av.AudioFrame(
             format=channel_state.source_format_params.av_format,
             layout=channel_state.source_format_params.av_layout,
@@ -1387,6 +1399,7 @@ class Streamer:
         """
         if pipeline.encoder is None:
             raise RuntimeError("Encoder not configured for this pipeline")
+        av = _get_av()
         frame = av.AudioFrame(
             format=pipeline.target_av_format,
             layout=pipeline.target_layout,
