@@ -7,7 +7,7 @@ from contextlib import suppress
 from enum import Enum
 from typing import TYPE_CHECKING, Any, cast
 
-from aiohttp import ClientWebSocketResponse, WSMessage, WSMsgType, web
+from aiohttp import ClientWebSocketResponse, WSMsgType, web
 
 from aiosendspin.models import unpack_binary_header
 from aiosendspin.models.core import (
@@ -102,6 +102,8 @@ class SendspinClient:
     _client_info: ClientHelloPayload | None = None
     _writer_task: asyncio.Task[None] | None = None
     """Task responsible for sending JSON and binary data."""
+    _message_loop_task: asyncio.Task[None] | None = None
+    """Task responsible for receiving and processing messages."""
     _to_write: asyncio.Queue[ServerMessage | bytes]
     """Queue for messages to be sent to the client through the WebSocket."""
     _group: SendspinGroup
@@ -212,7 +214,11 @@ class SendspinClient:
             self._writer_task.cancel()
             with suppress(asyncio.CancelledError):
                 await self._writer_task
-        # Handle task is cancelled implicitly when wsock closes or externally
+        if self._message_loop_task and not self._message_loop_task.done():
+            self._logger.debug("Cancelling message loop task")
+            self._message_loop_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await self._message_loop_task
 
         # Close WebSocket
         if self._wsock_client is not None and not self._wsock_client.closed:
@@ -422,33 +428,9 @@ class SendspinClient:
         """Run the main message processing loop."""
         wsock = self._wsock_server or self._wsock_client
         assert wsock is not None
-        receive_task: asyncio.Task[WSMessage] | None = None
         # Listen for all incoming messages
         try:
-            while not wsock.closed:
-                # Wait for either a message or the writer task to complete (meaning the client
-                # disconnected or errored)
-                receive_task = self._server.loop.create_task(wsock.receive())
-                assert self._writer_task is not None  # for type checking
-                done, pending = await asyncio.wait(
-                    [receive_task, self._writer_task],
-                    return_when=asyncio.FIRST_COMPLETED,
-                )
-
-                if self._writer_task in done:
-                    self._logger.debug("Writer task ended, closing connection")
-                    # Cancel the receive task if it's still pending
-                    if receive_task in pending:
-                        receive_task.cancel()
-                    break
-
-                # Get the message from the completed receive task
-                try:
-                    msg = await receive_task
-                except (ConnectionError, asyncio.CancelledError, TimeoutError) as e:
-                    self._logger.error("Error receiving message: %s", e)
-                    break
-
+            async for msg in wsock:
                 timestamp = int(self._server.loop.time() * 1_000_000)
 
                 if msg.type in (WSMsgType.CLOSE, WSMsgType.CLOSING, WSMsgType.CLOSED):
@@ -480,12 +462,14 @@ class SendspinClient:
             self._logger.debug("wsock was closed")
 
         except asyncio.CancelledError:
-            self._logger.debug("Connection closed by client")
+            self._logger.debug("Message loop cancelled")
         except Exception:
             self._logger.exception("Unexpected error inside websocket API")
         finally:
-            if receive_task and not receive_task.done():
-                receive_task.cancel()
+            # Cancel the writer when message loop exits
+            if self._writer_task and not self._writer_task.done():
+                self._logger.debug("Message loop finished, cancelling writer")
+                self._writer_task.cancel()
 
     async def _cleanup_connection(self) -> None:
         """Clean up WebSocket connection and tasks."""
@@ -508,8 +492,12 @@ class SendspinClient:
             # Establish connection and setup
             await self._setup_connection()
 
-            # Run the main message loop
-            await self._run_message_loop()
+            # Run the main message loop as a task so writer can cancel it
+            self._message_loop_task = self._server.loop.create_task(self._run_message_loop())
+            try:
+                await self._message_loop_task
+            except asyncio.CancelledError:
+                self._logger.debug("Message loop task was cancelled")
         finally:
             # Clean up connection and tasks
             await self._cleanup_connection()
@@ -695,6 +683,11 @@ class SendspinClient:
             self._logger.debug("WebSocket Connection was closed for the client, ending writer task")
         except Exception:
             self._logger.exception("Error in writer task for client")
+        finally:
+            # Cancel the message loop when writer exits
+            if self._message_loop_task and not self._message_loop_task.done():
+                self._logger.debug("Writer finished, cancelling message loop")
+                self._message_loop_task.cancel()
 
     def send_message(self, message: ServerMessage | bytes) -> None:
         """
