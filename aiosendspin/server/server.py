@@ -146,6 +146,7 @@ class SendspinServer:
             self._owns_session = False
         self._connection_tasks = {}
         self._retry_events = {}
+        self._mdns_client_urls: dict[str, str] = {}  # mDNS service name -> WebSocket URL
         self._app = None
         self._app_runner = None
         self._tcp_site = None
@@ -543,14 +544,15 @@ class SendspinServer:
         """Handle mDNS service state callback (called from zeroconf thread)."""
         if state_change in (ServiceStateChange.Added, ServiceStateChange.Updated):
 
-            def _schedule() -> None:
+            def _schedule_add() -> None:
                 task = self._loop.create_task(
                     self._handle_service_added(zeroconf, service_type, name)
                 )
                 task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
 
-            self._loop.call_soon_threadsafe(_schedule)
-        # We don't listen on removals since connect_to_client has its own disconnect/retry logic
+            self._loop.call_soon_threadsafe(_schedule_add)
+        elif state_change is ServiceStateChange.Removed:
+            self._loop.call_soon_threadsafe(lambda: self._handle_service_removed(name))
 
     async def _handle_service_added(self, zeroconf: Zeroconf, service_type: str, name: str) -> None:
         """Handle a new mDNS service being added."""
@@ -593,7 +595,16 @@ class SendspinServer:
 
         url = f"ws://{address}:{port}{path}"
         logger.debug("mDNS discovered client at %s", url)
+        # Track the URL for this service so we can disconnect when removed
+        self._mdns_client_urls[name] = url
         self.connect_to_client(url)
+
+    def _handle_service_removed(self, name: str) -> None:
+        """Handle an mDNS service being removed."""
+        url = self._mdns_client_urls.pop(name, None)
+        if url is not None:
+            logger.debug("mDNS client removed: %s", url)
+            self.disconnect_from_client(url)
 
     async def _stop_mdns(self) -> None:
         """Stop mDNS advertise and discovery if active."""
