@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import socket
 from collections.abc import Callable, Coroutine
 from contextlib import suppress
 from dataclasses import dataclass
@@ -20,6 +19,8 @@ from zeroconf import (
     Zeroconf,
 )
 from zeroconf.asyncio import AsyncServiceBrowser, AsyncServiceInfo, AsyncZeroconf
+
+from aiosendspin.util import get_local_ip
 
 from .client import SendspinClient
 
@@ -42,19 +43,6 @@ class ClientRemovedEvent(SendspinEvent):
     """A client disconnected from the server."""
 
     client_id: str
-
-
-def _get_local_ip() -> str | None:
-    """Get a local IP address that can be used for mDNS advertising."""
-    try:
-        # Create a UDP socket and connect to an external address
-        # This doesn't send any data, just determines which interface would be used
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
-            s.connect(("8.8.8.8", 80))
-            result: str = s.getsockname()[0]
-            return result
-    except OSError:
-        return None
 
 
 def _get_first_valid_ip(addresses: list[str]) -> str | None:
@@ -428,7 +416,7 @@ class SendspinServer:
             # Determine IP addresses to advertise
             if advertise_addresses is not None:
                 addresses = advertise_addresses
-            elif local_ip := _get_local_ip():
+            elif local_ip := get_local_ip():
                 addresses = [local_ip]
             else:
                 addresses = []

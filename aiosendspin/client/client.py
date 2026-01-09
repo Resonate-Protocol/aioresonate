@@ -8,7 +8,7 @@ from collections.abc import Callable, Sequence
 from contextlib import suppress
 from dataclasses import dataclass
 
-from aiohttp import ClientSession, ClientWebSocketResponse, WSMessage, WSMsgType
+from aiohttp import ClientSession, ClientWebSocketResponse, WSMessage, WSMsgType, web
 
 from aiosendspin.models import BINARY_HEADER_SIZE, BinaryMessageType, unpack_binary_header
 from aiosendspin.models.artwork import ClientHelloArtworkSupport
@@ -140,7 +140,7 @@ class SendspinClient:
 
     _loop: asyncio.AbstractEventLoop
     """Event loop for this client."""
-    _ws: ClientWebSocketResponse | None = None
+    _ws: ClientWebSocketResponse | web.WebSocketResponse | None = None
     """WebSocket connection to the server."""
     _owns_session: bool
     """Whether this client owns and should close the session."""
@@ -317,6 +317,45 @@ class SendspinClient:
 
         logger.info("Connecting to Sendspin server at %s", url)
         self._ws = await self._session.ws_connect(url, heartbeat=30)
+        self._connected = True
+
+        self._reader_task = self._loop.create_task(self._reader_loop())
+        await self._send_client_hello()
+
+        try:
+            await asyncio.wait_for(self._server_hello_event.wait(), timeout=10)
+        except TimeoutError as err:
+            await self.disconnect()
+            raise TimeoutError("Timed out waiting for server/hello response") from err
+
+        # Send initial player state if player role is supported
+        if Roles.PLAYER in self._roles:
+            await self.send_player_state(
+                state=PlayerStateType.SYNCHRONIZED,
+                volume=self._initial_volume,
+                muted=self._initial_muted,
+            )
+
+        await self._send_time_message()
+        self._time_task = self._loop.create_task(self._time_sync_loop())
+        logger.info("Handshake with server complete")
+
+    async def attach_websocket(self, ws: web.WebSocketResponse) -> None:
+        """
+        Attach an existing WebSocket connection from an incoming server.
+
+        This is used for server-initiated connections where the server connects
+        to the client. The client still sends client/hello and performs the
+        handshake, but uses the provided WebSocket instead of connecting out.
+
+        Args:
+            ws: An already-prepared WebSocketResponse from an incoming connection.
+        """
+        if self.connected:
+            raise RuntimeError("Client is already connected")
+
+        self._server_hello_event = asyncio.Event()
+        self._ws = ws
         self._connected = True
 
         self._reader_task = self._loop.create_task(self._reader_loop())
