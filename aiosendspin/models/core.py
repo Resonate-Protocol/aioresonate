@@ -151,7 +151,6 @@ class ClientHelloPayload(DataClassORJSONMixin):
         """Config for parsing json messages."""
 
         omit_none = True
-        serialize_by_alias = True
 
 
 @dataclass

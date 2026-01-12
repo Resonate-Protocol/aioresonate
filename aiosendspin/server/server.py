@@ -1,11 +1,14 @@
 """Sendspin Server implementation to connect to and manage many Sendspin Clients."""
 
+from __future__ import annotations
+
 import asyncio
 import logging
 import socket
 from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import dataclass
+from ipaddress import ip_address
 
 from aiohttp import ClientConnectionError, ClientResponseError, ClientTimeout, ClientWSTimeout, web
 from aiohttp.client import ClientSession
@@ -41,12 +44,31 @@ class ClientRemovedEvent(SendspinEvent):
     client_id: str
 
 
-async def _get_ip_pton(ip_string: str) -> bytes:
-    """Return socket pton for a local ip."""
+def _get_local_ip() -> str | None:
+    """Get a local IP address that can be used for mDNS advertising."""
     try:
-        return await asyncio.to_thread(socket.inet_pton, socket.AF_INET, ip_string)
+        # Create a UDP socket and connect to an external address
+        # This doesn't send any data, just determines which interface would be used
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.connect(("8.8.8.8", 80))
+            result: str = s.getsockname()[0]
+            return result
     except OSError:
-        return await asyncio.to_thread(socket.inet_pton, socket.AF_INET6, ip_string)
+        return None
+
+
+def _get_first_valid_ip(addresses: list[str]) -> str | None:
+    """Get the first valid IP address, filtering out link-local and unspecified addresses."""
+    for addr_str in addresses:
+        try:
+            addr = ip_address(addr_str)
+        except ValueError:
+            continue
+        # Skip link-local addresses (169.254.x.x for IPv4, fe80:: for IPv6)
+        # and unspecified addresses (0.0.0.0, ::)
+        if not addr.is_link_local and not addr.is_unspecified:
+            return addr_str
+    return None
 
 
 class SendspinServer:
@@ -57,7 +79,7 @@ class SendspinServer:
     _clients: set[SendspinClient]
     """All groups managed by this server."""
     _loop: asyncio.AbstractEventLoop
-    _event_cbs: list[Callable[["SendspinServer", SendspinEvent], None]]
+    _event_cbs: list[Callable[[SendspinServer, SendspinEvent], None]]
     _connection_tasks: dict[str, asyncio.Task[None]]
     """
     All tasks managing client connections.
@@ -124,6 +146,7 @@ class SendspinServer:
             self._owns_session = False
         self._connection_tasks = {}
         self._retry_events = {}
+        self._mdns_client_urls: dict[str, str] = {}  # mDNS service name -> WebSocket URL
         self._app = None
         self._app_runner = None
         self._tcp_site = None
@@ -272,7 +295,7 @@ class SendspinServer:
             self._retry_events.pop(url, None)  # Cleanup retry events dict
 
     def add_event_listener(
-        self, callback: Callable[["SendspinServer", SendspinEvent], None]
+        self, callback: Callable[[SendspinServer, SendspinEvent], None]
     ) -> Callable[[], None]:
         """
         Register a callback to listen for state changes of the server.
@@ -361,7 +384,7 @@ class SendspinServer:
         self,
         port: int = 8927,
         host: str = "0.0.0.0",
-        advertise_host: str = "0.0.0.0",
+        advertise_addresses: list[str] | None = None,
         *,
         discover_clients: bool = True,
     ) -> None:
@@ -376,7 +399,8 @@ class SendspinServer:
         :param port: The TCP port to bind the server to.
         :param host: The IP address for the server to listen on
             (e.g., "0.0.0.0" for all interfaces).
-        :param advertise_host: The IP address to advertise via mDNS.
+        :param advertise_addresses: List of IP addresses to advertise via mDNS.
+            If None, auto-detects the local IP address.
         :param discover_clients: If True, enable automatic mDNS discovery of clients.
             If False, the server will still advertise itself and accept incoming connections,
             but will not actively connect to discovered clients.
@@ -400,9 +424,28 @@ class SendspinServer:
             logger.info("Sendspin server started successfully on %s:%d", host, port)
             # Start mDNS advertise and discovery
             self._zc = AsyncZeroconf(
-                ip_version=IPVersion.V4Only, interfaces=InterfaceChoice.Default
+                ip_version=IPVersion.V4Only,
+                interfaces=[host] if host != "0.0.0.0" else InterfaceChoice.Default,
             )
-            await self._start_mdns_advertising(host=advertise_host, port=port, path=self.API_PATH)
+            # Determine IP addresses to advertise
+            if advertise_addresses is not None:
+                addresses = advertise_addresses
+            elif local_ip := _get_local_ip():
+                addresses = [local_ip]
+            else:
+                addresses = []
+
+            if addresses:
+                await self._start_mdns_advertising(
+                    addresses=addresses, port=port, path=self.API_PATH
+                )
+            else:
+                logger.warning(
+                    "No IP addresses available for mDNS advertising. "
+                    "Clients may not be able to discover this server. "
+                    "Consider specifying addresses manually via advertise_addresses parameter."
+                )
+
             if discover_clients:
                 await self._start_mdns_discovery()
         except OSError as e:
@@ -436,14 +479,28 @@ class SendspinServer:
 
     async def close(self) -> None:
         """Close the server and cleanup resources."""
+        # Cancel all connection tasks to prevent reconnection attempts
+        for task in self._connection_tasks.values():
+            task.cancel()
+
+        # Disconnect all clients before stopping the server
+        clients = list(self.clients)
+        disconnect_tasks = []
+        for client in clients:
+            logger.debug("Disconnecting client %s", client.client_id)
+            disconnect_tasks.append(client.disconnect(retry_connection=False))
+        if disconnect_tasks:
+            results = await asyncio.gather(*disconnect_tasks, return_exceptions=True)
+            for client, result in zip(clients, results, strict=True):
+                if isinstance(result, Exception):
+                    logger.warning("Error disconnecting client %s: %s", client.client_id, result)
+
         await self.stop_server()
-        # Stop mDNS if active
-        await self._stop_mdns()
         if self._owns_session and not self._client_session.closed:
             await self._client_session.close()
             logger.debug("Closed internal client session for server %s", self._name)
 
-    async def _start_mdns_advertising(self, host: str, port: int, path: str) -> None:
+    async def _start_mdns_advertising(self, addresses: list[str], port: int, path: str) -> None:
         """Start advertising this server via mDNS."""
         assert self._zc is not None
         if self._mdns_service is not None:
@@ -451,10 +508,12 @@ class SendspinServer:
 
         service_type = "_sendspin-server._tcp.local."
         properties = {"path": path}
+
         info = AsyncServiceInfo(
             type_=service_type,
             name=f"{self._id}.{service_type}",
-            addresses=[await _get_ip_pton(host)] if host != "0.0.0.0" else None,
+            server=f"{self._id}.local.",
+            parsed_addresses=addresses,
             port=port,
             properties=properties,
         )
@@ -487,25 +546,35 @@ class SendspinServer:
         """Handle mDNS service state callback (called from zeroconf thread)."""
         if state_change in (ServiceStateChange.Added, ServiceStateChange.Updated):
 
-            def _schedule() -> None:
+            def _schedule_add() -> None:
                 task = self._loop.create_task(
                     self._handle_service_added(zeroconf, service_type, name)
                 )
                 task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
 
-            self._loop.call_soon_threadsafe(_schedule)
-        # We don't listen on removals since connect_to_client has its own disconnect/retry logic
+            self._loop.call_soon_threadsafe(_schedule_add)
+        elif state_change is ServiceStateChange.Removed:
+            self._loop.call_soon_threadsafe(lambda: self._handle_service_removed(name))
 
     async def _handle_service_added(self, zeroconf: Zeroconf, service_type: str, name: str) -> None:
         """Handle a new mDNS service being added."""
-        # Get service info asynchronously
+        # Try cache first for faster discovery, fall back to network request
         info = AsyncServiceInfo(service_type, name)
-        await info.async_request(zeroconf, 3000)
+        if not info.load_from_cache(zeroconf):
+            await info.async_request(zeroconf, 3000)
 
-        if not info or not info.parsed_addresses():
+        if not info.parsed_addresses():
+            logger.debug("No addresses found for discovered service %s", name)
             return
 
-        address = info.parsed_addresses()[0]
+        # Filter out link-local and unspecified addresses
+        address = _get_first_valid_ip(info.parsed_addresses())
+        if address is None:
+            logger.debug(
+                "No valid (non-link-local) addresses found for discovered service %s", name
+            )
+            return
+
         port = info.port
         path = None
         if info.properties:
@@ -528,7 +597,16 @@ class SendspinServer:
 
         url = f"ws://{address}:{port}{path}"
         logger.debug("mDNS discovered client at %s", url)
+        # Track the URL for this service so we can disconnect when removed
+        self._mdns_client_urls[name] = url
         self.connect_to_client(url)
+
+    def _handle_service_removed(self, name: str) -> None:
+        """Handle an mDNS service being removed."""
+        url = self._mdns_client_urls.pop(name, None)
+        if url is not None:
+            logger.debug("mDNS client removed: %s", url)
+            self.disconnect_from_client(url)
 
     async def _stop_mdns(self) -> None:
         """Stop mDNS advertise and discovery if active."""

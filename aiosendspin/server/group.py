@@ -1208,13 +1208,13 @@ class SendspinGroup:
         # If app didn't declare any commands, only protocol commands are supported
         return protocol_commands
 
-    async def _handle_group_command(self, cmd: ControllerCommandPayload) -> None:
+    def _handle_group_command(self, cmd: ControllerCommandPayload) -> None:
         # Handle volume and mute commands directly
         if cmd.command == MediaCommand.VOLUME and cmd.volume is not None:
-            await self.set_volume(cmd.volume)
+            self.set_volume(cmd.volume)
             return
         if cmd.command == MediaCommand.MUTE and cmd.mute is not None:
-            await self.set_mute(cmd.mute)
+            self.set_mute(cmd.mute)
             return
 
         # Signal the event for application commands (PLAY, PAUSE, STOP, etc.)
@@ -1303,7 +1303,7 @@ class SendspinGroup:
             return False
         return all(player.muted for player in players)
 
-    async def set_volume(self, volume_level: int) -> None:
+    def set_volume(self, volume_level: int) -> None:
         """Set group volume using redistribution algorithm from spec."""
         volume_level = max(0, min(100, volume_level))
         players = self.players()
@@ -1360,7 +1360,7 @@ class SendspinGroup:
         # Send state update to controller clients
         self._send_controller_state_to_clients()
 
-    async def set_mute(self, muted: bool) -> None:  # noqa: FBT001
+    def set_mute(self, muted: bool) -> None:  # noqa: FBT001
         """Set group mute state and propagate to all players."""
         # Propagate to all player clients
         for player in self.players():
@@ -1424,7 +1424,7 @@ class SendspinGroup:
         # Send group update to notify client of their new solo group
         new_group._send_group_update_to_clients()
 
-    async def add_client(self, client: SendspinClient) -> None:
+    async def add_client(self, client: SendspinClient) -> None:  # noqa: PLR0915
         """
         Add a client to this group.
 
@@ -1441,6 +1441,23 @@ class SendspinGroup:
             return
         # Remove it from any existing group first
         await client.ungroup()
+
+        # Check for and remove any stale client with the same client_id
+        # This handles the case where a client disconnects and reconnects
+        # while still being listed in _clients (e.g., solo client disconnect)
+        stale_client = next((c for c in self._clients if c.client_id == client.client_id), None)
+        if stale_client is not None:
+            logger.debug(
+                "Removing stale client %s (object %s) before adding new client (object %s)",
+                stale_client.client_id,
+                id(stale_client),
+                id(client),
+            )
+            self._clients.remove(stale_client)
+            self._unregister_client_events(stale_client)
+            # Clean up stale player from streamer if actively streaming
+            if self._streamer is not None:
+                self._streamer.remove_player(stale_client.client_id)
 
         # Add client to this group's client list
         self._clients.append(client)
