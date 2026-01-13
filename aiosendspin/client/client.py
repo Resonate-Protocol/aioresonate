@@ -313,32 +313,12 @@ class SendspinClient:
 
         if self._session is None:
             self._session = ClientSession()
-        self._server_hello_event = asyncio.Event()
 
         logger.info("Connecting to Sendspin server at %s", url)
         self._ws = await self._session.ws_connect(url, heartbeat=30)
         self._connected = True
 
-        self._reader_task = self._loop.create_task(self._reader_loop())
-        await self._send_client_hello()
-
-        try:
-            await asyncio.wait_for(self._server_hello_event.wait(), timeout=10)
-        except TimeoutError as err:
-            await self.disconnect()
-            raise TimeoutError("Timed out waiting for server/hello response") from err
-
-        # Send initial player state if player role is supported
-        if Roles.PLAYER in self._roles:
-            await self.send_player_state(
-                state=PlayerStateType.SYNCHRONIZED,
-                volume=self._initial_volume,
-                muted=self._initial_muted,
-            )
-
-        await self._send_time_message()
-        self._time_task = self._loop.create_task(self._time_sync_loop())
-        logger.info("Handshake with server complete")
+        await self._perform_handshake()
 
     async def attach_websocket(self, ws: web.WebSocketResponse) -> None:
         """
@@ -354,9 +334,14 @@ class SendspinClient:
         if self.connected:
             raise RuntimeError("Client is already connected")
 
-        self._server_hello_event = asyncio.Event()
         self._ws = ws
         self._connected = True
+
+        await self._perform_handshake()
+
+    async def _perform_handshake(self) -> None:
+        """Perform the handshake with the server after connection is established."""
+        self._server_hello_event = asyncio.Event()
 
         self._reader_task = self._loop.create_task(self._reader_loop())
         await self._send_client_hello()

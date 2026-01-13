@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Awaitable, Callable
-from typing import Any
 
 from aiohttp import web
 from zeroconf import NonUniqueNameException
@@ -17,6 +16,7 @@ logger = logging.getLogger(__name__)
 # Default recommended port per spec
 DEFAULT_PORT = 8927
 DEFAULT_PATH = "/sendspin"
+DEFAULT_HOST = "0.0.0.0"
 
 # Callback type for new server connections.
 # Receives the WebSocketResponse and should handle the connection lifecycle.
@@ -54,6 +54,7 @@ class ClientListener:
         *,
         port: int = DEFAULT_PORT,
         path: str = DEFAULT_PATH,
+        host: str = DEFAULT_HOST,
         advertise_mdns: bool = True,
     ) -> None:
         """
@@ -67,20 +68,23 @@ class ClientListener:
                 for disconnect, etc.).
             port: Port to listen on (default: 8927).
             path: WebSocket endpoint path (default: /sendspin).
+            host: Host/IP address to bind to (default: 0.0.0.0). Use "127.0.0.1"
+                for local-only access.
             advertise_mdns: Whether to advertise via mDNS (default: True).
         """
         self._client_id = client_id
         self._on_connection = on_connection
         self._port = port
         self._path = path
+        self._host = host
         self._advertise_mdns = advertise_mdns
 
         self._app: web.Application | None = None
         self._runner: web.AppRunner | None = None
         self._site: web.TCPSite | None = None
 
-        self._zc: Any = None
-        self._mdns_service: Any = None
+        self._zc: AsyncZeroconf | None = None
+        self._mdns_service: AsyncServiceInfo | None = None
 
     @property
     def port(self) -> int:
@@ -100,7 +104,7 @@ class ClientListener:
         # Start the server
         self._runner = web.AppRunner(self._app)
         await self._runner.setup()
-        self._site = web.TCPSite(self._runner, "0.0.0.0", self._port)
+        self._site = web.TCPSite(self._runner, self._host, self._port)
         await self._site.start()
 
         logger.info("ClientListener started on port %d, path %s", self._port, self._path)
@@ -135,7 +139,15 @@ class ClientListener:
         logger.debug("Incoming server connection from %s", request.remote)
 
         # Delegate to the connection handler
-        await self._on_connection(ws)
+        try:
+            await self._on_connection(ws)
+        except Exception:
+            logger.exception(
+                "Unhandled exception in on_connection callback for %s",
+                request.remote,
+            )
+            if not ws.closed:
+                await ws.close(code=1011, message=b"Internal error")
 
         return ws
 
