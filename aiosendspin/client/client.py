@@ -8,7 +8,7 @@ from collections.abc import Callable, Sequence
 from contextlib import suppress
 from dataclasses import dataclass
 
-from aiohttp import ClientSession, ClientWebSocketResponse, WSMessage, WSMsgType
+from aiohttp import ClientSession, ClientWebSocketResponse, WSMessage, WSMsgType, web
 
 from aiosendspin.models import BINARY_HEADER_SIZE, BinaryMessageType, unpack_binary_header
 from aiosendspin.models.artwork import ClientHelloArtworkSupport
@@ -140,7 +140,7 @@ class SendspinClient:
 
     _loop: asyncio.AbstractEventLoop
     """Event loop for this client."""
-    _ws: ClientWebSocketResponse | None = None
+    _ws: ClientWebSocketResponse | web.WebSocketResponse | None = None
     """WebSocket connection to the server."""
     _owns_session: bool
     """Whether this client owns and should close the session."""
@@ -313,11 +313,35 @@ class SendspinClient:
 
         if self._session is None:
             self._session = ClientSession()
-        self._server_hello_event = asyncio.Event()
 
         logger.info("Connecting to Sendspin server at %s", url)
         self._ws = await self._session.ws_connect(url, heartbeat=30)
         self._connected = True
+
+        await self._perform_handshake()
+
+    async def attach_websocket(self, ws: web.WebSocketResponse) -> None:
+        """
+        Attach an existing WebSocket connection from an incoming server.
+
+        This is used for server-initiated connections where the server connects
+        to the client. The client still sends client/hello and performs the
+        handshake, but uses the provided WebSocket instead of connecting out.
+
+        Args:
+            ws: An already-prepared WebSocketResponse from an incoming connection.
+        """
+        if self.connected:
+            raise RuntimeError("Client is already connected")
+
+        self._ws = ws
+        self._connected = True
+
+        await self._perform_handshake()
+
+    async def _perform_handshake(self) -> None:
+        """Perform the handshake with the server after connection is established."""
+        self._server_hello_event = asyncio.Event()
 
         self._reader_task = self._loop.create_task(self._reader_loop())
         await self._send_client_hello()

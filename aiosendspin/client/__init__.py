@@ -11,10 +11,12 @@ from .client import (
     StreamEndCallback,
     StreamStartCallback,
 )
+from .listener import ClientListener
 from .time_sync import SendspinTimeFilter
 
 __all__ = [
     "AudioChunkCallback",
+    "ClientListener",
     "DisconnectCallback",
     "GroupUpdateCallback",
     "MetadataCallback",
