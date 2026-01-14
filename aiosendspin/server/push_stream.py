@@ -376,9 +376,22 @@ class PushStream:
         Wait until there is buffer space available on players.
 
         This is useful for throttling audio production to match
-        player consumption rates.
+        player consumption rates. Uses an estimated chunk size
+        to determine buffer capacity needs.
         """
-        # Stub implementation - will be filled in Task 13
+        # Estimate chunk size: 25ms of 48kHz stereo 16-bit PCM = 4800 bytes
+        # This is a reasonable default for typical audio streaming
+        estimated_chunk_bytes = 4800
+
+        max_wait_us = 0
+        for player in self._player_registry.get_connected():
+            if player.buffer_tracker is not None:
+                wait_us = player.buffer_tracker.time_until_capacity(estimated_chunk_bytes)
+                max_wait_us = max(max_wait_us, wait_us)
+
+        if max_wait_us > 0:
+            # Convert microseconds to seconds for asyncio.sleep
+            await asyncio.sleep(max_wait_us / 1_000_000)
 
     def stop(self) -> None:
         """

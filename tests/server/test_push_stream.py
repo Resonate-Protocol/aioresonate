@@ -1232,3 +1232,161 @@ class TestStopClear:
             if isinstance(call[0][0], StreamStartMessage)
         )
         assert stream_starts_after == 2  # Two stream/start messages total
+
+
+class TestWaitForBufferSpace:
+    """Tests for wait_for_buffer_space behavior."""
+
+    @pytest.fixture
+    def mock_loop(self) -> MagicMock:
+        """Create a mock event loop with time()."""
+        loop = MagicMock()
+        loop.time.return_value = 1000.0  # 1000 seconds = 1_000_000_000 us
+        return loop
+
+    @pytest.fixture
+    def target_format_pcm(self) -> AudioFormat:
+        """Target PCM format (no encoding needed)."""
+        return AudioFormat(sample_rate=48000, bit_depth=16, channels=2, codec=AudioCodec.PCM)
+
+    def _create_mock_player(
+        self,
+        client_id: str,
+        mock_loop: MagicMock,
+        target_format: AudioFormat,
+        *,
+        is_connected: bool = True,
+        wait_us: int = 0,
+    ) -> MagicMock:
+        """Create a mock player with connection and buffer tracker."""
+        player = MagicMock()
+        player.client_id = client_id
+        player.is_connected = is_connected
+        player.preferred_format = target_format
+        player.buffer_tracker = MagicMock()
+        player.buffer_tracker.time_until_capacity.return_value = wait_us
+        player.buffer_tracker.loop = mock_loop
+        player.connection = MagicMock()
+        return player
+
+    @pytest.mark.asyncio
+    async def test_returns_immediately_if_no_connected_players(
+        self,
+        mock_loop: MagicMock,
+    ) -> None:
+        """wait_for_buffer_space should return immediately if no connected players."""
+        registry = PlayerRegistry(loop=mock_loop, default_buffer_capacity=100_000)
+        router = ChannelRouter()
+
+        push_stream = PushStream(
+            loop=mock_loop,
+            player_registry=registry,
+            channel_router=router,
+        )
+
+        # Should return immediately without error
+        await push_stream.wait_for_buffer_space()
+
+    @pytest.mark.asyncio
+    async def test_returns_immediately_if_all_players_have_capacity(
+        self,
+        mock_loop: MagicMock,
+        target_format_pcm: AudioFormat,
+    ) -> None:
+        """wait_for_buffer_space should return immediately if all players have capacity."""
+        registry = PlayerRegistry(loop=mock_loop, default_buffer_capacity=100_000)
+        router = ChannelRouter()
+
+        player = self._create_mock_player(
+            "player-1", mock_loop, target_format_pcm, is_connected=True, wait_us=0
+        )
+        registry._players["player-1"] = player  # noqa: SLF001
+
+        push_stream = PushStream(
+            loop=mock_loop,
+            player_registry=registry,
+            channel_router=router,
+        )
+
+        # Should return immediately without sleeping
+        await push_stream.wait_for_buffer_space()
+        # time_until_capacity should have been called
+        player.buffer_tracker.time_until_capacity.assert_called()
+
+    @pytest.mark.asyncio
+    async def test_sleeps_for_max_wait_across_players(
+        self,
+        mock_loop: MagicMock,
+        target_format_pcm: AudioFormat,
+    ) -> None:
+        """wait_for_buffer_space should sleep for max wait time across players."""
+        registry = PlayerRegistry(loop=mock_loop, default_buffer_capacity=100_000)
+        router = ChannelRouter()
+
+        # Create players with different wait times
+        player1 = self._create_mock_player(
+            "player-1", mock_loop, target_format_pcm, is_connected=True, wait_us=5_000
+        )
+        player2 = self._create_mock_player(
+            "player-2", mock_loop, target_format_pcm, is_connected=True, wait_us=15_000
+        )
+        player3 = self._create_mock_player(
+            "player-3", mock_loop, target_format_pcm, is_connected=True, wait_us=10_000
+        )
+        registry._players["player-1"] = player1  # noqa: SLF001
+        registry._players["player-2"] = player2  # noqa: SLF001
+        registry._players["player-3"] = player3  # noqa: SLF001
+
+        push_stream = PushStream(
+            loop=mock_loop,
+            player_registry=registry,
+            channel_router=router,
+        )
+
+        # Track actual sleep duration
+        slept_duration: float | None = None
+
+        async def mock_sleep(duration: float) -> None:
+            nonlocal slept_duration
+            slept_duration = duration
+            # Don't actually sleep in tests
+
+        # Patch asyncio.sleep
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(asyncio, "sleep", mock_sleep)
+            await push_stream.wait_for_buffer_space()
+
+        # Should have slept for max wait (15ms = 0.015 seconds)
+        assert slept_duration is not None
+        assert slept_duration == pytest.approx(0.015, abs=0.001)
+
+    @pytest.mark.asyncio
+    async def test_uses_estimated_chunk_size(
+        self,
+        mock_loop: MagicMock,
+        target_format_pcm: AudioFormat,
+    ) -> None:
+        """wait_for_buffer_space should use an estimated chunk size for capacity check."""
+        registry = PlayerRegistry(loop=mock_loop, default_buffer_capacity=100_000)
+        router = ChannelRouter()
+
+        player = self._create_mock_player(
+            "player-1", mock_loop, target_format_pcm, is_connected=True, wait_us=0
+        )
+        registry._players["player-1"] = player  # noqa: SLF001
+
+        push_stream = PushStream(
+            loop=mock_loop,
+            player_registry=registry,
+            channel_router=router,
+        )
+
+        await push_stream.wait_for_buffer_space()
+
+        # time_until_capacity should have been called with some byte estimate
+        player.buffer_tracker.time_until_capacity.assert_called()
+        call_args = player.buffer_tracker.time_until_capacity.call_args[0]
+        assert len(call_args) >= 1
+        byte_estimate = call_args[0]
+        # Should be a reasonable estimate (not 0)
+        assert byte_estimate > 0
