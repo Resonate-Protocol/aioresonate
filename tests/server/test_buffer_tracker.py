@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock
 
-from aiosendspin.server.stream import BufferTracker
+from aiosendspin.server.audio import BufferTracker
 
 
 class TestBufferTrackerCapacity:

@@ -15,6 +15,7 @@ from aiosendspin.models import (
     unpack_binary_header,
 )
 from aiosendspin.models.core import StreamClearMessage, StreamEndMessage, StreamStartMessage
+from aiosendspin.server.audio import AudioFormat
 from aiosendspin.server.channels import MAIN_CHANNEL, ChannelRouter
 from aiosendspin.server.player_state import PlayerRegistry
 from aiosendspin.server.push_stream import (
@@ -22,7 +23,6 @@ from aiosendspin.server.push_stream import (
     PushStream,
     StreamStoppedError,
 )
-from aiosendspin.server.stream import AudioFormat
 
 
 class TestPushStreamConstruction:

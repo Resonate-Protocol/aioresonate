@@ -1,20 +1,15 @@
-"""High-level streaming pipeline primitives."""
+"""Audio types and buffer tracking utilities."""
 
 from __future__ import annotations
 
 import asyncio
-import base64
 import logging
 import types
 from collections import deque
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, NamedTuple
-from uuid import UUID
+from typing import NamedTuple
 
 from aiosendspin.models import AudioCodec
-
-if TYPE_CHECKING:
-    import av
 
 logger = logging.getLogger(__name__)
 
@@ -24,12 +19,6 @@ def _get_av() -> types.ModuleType:
     import av as _av  # noqa: PLC0415
 
     return _av
-
-
-# Universal main channel ID for the primary audio source.
-# Used as the canonical source for visualization and as a fallback when
-# player_channel() returns None.
-MAIN_CHANNEL_ID: UUID = UUID("00000000-0000-0000-0000-000000000000")
 
 
 @dataclass(frozen=True)
@@ -44,20 +33,6 @@ class AudioFormat:
     """Number of audio channels (1 for mono, 2 for stereo)."""
     codec: AudioCodec = AudioCodec.PCM
     """Audio codec of the stream."""
-
-
-@dataclass
-class SourceChunk:
-    """Raw PCM chunk received from the source."""
-
-    pcm_data: bytes
-    """Raw PCM audio data."""
-    start_time_us: int
-    """Absolute timestamp when this chunk starts playing."""
-    end_time_us: int
-    """Absolute timestamp when this chunk finishes playing."""
-    sample_count: int
-    """Number of audio samples in this chunk."""
 
 
 class BufferedChunk(NamedTuple):
@@ -218,85 +193,8 @@ def _resolve_audio_format(audio_format: AudioFormat) -> tuple[int, str, str]:
     return bytes_per_sample, av_format, layout
 
 
-def build_encoder_for_format(
-    audio_format: AudioFormat,
-    *,
-    input_audio_layout: str,
-    input_audio_format: str,
-) -> tuple[av.AudioCodecContext | None, str | None, int]:
-    """Create and configure an encoder for the target audio format."""
-    if audio_format.codec == AudioCodec.PCM:
-        samples_per_chunk = int(audio_format.sample_rate * 0.025)
-        return None, None, samples_per_chunk
-
-    codec = "libopus" if audio_format.codec == AudioCodec.OPUS else audio_format.codec.value
-
-    av = _get_av()
-    encoder: av.AudioCodecContext = av.AudioCodecContext.create(codec, "w")  # type: ignore[name-defined]
-    encoder.sample_rate = audio_format.sample_rate
-    encoder.layout = input_audio_layout
-    encoder.format = input_audio_format
-    if audio_format.codec == AudioCodec.FLAC:
-        encoder.options = {"compression_level": "5"}
-
-    with av.logging.Capture() as logs:
-        encoder.open()
-    for log in logs:
-        logger.debug("Opening AudioCodecContext log from av: %s", log)
-
-    header = bytes(encoder.extradata) if encoder.extradata else b""
-    if audio_format.codec == AudioCodec.FLAC and header:
-        # For FLAC, we need to construct a proper FLAC stream header ourselves
-        # since ffmpeg only provides the StreamInfo metadata block in extradata:
-        # See https://datatracker.ietf.org/doc/rfc9639/ Section 8.1
-
-        # FLAC stream signature (4 bytes): "fLaC"
-        # Metadata block header (4 bytes):
-        # - Bit 0: last metadata block (1 since we only have one)
-        # - Bits 1-7: block type (0 for StreamInfo)
-        # - Next 3 bytes: block length of the next metadata block in bytes
-        # StreamInfo block (34 bytes): as provided by ffmpeg
-        header = b"fLaC\x80" + len(header).to_bytes(3, "big") + header
-
-    codec_header_b64 = base64.b64encode(header).decode()
-
-    # Calculate samples per chunk
-    if audio_format.codec == AudioCodec.FLAC:
-        # FLAC: Use 25ms chunks regardless of encoder frame_size
-        samples_per_chunk = int(audio_format.sample_rate * 0.025)
-    elif encoder.frame_size and encoder.frame_size > 0:
-        # Use recommended frame size for other codecs (e.g., OPUS)
-        samples_per_chunk = int(encoder.frame_size)
-    else:
-        raise ValueError(
-            f"Codec {audio_format.codec.value} encoder has invalid frame_size: {encoder.frame_size}"
-        )
-    return encoder, codec_header_b64, samples_per_chunk
-
-
-@dataclass(frozen=True)
-class AudioFormatParams:
-    """Audio format parameters with computed PyAV values for processing."""
-
-    audio_format: AudioFormat
-    """Source audio format."""
-    bytes_per_sample: int
-    """Bytes per sample (derived from bit depth)."""
-    frame_stride: int
-    """Bytes per frame (bytes_per_sample * channels)."""
-    av_format: str
-    """PyAV format string (e.g., 's16', 's24')."""
-    av_layout: str
-    """PyAV channel layout (e.g., 'mono', 'stereo')."""
-
-
 __all__ = [
-    "MAIN_CHANNEL_ID",
     "AudioCodec",
     "AudioFormat",
-    "AudioFormatParams",
     "BufferTracker",
-    "BufferedChunk",
-    "SourceChunk",
-    "build_encoder_for_format",
 ]

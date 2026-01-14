@@ -12,8 +12,8 @@ from aiosendspin.models.player import (
 )
 from aiosendspin.models.types import PlayerCommand
 
+from .audio import AudioCodec, AudioFormat
 from .events import VolumeChangedEvent
-from .stream import AudioCodec, AudioFormat
 
 if TYPE_CHECKING:
     from .client import SendspinClient

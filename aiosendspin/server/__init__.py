@@ -27,6 +27,7 @@ __all__ = [
     "VolumeChangedEvent",
 ]
 
+from .audio import AudioCodec, AudioFormat
 from .client import DisconnectBehaviour, SendspinClient
 from .events import ClientEvent, ClientGroupChangedEvent, VolumeChangedEvent
 from .group import (
@@ -39,4 +40,3 @@ from .group import (
     SendspinGroup,
 )
 from .server import ClientAddedEvent, ClientRemovedEvent, SendspinEvent, SendspinServer
-from .stream import AudioCodec, AudioFormat

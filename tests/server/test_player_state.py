@@ -8,9 +8,9 @@ import pytest
 
 from aiosendspin.models import AudioCodec
 from aiosendspin.models.types import Roles
+from aiosendspin.server.audio import AudioFormat
 from aiosendspin.server.client import SendspinClient
 from aiosendspin.server.player_state import PlayerRecord, PlayerRegistry
-from aiosendspin.server.stream import AudioFormat
 
 
 class TestPlayerRecordDefaults:

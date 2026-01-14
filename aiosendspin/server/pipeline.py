@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, NamedTuple
 
 from aiosendspin.models import AudioCodec
-from aiosendspin.server.stream import AudioFormat, _get_av, _resolve_audio_format
+from aiosendspin.server.audio import AudioFormat, _get_av, _resolve_audio_format
 
 if TYPE_CHECKING:
     from uuid import UUID

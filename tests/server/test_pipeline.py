@@ -7,9 +7,9 @@ from uuid import UUID
 import pytest
 
 from aiosendspin.models import AudioCodec
+from aiosendspin.server.audio import AudioFormat
 from aiosendspin.server.channels import MAIN_CHANNEL
 from aiosendspin.server.pipeline import EncodedChunk, PipelineKey, PipelineManager
-from aiosendspin.server.stream import AudioFormat
 
 
 class TestPipelineKey:

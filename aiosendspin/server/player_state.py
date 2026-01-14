@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from typing import TYPE_CHECKING
 
-from aiosendspin.server.stream import AudioFormat, BufferTracker
+from aiosendspin.server.audio import AudioFormat, BufferTracker
 
 if TYPE_CHECKING:
     from aiosendspin.server.client import SendspinClient

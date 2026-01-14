@@ -14,10 +14,10 @@ import pytest
 from aiosendspin.models.core import ClientHelloPayload, StreamStartMessage
 from aiosendspin.models.player import ClientHelloPlayerSupport, SupportedAudioFormat
 from aiosendspin.models.types import AudioCodec, PlayerCommand, Roles
+from aiosendspin.server.audio import AudioFormat
 from aiosendspin.server.channels import ChannelRouter
 from aiosendspin.server.player_state import PlayerRecord, PlayerRegistry
 from aiosendspin.server.push_stream import PushStream
-from aiosendspin.server.stream import AudioFormat
 
 # Standard test audio format: 48kHz stereo 16-bit
 TEST_AUDIO_FORMAT = AudioFormat(sample_rate=48000, bit_depth=16, channels=2)
