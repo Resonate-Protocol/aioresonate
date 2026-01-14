@@ -335,3 +335,145 @@ class TestCommitAudio:
         # Should not raise, returns 0 or initial timing
         result = await push_stream.commit_audio()
         assert isinstance(result, int)
+
+
+class TestBackpressure:
+    """Tests for backpressure and timeline shift."""
+
+    @pytest.fixture
+    def mock_loop(self) -> MagicMock:
+        """Create a mock event loop with time()."""
+        loop = MagicMock()
+        loop.time.return_value = 1000.0  # 1000 seconds = 1_000_000_000 us
+        return loop
+
+    @pytest.fixture
+    def source_format(self) -> AudioFormat:
+        """Source PCM format (48kHz stereo 16-bit)."""
+        return AudioFormat(sample_rate=48000, bit_depth=16, channels=2, codec=AudioCodec.PCM)
+
+    def _create_mock_player(self, client_id: str, wait_us: int, mock_loop: MagicMock) -> MagicMock:
+        """Create a mock player with a buffer tracker that returns specified wait."""
+        player = MagicMock()
+        player.client_id = client_id
+        player.is_connected = True
+        player.buffer_tracker = MagicMock()
+        player.buffer_tracker.time_until_capacity.return_value = wait_us
+        player.buffer_tracker.loop = mock_loop
+        player.preferred_format = None  # Uses default
+        return player
+
+    @pytest.mark.asyncio
+    async def test_no_shift_when_all_players_have_capacity(
+        self, mock_loop: MagicMock, source_format: AudioFormat
+    ) -> None:
+        """If all players have capacity, timeline should not shift."""
+        registry = PlayerRegistry(loop=mock_loop, default_buffer_capacity=100_000)
+        router = ChannelRouter()
+
+        # Create player with no wait needed
+        player = self._create_mock_player("player-1", wait_us=0, mock_loop=mock_loop)
+        registry._players["player-1"] = player  # noqa: SLF001
+
+        push_stream = PushStream(
+            loop=mock_loop,
+            player_registry=registry,
+            channel_router=router,
+        )
+
+        pcm = bytes(4800)  # 25ms
+        push_stream.prepare_audio(pcm, source_format)
+        first_start = await push_stream.commit_audio()
+
+        push_stream.prepare_audio(pcm, source_format)
+        second_start = await push_stream.commit_audio()
+
+        # No shift - second starts exactly 25ms after first
+        assert second_start == first_start + 25000
+
+    @pytest.mark.asyncio
+    async def test_shift_when_player_needs_wait(
+        self, mock_loop: MagicMock, source_format: AudioFormat
+    ) -> None:
+        """If player needs wait_us, timeline should shift forward."""
+        registry = PlayerRegistry(loop=mock_loop, default_buffer_capacity=100_000)
+        router = ChannelRouter()
+
+        # Create player that needs 10ms wait
+        player = self._create_mock_player("player-1", wait_us=10_000, mock_loop=mock_loop)
+        registry._players["player-1"] = player  # noqa: SLF001
+
+        push_stream = PushStream(
+            loop=mock_loop,
+            player_registry=registry,
+            channel_router=router,
+        )
+
+        pcm = bytes(4800)  # 25ms
+        push_stream.prepare_audio(pcm, source_format)
+        first_start = await push_stream.commit_audio()
+
+        # Update mock to need 10ms wait for second commit
+        player.buffer_tracker.time_until_capacity.return_value = 10_000
+
+        push_stream.prepare_audio(pcm, source_format)
+        second_start = await push_stream.commit_audio()
+
+        # Should be shifted: 25ms audio + 10ms wait = 35ms after first
+        assert second_start == first_start + 35000
+
+    @pytest.mark.asyncio
+    async def test_shift_uses_max_wait_across_players(
+        self, mock_loop: MagicMock, source_format: AudioFormat
+    ) -> None:
+        """Multiple slow players should use max wait time."""
+        registry = PlayerRegistry(loop=mock_loop, default_buffer_capacity=100_000)
+        router = ChannelRouter()
+
+        # Create players with different wait times
+        player1 = self._create_mock_player("player-1", wait_us=5_000, mock_loop=mock_loop)
+        player2 = self._create_mock_player("player-2", wait_us=15_000, mock_loop=mock_loop)
+        player3 = self._create_mock_player("player-3", wait_us=10_000, mock_loop=mock_loop)
+        registry._players["player-1"] = player1  # noqa: SLF001
+        registry._players["player-2"] = player2  # noqa: SLF001
+        registry._players["player-3"] = player3  # noqa: SLF001
+
+        push_stream = PushStream(
+            loop=mock_loop,
+            player_registry=registry,
+            channel_router=router,
+        )
+
+        pcm = bytes(4800)  # 25ms
+        push_stream.prepare_audio(pcm, source_format)
+        first_start = await push_stream.commit_audio()
+
+        push_stream.prepare_audio(pcm, source_format)
+        second_start = await push_stream.commit_audio()
+
+        # Should use max wait (15ms): 25ms audio + 15ms wait = 40ms after first
+        assert second_start == first_start + 40000
+
+    @pytest.mark.asyncio
+    async def test_no_shift_with_no_connected_players(
+        self, mock_loop: MagicMock, source_format: AudioFormat
+    ) -> None:
+        """No connected players means no backpressure."""
+        registry = PlayerRegistry(loop=mock_loop, default_buffer_capacity=100_000)
+        router = ChannelRouter()
+
+        push_stream = PushStream(
+            loop=mock_loop,
+            player_registry=registry,
+            channel_router=router,
+        )
+
+        pcm = bytes(4800)  # 25ms
+        push_stream.prepare_audio(pcm, source_format)
+        first_start = await push_stream.commit_audio()
+
+        push_stream.prepare_audio(pcm, source_format)
+        second_start = await push_stream.commit_audio()
+
+        # No shift - second starts exactly 25ms after first
+        assert second_start == first_start + 25000

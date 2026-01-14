@@ -134,6 +134,14 @@ class PushStream:
             now_us = int(self._loop.time() * 1_000_000)
             self._next_chunk_start_us = now_us + DEFAULT_INITIAL_DELAY_US
 
+        # Calculate approximate byte count for backpressure (use total of all channels)
+        total_bytes = sum(len(pcm) for pcm, _ in prepared.values())
+
+        # Apply backpressure: query connected players for wait time
+        max_wait_us = self._calculate_backpressure(total_bytes)
+        if max_wait_us > 0:
+            self._next_chunk_start_us += max_wait_us
+
         # Get the play_start_us for this commit
         play_start_us = self._next_chunk_start_us
 
@@ -142,9 +150,26 @@ class PushStream:
             duration_us = next(iter(durations_us.values()))
             self._next_chunk_start_us += duration_us
 
-        # TODO (Task 9+): Encode via PipelineManager, apply backpressure, send to players
+        # TODO (Task 10+): Encode via PipelineManager, send to players
 
         return play_start_us
+
+    def _calculate_backpressure(self, byte_count: int) -> int:
+        """
+        Calculate backpressure delay based on player buffer capacity.
+
+        Args:
+            byte_count: Approximate bytes being sent to players.
+
+        Returns:
+            Maximum wait time in microseconds across all connected players.
+        """
+        max_wait_us = 0
+        for player in self._player_registry.get_connected():
+            if hasattr(player, "buffer_tracker") and player.buffer_tracker:
+                wait_us = player.buffer_tracker.time_until_capacity(byte_count)
+                max_wait_us = max(max_wait_us, wait_us)
+        return max_wait_us
 
     def _calculate_channel_durations(
         self,
