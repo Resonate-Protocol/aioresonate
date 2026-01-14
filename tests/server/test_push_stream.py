@@ -1390,3 +1390,232 @@ class TestWaitForBufferSpace:
         byte_estimate = call_args[0]
         # Should be a reasonable estimate (not 0)
         assert byte_estimate > 0
+
+
+class TestLateJoinerCache:
+    """Tests for late joiner chunk cache."""
+
+    @pytest.fixture
+    def mock_loop(self) -> MagicMock:
+        """Create a mock event loop with time()."""
+        loop = MagicMock()
+        loop.time.return_value = 1000.0  # 1000 seconds = 1_000_000_000 us
+        return loop
+
+    @pytest.fixture
+    def source_format(self) -> AudioFormat:
+        """Source PCM format (48kHz stereo 16-bit)."""
+        return AudioFormat(sample_rate=48000, bit_depth=16, channels=2, codec=AudioCodec.PCM)
+
+    @pytest.fixture
+    def target_format_pcm(self) -> AudioFormat:
+        """Target PCM format (no encoding needed)."""
+        return AudioFormat(sample_rate=48000, bit_depth=16, channels=2, codec=AudioCodec.PCM)
+
+    def _create_mock_player(
+        self,
+        client_id: str,
+        mock_loop: MagicMock,
+        target_format: AudioFormat,
+        *,
+        is_connected: bool = True,
+    ) -> MagicMock:
+        """Create a mock player with connection and buffer tracker."""
+        player = MagicMock()
+        player.client_id = client_id
+        player.is_connected = is_connected
+        player.preferred_format = target_format
+        player.buffer_tracker = MagicMock()
+        player.buffer_tracker.time_until_capacity.return_value = 0
+        player.buffer_tracker.register = MagicMock()
+        player.buffer_tracker.loop = mock_loop
+        player.connection = MagicMock()
+        player.connection.send_message = MagicMock()
+        return player
+
+    @pytest.mark.asyncio
+    async def test_commit_caches_chunks(
+        self,
+        mock_loop: MagicMock,
+        source_format: AudioFormat,
+        target_format_pcm: AudioFormat,
+    ) -> None:
+        """After commit, chunks should be cached."""
+        registry = PlayerRegistry(loop=mock_loop, default_buffer_capacity=100_000)
+        router = ChannelRouter()
+
+        player = self._create_mock_player(
+            "player-1", mock_loop, target_format_pcm, is_connected=True
+        )
+        registry._players["player-1"] = player  # noqa: SLF001
+
+        push_stream = PushStream(
+            loop=mock_loop,
+            player_registry=registry,
+            channel_router=router,
+        )
+
+        pcm = bytes(4800)  # 25ms
+        push_stream.prepare_audio(pcm, source_format)
+        await push_stream.commit_audio()
+
+        # Cache should have chunks
+        assert push_stream.has_cached_chunks()
+
+    @pytest.mark.asyncio
+    async def test_cache_bounded_by_time_window(
+        self,
+        mock_loop: MagicMock,
+        source_format: AudioFormat,
+        target_format_pcm: AudioFormat,
+    ) -> None:
+        """Cache should be bounded by time window (old chunks pruned)."""
+        registry = PlayerRegistry(loop=mock_loop, default_buffer_capacity=100_000)
+        router = ChannelRouter()
+
+        player = self._create_mock_player(
+            "player-1", mock_loop, target_format_pcm, is_connected=True
+        )
+        registry._players["player-1"] = player  # noqa: SLF001
+
+        push_stream = PushStream(
+            loop=mock_loop,
+            player_registry=registry,
+            channel_router=router,
+        )
+
+        # Commit some audio
+        pcm = bytes(4800)  # 25ms
+        push_stream.prepare_audio(pcm, source_format)
+        await push_stream.commit_audio()
+
+        # Advance time past the cache window (default 10 seconds)
+        mock_loop.time.return_value = 2000.0  # 1000 seconds later
+
+        # Commit more audio to trigger pruning
+        push_stream.prepare_audio(pcm, source_format)
+        await push_stream.commit_audio()
+
+        # Get catchup chunks for player's channel
+        # Old chunks should be pruned
+        chunks = push_stream.get_catchup_chunks("player-1")
+        # All returned chunks should have recent timestamps
+        for chunk in chunks:
+            # Chunk timestamps should be >= now (2000.0s = 2_000_000_000 us)
+            assert chunk.timestamp_us >= 2_000_000_000
+
+    @pytest.mark.asyncio
+    async def test_get_catchup_chunks_returns_for_player_channel(
+        self,
+        mock_loop: MagicMock,
+        source_format: AudioFormat,
+        target_format_pcm: AudioFormat,
+    ) -> None:
+        """get_catchup_chunks should return chunks for player's channel."""
+        registry = PlayerRegistry(loop=mock_loop, default_buffer_capacity=100_000)
+        router = ChannelRouter()
+
+        # Create two channels
+        channel_a = UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
+        channel_b = UUID("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb")
+
+        player_a = self._create_mock_player(
+            "player-a", mock_loop, target_format_pcm, is_connected=True
+        )
+        player_b = self._create_mock_player(
+            "player-b", mock_loop, target_format_pcm, is_connected=True
+        )
+        registry._players["player-a"] = player_a  # noqa: SLF001
+        registry._players["player-b"] = player_b  # noqa: SLF001
+
+        router.set_channel("player-a", channel_a)
+        router.set_channel("player-b", channel_b)
+
+        push_stream = PushStream(
+            loop=mock_loop,
+            player_registry=registry,
+            channel_router=router,
+        )
+
+        # Prepare different audio for each channel
+        pcm_a = b"\x01\x02" * 2400
+        pcm_b = b"\x03\x04" * 2400
+
+        push_stream.prepare_audio(pcm_a, source_format, channel_id=channel_a)
+        push_stream.prepare_audio(pcm_b, source_format, channel_id=channel_b)
+        await push_stream.commit_audio()
+
+        # Player A should get chunks from channel A
+        chunks_a = push_stream.get_catchup_chunks("player-a")
+        assert len(chunks_a) > 0
+
+        # Player B should get chunks from channel B
+        chunks_b = push_stream.get_catchup_chunks("player-b")
+        assert len(chunks_b) > 0
+
+    @pytest.mark.asyncio
+    async def test_get_catchup_chunks_returns_future_chunks_only(
+        self,
+        mock_loop: MagicMock,
+        source_format: AudioFormat,
+        target_format_pcm: AudioFormat,
+    ) -> None:
+        """get_catchup_chunks should return only chunks with timestamp >= now + margin."""
+        registry = PlayerRegistry(loop=mock_loop, default_buffer_capacity=100_000)
+        router = ChannelRouter()
+
+        player = self._create_mock_player(
+            "player-1", mock_loop, target_format_pcm, is_connected=True
+        )
+        registry._players["player-1"] = player  # noqa: SLF001
+
+        push_stream = PushStream(
+            loop=mock_loop,
+            player_registry=registry,
+            channel_router=router,
+        )
+
+        # Commit audio (timestamps will be around 1000s + 100ms initial delay)
+        pcm = bytes(4800)
+        push_stream.prepare_audio(pcm, source_format)
+        await push_stream.commit_audio()
+
+        # Get current time in microseconds
+        now_us = int(mock_loop.time() * 1_000_000)
+
+        # All returned chunks should have timestamps >= now
+        chunks = push_stream.get_catchup_chunks("player-1")
+        for chunk in chunks:
+            assert chunk.timestamp_us >= now_us
+
+    @pytest.mark.asyncio
+    async def test_clear_clears_cache(
+        self,
+        mock_loop: MagicMock,
+        source_format: AudioFormat,
+        target_format_pcm: AudioFormat,
+    ) -> None:
+        """clear() should clear the chunk cache."""
+        registry = PlayerRegistry(loop=mock_loop, default_buffer_capacity=100_000)
+        router = ChannelRouter()
+
+        player = self._create_mock_player(
+            "player-1", mock_loop, target_format_pcm, is_connected=True
+        )
+        registry._players["player-1"] = player  # noqa: SLF001
+
+        push_stream = PushStream(
+            loop=mock_loop,
+            player_registry=registry,
+            channel_router=router,
+        )
+
+        pcm = bytes(4800)
+        push_stream.prepare_audio(pcm, source_format)
+        await push_stream.commit_audio()
+
+        assert push_stream.has_cached_chunks()
+
+        push_stream.clear()
+
+        assert not push_stream.has_cached_chunks()

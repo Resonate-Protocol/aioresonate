@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 from uuid import UUID
 
@@ -26,6 +27,21 @@ if TYPE_CHECKING:
 
 # Default initial delay before first audio plays (microseconds)
 DEFAULT_INITIAL_DELAY_US = 100_000  # 100ms
+
+# Default cache window for late joiner chunks (microseconds)
+DEFAULT_CACHE_WINDOW_US = 10_000_000  # 10 seconds
+
+
+@dataclass(frozen=True)
+class CachedChunk:
+    """Cached chunk for late joiner catch-up."""
+
+    timestamp_us: int
+    """Start timestamp for this chunk."""
+    data: bytes
+    """Encoded audio data (with binary header)."""
+    byte_count: int
+    """Size of encoded audio data (without header)."""
 
 
 class StreamStoppedError(Exception):
@@ -72,6 +88,8 @@ class PushStream:
         self._pipeline_manager = PipelineManager()
         # Track players that have received stream/start (by client_id)
         self._player_started: set[str] = set()
+        # Late joiner cache: pipeline_key -> list of cached chunks
+        self._chunk_cache: dict[PipelineKey, list[CachedChunk]] = {}
 
     @property
     def is_stopped(self) -> bool:
@@ -171,6 +189,9 @@ class PushStream:
 
         # Send chunks to players
         self._send_chunks_to_players(play_start_us, prepared, encoded_results)
+
+        # Prune old chunks from cache
+        self._prune_chunk_cache()
 
         return play_start_us
 
@@ -326,12 +347,23 @@ class PushStream:
 
                 # Pack binary header and send
                 header = pack_binary_header_raw(BinaryMessageType.AUDIO_CHUNK.value, chunk_start_us)
+                packed_data = header + chunk.data
                 if player.connection is not None:
-                    player.connection.send_message(header + chunk.data)
+                    player.connection.send_message(packed_data)
 
                 # Register with buffer tracker
                 if player.buffer_tracker is not None:
                     player.buffer_tracker.register(chunk_end_us, chunk.byte_count)
+
+                # Cache chunk for late joiners
+                cached = CachedChunk(
+                    timestamp_us=chunk_start_us,
+                    data=packed_data,
+                    byte_count=chunk.byte_count,
+                )
+                if key not in self._chunk_cache:
+                    self._chunk_cache[key] = []
+                self._chunk_cache[key].append(cached)
 
                 # Advance to next chunk
                 chunk_start_us = chunk_end_us
@@ -393,6 +425,63 @@ class PushStream:
             # Convert microseconds to seconds for asyncio.sleep
             await asyncio.sleep(max_wait_us / 1_000_000)
 
+    def has_cached_chunks(self) -> bool:
+        """Return True if there are cached chunks for late joiners."""
+        return any(len(chunks) > 0 for chunks in self._chunk_cache.values())
+
+    def get_catchup_chunks(self, player_id: str) -> list[CachedChunk]:
+        """
+        Get cached chunks for a player's channel and format.
+
+        Returns only chunks with timestamps >= now (future playback).
+
+        Args:
+            player_id: Player ID to get chunks for.
+
+        Returns:
+            List of cached chunks for the player's channel, sorted by timestamp.
+        """
+        # Get player's channel
+        channel_id = self._channel_router.get_channel(player_id)
+
+        # Get player record for format selection
+        player = self._player_registry.get(player_id)
+        if player is None:
+            return []
+
+        # Get current time
+        now_us = int(self._loop.time() * 1_000_000)
+
+        # Find matching pipeline keys for this channel
+        result: list[CachedChunk] = []
+        for key, chunks in self._chunk_cache.items():
+            if key.channel_id != channel_id:
+                continue
+
+            # Check if format matches player's preference
+            if player.preferred_format is not None and key.target_format != player.preferred_format:
+                continue
+
+            # Filter to future chunks only
+            result.extend(chunk for chunk in chunks if chunk.timestamp_us >= now_us)
+
+        # Sort by timestamp
+        result.sort(key=lambda c: c.timestamp_us)
+        return result
+
+    def _prune_chunk_cache(self) -> None:
+        """Remove old chunks from the cache."""
+        now_us = int(self._loop.time() * 1_000_000)
+
+        for key in list(self._chunk_cache.keys()):
+            # Filter out chunks older than now
+            self._chunk_cache[key] = [
+                chunk for chunk in self._chunk_cache[key] if chunk.timestamp_us >= now_us
+            ]
+            # Remove empty lists
+            if not self._chunk_cache[key]:
+                del self._chunk_cache[key]
+
     def stop(self) -> None:
         """
         Stop the stream.
@@ -423,6 +512,9 @@ class PushStream:
 
         # Reset player_started set (stream/start will be re-sent)
         self._player_started.clear()
+
+        # Clear chunk cache
+        self._chunk_cache.clear()
 
         # Send stream/clear and reset buffer trackers for connected players
         stream_clear = StreamClearMessage(payload=StreamClearPayload())
