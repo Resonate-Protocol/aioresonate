@@ -533,6 +533,51 @@ class PushStream:
                 chunk_end_us = chunk.timestamp_us + estimated_duration_us
                 player.buffer_tracker.register(chunk_end_us, chunk.byte_count)
 
+    def on_format_request(self, player_id: str, new_format: AudioFormat) -> bool:
+        """
+        Handle a format change request from a player.
+
+        Validates the format against the player's supported formats,
+        updates the preferred format, and triggers a new stream/start
+        on the next commit.
+
+        Args:
+            player_id: Player ID requesting the format change.
+            new_format: The requested audio format.
+
+        Returns:
+            True if format change was accepted, False if invalid or player not found.
+        """
+        player = self._player_registry.get(player_id)
+        if player is None or player.connection is None:
+            return False
+
+        # Get supported formats from client info
+        player_support = player.connection.info.player_support
+        if player_support is None:
+            return False
+        supported = player_support.supported_formats
+
+        # Validate format against supported formats
+        is_supported = any(
+            fmt.codec == new_format.codec
+            and fmt.sample_rate == new_format.sample_rate
+            and fmt.channels == new_format.channels
+            and fmt.bit_depth == new_format.bit_depth
+            for fmt in supported
+        )
+
+        if not is_supported:
+            return False
+
+        # Update preferred format
+        player.preferred_format = new_format
+
+        # Remove from _player_started so next commit sends new stream/start
+        self._player_started.discard(player_id)
+
+        return True
+
     def stop(self) -> None:
         """
         Stop the stream.

@@ -1896,3 +1896,214 @@ class TestPlayerJoin:
 
         # Should not crash even with no cached chunks
         push_stream.on_player_join("player-1")
+
+
+class TestFormatRequest:
+    """Tests for format change request handling."""
+
+    @pytest.fixture
+    def mock_loop(self) -> MagicMock:
+        """Create a mock event loop with time()."""
+        loop = MagicMock()
+        loop.time.return_value = 1000.0
+        return loop
+
+    @pytest.fixture
+    def source_format(self) -> AudioFormat:
+        """Source PCM format (48kHz stereo 16-bit)."""
+        return AudioFormat(sample_rate=48000, bit_depth=16, channels=2, codec=AudioCodec.PCM)
+
+    @pytest.fixture
+    def target_format_pcm(self) -> AudioFormat:
+        """Target PCM format."""
+        return AudioFormat(sample_rate=48000, bit_depth=16, channels=2, codec=AudioCodec.PCM)
+
+    @pytest.fixture
+    def target_format_flac(self) -> AudioFormat:
+        """Target FLAC format."""
+        return AudioFormat(sample_rate=48000, bit_depth=16, channels=2, codec=AudioCodec.FLAC)
+
+    def _create_mock_player(
+        self,
+        client_id: str,
+        mock_loop: MagicMock,
+        preferred_format: AudioFormat,
+        supported_formats: list[AudioFormat],
+    ) -> MagicMock:
+        """Create a mock player with supported formats."""
+        player = MagicMock()
+        player.client_id = client_id
+        player.is_connected = True
+        player.preferred_format = preferred_format
+        player.buffer_tracker = MagicMock()
+        player.buffer_tracker.time_until_capacity.return_value = 0
+        player.buffer_tracker.register = MagicMock()
+        player.buffer_tracker.loop = mock_loop
+        player.connection = MagicMock()
+        player.connection.send_message = MagicMock()
+        # Mock supported formats via client info
+        player.connection.info.player_support.supported_formats = supported_formats
+        return player
+
+    def test_on_format_request_updates_preferred_format(
+        self,
+        mock_loop: MagicMock,
+        target_format_pcm: AudioFormat,
+        target_format_flac: AudioFormat,
+    ) -> None:
+        """on_format_request should update player's preferred_format."""
+        registry = PlayerRegistry(loop=mock_loop, default_buffer_capacity=100_000)
+        router = ChannelRouter()
+
+        player = self._create_mock_player(
+            "player-1",
+            mock_loop,
+            target_format_pcm,
+            [target_format_pcm, target_format_flac],
+        )
+        registry._players["player-1"] = player  # noqa: SLF001
+
+        push_stream = PushStream(
+            loop=mock_loop,
+            player_registry=registry,
+            channel_router=router,
+        )
+
+        # Request format change to FLAC
+        result = push_stream.on_format_request("player-1", target_format_flac)
+
+        assert result is True
+        assert player.preferred_format == target_format_flac
+
+    def test_on_format_request_invalid_format_returns_false(
+        self,
+        mock_loop: MagicMock,
+        target_format_pcm: AudioFormat,
+    ) -> None:
+        """on_format_request with invalid format should return False."""
+        registry = PlayerRegistry(loop=mock_loop, default_buffer_capacity=100_000)
+        router = ChannelRouter()
+
+        # Only supports PCM
+        player = self._create_mock_player(
+            "player-1",
+            mock_loop,
+            target_format_pcm,
+            [target_format_pcm],
+        )
+        registry._players["player-1"] = player  # noqa: SLF001
+
+        push_stream = PushStream(
+            loop=mock_loop,
+            player_registry=registry,
+            channel_router=router,
+        )
+
+        # Request unsupported format
+        unsupported = AudioFormat(
+            sample_rate=96000, bit_depth=24, channels=2, codec=AudioCodec.FLAC
+        )
+        result = push_stream.on_format_request("player-1", unsupported)
+
+        assert result is False
+        # Preferred format unchanged
+        assert player.preferred_format == target_format_pcm
+
+    @pytest.mark.asyncio
+    async def test_on_format_request_triggers_new_stream_start(
+        self,
+        mock_loop: MagicMock,
+        source_format: AudioFormat,
+        target_format_pcm: AudioFormat,
+        target_format_flac: AudioFormat,
+    ) -> None:
+        """After format change, next commit should send new stream/start."""
+        registry = PlayerRegistry(loop=mock_loop, default_buffer_capacity=100_000)
+        router = ChannelRouter()
+
+        player = self._create_mock_player(
+            "player-1",
+            mock_loop,
+            target_format_pcm,
+            [target_format_pcm, target_format_flac],
+        )
+        registry._players["player-1"] = player  # noqa: SLF001
+
+        push_stream = PushStream(
+            loop=mock_loop,
+            player_registry=registry,
+            channel_router=router,
+        )
+
+        # First commit with PCM
+        pcm = bytes(19200)  # 100ms for FLAC
+        push_stream.prepare_audio(pcm, source_format)
+        await push_stream.commit_audio()
+
+        stream_start_count_1 = sum(
+            1
+            for call in player.connection.send_message.call_args_list
+            if isinstance(call[0][0], StreamStartMessage)
+        )
+
+        # Request format change
+        push_stream.on_format_request("player-1", target_format_flac)
+
+        # Next commit should send new stream/start
+        push_stream.prepare_audio(pcm, source_format)
+        await push_stream.commit_audio()
+
+        stream_start_count_2 = sum(
+            1
+            for call in player.connection.send_message.call_args_list
+            if isinstance(call[0][0], StreamStartMessage)
+        )
+
+        # Should have received 2 stream/start messages (initial + after format change)
+        assert stream_start_count_1 == 1
+        assert stream_start_count_2 == 2
+
+    def test_on_format_request_nonexistent_player(
+        self,
+        mock_loop: MagicMock,
+        target_format_pcm: AudioFormat,
+    ) -> None:
+        """on_format_request for nonexistent player should return False."""
+        registry = PlayerRegistry(loop=mock_loop, default_buffer_capacity=100_000)
+        router = ChannelRouter()
+
+        push_stream = PushStream(
+            loop=mock_loop,
+            player_registry=registry,
+            channel_router=router,
+        )
+
+        result = push_stream.on_format_request("nonexistent", target_format_pcm)
+        assert result is False
+
+    def test_on_format_request_disconnected_player(
+        self,
+        mock_loop: MagicMock,
+        target_format_pcm: AudioFormat,
+        target_format_flac: AudioFormat,
+    ) -> None:
+        """on_format_request for disconnected player should return False."""
+        registry = PlayerRegistry(loop=mock_loop, default_buffer_capacity=100_000)
+        router = ChannelRouter()
+
+        player = MagicMock()
+        player.client_id = "player-1"
+        player.is_connected = False
+        player.preferred_format = target_format_pcm
+        player.connection = None  # Disconnected
+
+        registry._players["player-1"] = player  # noqa: SLF001
+
+        push_stream = PushStream(
+            loop=mock_loop,
+            player_registry=registry,
+            channel_router=router,
+        )
+
+        result = push_stream.on_format_request("player-1", target_format_flac)
+        assert result is False
