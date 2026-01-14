@@ -121,3 +121,106 @@ class PlayerRecord:
     def mark_disconnected(self, time_us: int) -> None:
         """Record when this player disconnected for cleanup decisions."""
         self._disconnect_time_us = time_us
+
+
+class PlayerRegistry:
+    """
+    Manages all PlayerRecords, handling get-or-create and cleanup.
+
+    This registry maintains player state that persists across connections,
+    enabling reconnection with preserved volume, mute state, and group membership.
+    """
+
+    def __init__(
+        self,
+        *,
+        loop: asyncio.AbstractEventLoop,
+        default_buffer_capacity: int,
+    ) -> None:
+        """
+        Create a new PlayerRegistry.
+
+        Args:
+            loop: Event loop for PlayerRecord BufferTrackers.
+            default_buffer_capacity: Default buffer capacity for new PlayerRecords.
+        """
+        self._loop = loop
+        self._default_buffer_capacity = default_buffer_capacity
+        self._players: dict[str, PlayerRecord] = {}
+
+    def get_or_create(self, client_id: str) -> PlayerRecord:
+        """
+        Get an existing PlayerRecord or create a new one.
+
+        Args:
+            client_id: Unique identifier for the player.
+
+        Returns:
+            The existing or newly created PlayerRecord.
+        """
+        if client_id not in self._players:
+            self._players[client_id] = PlayerRecord(
+                client_id=client_id,
+                loop=self._loop,
+                buffer_capacity_bytes=self._default_buffer_capacity,
+            )
+        return self._players[client_id]
+
+    def get(self, client_id: str) -> PlayerRecord | None:
+        """
+        Get an existing PlayerRecord by client_id.
+
+        Args:
+            client_id: Unique identifier for the player.
+
+        Returns:
+            The PlayerRecord if found, None otherwise.
+        """
+        return self._players.get(client_id)
+
+    def get_connected(self) -> list[PlayerRecord]:
+        """
+        Get all PlayerRecords with active connections.
+
+        Returns:
+            List of connected PlayerRecords.
+        """
+        return [p for p in self._players.values() if p.is_connected]
+
+    def get_in_group(self, group_id: str) -> list[PlayerRecord]:
+        """
+        Get all PlayerRecords belonging to a specific group.
+
+        Args:
+            group_id: The group ID to filter by.
+
+        Returns:
+            List of PlayerRecords in the specified group.
+        """
+        return [p for p in self._players.values() if p.group_id == group_id]
+
+    def cleanup_expired(self, timeout_us: int) -> None:
+        """
+        Remove PlayerRecords that have been disconnected longer than timeout.
+
+        Connected players and players that were never disconnected are not removed.
+
+        Args:
+            timeout_us: Maximum time in microseconds a disconnected player is kept.
+        """
+        now_us = int(self._loop.time() * 1_000_000)
+        to_remove = []
+
+        for client_id, record in self._players.items():
+            # Keep connected players
+            if record.is_connected:
+                continue
+            # Keep players that were never marked disconnected
+            if record.disconnect_time_us is None:
+                continue
+            # Remove if disconnected longer than timeout
+            if now_us - record.disconnect_time_us > timeout_us:
+                to_remove.append(client_id)
+
+        for client_id in to_remove:
+            del self._players[client_id]

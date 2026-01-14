@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 from unittest.mock import MagicMock
 
 from aiosendspin.models import AudioCodec
-from aiosendspin.server.player_state import PlayerRecord
+from aiosendspin.server.player_state import PlayerRecord, PlayerRegistry
 from aiosendspin.server.stream import AudioFormat
 
 if TYPE_CHECKING:
@@ -193,3 +193,157 @@ class TestPlayerRecordDisconnect:
             buffer_capacity_bytes=100_000,
         )
         assert record.disconnect_time_us is None
+
+
+# =============================================================================
+# PlayerRegistry Tests
+# =============================================================================
+
+
+class TestPlayerRegistryGetOrCreate:
+    """Tests for PlayerRegistry get_or_create behavior."""
+
+    def test_creates_new_player_record(self, mock_loop: MagicMock) -> None:
+        """get_or_create should create a new PlayerRecord if not found."""
+        registry = PlayerRegistry(loop=mock_loop, default_buffer_capacity=100_000)
+        record = registry.get_or_create("player-1")
+        assert record is not None
+        assert record.client_id == "player-1"
+
+    def test_returns_same_instance_for_same_id(self, mock_loop: MagicMock) -> None:
+        """get_or_create should return the same instance for the same client_id."""
+        registry = PlayerRegistry(loop=mock_loop, default_buffer_capacity=100_000)
+        record1 = registry.get_or_create("player-1")
+        record2 = registry.get_or_create("player-1")
+        assert record1 is record2
+
+    def test_creates_different_instances_for_different_ids(self, mock_loop: MagicMock) -> None:
+        """get_or_create should create different instances for different client_ids."""
+        registry = PlayerRegistry(loop=mock_loop, default_buffer_capacity=100_000)
+        record1 = registry.get_or_create("player-1")
+        record2 = registry.get_or_create("player-2")
+        assert record1 is not record2
+        assert record1.client_id == "player-1"
+        assert record2.client_id == "player-2"
+
+
+class TestPlayerRegistryGet:
+    """Tests for PlayerRegistry get behavior."""
+
+    def test_returns_none_if_not_found(self, mock_loop: MagicMock) -> None:
+        """Get should return None if client_id is not found."""
+        registry = PlayerRegistry(loop=mock_loop, default_buffer_capacity=100_000)
+        assert registry.get("nonexistent") is None
+
+    def test_returns_record_if_found(self, mock_loop: MagicMock) -> None:
+        """Get should return the record if client_id exists."""
+        registry = PlayerRegistry(loop=mock_loop, default_buffer_capacity=100_000)
+        created = registry.get_or_create("player-1")
+        found = registry.get("player-1")
+        assert found is created
+
+
+class TestPlayerRegistryGetConnected:
+    """Tests for PlayerRegistry get_connected behavior."""
+
+    def test_returns_empty_when_no_players(self, mock_loop: MagicMock) -> None:
+        """get_connected should return empty list when no players exist."""
+        registry = PlayerRegistry(loop=mock_loop, default_buffer_capacity=100_000)
+        assert registry.get_connected() == []
+
+    def test_returns_empty_when_all_disconnected(self, mock_loop: MagicMock) -> None:
+        """get_connected should return empty list when all players are disconnected."""
+        registry = PlayerRegistry(loop=mock_loop, default_buffer_capacity=100_000)
+        registry.get_or_create("player-1")
+        registry.get_or_create("player-2")
+        assert registry.get_connected() == []
+
+    def test_returns_only_connected_players(self, mock_loop: MagicMock) -> None:
+        """get_connected should return only players with connections."""
+        registry = PlayerRegistry(loop=mock_loop, default_buffer_capacity=100_000)
+        record1 = registry.get_or_create("player-1")
+        record2 = registry.get_or_create("player-2")
+        record3 = registry.get_or_create("player-3")
+
+        record1.connection = MagicMock()
+        record3.connection = MagicMock()
+
+        connected = registry.get_connected()
+        assert len(connected) == 2
+        assert record1 in connected
+        assert record2 not in connected
+        assert record3 in connected
+
+
+class TestPlayerRegistryGetInGroup:
+    """Tests for PlayerRegistry get_in_group behavior."""
+
+    def test_returns_empty_when_no_players_in_group(self, mock_loop: MagicMock) -> None:
+        """get_in_group should return empty list when no players in group."""
+        registry = PlayerRegistry(loop=mock_loop, default_buffer_capacity=100_000)
+        registry.get_or_create("player-1")
+        assert registry.get_in_group("group-123") == []
+
+    def test_returns_players_in_group(self, mock_loop: MagicMock) -> None:
+        """get_in_group should return players belonging to the group."""
+        registry = PlayerRegistry(loop=mock_loop, default_buffer_capacity=100_000)
+        record1 = registry.get_or_create("player-1")
+        record2 = registry.get_or_create("player-2")
+        record3 = registry.get_or_create("player-3")
+
+        record1.group_id = "group-A"
+        record2.group_id = "group-B"
+        record3.group_id = "group-A"
+
+        group_a = registry.get_in_group("group-A")
+        assert len(group_a) == 2
+        assert record1 in group_a
+        assert record3 in group_a
+
+        group_b = registry.get_in_group("group-B")
+        assert len(group_b) == 1
+        assert record2 in group_b
+
+
+class TestPlayerRegistryCleanup:
+    """Tests for PlayerRegistry cleanup_expired behavior."""
+
+    def test_does_not_remove_connected_players(self, mock_loop: MagicMock) -> None:
+        """cleanup_expired should not remove connected players."""
+        mock_loop.time.return_value = 10.0  # 10 seconds
+        registry = PlayerRegistry(loop=mock_loop, default_buffer_capacity=100_000)
+        record = registry.get_or_create("player-1")
+        record.connection = MagicMock()
+
+        registry.cleanup_expired(timeout_us=1_000_000)  # 1 second timeout
+        assert registry.get("player-1") is record
+
+    def test_does_not_remove_recently_disconnected(self, mock_loop: MagicMock) -> None:
+        """cleanup_expired should not remove recently disconnected players."""
+        mock_loop.time.return_value = 10.0  # 10 seconds = 10_000_000 us
+        registry = PlayerRegistry(loop=mock_loop, default_buffer_capacity=100_000)
+        record = registry.get_or_create("player-1")
+        record.mark_disconnected(time_us=9_500_000)  # Disconnected 0.5s ago
+
+        registry.cleanup_expired(timeout_us=1_000_000)  # 1 second timeout
+        assert registry.get("player-1") is record
+
+    def test_removes_long_disconnected_players(self, mock_loop: MagicMock) -> None:
+        """cleanup_expired should remove players disconnected longer than timeout."""
+        mock_loop.time.return_value = 10.0  # 10 seconds = 10_000_000 us
+        registry = PlayerRegistry(loop=mock_loop, default_buffer_capacity=100_000)
+        record = registry.get_or_create("player-1")
+        record.mark_disconnected(time_us=5_000_000)  # Disconnected 5s ago
+
+        registry.cleanup_expired(timeout_us=1_000_000)  # 1 second timeout
+        assert registry.get("player-1") is None
+
+    def test_keeps_players_without_disconnect_time(self, mock_loop: MagicMock) -> None:
+        """cleanup_expired should not remove players that were never marked disconnected."""
+        mock_loop.time.return_value = 10.0
+        registry = PlayerRegistry(loop=mock_loop, default_buffer_capacity=100_000)
+        record = registry.get_or_create("player-1")
+        # Never disconnected, disconnect_time_us is None
+
+        registry.cleanup_expired(timeout_us=1_000_000)
+        assert registry.get("player-1") is record
