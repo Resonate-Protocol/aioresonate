@@ -6,11 +6,15 @@ import asyncio
 from typing import TYPE_CHECKING
 from uuid import UUID
 
+from aiosendspin.models import BinaryMessageType, pack_binary_header_raw
+from aiosendspin.models.core import StreamStartMessage, StreamStartPayload
+from aiosendspin.models.player import StreamStartPlayer
 from aiosendspin.server.channels import MAIN_CHANNEL
+from aiosendspin.server.pipeline import EncodedChunk, PipelineKey, PipelineManager
 
 if TYPE_CHECKING:
     from aiosendspin.server.channels import ChannelRouter
-    from aiosendspin.server.player_state import PlayerRegistry
+    from aiosendspin.server.player_state import PlayerRecord, PlayerRegistry
     from aiosendspin.server.stream import AudioFormat
 
 # Default initial delay before first audio plays (microseconds)
@@ -57,6 +61,10 @@ class PushStream:
         self._channel_buffers: dict[UUID, tuple[bytes, AudioFormat]] = {}
         # Timing state
         self._next_chunk_start_us: int | None = None  # Initialized on first commit
+        # Pipeline manager for encoding
+        self._pipeline_manager = PipelineManager()
+        # Track players that have received stream/start (by client_id)
+        self._player_started: set[str] = set()
 
     @property
     def is_stopped(self) -> bool:
@@ -150,7 +158,12 @@ class PushStream:
             duration_us = next(iter(durations_us.values()))
             self._next_chunk_start_us += duration_us
 
-        # TODO (Task 10+): Encode via PipelineManager, send to players
+        # Determine required pipelines and encode
+        pipeline_keys = self._get_required_pipeline_keys(prepared)
+        encoded_results = self._pipeline_manager.process(prepared, pipeline_keys)
+
+        # Send chunks to players
+        self._send_chunks_to_players(play_start_us, prepared, encoded_results)
 
         return play_start_us
 
@@ -200,6 +213,156 @@ class PushStream:
             raise DurationMismatchError(
                 f"Channel durations differ by {max_dur - min_dur}us (max allowed: {tolerance_us}us)"
             )
+
+    def _get_player_target_format(
+        self,
+        player: PlayerRecord,
+        source_format: AudioFormat,
+    ) -> AudioFormat:
+        """
+        Get the target format for a player.
+
+        Uses player's preferred_format if set, otherwise uses source format
+        (no encoding - direct PCM passthrough).
+        """
+        if player.preferred_format is not None:
+            return player.preferred_format
+        # Default to source format (no resampling/encoding needed)
+        return source_format
+
+    def _get_required_pipeline_keys(
+        self,
+        prepared: dict[UUID, tuple[bytes, AudioFormat]],
+    ) -> set[PipelineKey]:
+        """
+        Determine which pipelines are needed for connected players.
+
+        For each connected player, determines their channel and target format,
+        then ensures a pipeline exists for that combination.
+
+        Returns:
+            Set of pipeline keys needed for this commit.
+        """
+        pipeline_keys: set[PipelineKey] = set()
+
+        for player in self._player_registry.get_connected():
+            # Get player's assigned channel
+            channel_id = self._channel_router.get_channel(player.client_id)
+
+            # Skip if we don't have audio for this channel
+            if channel_id not in prepared:
+                continue
+
+            _, source_format = prepared[channel_id]
+            target_format = self._get_player_target_format(player, source_format)
+
+            # Add or get pipeline
+            key = self._pipeline_manager.add_pipeline(
+                channel_id=channel_id,
+                source_format=source_format,
+                target_format=target_format,
+            )
+            pipeline_keys.add(key)
+
+        return pipeline_keys
+
+    def _send_chunks_to_players(
+        self,
+        play_start_us: int,
+        prepared: dict[UUID, tuple[bytes, AudioFormat]],
+        encoded_results: dict[PipelineKey, list[EncodedChunk]],
+    ) -> None:
+        """
+        Send encoded chunks to connected players.
+
+        For each connected player:
+        1. Determine their channel and target format
+        2. Find the correct pipeline
+        3. Send each chunk with appropriate timestamp
+        4. Register chunks with buffer tracker
+        """
+        for player in self._player_registry.get_connected():
+            # Get player's assigned channel
+            channel_id = self._channel_router.get_channel(player.client_id)
+
+            # Skip if we don't have audio for this channel
+            if channel_id not in prepared:
+                continue
+
+            _, source_format = prepared[channel_id]
+            target_format = self._get_player_target_format(player, source_format)
+
+            # Find the pipeline key for this player
+            key = PipelineKey(
+                channel_id=channel_id,
+                source_format=source_format,
+                target_format=target_format,
+            )
+
+            # Skip if no encoded chunks for this pipeline
+            if key not in encoded_results:
+                continue
+
+            chunks = encoded_results[key]
+            if not chunks:
+                continue
+
+            # Send stream/start if this is first audio for this player
+            if player.client_id not in self._player_started:
+                self._send_stream_start(player, target_format, key)
+                self._player_started.add(player.client_id)
+
+            # Send each chunk with contiguous timestamps
+            chunk_start_us = play_start_us
+            for chunk in chunks:
+                chunk_end_us = chunk_start_us + chunk.duration_us
+
+                # Pack binary header and send
+                header = pack_binary_header_raw(BinaryMessageType.AUDIO_CHUNK.value, chunk_start_us)
+                if player.connection is not None:
+                    player.connection.send_message(header + chunk.data)
+
+                # Register with buffer tracker
+                if player.buffer_tracker is not None:
+                    player.buffer_tracker.register(chunk_end_us, chunk.byte_count)
+
+                # Advance to next chunk
+                chunk_start_us = chunk_end_us
+
+    def _send_stream_start(
+        self,
+        player: PlayerRecord,
+        target_format: AudioFormat,
+        pipeline_key: PipelineKey,
+    ) -> None:
+        """
+        Send stream/start message to a player.
+
+        Args:
+            player: Player to send to.
+            target_format: Audio format for this player.
+            pipeline_key: Pipeline key (for codec header lookup).
+        """
+        if player.connection is None:
+            return
+
+        # Get codec header if applicable (e.g., FLAC)
+        codec_header_b64 = self._pipeline_manager.get_codec_header_b64(pipeline_key)
+
+        # Create stream/start message
+        stream_start = StreamStartMessage(
+            payload=StreamStartPayload(
+                player=StreamStartPlayer(
+                    codec=target_format.codec,
+                    sample_rate=target_format.sample_rate,
+                    channels=target_format.channels,
+                    bit_depth=target_format.bit_depth,
+                    codec_header=codec_header_b64,
+                )
+            )
+        )
+
+        player.connection.send_message(stream_start)
 
     async def wait_for_buffer_space(self) -> None:
         """
