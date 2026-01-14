@@ -63,6 +63,7 @@ class TestFullStreamingFlow:
         """Create a PushStream for testing."""
         return PushStream(
             loop=mock_loop,
+            group_id="test-group",
             player_registry=player_registry,
             channel_router=channel_router,
         )
@@ -106,6 +107,7 @@ class TestFullStreamingFlow:
     ) -> tuple[PlayerRecord, MagicMock]:
         """Register a player and attach a mock connection."""
         record = player_registry.get_or_create(client_id)
+        record.group_id = "test-group"
         conn = self._create_mock_connection(client_id)
         record.connection = conn
         return record, conn
@@ -342,6 +344,7 @@ class TestMultiChannelStreaming:
         """Create a PushStream for testing."""
         return PushStream(
             loop=mock_loop,
+            group_id="test-group",
             player_registry=player_registry,
             channel_router=channel_router,
         )
@@ -387,11 +390,13 @@ class TestMultiChannelStreaming:
         channel_b = uuid4()
 
         record1 = player_registry.get_or_create("player-1")
+        record1.group_id = "test-group"
         conn1 = self._create_mock_connection("player-1")
         record1.connection = conn1
         channel_router.set_channel("player-1", channel_a)
 
         record2 = player_registry.get_or_create("player-2")
+        record2.group_id = "test-group"
         conn2 = self._create_mock_connection("player-2")
         record2.connection = conn2
         channel_router.set_channel("player-2", channel_b)
@@ -424,6 +429,7 @@ class TestMultiChannelStreaming:
         """Players without explicit channel assignment receive main channel."""
         # Setup: Player with no channel assignment
         record = player_registry.get_or_create("player-1")
+        record.group_id = "test-group"
         conn = self._create_mock_connection("player-1")
         record.connection = conn
 
@@ -460,6 +466,7 @@ class TestBackpressureIntegration:
         """Create a PushStream for testing."""
         return PushStream(
             loop=mock_loop,
+            group_id="test-group",
             player_registry=player_registry,
             channel_router=ChannelRouter(),
         )
@@ -501,6 +508,7 @@ class TestBackpressureIntegration:
         """Sending audio updates the player's buffer tracker."""
         # Setup
         record = player_registry.get_or_create("player-1")
+        record.group_id = "test-group"
         conn = self._create_mock_connection("player-1")
         record.connection = conn
 

@@ -206,6 +206,15 @@ class SendspinGroup:
         self._client_event_unsubs: dict[SendspinClient, Callable[[], None]] = {}
         self._playback_lock = asyncio.Lock()
         self._push_stream: PushStream | None = None
+
+        # Set group reference and update PlayerRecord.group_id for initial clients
+        for client in self._clients:
+            client._set_group(self)  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+            if client.check_role(Roles.PLAYER):
+                record = self._server.player_registry.get(client.client_id)
+                if record:
+                    record.group_id = self._group_id
+
         logger.debug(
             "SendspinGroup initialized with %d client(s): %s",
             len(self._clients),
@@ -232,6 +241,7 @@ class SendspinGroup:
 
         self._push_stream = PushStream(
             loop=self._server.loop,
+            group_id=self._group_id,
             player_registry=self._server.player_registry,
             channel_router=channel_router,
         )
@@ -1087,6 +1097,12 @@ class SendspinGroup:
 
         # Then set the group (which will emit ClientGroupChangedEvent)
         client._set_group(self)  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+
+        # Update PlayerRecord.group_id for player clients
+        if client.check_role(Roles.PLAYER):
+            record = self._server.player_registry.get(client.client_id)
+            if record:
+                record.group_id = self._group_id
 
         # Handle player joining/reconnecting with active PushStream
         if (

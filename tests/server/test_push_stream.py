@@ -35,6 +35,7 @@ class TestPushStreamConstruction:
 
         stream = PushStream(
             loop=mock_loop,
+            group_id="test-group",
             player_registry=registry,
             channel_router=router,
         )
@@ -52,6 +53,7 @@ class TestPushStreamAPIShape:
         router = ChannelRouter()
         return PushStream(
             loop=mock_loop,
+            group_id="test-group",
             player_registry=registry,
             channel_router=router,
         )
@@ -136,6 +138,7 @@ class TestPrepareAudio:
         router = ChannelRouter()
         return PushStream(
             loop=mock_loop,
+            group_id="test-group",
             player_registry=registry,
             channel_router=router,
         )
@@ -229,6 +232,7 @@ class TestCommitAudio:
         router = ChannelRouter()
         return PushStream(
             loop=mock_loop,
+            group_id="test-group",
             player_registry=registry,
             channel_router=router,
         )
@@ -363,6 +367,7 @@ class TestBackpressure:
         player = MagicMock()
         player.client_id = client_id
         player.is_connected = True
+        player.group_id = "test-group"
         player.buffer_tracker = MagicMock()
         player.buffer_tracker.time_until_capacity.return_value = wait_us
         player.buffer_tracker.loop = mock_loop
@@ -383,6 +388,7 @@ class TestBackpressure:
 
         push_stream = PushStream(
             loop=mock_loop,
+            group_id="test-group",
             player_registry=registry,
             channel_router=router,
         )
@@ -411,6 +417,7 @@ class TestBackpressure:
 
         push_stream = PushStream(
             loop=mock_loop,
+            group_id="test-group",
             player_registry=registry,
             channel_router=router,
         )
@@ -446,6 +453,7 @@ class TestBackpressure:
 
         push_stream = PushStream(
             loop=mock_loop,
+            group_id="test-group",
             player_registry=registry,
             channel_router=router,
         )
@@ -470,6 +478,7 @@ class TestBackpressure:
 
         push_stream = PushStream(
             loop=mock_loop,
+            group_id="test-group",
             player_registry=registry,
             channel_router=router,
         )
@@ -518,6 +527,7 @@ class TestSendChunks:
         player = MagicMock()
         player.client_id = client_id
         player.is_connected = is_connected
+        player.group_id = "test-group"
         player.preferred_format = target_format
         player.buffer_tracker = MagicMock()
         player.buffer_tracker.time_until_capacity.return_value = wait_us
@@ -545,6 +555,7 @@ class TestSendChunks:
 
         push_stream = PushStream(
             loop=mock_loop,
+            group_id="test-group",
             player_registry=registry,
             channel_router=router,
         )
@@ -575,6 +586,7 @@ class TestSendChunks:
 
         push_stream = PushStream(
             loop=mock_loop,
+            group_id="test-group",
             player_registry=registry,
             channel_router=router,
         )
@@ -610,6 +622,7 @@ class TestSendChunks:
 
         push_stream = PushStream(
             loop=mock_loop,
+            group_id="test-group",
             player_registry=registry,
             channel_router=router,
         )
@@ -655,6 +668,7 @@ class TestSendChunks:
 
         push_stream = PushStream(
             loop=mock_loop,
+            group_id="test-group",
             player_registry=registry,
             channel_router=router,
         )
@@ -694,6 +708,7 @@ class TestSendChunks:
 
         push_stream = PushStream(
             loop=mock_loop,
+            group_id="test-group",
             player_registry=registry,
             channel_router=router,
         )
@@ -739,6 +754,7 @@ class TestSendChunks:
 
         push_stream = PushStream(
             loop=mock_loop,
+            group_id="test-group",
             player_registry=registry,
             channel_router=router,
         )
@@ -785,6 +801,7 @@ class TestStreamStart:
         player = MagicMock()
         player.client_id = client_id
         player.is_connected = is_connected
+        player.group_id = "test-group"
         player.preferred_format = target_format
         player.buffer_tracker = MagicMock()
         player.buffer_tracker.time_until_capacity.return_value = 0
@@ -812,6 +829,7 @@ class TestStreamStart:
 
         push_stream = PushStream(
             loop=mock_loop,
+            group_id="test-group",
             player_registry=registry,
             channel_router=router,
         )
@@ -846,6 +864,7 @@ class TestStreamStart:
 
         push_stream = PushStream(
             loop=mock_loop,
+            group_id="test-group",
             player_registry=registry,
             channel_router=router,
         )
@@ -886,6 +905,7 @@ class TestStreamStart:
 
         push_stream = PushStream(
             loop=mock_loop,
+            group_id="test-group",
             player_registry=registry,
             channel_router=router,
         )
@@ -927,6 +947,7 @@ class TestStreamStart:
 
         push_stream = PushStream(
             loop=mock_loop,
+            group_id="test-group",
             player_registry=registry,
             channel_router=router,
         )
@@ -989,6 +1010,7 @@ class TestStopClear:
         player = MagicMock()
         player.client_id = client_id
         player.is_connected = is_connected
+        player.group_id = "test-group"
         player.preferred_format = target_format
         player.buffer_tracker = MagicMock()
         player.buffer_tracker.time_until_capacity.return_value = 0
@@ -1009,6 +1031,7 @@ class TestStopClear:
 
         push_stream = PushStream(
             loop=mock_loop,
+            group_id="test-group",
             player_registry=registry,
             channel_router=router,
         )
@@ -1034,6 +1057,7 @@ class TestStopClear:
 
         push_stream = PushStream(
             loop=mock_loop,
+            group_id="test-group",
             player_registry=registry,
             channel_router=router,
         )
@@ -1058,6 +1082,7 @@ class TestStopClear:
 
         push_stream = PushStream(
             loop=mock_loop,
+            group_id="test-group",
             player_registry=registry,
             channel_router=router,
         )
@@ -1083,6 +1108,7 @@ class TestStopClear:
 
         push_stream = PushStream(
             loop=mock_loop,
+            group_id="test-group",
             player_registry=registry,
             channel_router=router,
         )
@@ -1106,6 +1132,7 @@ class TestStopClear:
 
         push_stream = PushStream(
             loop=mock_loop,
+            group_id="test-group",
             player_registry=registry,
             channel_router=router,
         )
@@ -1147,6 +1174,7 @@ class TestStopClear:
 
         push_stream = PushStream(
             loop=mock_loop,
+            group_id="test-group",
             player_registry=registry,
             channel_router=router,
         )
@@ -1176,6 +1204,7 @@ class TestStopClear:
 
         push_stream = PushStream(
             loop=mock_loop,
+            group_id="test-group",
             player_registry=registry,
             channel_router=router,
         )
@@ -1203,6 +1232,7 @@ class TestStopClear:
 
         push_stream = PushStream(
             loop=mock_loop,
+            group_id="test-group",
             player_registry=registry,
             channel_router=router,
         )
@@ -1262,6 +1292,7 @@ class TestWaitForBufferSpace:
         player = MagicMock()
         player.client_id = client_id
         player.is_connected = is_connected
+        player.group_id = "test-group"
         player.preferred_format = target_format
         player.buffer_tracker = MagicMock()
         player.buffer_tracker.time_until_capacity.return_value = wait_us
@@ -1280,6 +1311,7 @@ class TestWaitForBufferSpace:
 
         push_stream = PushStream(
             loop=mock_loop,
+            group_id="test-group",
             player_registry=registry,
             channel_router=router,
         )
@@ -1304,6 +1336,7 @@ class TestWaitForBufferSpace:
 
         push_stream = PushStream(
             loop=mock_loop,
+            group_id="test-group",
             player_registry=registry,
             channel_router=router,
         )
@@ -1339,6 +1372,7 @@ class TestWaitForBufferSpace:
 
         push_stream = PushStream(
             loop=mock_loop,
+            group_id="test-group",
             player_registry=registry,
             channel_router=router,
         )
@@ -1377,6 +1411,7 @@ class TestWaitForBufferSpace:
 
         push_stream = PushStream(
             loop=mock_loop,
+            group_id="test-group",
             player_registry=registry,
             channel_router=router,
         )
@@ -1424,6 +1459,7 @@ class TestLateJoinerCache:
         player = MagicMock()
         player.client_id = client_id
         player.is_connected = is_connected
+        player.group_id = "test-group"
         player.preferred_format = target_format
         player.buffer_tracker = MagicMock()
         player.buffer_tracker.time_until_capacity.return_value = 0
@@ -1451,6 +1487,7 @@ class TestLateJoinerCache:
 
         push_stream = PushStream(
             loop=mock_loop,
+            group_id="test-group",
             player_registry=registry,
             channel_router=router,
         )
@@ -1480,6 +1517,7 @@ class TestLateJoinerCache:
 
         push_stream = PushStream(
             loop=mock_loop,
+            group_id="test-group",
             player_registry=registry,
             channel_router=router,
         )
@@ -1533,6 +1571,7 @@ class TestLateJoinerCache:
 
         push_stream = PushStream(
             loop=mock_loop,
+            group_id="test-group",
             player_registry=registry,
             channel_router=router,
         )
@@ -1571,6 +1610,7 @@ class TestLateJoinerCache:
 
         push_stream = PushStream(
             loop=mock_loop,
+            group_id="test-group",
             player_registry=registry,
             channel_router=router,
         )
@@ -1606,6 +1646,7 @@ class TestLateJoinerCache:
 
         push_stream = PushStream(
             loop=mock_loop,
+            group_id="test-group",
             player_registry=registry,
             channel_router=router,
         )
@@ -1653,6 +1694,7 @@ class TestPlayerJoin:
         player = MagicMock()
         player.client_id = client_id
         player.is_connected = is_connected
+        player.group_id = "test-group"
         player.preferred_format = target_format
         player.buffer_tracker = MagicMock()
         player.buffer_tracker.time_until_capacity.return_value = 0
@@ -1682,6 +1724,7 @@ class TestPlayerJoin:
 
         push_stream = PushStream(
             loop=mock_loop,
+            group_id="test-group",
             player_registry=registry,
             channel_router=router,
         )
@@ -1721,6 +1764,7 @@ class TestPlayerJoin:
 
         push_stream = PushStream(
             loop=mock_loop,
+            group_id="test-group",
             player_registry=registry,
             channel_router=router,
         )
@@ -1760,6 +1804,7 @@ class TestPlayerJoin:
 
         push_stream = PushStream(
             loop=mock_loop,
+            group_id="test-group",
             player_registry=registry,
             channel_router=router,
         )
@@ -1800,6 +1845,7 @@ class TestPlayerJoin:
 
         push_stream = PushStream(
             loop=mock_loop,
+            group_id="test-group",
             player_registry=registry,
             channel_router=router,
         )
@@ -1836,6 +1882,7 @@ class TestPlayerJoin:
 
         push_stream = PushStream(
             loop=mock_loop,
+            group_id="test-group",
             player_registry=registry,
             channel_router=router,
         )
@@ -1885,6 +1932,7 @@ class TestPlayerJoin:
 
         push_stream = PushStream(
             loop=mock_loop,
+            group_id="test-group",
             player_registry=registry,
             channel_router=router,
         )
@@ -1934,6 +1982,7 @@ class TestFormatRequest:
         player = MagicMock()
         player.client_id = client_id
         player.is_connected = True
+        player.group_id = "test-group"
         player.preferred_format = preferred_format
         player.buffer_tracker = MagicMock()
         player.buffer_tracker.time_until_capacity.return_value = 0
@@ -1965,6 +2014,7 @@ class TestFormatRequest:
 
         push_stream = PushStream(
             loop=mock_loop,
+            group_id="test-group",
             player_registry=registry,
             channel_router=router,
         )
@@ -1995,6 +2045,7 @@ class TestFormatRequest:
 
         push_stream = PushStream(
             loop=mock_loop,
+            group_id="test-group",
             player_registry=registry,
             channel_router=router,
         )
@@ -2031,6 +2082,7 @@ class TestFormatRequest:
 
         push_stream = PushStream(
             loop=mock_loop,
+            group_id="test-group",
             player_registry=registry,
             channel_router=router,
         )
@@ -2074,6 +2126,7 @@ class TestFormatRequest:
 
         push_stream = PushStream(
             loop=mock_loop,
+            group_id="test-group",
             player_registry=registry,
             channel_router=router,
         )
@@ -2101,6 +2154,7 @@ class TestFormatRequest:
 
         push_stream = PushStream(
             loop=mock_loop,
+            group_id="test-group",
             player_registry=registry,
             channel_router=router,
         )

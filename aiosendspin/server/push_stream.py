@@ -65,6 +65,7 @@ class PushStream:
         self,
         *,
         loop: asyncio.AbstractEventLoop,
+        group_id: str,
         player_registry: PlayerRegistry,
         channel_router: ChannelRouter,
     ) -> None:
@@ -73,10 +74,12 @@ class PushStream:
 
         Args:
             loop: Event loop for timing and async operations.
+            group_id: ID of the group this stream belongs to.
             player_registry: Registry for player state management.
             channel_router: Router for channel assignments.
         """
         self._loop = loop
+        self._group_id = group_id
         self._player_registry = player_registry
         self._channel_router = channel_router
         self._is_stopped = False
@@ -95,6 +98,10 @@ class PushStream:
     def is_stopped(self) -> bool:
         """Whether this stream has been stopped."""
         return self._is_stopped
+
+    def _get_group_players(self) -> list[PlayerRecord]:
+        """Get all connected players in this stream's group."""
+        return [p for p in self._player_registry.get_in_group(self._group_id) if p.is_connected]
 
     def has_pending_audio(self) -> bool:
         """Return True if there is pending audio to commit."""
@@ -206,7 +213,7 @@ class PushStream:
             Maximum wait time in microseconds across all connected players.
         """
         max_wait_us = 0
-        for player in self._player_registry.get_connected():
+        for player in self._get_group_players():
             if hasattr(player, "buffer_tracker") and player.buffer_tracker:
                 wait_us = player.buffer_tracker.time_until_capacity(byte_count)
                 max_wait_us = max(max_wait_us, wait_us)
@@ -273,7 +280,7 @@ class PushStream:
         """
         pipeline_keys: set[PipelineKey] = set()
 
-        for player in self._player_registry.get_connected():
+        for player in self._get_group_players():
             # Get player's assigned channel
             channel_id = self._channel_router.get_channel(player.client_id)
 
@@ -309,7 +316,7 @@ class PushStream:
         3. Send each chunk with appropriate timestamp
         4. Register chunks with buffer tracker
         """
-        for player in self._player_registry.get_connected():
+        for player in self._get_group_players():
             # Get player's assigned channel
             channel_id = self._channel_router.get_channel(player.client_id)
 
@@ -416,7 +423,7 @@ class PushStream:
         estimated_chunk_bytes = 4800
 
         max_wait_us = 0
-        for player in self._player_registry.get_connected():
+        for player in self._get_group_players():
             if player.buffer_tracker is not None:
                 wait_us = player.buffer_tracker.time_until_capacity(estimated_chunk_bytes)
                 max_wait_us = max(max_wait_us, wait_us)
@@ -589,7 +596,7 @@ class PushStream:
 
         # Send stream/end to connected players
         stream_end = StreamEndMessage(payload=StreamEndPayload())
-        for player in self._player_registry.get_connected():
+        for player in self._get_group_players():
             if player.connection is not None:
                 player.connection.send_message(stream_end)
 
@@ -614,7 +621,7 @@ class PushStream:
 
         # Send stream/clear and reset buffer trackers for connected players
         stream_clear = StreamClearMessage(payload=StreamClearPayload())
-        for player in self._player_registry.get_connected():
+        for player in self._get_group_players():
             if player.connection is not None:
                 player.connection.send_message(stream_clear)
             if player.buffer_tracker is not None:
