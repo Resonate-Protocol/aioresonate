@@ -42,11 +42,21 @@ class PushStream:
         self._player_registry = player_registry
         self._channel_router = channel_router
         self._is_stopped = False
+        # Pending audio per channel: channel_id -> (pcm_bytes, audio_format)
+        self._channel_buffers: dict[UUID, tuple[bytes, AudioFormat]] = {}
 
     @property
     def is_stopped(self) -> bool:
         """Whether this stream has been stopped."""
         return self._is_stopped
+
+    def has_pending_audio(self) -> bool:
+        """Return True if there is pending audio to commit."""
+        return len(self._channel_buffers) > 0
+
+    def get_pending_audio(self) -> dict[UUID, tuple[bytes, AudioFormat]]:
+        """Return the pending audio buffers (for testing/inspection)."""
+        return self._channel_buffers
 
     def prepare_audio(
         self,
@@ -67,7 +77,7 @@ class PushStream:
             audio_format: Format of the PCM data.
             channel_id: Channel to prepare audio for (default: MAIN_CHANNEL).
         """
-        # Stub implementation - will be filled in Task 6
+        self._channel_buffers[channel_id] = (pcm, audio_format)
 
     async def commit_audio(self) -> int:
         """
@@ -82,7 +92,9 @@ class PushStream:
         Returns:
             The play_start_us timestamp for this commit.
         """
-        # Stub implementation - will be filled in Task 8
+        # Stub implementation - encoding/sending will be filled in Task 8
+        # For now, just clear the buffers
+        self._channel_buffers.clear()
         return 0
 
     async def wait_for_buffer_space(self) -> None:
