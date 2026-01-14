@@ -52,8 +52,10 @@ from aiosendspin.models.types import (
 )
 from aiosendspin.models.visualizer import StreamStartVisualizer
 
+from .channels import ChannelRouter
 from .events import ClientEvent, VolumeChangedEvent
 from .metadata import Metadata
+from .push_stream import PushStream
 from .stream import AudioCodec, AudioFormat, ClientStreamConfig, MediaStream, Streamer
 
 # The cyclic import is not an issue during runtime, so hide it
@@ -201,6 +203,8 @@ class SendspinGroup:
     """Commands supported by the application (input to _get_supported_commands())."""
     _playback_lock: asyncio.Lock
     """Lock to serialize play_media() and stop() operations, preventing race conditions."""
+    _push_stream: PushStream | None
+    """Current PushStream for push-based streaming, None when not active."""
 
     def __init__(self, server: SendspinServer, *args: SendspinClient) -> None:
         """
@@ -237,11 +241,46 @@ class SendspinGroup:
         self._supported_commands: list[MediaCommand] = []
         self._client_event_unsubs: dict[SendspinClient, Callable[[], None]] = {}
         self._playback_lock = asyncio.Lock()
+        self._push_stream: PushStream | None = None
         logger.debug(
             "SendspinGroup initialized with %d client(s): %s",
             len(self._clients),
             [type(c).__name__ for c in self._clients],
         )
+
+    def start_stream(
+        self,
+        *,
+        channel_router: ChannelRouter | None = None,
+    ) -> PushStream:
+        """
+        Create a new PushStream for push-based audio streaming.
+
+        Args:
+            channel_router: Optional custom channel router. If not provided,
+                a new ChannelRouter is created.
+
+        Returns:
+            A new PushStream instance configured for this group.
+        """
+        if channel_router is None:
+            channel_router = ChannelRouter()
+
+        self._push_stream = PushStream(
+            loop=self._server.loop,
+            player_registry=self._server.player_registry,
+            channel_router=channel_router,
+        )
+        return self._push_stream
+
+    def stop_stream(self) -> None:
+        """
+        Stop the current push stream.
+
+        Does nothing if no stream is active.
+        """
+        if self._push_stream is not None:
+            self._push_stream.stop()
 
     async def play_media(
         self,

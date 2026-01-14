@@ -166,6 +166,11 @@ class SendspinServer:
         """Read-only access to the event loop used by this server."""
         return self._loop
 
+    @property
+    def player_registry(self) -> PlayerRegistry:
+        """Read-only access to the player registry for state persistence."""
+        return self._player_registry
+
     async def on_client_connect(self, request: web.Request) -> web.StreamResponse:
         """Handle an incoming WebSocket connection from a Sendspin client."""
         logger.debug("Incoming client connection from %s", request.remote)
