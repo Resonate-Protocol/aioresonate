@@ -211,9 +211,8 @@ class SendspinGroup:
         for client in self._clients:
             client._set_group(self)  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
             if client.check_role(Roles.PLAYER):
-                record = self._server.player_registry.get(client.client_id)
-                if record:
-                    record.group_id = self._group_id
+                record = self._server.player_registry.get_or_create(client.client_id)
+                record.group_id = self._group_id
 
         logger.debug(
             "SendspinGroup initialized with %d client(s): %s",
@@ -1100,9 +1099,8 @@ class SendspinGroup:
 
         # Update PlayerRecord.group_id for player clients
         if client.check_role(Roles.PLAYER):
-            record = self._server.player_registry.get(client.client_id)
-            if record:
-                record.group_id = self._group_id
+            record = self._server.player_registry.get_or_create(client.client_id)
+            record.group_id = self._group_id
 
         # Handle player joining/reconnecting with active PushStream
         if (
