@@ -4,12 +4,12 @@
     "dockerfile": "Dockerfile"
   },
   "mounts": [
-    "source=claude-config,target=/home/vscode/.claude,type=volume"
+    "source=${localEnv:HOME}/.claude,target=/home/vscode/.claude,type=bind"
   ],
   "remoteEnv": {
     "CLAUDE_CONFIG_DIR": "/home/vscode/.claude"
   },
-  "postCreateCommand": "git config --global --add safe.directory ${containerWorkspaceFolder} && ./scripts/setup.sh && sudo chown -R vscode:vscode /home/vscode/.claude && curl -fsSL https://claude.ai/install.sh | bash",
+  "postCreateCommand": "git config --global --add safe.directory ${containerWorkspaceFolder} && ./scripts/setup.sh && curl -fsSL https://claude.ai/install.sh | bash",
   "customizations": {
     "vscode": {
       "extensions": [
