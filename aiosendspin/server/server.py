@@ -20,9 +20,11 @@ from zeroconf import (
 )
 from zeroconf.asyncio import AsyncServiceBrowser, AsyncServiceInfo, AsyncZeroconf
 
+from aiosendspin.models.types import Roles
 from aiosendspin.util import get_local_ip
 
 from .client import SendspinClient
+from .player_state import PlayerRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -141,6 +143,11 @@ class SendspinServer:
         self._zc = None
         self._mdns_service = None
         self._mdns_browser = None
+        # PlayerRegistry for managing player state across reconnects
+        self._player_registry = PlayerRegistry(
+            loop=self._loop,
+            default_buffer_capacity=1_000_000,  # 1MB default, can be overridden per-player
+        )
         logger.debug("SendspinServer initialized: id=%s, name=%s", server_id, server_name)
 
     def _create_web_application(self) -> web.Application:
@@ -332,6 +339,19 @@ class SendspinServer:
 
         logger.debug("Adding client %s (%s) to server", client.client_id, client.name)
         self._clients.add(client)
+
+        # Wire player clients to PlayerRegistry for state persistence
+        if client.check_role(Roles.PLAYER):
+            player_record = self._player_registry.get_or_create(client.client_id)
+            player_record.connection = client
+            # Clear disconnect time since we're now connected
+            player_record._disconnect_time_us = None  # noqa: SLF001
+            logger.debug(
+                "Attached player %s to PlayerRecord (group_id=%s)",
+                client.client_id,
+                player_record.group_id,
+            )
+
         self._signal_event(ClientAddedEvent(client.client_id))
 
     def _handle_client_disconnect(self, client: SendspinClient) -> None:
@@ -341,6 +361,19 @@ class SendspinServer:
 
         logger.debug("Removing client %s from server", client.client_id)
         self._clients.remove(client)
+
+        # Update PlayerRecord for player clients (record persists for reconnection)
+        if client.check_role(Roles.PLAYER):
+            player_record = self._player_registry.get(client.client_id)
+            if player_record is not None:
+                player_record.connection = None
+                player_record.mark_disconnected(int(self._loop.time() * 1_000_000))
+                logger.debug(
+                    "Detached player %s from PlayerRecord (group_id preserved: %s)",
+                    client.client_id,
+                    player_record.group_id,
+                )
+
         self._signal_event(ClientRemovedEvent(client.client_id))
 
     @property
@@ -367,6 +400,11 @@ class SendspinServer:
     def name(self) -> str:
         """Get the name of this server."""
         return self._name
+
+    @property
+    def player_registry(self) -> PlayerRegistry:
+        """Get the PlayerRegistry for managing player state across reconnects."""
+        return self._player_registry
 
     async def start_server(
         self,

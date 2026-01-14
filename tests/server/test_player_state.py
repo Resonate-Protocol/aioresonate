@@ -2,15 +2,15 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
 from unittest.mock import MagicMock
 
+import pytest
+
 from aiosendspin.models import AudioCodec
+from aiosendspin.models.types import Roles
+from aiosendspin.server.client import SendspinClient
 from aiosendspin.server.player_state import PlayerRecord, PlayerRegistry
 from aiosendspin.server.stream import AudioFormat
-
-if TYPE_CHECKING:
-    from aiosendspin.server.client import SendspinClient
 
 
 class TestPlayerRecordDefaults:
@@ -347,3 +347,112 @@ class TestPlayerRegistryCleanup:
 
         registry.cleanup_expired(timeout_us=1_000_000)
         assert registry.get("player-1") is record
+
+
+# =============================================================================
+# Server Integration Tests (Task 3.1)
+# =============================================================================
+
+
+class TestServerPlayerRegistryIntegration:
+    """Tests for PlayerRegistry integration with SendspinServer."""
+
+    @pytest.fixture
+    def mock_server(self, mock_loop: MagicMock) -> MagicMock:
+        """Create a mock server with PlayerRegistry."""
+        server = MagicMock()
+        server.loop = mock_loop
+        server._player_registry = PlayerRegistry(loop=mock_loop, default_buffer_capacity=100_000)  # noqa: SLF001
+        return server
+
+    @pytest.fixture
+    def mock_player_client(self) -> MagicMock:
+        """Create a mock client with player role."""
+        client = MagicMock(spec=SendspinClient)
+        client.client_id = "player-1"
+        client.check_role.side_effect = lambda role: role == Roles.PLAYER
+        return client
+
+    def test_connect_attaches_client_to_player_record(
+        self, mock_server: MagicMock, mock_player_client: MagicMock
+    ) -> None:
+        """On connect, server should attach client to PlayerRecord."""
+        registry = mock_server._player_registry  # noqa: SLF001
+
+        # Simulate connect
+        record = registry.get_or_create(mock_player_client.client_id)
+        record.connection = mock_player_client
+
+        assert record.connection is mock_player_client
+        assert record.is_connected is True
+
+    def test_disconnect_detaches_but_keeps_record(
+        self, mock_server: MagicMock, mock_player_client: MagicMock, mock_loop: MagicMock
+    ) -> None:
+        """On disconnect, PlayerRecord should remain but connection becomes None."""
+        mock_loop.time.return_value = 1.0
+        registry = mock_server._player_registry  # noqa: SLF001
+
+        # Simulate connect then disconnect
+        record = registry.get_or_create(mock_player_client.client_id)
+        record.connection = mock_player_client
+
+        # Disconnect
+        record.connection = None
+        record.mark_disconnected(time_us=1_000_000)
+
+        assert record.connection is None
+        assert record.is_connected is False
+        assert registry.get(mock_player_client.client_id) is record
+
+    def test_reconnect_reuses_same_record(
+        self, mock_server: MagicMock, mock_player_client: MagicMock, mock_loop: MagicMock
+    ) -> None:
+        """On reconnect, same PlayerRecord instance should be reused."""
+        mock_loop.time.return_value = 1.0
+        registry = mock_server._player_registry  # noqa: SLF001
+
+        # First connect
+        record1 = registry.get_or_create(mock_player_client.client_id)
+        record1.connection = mock_player_client
+        record1.volume = 75  # Set some state
+
+        # Disconnect
+        record1.connection = None
+        record1.mark_disconnected(time_us=1_000_000)
+
+        # Reconnect (same client_id)
+        new_mock_client = MagicMock(spec=SendspinClient)
+        new_mock_client.client_id = "player-1"
+
+        record2 = registry.get_or_create(new_mock_client.client_id)
+        record2.connection = new_mock_client
+
+        assert record1 is record2
+        assert record2.volume == 75  # State preserved
+        assert record2.is_connected is True
+
+    def test_reconnect_preserves_group_membership(
+        self, mock_server: MagicMock, mock_player_client: MagicMock, mock_loop: MagicMock
+    ) -> None:
+        """On reconnect, group_id should be preserved for restoration."""
+        mock_loop.time.return_value = 1.0
+        registry = mock_server._player_registry  # noqa: SLF001
+
+        # First connect and join group
+        record = registry.get_or_create(mock_player_client.client_id)
+        record.connection = mock_player_client
+        record.group_id = "group-abc"
+
+        # Disconnect
+        record.connection = None
+        record.mark_disconnected(time_us=1_000_000)
+
+        # Reconnect
+        new_mock_client = MagicMock(spec=SendspinClient)
+        new_mock_client.client_id = "player-1"
+
+        record_after = registry.get_or_create(new_mock_client.client_id)
+        record_after.connection = new_mock_client
+
+        assert record_after.group_id == "group-abc"
