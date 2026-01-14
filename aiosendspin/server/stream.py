@@ -193,6 +193,11 @@ class BufferTracker:
         self.buffered_chunks.append(BufferedChunk(end_time_us, byte_count))
         self.buffered_bytes += byte_count
 
+    def reset(self) -> None:
+        """Clear all tracked chunks and reset buffered bytes to zero."""
+        self.buffered_chunks.clear()
+        self.buffered_bytes = 0
+
 
 def _resolve_audio_format(audio_format: AudioFormat) -> tuple[int, str, str]:
     """Resolve helper data for an audio format."""
