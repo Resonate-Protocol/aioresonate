@@ -401,11 +401,6 @@ class SendspinServer:
         """Get the name of this server."""
         return self._name
 
-    @property
-    def player_registry(self) -> PlayerRegistry:
-        """Get the PlayerRegistry for managing player state across reconnects."""
-        return self._player_registry
-
     async def start_server(
         self,
         port: int = 8927,
