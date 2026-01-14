@@ -188,6 +188,7 @@ class SendspinServer:
 
         Raises:
             ClientConnectionError: If the initial connection to the client fails.
+            ClientResponseError: If the client responds with an error HTTP status.
             TimeoutError: If the initial connection times out.
         """
         logger.debug("Connecting to client at URL: %s", url)
@@ -259,7 +260,7 @@ class SendspinServer:
                             wsock_client=wsock,
                         )
                         await client._handle_client()  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
-                    if self._client_session.closed or client.closing:
+                    if self._client_session.closed or (client and client.closing):
                         break
                 except asyncio.CancelledError:
                     if not initial_connect_future.done():
