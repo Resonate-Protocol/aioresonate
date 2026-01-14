@@ -482,6 +482,57 @@ class PushStream:
             if not self._chunk_cache[key]:
                 del self._chunk_cache[key]
 
+    def on_player_join(self, player_id: str) -> None:
+        """
+        Handle a player joining (late joiner catch-up).
+
+        Sends stream/start and cached chunks to the player.
+
+        Args:
+            player_id: Player ID that joined.
+        """
+        player = self._player_registry.get(player_id)
+        if player is None or player.connection is None:
+            return
+
+        # Get cached chunks for this player
+        cached_chunks = self.get_catchup_chunks(player_id)
+        if not cached_chunks:
+            return
+
+        # Get player's channel and format for stream/start
+        channel_id = self._channel_router.get_channel(player_id)
+
+        # Find a matching pipeline key for stream/start
+        target_format = player.preferred_format
+        pipeline_key: PipelineKey | None = None
+        for key in self._chunk_cache:
+            if key.channel_id == channel_id and (
+                target_format is None or key.target_format == target_format
+            ):
+                pipeline_key = key
+                target_format = key.target_format
+                break
+
+        if pipeline_key is None or target_format is None:
+            return
+
+        # Send stream/start
+        self._send_stream_start(player, target_format, pipeline_key)
+        self._player_started.add(player_id)
+
+        # Send cached chunks
+        for chunk in cached_chunks:
+            player.connection.send_message(chunk.data)
+            # Register with buffer tracker
+            if player.buffer_tracker is not None:
+                # Estimate end time from chunk timestamp + duration
+                # Since we don't store duration in CachedChunk, use a rough estimate
+                # (chunk duration is typically 25ms = 25000 us)
+                estimated_duration_us = 25_000
+                chunk_end_us = chunk.timestamp_us + estimated_duration_us
+                player.buffer_tracker.register(chunk_end_us, chunk.byte_count)
+
     def stop(self) -> None:
         """
         Stop the stream.

@@ -1619,3 +1619,280 @@ class TestLateJoinerCache:
         push_stream.clear()
 
         assert not push_stream.has_cached_chunks()
+
+
+class TestPlayerJoin:
+    """Tests for player join handling and catch-up streaming."""
+
+    @pytest.fixture
+    def mock_loop(self) -> MagicMock:
+        """Create a mock event loop with time()."""
+        loop = MagicMock()
+        loop.time.return_value = 1000.0  # 1000 seconds = 1_000_000_000 us
+        return loop
+
+    @pytest.fixture
+    def source_format(self) -> AudioFormat:
+        """Source PCM format (48kHz stereo 16-bit)."""
+        return AudioFormat(sample_rate=48000, bit_depth=16, channels=2, codec=AudioCodec.PCM)
+
+    @pytest.fixture
+    def target_format_pcm(self) -> AudioFormat:
+        """Target PCM format (no encoding needed)."""
+        return AudioFormat(sample_rate=48000, bit_depth=16, channels=2, codec=AudioCodec.PCM)
+
+    def _create_mock_player(
+        self,
+        client_id: str,
+        mock_loop: MagicMock,
+        target_format: AudioFormat,
+        *,
+        is_connected: bool = True,
+    ) -> MagicMock:
+        """Create a mock player with connection and buffer tracker."""
+        player = MagicMock()
+        player.client_id = client_id
+        player.is_connected = is_connected
+        player.preferred_format = target_format
+        player.buffer_tracker = MagicMock()
+        player.buffer_tracker.time_until_capacity.return_value = 0
+        player.buffer_tracker.has_capacity.return_value = True
+        player.buffer_tracker.register = MagicMock()
+        player.buffer_tracker.loop = mock_loop
+        player.connection = MagicMock()
+        player.connection.send_message = MagicMock()
+        return player
+
+    @pytest.mark.asyncio
+    async def test_on_player_join_triggers_catchup(
+        self,
+        mock_loop: MagicMock,
+        source_format: AudioFormat,
+        target_format_pcm: AudioFormat,
+    ) -> None:
+        """on_player_join should trigger catch-up streaming."""
+        registry = PlayerRegistry(loop=mock_loop, default_buffer_capacity=100_000)
+        router = ChannelRouter()
+
+        # First player to generate cached chunks
+        player1 = self._create_mock_player(
+            "player-1", mock_loop, target_format_pcm, is_connected=True
+        )
+        registry._players["player-1"] = player1  # noqa: SLF001
+
+        push_stream = PushStream(
+            loop=mock_loop,
+            player_registry=registry,
+            channel_router=router,
+        )
+
+        # Commit some audio
+        pcm = bytes(4800)
+        push_stream.prepare_audio(pcm, source_format)
+        await push_stream.commit_audio()
+
+        # Add a new player (late joiner)
+        player2 = self._create_mock_player(
+            "player-2", mock_loop, target_format_pcm, is_connected=True
+        )
+        registry._players["player-2"] = player2  # noqa: SLF001
+
+        # Trigger catch-up for player2
+        push_stream.on_player_join("player-2")
+
+        # Player2 should have received messages
+        assert player2.connection.send_message.called
+
+    @pytest.mark.asyncio
+    async def test_on_player_join_sends_stream_start_first(
+        self,
+        mock_loop: MagicMock,
+        source_format: AudioFormat,
+        target_format_pcm: AudioFormat,
+    ) -> None:
+        """on_player_join should send stream/start before chunks."""
+        registry = PlayerRegistry(loop=mock_loop, default_buffer_capacity=100_000)
+        router = ChannelRouter()
+
+        player1 = self._create_mock_player(
+            "player-1", mock_loop, target_format_pcm, is_connected=True
+        )
+        registry._players["player-1"] = player1  # noqa: SLF001
+
+        push_stream = PushStream(
+            loop=mock_loop,
+            player_registry=registry,
+            channel_router=router,
+        )
+
+        pcm = bytes(4800)
+        push_stream.prepare_audio(pcm, source_format)
+        await push_stream.commit_audio()
+
+        player2 = self._create_mock_player(
+            "player-2", mock_loop, target_format_pcm, is_connected=True
+        )
+        registry._players["player-2"] = player2  # noqa: SLF001
+
+        push_stream.on_player_join("player-2")
+
+        # First message should be stream/start
+        calls = player2.connection.send_message.call_args_list
+        assert len(calls) >= 1
+        first_msg = calls[0][0][0]
+        assert isinstance(first_msg, StreamStartMessage)
+
+    @pytest.mark.asyncio
+    async def test_on_player_join_sends_cached_chunks(
+        self,
+        mock_loop: MagicMock,
+        source_format: AudioFormat,
+        target_format_pcm: AudioFormat,
+    ) -> None:
+        """on_player_join should send cached chunks after stream/start."""
+        registry = PlayerRegistry(loop=mock_loop, default_buffer_capacity=100_000)
+        router = ChannelRouter()
+
+        player1 = self._create_mock_player(
+            "player-1", mock_loop, target_format_pcm, is_connected=True
+        )
+        registry._players["player-1"] = player1  # noqa: SLF001
+
+        push_stream = PushStream(
+            loop=mock_loop,
+            player_registry=registry,
+            channel_router=router,
+        )
+
+        pcm = bytes(4800)
+        push_stream.prepare_audio(pcm, source_format)
+        await push_stream.commit_audio()
+
+        player2 = self._create_mock_player(
+            "player-2", mock_loop, target_format_pcm, is_connected=True
+        )
+        registry._players["player-2"] = player2  # noqa: SLF001
+
+        push_stream.on_player_join("player-2")
+
+        # Should have received stream/start + at least one binary chunk
+        calls = player2.connection.send_message.call_args_list
+        assert len(calls) >= 2  # At least stream/start + one chunk
+        # Second message should be binary data
+        second_msg = calls[1][0][0]
+        assert isinstance(second_msg, bytes)
+
+    @pytest.mark.asyncio
+    async def test_on_player_join_updates_buffer_tracker(
+        self,
+        mock_loop: MagicMock,
+        source_format: AudioFormat,
+        target_format_pcm: AudioFormat,
+    ) -> None:
+        """on_player_join should update buffer_tracker for sent chunks."""
+        registry = PlayerRegistry(loop=mock_loop, default_buffer_capacity=100_000)
+        router = ChannelRouter()
+
+        player1 = self._create_mock_player(
+            "player-1", mock_loop, target_format_pcm, is_connected=True
+        )
+        registry._players["player-1"] = player1  # noqa: SLF001
+
+        push_stream = PushStream(
+            loop=mock_loop,
+            player_registry=registry,
+            channel_router=router,
+        )
+
+        pcm = bytes(4800)
+        push_stream.prepare_audio(pcm, source_format)
+        await push_stream.commit_audio()
+
+        player2 = self._create_mock_player(
+            "player-2", mock_loop, target_format_pcm, is_connected=True
+        )
+        registry._players["player-2"] = player2  # noqa: SLF001
+
+        push_stream.on_player_join("player-2")
+
+        # Buffer tracker should have been updated
+        player2.buffer_tracker.register.assert_called()
+
+    @pytest.mark.asyncio
+    async def test_on_player_join_marks_player_started(
+        self,
+        mock_loop: MagicMock,
+        source_format: AudioFormat,
+        target_format_pcm: AudioFormat,
+    ) -> None:
+        """on_player_join should mark player as started so commit doesn't re-send stream/start."""
+        registry = PlayerRegistry(loop=mock_loop, default_buffer_capacity=100_000)
+        router = ChannelRouter()
+
+        player1 = self._create_mock_player(
+            "player-1", mock_loop, target_format_pcm, is_connected=True
+        )
+        registry._players["player-1"] = player1  # noqa: SLF001
+
+        push_stream = PushStream(
+            loop=mock_loop,
+            player_registry=registry,
+            channel_router=router,
+        )
+
+        pcm = bytes(4800)
+        push_stream.prepare_audio(pcm, source_format)
+        await push_stream.commit_audio()
+
+        player2 = self._create_mock_player(
+            "player-2", mock_loop, target_format_pcm, is_connected=True
+        )
+        registry._players["player-2"] = player2  # noqa: SLF001
+
+        # Trigger catch-up
+        push_stream.on_player_join("player-2")
+
+        # Count stream/start messages before next commit
+        stream_start_count_1 = sum(
+            1
+            for call in player2.connection.send_message.call_args_list
+            if isinstance(call[0][0], StreamStartMessage)
+        )
+
+        # Next commit should not send another stream/start
+        push_stream.prepare_audio(pcm, source_format)
+        await push_stream.commit_audio()
+
+        stream_start_count_2 = sum(
+            1
+            for call in player2.connection.send_message.call_args_list
+            if isinstance(call[0][0], StreamStartMessage)
+        )
+
+        # Should still be 1 (not 2)
+        assert stream_start_count_1 == 1
+        assert stream_start_count_2 == 1
+
+    @pytest.mark.asyncio
+    async def test_on_player_join_no_cache_does_not_crash(
+        self,
+        mock_loop: MagicMock,
+        target_format_pcm: AudioFormat,
+    ) -> None:
+        """on_player_join with no cached chunks should not crash."""
+        registry = PlayerRegistry(loop=mock_loop, default_buffer_capacity=100_000)
+        router = ChannelRouter()
+
+        push_stream = PushStream(
+            loop=mock_loop,
+            player_registry=registry,
+            channel_router=router,
+        )
+
+        player = self._create_mock_player(
+            "player-1", mock_loop, target_format_pcm, is_connected=True
+        )
+        registry._players["player-1"] = player  # noqa: SLF001
+
+        # Should not crash even with no cached chunks
+        push_stream.on_player_join("player-1")
