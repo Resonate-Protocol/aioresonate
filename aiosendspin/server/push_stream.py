@@ -26,7 +26,7 @@ if TYPE_CHECKING:
     from aiosendspin.server.stream import AudioFormat
 
 # Default initial delay before first audio plays (microseconds)
-DEFAULT_INITIAL_DELAY_US = 100_000  # 100ms
+DEFAULT_INITIAL_DELAY_US = 250_000  # 250ms
 
 # Default cache window for late joiner chunks (microseconds)
 DEFAULT_CACHE_WINDOW_US = 10_000_000  # 10 seconds

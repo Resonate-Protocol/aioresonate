@@ -1153,7 +1153,7 @@ class TestStopClear:
         new_start = await push_stream.commit_audio()
 
         # Should be based on new time (2000s), not continued from first commit
-        expected_new_start = int(2000.0 * 1_000_000) + 100_000  # 100ms initial delay
+        expected_new_start = int(2000.0 * 1_000_000) + 250_000  # 250ms initial delay
         assert new_start == expected_new_start
         assert new_start != first_start + 25000  # Not just continuation
 
