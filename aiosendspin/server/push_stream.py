@@ -594,11 +594,14 @@ class PushStream:
         """
         self._is_stopped = True
 
-        # Send stream/end to connected players
+        # Send stream/end to connected players and reset buffer trackers
         stream_end = StreamEndMessage(payload=StreamEndPayload())
         for player in self._get_group_players():
             if player.connection is not None:
                 player.connection.send_message(stream_end)
+            # Reset buffer tracker to prevent stale data on next play
+            if player.buffer_tracker is not None:
+                player.buffer_tracker.reset()
 
     def clear(self) -> None:
         """
