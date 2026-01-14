@@ -13,6 +13,17 @@ if TYPE_CHECKING:
     from aiosendspin.server.player_state import PlayerRegistry
     from aiosendspin.server.stream import AudioFormat
 
+# Default initial delay before first audio plays (microseconds)
+DEFAULT_INITIAL_DELAY_US = 100_000  # 100ms
+
+
+class StreamStoppedError(Exception):
+    """Raised when trying to commit audio on a stopped stream."""
+
+
+class DurationMismatchError(Exception):
+    """Raised when prepared channels have mismatched durations."""
+
 
 class PushStream:
     """
@@ -44,6 +55,8 @@ class PushStream:
         self._is_stopped = False
         # Pending audio per channel: channel_id -> (pcm_bytes, audio_format)
         self._channel_buffers: dict[UUID, tuple[bytes, AudioFormat]] = {}
+        # Timing state
+        self._next_chunk_start_us: int | None = None  # Initialized on first commit
 
     @property
     def is_stopped(self) -> bool:
@@ -91,11 +104,77 @@ class PushStream:
 
         Returns:
             The play_start_us timestamp for this commit.
+
+        Raises:
+            StreamStoppedError: If the stream has been stopped.
+            DurationMismatchError: If prepared channels have mismatched durations.
         """
-        # Stub implementation - encoding/sending will be filled in Task 8
-        # For now, just clear the buffers
+        # Check if stopped
+        if self._is_stopped:
+            raise StreamStoppedError("Cannot commit audio on a stopped stream")
+
+        # If no pending audio, return current timing
+        if not self._channel_buffers:
+            if self._next_chunk_start_us is None:
+                # Initialize timing even with no audio
+                now_us = int(self._loop.time() * 1_000_000)
+                self._next_chunk_start_us = now_us + DEFAULT_INITIAL_DELAY_US
+            return self._next_chunk_start_us
+
+        # Drain channel buffers and validate duration alignment
+        prepared = dict(self._channel_buffers)
         self._channel_buffers.clear()
-        return 0
+
+        # Calculate duration for each channel and validate alignment
+        durations_us = self._calculate_channel_durations(prepared)
+        self._validate_duration_alignment(durations_us)
+
+        # Initialize timing on first commit
+        if self._next_chunk_start_us is None:
+            now_us = int(self._loop.time() * 1_000_000)
+            self._next_chunk_start_us = now_us + DEFAULT_INITIAL_DELAY_US
+
+        # Get the play_start_us for this commit
+        play_start_us = self._next_chunk_start_us
+
+        # Advance timing by the audio duration (use first channel's duration)
+        if durations_us:
+            duration_us = next(iter(durations_us.values()))
+            self._next_chunk_start_us += duration_us
+
+        # TODO (Task 9+): Encode via PipelineManager, apply backpressure, send to players
+
+        return play_start_us
+
+    def _calculate_channel_durations(
+        self,
+        prepared: dict[UUID, tuple[bytes, AudioFormat]],
+    ) -> dict[UUID, int]:
+        """Calculate duration in microseconds for each prepared channel."""
+        durations: dict[UUID, int] = {}
+        for channel_id, (pcm, fmt) in prepared.items():
+            bytes_per_sample = fmt.bit_depth // 8
+            frame_stride = bytes_per_sample * fmt.channels
+            sample_count = len(pcm) // frame_stride
+            duration_us = int(sample_count * 1_000_000 / fmt.sample_rate)
+            durations[channel_id] = duration_us
+        return durations
+
+    def _validate_duration_alignment(self, durations_us: dict[UUID, int]) -> None:
+        """Validate that all channels have approximately the same duration."""
+        if len(durations_us) <= 1:
+            return
+
+        values = list(durations_us.values())
+        min_dur = min(values)
+        max_dur = max(values)
+
+        # Allow up to 5ms (5000 us) difference for rounding
+        tolerance_us = 5000
+        if max_dur - min_dur > tolerance_us:
+            raise DurationMismatchError(
+                f"Channel durations differ by {max_dur - min_dur}us (max allowed: {tolerance_us}us)"
+            )
 
     async def wait_for_buffer_space(self) -> None:
         """

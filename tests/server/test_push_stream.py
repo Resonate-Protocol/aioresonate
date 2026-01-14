@@ -11,7 +11,11 @@ import pytest
 from aiosendspin.models import AudioCodec
 from aiosendspin.server.channels import MAIN_CHANNEL, ChannelRouter
 from aiosendspin.server.player_state import PlayerRegistry
-from aiosendspin.server.push_stream import PushStream
+from aiosendspin.server.push_stream import (
+    DurationMismatchError,
+    PushStream,
+    StreamStoppedError,
+)
 from aiosendspin.server.stream import AudioFormat
 
 
@@ -200,3 +204,134 @@ class TestPrepareAudio:
         await push_stream.commit_audio()
 
         assert push_stream.has_pending_audio() is False
+
+
+class TestCommitAudio:
+    """Tests for commit_audio core logic."""
+
+    @pytest.fixture
+    def mock_loop(self) -> MagicMock:
+        """Create a mock event loop with time()."""
+        loop = MagicMock()
+        loop.time.return_value = 1000.0  # 1000 seconds = 1_000_000_000 us
+        return loop
+
+    @pytest.fixture
+    def push_stream(self, mock_loop: MagicMock) -> PushStream:
+        """Create a PushStream for testing."""
+        registry = PlayerRegistry(loop=mock_loop, default_buffer_capacity=100_000)
+        router = ChannelRouter()
+        return PushStream(
+            loop=mock_loop,
+            player_registry=registry,
+            channel_router=router,
+        )
+
+    @pytest.fixture
+    def source_format(self) -> AudioFormat:
+        """Source PCM format (48kHz stereo 16-bit)."""
+        return AudioFormat(sample_rate=48000, bit_depth=16, channels=2, codec=AudioCodec.PCM)
+
+    @pytest.mark.asyncio
+    async def test_first_commit_initializes_play_start_us(
+        self, push_stream: PushStream, source_format: AudioFormat
+    ) -> None:
+        """First commit should initialize play_start_us to now + initial_delay."""
+        # 25ms of audio at 48kHz stereo 16-bit = 1200 samples * 4 bytes = 4800 bytes
+        pcm = bytes(4800)
+        push_stream.prepare_audio(pcm, source_format)
+
+        play_start_us = await push_stream.commit_audio()
+
+        # Should be loop.time() in microseconds plus some initial delay
+        # loop.time() = 1000.0 seconds = 1_000_000_000 us
+        assert play_start_us > 1_000_000_000
+        # And reasonable (within 1 second of initial delay)
+        assert play_start_us < 1_001_000_000
+
+    @pytest.mark.asyncio
+    async def test_commit_returns_play_start_us(
+        self, push_stream: PushStream, source_format: AudioFormat
+    ) -> None:
+        """commit_audio should return play_start_us."""
+        pcm = bytes(4800)
+        push_stream.prepare_audio(pcm, source_format)
+
+        result = await push_stream.commit_audio()
+
+        assert isinstance(result, int)
+        assert result > 0
+
+    @pytest.mark.asyncio
+    async def test_subsequent_commits_advance_timing(
+        self, push_stream: PushStream, source_format: AudioFormat
+    ) -> None:
+        """Subsequent commits should advance play_start_us by audio duration."""
+        pcm = bytes(4800)  # 25ms
+
+        push_stream.prepare_audio(pcm, source_format)
+        first_start = await push_stream.commit_audio()
+
+        push_stream.prepare_audio(pcm, source_format)
+        second_start = await push_stream.commit_audio()
+
+        # Second commit should start 25ms (25000 us) after first
+        expected_advance = 25000  # 25ms in microseconds
+        assert second_start == first_start + expected_advance
+
+    @pytest.mark.asyncio
+    async def test_commit_raises_stream_stopped_error_when_stopped(
+        self, push_stream: PushStream, source_format: AudioFormat
+    ) -> None:
+        """commit_audio should raise StreamStoppedError if stream is stopped."""
+        pcm = bytes(4800)
+        push_stream.prepare_audio(pcm, source_format)
+        push_stream.stop()
+
+        with pytest.raises(StreamStoppedError):
+            await push_stream.commit_audio()
+
+    @pytest.mark.asyncio
+    async def test_commit_validates_duration_alignment(self, push_stream: PushStream) -> None:
+        """commit_audio should raise if channel durations don't match."""
+        fmt = AudioFormat(sample_rate=48000, bit_depth=16, channels=2, codec=AudioCodec.PCM)
+        channel_a = UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
+        channel_b = UUID("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb")
+
+        # 25ms on channel A
+        pcm_25ms = bytes(4800)
+        # 50ms on channel B (different duration)
+        pcm_50ms = bytes(9600)
+
+        push_stream.prepare_audio(pcm_25ms, fmt, channel_id=channel_a)
+        push_stream.prepare_audio(pcm_50ms, fmt, channel_id=channel_b)
+
+        with pytest.raises(DurationMismatchError):
+            await push_stream.commit_audio()
+
+    @pytest.mark.asyncio
+    async def test_commit_allows_small_duration_differences(self, push_stream: PushStream) -> None:
+        """commit_audio should allow small rounding differences in duration."""
+        fmt_48k = AudioFormat(sample_rate=48000, bit_depth=16, channels=2, codec=AudioCodec.PCM)
+        fmt_44k = AudioFormat(sample_rate=44100, bit_depth=16, channels=2, codec=AudioCodec.PCM)
+        channel_a = UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
+        channel_b = UUID("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb")
+
+        # Both approximately 25ms but slightly different sample counts
+        # 48000 * 0.025 = 1200 samples * 4 bytes = 4800 bytes
+        pcm_48k = bytes(4800)
+        # 44100 * 0.025 = 1102.5 -> 1102 samples * 4 bytes = 4408 bytes
+        pcm_44k = bytes(4408)
+
+        push_stream.prepare_audio(pcm_48k, fmt_48k, channel_id=channel_a)
+        push_stream.prepare_audio(pcm_44k, fmt_44k, channel_id=channel_b)
+
+        # Should not raise - durations are close enough
+        await push_stream.commit_audio()
+
+    @pytest.mark.asyncio
+    async def test_commit_with_no_pending_audio_is_noop(self, push_stream: PushStream) -> None:
+        """commit_audio with no pending audio should not raise."""
+        # Should not raise, returns 0 or initial timing
+        result = await push_stream.commit_audio()
+        assert isinstance(result, int)
