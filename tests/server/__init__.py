@@ -1,0 +1,1 @@
+"""aiosendspin.server tests."""

@@ -1,0 +1,1 @@
+"""aiosendspin test package."""
