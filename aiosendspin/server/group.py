@@ -1514,6 +1514,15 @@ class SendspinGroup:
             elif client.check_role(Roles.VISUALIZER) or client.check_role(Roles.ARTWORK):
                 self._send_stream_start_msg(client, None)
 
+        # Handle player joining/reconnecting with active PushStream
+        if (
+            self._push_stream is not None
+            and not self._push_stream.is_stopped
+            and client.check_role(Roles.PLAYER)
+        ):
+            logger.debug("Player %s joining active push stream", client.client_id)
+            self._push_stream.on_player_join(client.client_id)
+
         # Send current state to the new client
         group_message = GroupUpdateServerMessage(
             GroupUpdateServerPayload(
