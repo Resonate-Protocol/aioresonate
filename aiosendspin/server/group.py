@@ -514,6 +514,8 @@ class SendspinGroup:
                     pass  # Channel exhausted (normal completion)
                 except TimeoutError:
                     logger.error("Channel %s timed out during prefill, removing", channel_id)
+                except OSError:
+                    raise  # Re-raise file/IO errors (e.g. file not found)
                 except Exception:
                     logger.exception("Channel %s failed during prefill, removing", channel_id)
                 # Channel done (exhausted, timed out, or failed) - clean up and exit
@@ -559,6 +561,8 @@ class SendspinGroup:
                     pass  # Channel exhausted (normal completion)
                 except TimeoutError:
                     logger.error("Channel %s timed out during read, removing", channel_id)
+                except OSError:
+                    raise  # Re-raise file/IO errors (e.g. file not found)
                 except Exception:
                     logger.exception("Channel %s failed during read, removing", channel_id)
                 # Channel done (exhausted, timed out, or failed) - clean up
@@ -797,6 +801,8 @@ class SendspinGroup:
             await stream_task
         except asyncio.CancelledError:
             pass
+        except OSError:
+            pass  # Already handled by caller
         except Exception:
             logger.exception("Unhandled exception while stopping stream task")
         # Only clear if it's still the same task (not replaced by a new play_media call)
