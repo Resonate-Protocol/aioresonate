@@ -7,7 +7,14 @@ from typing import TYPE_CHECKING
 from uuid import UUID
 
 from aiosendspin.models import BinaryMessageType, pack_binary_header_raw
-from aiosendspin.models.core import StreamStartMessage, StreamStartPayload
+from aiosendspin.models.core import (
+    StreamClearMessage,
+    StreamClearPayload,
+    StreamEndMessage,
+    StreamEndPayload,
+    StreamStartMessage,
+    StreamStartPayload,
+)
 from aiosendspin.models.player import StreamStartPlayer
 from aiosendspin.server.channels import MAIN_CHANNEL
 from aiosendspin.server.pipeline import EncodedChunk, PipelineKey, PipelineManager
@@ -378,13 +385,36 @@ class PushStream:
         Stop the stream.
 
         After calling stop(), commit_audio() will raise StreamStoppedError.
+        Sends stream/end message to connected players.
         """
         self._is_stopped = True
+
+        # Send stream/end to connected players
+        stream_end = StreamEndMessage(payload=StreamEndPayload())
+        for player in self._player_registry.get_connected():
+            if player.connection is not None:
+                player.connection.send_message(stream_end)
 
     def clear(self) -> None:
         """
         Clear all pending audio and reset timing.
 
         This is used for seek operations where buffered audio is discarded.
+        Sends stream/clear to connected players and resets their buffer trackers.
         """
-        # Stub implementation - will be filled in Task 12
+        # Clear pending audio
+        self._channel_buffers.clear()
+
+        # Reset timing
+        self._next_chunk_start_us = None
+
+        # Reset player_started set (stream/start will be re-sent)
+        self._player_started.clear()
+
+        # Send stream/clear and reset buffer trackers for connected players
+        stream_clear = StreamClearMessage(payload=StreamClearPayload())
+        for player in self._player_registry.get_connected():
+            if player.connection is not None:
+                player.connection.send_message(stream_clear)
+            if player.buffer_tracker is not None:
+                player.buffer_tracker.reset()

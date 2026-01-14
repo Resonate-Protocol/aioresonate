@@ -14,7 +14,7 @@ from aiosendspin.models import (
     BinaryMessageType,
     unpack_binary_header,
 )
-from aiosendspin.models.core import StreamStartMessage
+from aiosendspin.models.core import StreamClearMessage, StreamEndMessage, StreamStartMessage
 from aiosendspin.server.channels import MAIN_CHANNEL, ChannelRouter
 from aiosendspin.server.player_state import PlayerRegistry
 from aiosendspin.server.push_stream import (
@@ -955,3 +955,280 @@ class TestStreamStart:
             if isinstance(call[0][0], StreamStartMessage)
         )
         assert stream_start_count_2 == 1
+
+
+class TestStopClear:
+    """Tests for stop() and clear() methods."""
+
+    @pytest.fixture
+    def mock_loop(self) -> MagicMock:
+        """Create a mock event loop with time()."""
+        loop = MagicMock()
+        loop.time.return_value = 1000.0  # 1000 seconds = 1_000_000_000 us
+        return loop
+
+    @pytest.fixture
+    def source_format(self) -> AudioFormat:
+        """Source PCM format (48kHz stereo 16-bit)."""
+        return AudioFormat(sample_rate=48000, bit_depth=16, channels=2, codec=AudioCodec.PCM)
+
+    @pytest.fixture
+    def target_format_pcm(self) -> AudioFormat:
+        """Target PCM format (no encoding needed)."""
+        return AudioFormat(sample_rate=48000, bit_depth=16, channels=2, codec=AudioCodec.PCM)
+
+    def _create_mock_player(
+        self,
+        client_id: str,
+        mock_loop: MagicMock,
+        target_format: AudioFormat,
+        *,
+        is_connected: bool = True,
+    ) -> MagicMock:
+        """Create a mock player with connection and buffer tracker."""
+        player = MagicMock()
+        player.client_id = client_id
+        player.is_connected = is_connected
+        player.preferred_format = target_format
+        player.buffer_tracker = MagicMock()
+        player.buffer_tracker.time_until_capacity.return_value = 0
+        player.buffer_tracker.register = MagicMock()
+        player.buffer_tracker.reset = MagicMock()
+        player.buffer_tracker.loop = mock_loop
+        player.connection = MagicMock()
+        player.connection.send_message = MagicMock()
+        return player
+
+    # Tests for stop()
+
+    @pytest.mark.asyncio
+    async def test_stop_sets_is_stopped(self, mock_loop: MagicMock) -> None:
+        """stop() should set is_stopped = True."""
+        registry = PlayerRegistry(loop=mock_loop, default_buffer_capacity=100_000)
+        router = ChannelRouter()
+
+        push_stream = PushStream(
+            loop=mock_loop,
+            player_registry=registry,
+            channel_router=router,
+        )
+
+        assert not push_stream.is_stopped
+        push_stream.stop()
+        assert push_stream.is_stopped
+
+    @pytest.mark.asyncio
+    async def test_stop_sends_stream_end_message(
+        self,
+        mock_loop: MagicMock,
+        target_format_pcm: AudioFormat,
+    ) -> None:
+        """stop() should send StreamEndMessage to connected players."""
+        registry = PlayerRegistry(loop=mock_loop, default_buffer_capacity=100_000)
+        router = ChannelRouter()
+
+        player = self._create_mock_player(
+            "player-1", mock_loop, target_format_pcm, is_connected=True
+        )
+        registry._players["player-1"] = player  # noqa: SLF001
+
+        push_stream = PushStream(
+            loop=mock_loop,
+            player_registry=registry,
+            channel_router=router,
+        )
+
+        push_stream.stop()
+
+        # Player should have received stream/end message
+        calls = player.connection.send_message.call_args_list
+        assert len(calls) == 1
+        msg = calls[0][0][0]
+        assert isinstance(msg, StreamEndMessage)
+
+    @pytest.mark.asyncio
+    async def test_commit_raises_after_stop(
+        self,
+        mock_loop: MagicMock,
+        source_format: AudioFormat,
+    ) -> None:
+        """commit_audio() should raise StreamStoppedError after stop."""
+        registry = PlayerRegistry(loop=mock_loop, default_buffer_capacity=100_000)
+        router = ChannelRouter()
+
+        push_stream = PushStream(
+            loop=mock_loop,
+            player_registry=registry,
+            channel_router=router,
+        )
+
+        push_stream.stop()
+
+        pcm = bytes(4800)
+        push_stream.prepare_audio(pcm, source_format)
+
+        with pytest.raises(StreamStoppedError):
+            await push_stream.commit_audio()
+
+    # Tests for clear()
+
+    def test_clear_resets_channel_buffers(
+        self,
+        mock_loop: MagicMock,
+        source_format: AudioFormat,
+    ) -> None:
+        """clear() should reset channel buffers."""
+        registry = PlayerRegistry(loop=mock_loop, default_buffer_capacity=100_000)
+        router = ChannelRouter()
+
+        push_stream = PushStream(
+            loop=mock_loop,
+            player_registry=registry,
+            channel_router=router,
+        )
+
+        pcm = bytes(4800)
+        push_stream.prepare_audio(pcm, source_format)
+        assert push_stream.has_pending_audio()
+
+        push_stream.clear()
+        assert not push_stream.has_pending_audio()
+
+    @pytest.mark.asyncio
+    async def test_clear_resets_timing(
+        self,
+        mock_loop: MagicMock,
+        source_format: AudioFormat,
+    ) -> None:
+        """clear() should reset timing (next_chunk_start_us)."""
+        registry = PlayerRegistry(loop=mock_loop, default_buffer_capacity=100_000)
+        router = ChannelRouter()
+
+        push_stream = PushStream(
+            loop=mock_loop,
+            player_registry=registry,
+            channel_router=router,
+        )
+
+        # Commit to initialize timing
+        pcm = bytes(4800)
+        push_stream.prepare_audio(pcm, source_format)
+        first_start = await push_stream.commit_audio()
+
+        # Clear should reset timing
+        push_stream.clear()
+
+        # Advance mock time
+        mock_loop.time.return_value = 2000.0
+
+        # Next commit should reinitialize timing at new time
+        push_stream.prepare_audio(pcm, source_format)
+        new_start = await push_stream.commit_audio()
+
+        # Should be based on new time (2000s), not continued from first commit
+        expected_new_start = int(2000.0 * 1_000_000) + 100_000  # 100ms initial delay
+        assert new_start == expected_new_start
+        assert new_start != first_start + 25000  # Not just continuation
+
+    @pytest.mark.asyncio
+    async def test_clear_sends_stream_clear_message(
+        self,
+        mock_loop: MagicMock,
+        target_format_pcm: AudioFormat,
+    ) -> None:
+        """clear() should send StreamClearMessage to connected players."""
+        registry = PlayerRegistry(loop=mock_loop, default_buffer_capacity=100_000)
+        router = ChannelRouter()
+
+        player = self._create_mock_player(
+            "player-1", mock_loop, target_format_pcm, is_connected=True
+        )
+        registry._players["player-1"] = player  # noqa: SLF001
+
+        push_stream = PushStream(
+            loop=mock_loop,
+            player_registry=registry,
+            channel_router=router,
+        )
+
+        push_stream.clear()
+
+        # Player should have received stream/clear message
+        calls = player.connection.send_message.call_args_list
+        assert len(calls) == 1
+        msg = calls[0][0][0]
+        assert isinstance(msg, StreamClearMessage)
+
+    @pytest.mark.asyncio
+    async def test_clear_resets_buffer_trackers(
+        self,
+        mock_loop: MagicMock,
+        target_format_pcm: AudioFormat,
+    ) -> None:
+        """clear() should reset player buffer trackers."""
+        registry = PlayerRegistry(loop=mock_loop, default_buffer_capacity=100_000)
+        router = ChannelRouter()
+
+        player = self._create_mock_player(
+            "player-1", mock_loop, target_format_pcm, is_connected=True
+        )
+        registry._players["player-1"] = player  # noqa: SLF001
+
+        push_stream = PushStream(
+            loop=mock_loop,
+            player_registry=registry,
+            channel_router=router,
+        )
+
+        push_stream.clear()
+
+        # Buffer tracker reset should have been called
+        player.buffer_tracker.reset.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_clear_resets_player_started_set(
+        self,
+        mock_loop: MagicMock,
+        source_format: AudioFormat,
+        target_format_pcm: AudioFormat,
+    ) -> None:
+        """clear() should reset _player_started so stream/start is re-sent."""
+        registry = PlayerRegistry(loop=mock_loop, default_buffer_capacity=100_000)
+        router = ChannelRouter()
+
+        player = self._create_mock_player(
+            "player-1", mock_loop, target_format_pcm, is_connected=True
+        )
+        registry._players["player-1"] = player  # noqa: SLF001
+
+        push_stream = PushStream(
+            loop=mock_loop,
+            player_registry=registry,
+            channel_router=router,
+        )
+
+        # First commit sends stream/start
+        pcm = bytes(4800)
+        push_stream.prepare_audio(pcm, source_format)
+        await push_stream.commit_audio()
+
+        stream_starts_before = sum(
+            1
+            for call in player.connection.send_message.call_args_list
+            if isinstance(call[0][0], StreamStartMessage)
+        )
+        assert stream_starts_before == 1
+
+        # Clear resets _player_started
+        push_stream.clear()
+
+        # Next commit should send stream/start again
+        push_stream.prepare_audio(pcm, source_format)
+        await push_stream.commit_audio()
+
+        stream_starts_after = sum(
+            1
+            for call in player.connection.send_message.call_args_list
+            if isinstance(call[0][0], StreamStartMessage)
+        )
+        assert stream_starts_after == 2  # Two stream/start messages total
