@@ -349,6 +349,7 @@ class SendspinServer:
         if client.check_role(Roles.PLAYER):
             player_record = self._player_registry.get_or_create(client.client_id)
             player_record.connection = client
+            player_record.group_id = client.group.group_id
             # Clear disconnect time since we're now connected
             player_record._disconnect_time_us = None  # noqa: SLF001
             logger.debug(
