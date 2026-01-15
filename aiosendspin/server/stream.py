@@ -42,7 +42,7 @@ def _get_numpy() -> types.ModuleType | None:
     except ImportError:
         _numpy_unavailable = True
         return None
-    return np
+    return np  # type: ignore[no-any-return,unused-ignore]
 
 
 # Universal main channel ID for the primary audio source.
