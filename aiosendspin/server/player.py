@@ -9,6 +9,7 @@ from aiosendspin.models.player import (
     ClientHelloPlayerSupport,
     PlayerCommandPayload,
     PlayerStatePayload,
+    SupportedAudioFormat,
 )
 from aiosendspin.models.types import PlayerCommand
 
@@ -127,112 +128,33 @@ class PlayerClient:
                 VolumeChangedEvent(volume=self._volume, muted=self._muted)
             )
 
-    def determine_optimal_format(
-        self,
-        source_format: AudioFormat,
-    ) -> AudioFormat:
+    # Opus encoder constraints
+    _OPUS_SAMPLE_RATES = frozenset({8000, 12000, 16000, 24000, 48000})
+    _OPUS_BIT_DEPTHS = frozenset({16})  # Opus only accepts s16 input
+
+    def _is_format_supported_by_server(self, fmt: SupportedAudioFormat) -> bool:
+        """Check if the server can encode to this format."""
+        if fmt.codec == AudioCodec.OPUS:
+            if fmt.sample_rate not in self._OPUS_SAMPLE_RATES:
+                return False
+            if fmt.bit_depth not in self._OPUS_BIT_DEPTHS:
+                return False
+        return fmt.channels in (1, 2)
+
+    def determine_optimal_format(self, source_format: AudioFormat) -> AudioFormat:  # noqa: ARG002
         """
-        Determine the optimal audio format for this client given a source format.
+        Determine the optimal audio format for this client.
 
-        Prefers higher quality within the client's capabilities and falls back gracefully.
-        Properly handles per-codec capabilities by filtering formats by codec first.
-
-        Args:
-            source_format: The source audio format to match against.
-
-        Returns:
-            AudioFormat: The optimal format for this client.
+        Uses the client's preferred format (first in supported_formats per spec),
+        falling back to subsequent formats if the server can't encode the preferred one.
         """
         support = self.support
         if not support or not support.supported_formats:
             raise ValueError(f"Client {self.client.client_id} has no supported formats")
 
-        # Get available codecs
-        support_codecs = {fmt.codec for fmt in support.supported_formats}
+        # Use client's preferred format, falling back if server can't encode it
+        for fmt in support.supported_formats:
+            if self._is_format_supported_by_server(fmt):
+                return AudioFormat(fmt.sample_rate, fmt.bit_depth, fmt.channels, fmt.codec)
 
-        # Determine optimal codec with fallback chain
-        codec_fallbacks = [AudioCodec.FLAC, AudioCodec.OPUS, AudioCodec.PCM]
-        selected_codec = None
-
-        for candidate_codec in codec_fallbacks:
-            if candidate_codec in support_codecs:
-                selected_codec = candidate_codec
-                break
-
-        if selected_codec is None:
-            raise ValueError(f"Client {self.client.client_id} does not support any known codec")
-
-        # Filter supported_formats by the selected codec to get per-codec capabilities
-        codec_formats = [fmt for fmt in support.supported_formats if fmt.codec == selected_codec]
-
-        # Get supported values for this specific codec
-        codec_sample_rates = {fmt.sample_rate for fmt in codec_formats}
-        codec_bit_depths = {fmt.bit_depth for fmt in codec_formats}
-        codec_channels = {fmt.channels for fmt in codec_formats}
-
-        # Determine optimal sample rate for this codec
-        sample_rate = source_format.sample_rate
-
-        # Special handling for Opus - use specific sample rates
-        if selected_codec == AudioCodec.OPUS:
-            opus_rate_candidates = [
-                (8000, sample_rate <= 8000),
-                (12000, sample_rate <= 12000),
-                (16000, sample_rate <= 16000),
-                (24000, sample_rate <= 24000),
-                (48000, True),  # Default fallback
-            ]
-
-            opus_sample_rate = None
-            for candidate_rate, condition in opus_rate_candidates:
-                if condition and candidate_rate in codec_sample_rates:
-                    opus_sample_rate = candidate_rate
-                    break
-
-            if opus_sample_rate is None:
-                raise ValueError(
-                    f"Client {self.client.client_id} does not support any Opus sample rates"
-                )
-
-            if sample_rate != opus_sample_rate:
-                self._logger.debug(
-                    "Adjusted sample_rate for Opus on client %s: %s -> %s",
-                    self.client.client_id,
-                    sample_rate,
-                    opus_sample_rate,
-                )
-            sample_rate = opus_sample_rate
-        elif sample_rate not in codec_sample_rates:
-            # For other codecs, prefer lower rates closest to source
-            lower_rates = [r for r in codec_sample_rates if r < sample_rate]
-            sample_rate = max(lower_rates) if lower_rates else min(codec_sample_rates)
-            self._logger.debug(
-                "Adjusted sample_rate for client %s: %s", self.client.client_id, sample_rate
-            )
-
-        # Determine optimal bit depth for this codec
-        bit_depth = source_format.bit_depth
-        if bit_depth not in codec_bit_depths:
-            if 16 in codec_bit_depths:
-                bit_depth = 16
-            else:
-                raise NotImplementedError("Only 16bit is supported for now")
-            self._logger.debug(
-                "Adjusted bit_depth for client %s: %s", self.client.client_id, bit_depth
-            )
-
-        # Determine optimal channel count for this codec
-        channels = source_format.channels
-        if channels not in codec_channels:
-            # Prefer stereo, then mono
-            if 2 in codec_channels:
-                channels = 2
-            elif 1 in codec_channels:
-                channels = 1
-            else:
-                raise NotImplementedError("Only mono and stereo are supported")
-            self._logger.debug(
-                "Adjusted channels for client %s: %s", self.client.client_id, channels
-            )
-
-        return AudioFormat(sample_rate, bit_depth, channels, selected_codec)
+        raise ValueError(f"Client {self.client.client_id} has no formats the server can encode")
