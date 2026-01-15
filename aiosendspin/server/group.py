@@ -43,6 +43,7 @@ from aiosendspin.models.player import (
 )
 from aiosendspin.models.types import (
     ArtworkSource,
+    AudioCodec,
     MediaCommand,
     PictureFormat,
     PlaybackStateType,
@@ -50,9 +51,11 @@ from aiosendspin.models.types import (
 )
 from aiosendspin.models.visualizer import StreamStartVisualizer
 
-from .channels import ChannelRouter
+from .audio import AudioFormat
+from .channels import MAIN_CHANNEL, ChannelRouter
 from .events import ClientEvent, VolumeChangedEvent
 from .metadata import Metadata
+from .pipeline import PipelineManager
 from .push_stream import PushStream
 
 # The cyclic import is not an issue during runtime, so hide it
@@ -244,6 +247,11 @@ class SendspinGroup:
             player_registry=self._server.player_registry,
             channel_router=channel_router,
         )
+        # Starting a stream implies the group is actively playing.
+        if self._current_state != PlaybackStateType.PLAYING:
+            self._current_state = PlaybackStateType.PLAYING
+            self._signal_event(GroupStateChangedEvent(PlaybackStateType.PLAYING))
+            self._send_group_update_to_clients()
         return self._push_stream
 
     def stop_stream(self) -> None:
@@ -254,6 +262,27 @@ class SendspinGroup:
         """
         if self._push_stream is not None:
             self._push_stream.stop()
+
+    def _get_codec_header_b64(self, fmt: AudioFormat) -> str | None:
+        """Generate codec header (base64) for a target format if applicable."""
+        try:
+            pipeline_manager = PipelineManager()
+            # Source format is only used for resampling; header depends on target.
+            source_format = AudioFormat(
+                sample_rate=fmt.sample_rate,
+                bit_depth=fmt.bit_depth,
+                channels=fmt.channels,
+                codec=AudioCodec.PCM,
+            )
+            key = pipeline_manager.add_pipeline(
+                channel_id=MAIN_CHANNEL,
+                source_format=source_format,
+                target_format=fmt,
+            )
+            return pipeline_manager.get_codec_header_b64(key)
+        except Exception:
+            logger.exception("Failed to generate codec header for %s", fmt)
+            return None
 
     def _send_group_update_to_clients(self) -> None:
         """Send group/update and server/state messages to all clients."""
@@ -1184,6 +1213,77 @@ class SendspinGroup:
         request: StreamRequestFormatPayload,
     ) -> None:
         """Handle stream/request-format from a client and send stream/start."""
+        if request.player:
+            if not client.check_role(Roles.PLAYER):
+                raise ValueError(
+                    f"Client {client.client_id} sent player format request "
+                    "but does not have player role"
+                )
+            if client.info.player_support is None:
+                raise ValueError(
+                    f"Client {client.client_id} sent player format request "
+                    "but has no player support"
+                )
+
+            supported = client.info.player_support.supported_formats
+            record = self._server.player_registry.get_or_create(client.client_id)
+
+            # Start with current preferred format (if any), otherwise the client's top preference.
+            base = record.preferred_format or AudioFormat(
+                codec=supported[0].codec,
+                sample_rate=supported[0].sample_rate,
+                bit_depth=supported[0].bit_depth,
+                channels=supported[0].channels,
+            )
+
+            player_req = request.player
+            requested = AudioFormat(
+                codec=player_req.codec or base.codec,
+                sample_rate=player_req.sample_rate or base.sample_rate,
+                bit_depth=player_req.bit_depth or base.bit_depth,
+                channels=player_req.channels or base.channels,
+            )
+
+            # Validate requested format is supported; fall back to client's top preference.
+            if not any(
+                fmt.codec == requested.codec
+                and fmt.sample_rate == requested.sample_rate
+                and fmt.bit_depth == requested.bit_depth
+                and fmt.channels == requested.channels
+                for fmt in supported
+            ):
+                logger.warning(
+                    "Client %s requested unsupported format %s, falling back to %s",
+                    client.client_id,
+                    requested,
+                    base,
+                )
+                requested = base
+
+            # Persist preference (also used when no stream is active).
+            record.preferred_format = requested
+
+            # If a push stream is active, inform it so next commit re-sends stream/start.
+            if self._push_stream is not None and not self._push_stream.is_stopped:
+                self._push_stream.on_format_request(client.client_id, requested)
+
+            # Ack with stream/start for the selected format.
+            codec_header_b64 = self._get_codec_header_b64(requested)
+            stream_start = StreamStartPayload(
+                player=StreamStartPlayer(
+                    codec=requested.codec,
+                    sample_rate=requested.sample_rate,
+                    channels=requested.channels,
+                    bit_depth=requested.bit_depth,
+                    codec_header=codec_header_b64,
+                )
+            )
+            logger.debug(
+                "Sending stream/start to client %s for player format change",
+                client.client_id,
+            )
+            client.send_message(StreamStartMessage(stream_start))
+
         if request.artwork:
             if not client.check_role(Roles.ARTWORK):
                 raise ValueError(
