@@ -292,7 +292,9 @@ class SendspinServer:
                 backoff *= 2
         except asyncio.CancelledError:
             pass
-        except Exception:
+        except Exception as err:
+            if not first_connection_succeeded and not initial_connect_future.done():
+                initial_connect_future.set_exception(err)
             logger.exception("Unexpected error occurred")
         finally:
             self._connection_tasks.pop(url, None)
