@@ -23,6 +23,7 @@ from zeroconf.asyncio import AsyncServiceBrowser, AsyncServiceInfo, AsyncZerocon
 from aiosendspin.models.types import Roles
 from aiosendspin.util import get_local_ip
 
+from .audio import AudioFormat
 from .client import SendspinClient
 from .player_state import PlayerRegistry
 
@@ -352,6 +353,27 @@ class SendspinServer:
             player_record.group_id = client.group.group_id
             # Clear disconnect time since we're now connected
             player_record._disconnect_time_us = None  # noqa: SLF001
+            # Update buffer capacity from client-reported capabilities
+            if client.info.player_support is not None:
+                player_record.buffer_tracker.capacity_bytes = (
+                    client.info.player_support.buffer_capacity
+                )
+                # Ensure we have a valid preferred format that the client supports.
+                supported = client.info.player_support.supported_formats
+                default_format = AudioFormat(
+                    codec=supported[0].codec,
+                    sample_rate=supported[0].sample_rate,
+                    bit_depth=supported[0].bit_depth,
+                    channels=supported[0].channels,
+                )
+                if player_record.preferred_format is None or not any(
+                    fmt.codec == player_record.preferred_format.codec
+                    and fmt.sample_rate == player_record.preferred_format.sample_rate
+                    and fmt.bit_depth == player_record.preferred_format.bit_depth
+                    and fmt.channels == player_record.preferred_format.channels
+                    for fmt in supported
+                ):
+                    player_record.preferred_format = default_format
             logger.debug(
                 "Attached player %s to PlayerRecord (group_id=%s)",
                 client.client_id,
