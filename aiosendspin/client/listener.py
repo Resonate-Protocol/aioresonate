@@ -14,7 +14,7 @@ from aiosendspin.util import get_local_ip
 logger = logging.getLogger(__name__)
 
 # Default recommended port per spec
-DEFAULT_PORT = 8927
+DEFAULT_PORT = 8928
 DEFAULT_PATH = "/sendspin"
 DEFAULT_HOST = "0.0.0.0"
 

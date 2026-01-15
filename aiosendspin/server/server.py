@@ -370,7 +370,7 @@ class SendspinServer:
 
     async def start_server(
         self,
-        port: int = 8927,
+        port: int = 8928,
         host: str = "0.0.0.0",
         advertise_addresses: list[str] | None = None,
         *,
