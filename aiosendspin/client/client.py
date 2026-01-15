@@ -59,7 +59,7 @@ class PCMFormat:
     channels: int
     """Number of audio channels (1=mono, 2=stereo)."""
     bit_depth: int
-    """Bits per sample (e.g., 8, 16, 24, 32)."""
+    """Bits per sample (e.g., 16, 24, 32)."""
 
     def __post_init__(self) -> None:
         """Validate the provided PCM audio format."""
@@ -67,8 +67,8 @@ class PCMFormat:
             raise ValueError("sample_rate must be positive")
         if self.channels not in (1, 2):
             raise ValueError("channels must be 1 or 2")
-        if self.bit_depth not in (8, 16, 24, 32):
-            raise ValueError("bit_depth must be 8, 16, 24, or 32")
+        if self.bit_depth not in (16, 24, 32):
+            raise ValueError("bit_depth must be 16, 24, or 32")
 
     @property
     def frame_size(self) -> int:

@@ -58,7 +58,7 @@ class AudioFormat:
     sample_rate: int
     """Sample rate in Hz (e.g., 44100, 48000)."""
     bit_depth: int
-    """Bit depth in bits per sample (8, 16, 24, or 32)."""
+    """Bit depth in bits per sample (16, 24, or 32)."""
     channels: int
     """Number of audio channels (1 for mono, 2 for stereo)."""
     codec: AudioCodec = AudioCodec.PCM
@@ -221,12 +221,7 @@ def _resolve_audio_format(audio_format: AudioFormat) -> tuple[int, str, str, int
         - layout: Channel layout string ("mono" or "stereo")
         - av_bytes_per_sample: Bytes per sample from PyAV resampler output
     """
-    if audio_format.bit_depth == 8:
-        # 8-bit PCM uses unsigned format (standard convention)
-        wire_bytes = 1
-        av_format = "u8"
-        av_bytes = 1
-    elif audio_format.bit_depth == 16:
+    if audio_format.bit_depth == 16:
         wire_bytes = 2
         av_format = "s16"
         av_bytes = 2
