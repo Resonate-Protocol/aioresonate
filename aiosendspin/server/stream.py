@@ -258,6 +258,8 @@ def _convert_s32_to_s24(data: bytes) -> bytes:
     Extracts upper 24 bits from each 32-bit sample by slicing out the LSB.
     Uses numpy when available (~28x faster), falls back to byte slicing.
     """
+    if len(data) % 4:
+        raise ValueError("s32 PCM buffer length must be a multiple of 4 bytes")
     if np := _get_numpy():
         if sys.byteorder == "little":
             arr = np.frombuffer(data, dtype="<i4")
