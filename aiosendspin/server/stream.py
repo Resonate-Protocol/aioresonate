@@ -279,9 +279,9 @@ def build_encoder_for_format(
         samples_per_chunk = int(audio_format.sample_rate * 0.025)
         return None, None, samples_per_chunk
 
-    if audio_format.codec == AudioCodec.FLAC and audio_format.bit_depth not in (16, 24):
+    if audio_format.codec == AudioCodec.FLAC and audio_format.bit_depth not in (16, 24, 32):
         raise ValueError(
-            f"Unsupported FLAC bit depth: {audio_format.bit_depth} (supported: 16 or 24)"
+            f"Unsupported FLAC bit depth: {audio_format.bit_depth} (supported: 16, 24, or 32)"
         )
 
     codec = "libopus" if audio_format.codec == AudioCodec.OPUS else audio_format.codec.value
