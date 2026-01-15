@@ -131,13 +131,23 @@ class PlayerClient:
     # Opus encoder constraints
     _OPUS_SAMPLE_RATES = frozenset({8000, 12000, 16000, 24000, 48000})
     _OPUS_BIT_DEPTHS = frozenset({16})  # Opus only accepts s16 input
+    _FLAC_BIT_DEPTHS = frozenset({16, 24})
+    _PCM_BIT_DEPTHS = frozenset({8, 16, 24, 32})
 
     def _is_format_supported_by_server(self, fmt: SupportedAudioFormat) -> bool:
         """Check if the server can encode to this format."""
+        if fmt.sample_rate <= 0:
+            return False
         if fmt.codec == AudioCodec.OPUS:
             if fmt.sample_rate not in self._OPUS_SAMPLE_RATES:
                 return False
             if fmt.bit_depth not in self._OPUS_BIT_DEPTHS:
+                return False
+        elif fmt.codec == AudioCodec.FLAC:
+            if fmt.bit_depth not in self._FLAC_BIT_DEPTHS:
+                return False
+        elif fmt.codec == AudioCodec.PCM:
+            if fmt.bit_depth not in self._PCM_BIT_DEPTHS:
                 return False
         return fmt.channels in (1, 2)
 

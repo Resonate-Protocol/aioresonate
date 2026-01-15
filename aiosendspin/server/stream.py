@@ -284,6 +284,11 @@ def build_encoder_for_format(
         samples_per_chunk = int(audio_format.sample_rate * 0.025)
         return None, None, samples_per_chunk
 
+    if audio_format.codec == AudioCodec.FLAC and audio_format.bit_depth not in (16, 24):
+        raise ValueError(
+            f"Unsupported FLAC bit depth: {audio_format.bit_depth} (supported: 16 or 24)"
+        )
+
     codec = "libopus" if audio_format.codec == AudioCodec.OPUS else audio_format.codec.value
 
     av = _get_av()
@@ -720,7 +725,9 @@ class Streamer:
             resampler=resampler,
             encoder=encoder,
             codec_header_b64=codec_header_b64,
-            needs_s32_to_s24_conversion=(audio_format.bit_depth == 24),
+            needs_s32_to_s24_conversion=(
+                audio_format.codec == AudioCodec.PCM and audio_format.bit_depth == 24
+            ),
         )
         self._pipelines[pipeline_key] = pipeline
         return pipeline
@@ -1417,7 +1424,11 @@ class Streamer:
             pipeline.buffer.clear()
             return
 
-        frame_stride = pipeline.target_frame_stride
+        frame_stride = (
+            pipeline.av_frame_stride
+            if pipeline.encoder is not None
+            else pipeline.target_frame_stride
+        )
         while len(pipeline.buffer) >= frame_stride:
             available_samples = len(pipeline.buffer) // frame_stride
             if not force_flush and available_samples < pipeline.chunk_samples:
