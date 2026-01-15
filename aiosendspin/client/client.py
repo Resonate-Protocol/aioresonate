@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import logging
 from collections.abc import Callable, Sequence
 from contextlib import suppress
@@ -75,6 +76,23 @@ class PCMFormat:
         return self.channels * (self.bit_depth // 8)
 
 
+@dataclass(slots=True)
+class AudioFormat:
+    """Audio format description including codec type.
+
+    For PCM, audio_data contains raw samples. For compressed codecs (FLAC, Opus),
+    audio_data contains compressed frames that must be decoded by the receiver.
+    The pcm_format describes the decoded audio characteristics.
+    """
+
+    codec: AudioCodec
+    """Audio codec used for encoding."""
+    pcm_format: PCMFormat
+    """Format of the decoded PCM audio."""
+    codec_header: bytes | None = None
+    """Optional codec-specific header data (e.g., FLAC streaminfo)."""
+
+
 # Callback invoked when server state metadata updates are received.
 MetadataCallback = Callable[[ServerStatePayload], None]
 
@@ -96,7 +114,8 @@ StreamEndCallback = Callable[[list[Roles] | None], None]
 StreamClearCallback = Callable[[list[Roles] | None], None]
 
 # Callback invoked with (server_timestamp_us, audio_data, format) when audio chunks arrive.
-AudioChunkCallback = Callable[[int, bytes, PCMFormat], None]
+# For PCM, audio_data is raw samples. For FLAC/Opus, it's compressed frames to decode.
+AudioChunkCallback = Callable[[int, bytes, AudioFormat], None]
 
 # Callback invoked when the client disconnects from the server.
 DisconnectCallback = Callable[[], None]
@@ -165,8 +184,8 @@ class SendspinClient:
 
     _current_player: StreamStartPlayer | None = None
     """Current active player configuration."""
-    _current_pcm_format: PCMFormat | None = None
-    """Current PCM audio format for active stream."""
+    _current_audio_format: AudioFormat | None = None
+    """Current audio format for active stream (includes codec info)."""
     _stream_active: bool = False
     """True if stream is active (stream/start received, stream/end not yet received)."""
 
@@ -392,7 +411,7 @@ class SendspinClient:
         self._group_state = None
         self._server_state = None
         self._stream_active = False
-        self._current_pcm_format = None
+        self._current_audio_format = None
         self._current_player = None
 
         # Notify disconnect callback
@@ -700,15 +719,18 @@ class SendspinClient:
             logger.debug("Stream start message without player payload")
             return
 
-        if player.codec != AudioCodec.PCM:
-            logger.error("Unsupported codec '%s' - only PCM is supported", player.codec.value)
+        # Accept PCM and FLAC codecs (Opus support can be added later)
+        if player.codec not in (AudioCodec.PCM, AudioCodec.FLAC):
+            logger.error(
+                "Unsupported codec '%s' - only PCM and FLAC are supported", player.codec.value
+            )
             return
 
         is_format_update = self._stream_active and self._current_player is not None
         if is_format_update:
-            logger.info("Stream format updated")
+            logger.info("Stream format updated to %s", player.codec.value)
         else:
-            logger.info("Stream started")
+            logger.info("Stream started with codec %s", player.codec.value)
             self._stream_active = True
 
         pcm_format = PCMFormat(
@@ -716,7 +738,17 @@ class SendspinClient:
             channels=player.channels,
             bit_depth=player.bit_depth,
         )
-        self._configure_audio_output(pcm_format)
+        # Decode base64 codec_header to bytes if present
+        codec_header_bytes: bytes | None = None
+        if player.codec_header:
+            codec_header_bytes = base64.b64decode(player.codec_header)
+
+        audio_format = AudioFormat(
+            codec=player.codec,
+            pcm_format=pcm_format,
+            codec_header=codec_header_bytes,
+        )
+        self._configure_audio_output(audio_format)
         self._current_player = StreamStartPlayer(
             codec=player.codec,
             sample_rate=player.sample_rate,
@@ -742,7 +774,7 @@ class SendspinClient:
         if roles is None or Roles.PLAYER in roles:
             self._stream_active = False
             self._current_player = None
-            self._current_pcm_format = None
+            self._current_audio_format = None
 
         self._notify_stream_end(roles)
 
@@ -762,15 +794,15 @@ class SendspinClient:
         """Handle server/command message."""
         self._notify_server_command_callback(payload)
 
-    def _configure_audio_output(self, pcm_format: PCMFormat) -> None:
+    def _configure_audio_output(self, audio_format: AudioFormat) -> None:
         """Store the current audio format for use in callbacks."""
-        self._current_pcm_format = pcm_format
+        self._current_audio_format = audio_format
 
     def _handle_audio_chunk(self, timestamp_us: int, payload: bytes) -> None:
         """Handle incoming audio chunk and notify callbacks."""
         if not self._audio_chunk_callbacks:
             return
-        if self._current_pcm_format is None:
+        if self._current_audio_format is None:
             logger.debug("Dropping audio chunk without format")
             return
 
@@ -778,7 +810,7 @@ class SendspinClient:
         # to allow for dynamic time base updates
         for callback in list(self._audio_chunk_callbacks):
             try:
-                callback(timestamp_us, payload, self._current_pcm_format)
+                callback(timestamp_us, payload, self._current_audio_format)
             except Exception:
                 logger.exception("Error in audio chunk callback %s", callback)
 

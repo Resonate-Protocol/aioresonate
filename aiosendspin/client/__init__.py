@@ -2,6 +2,7 @@
 
 from .client import (
     AudioChunkCallback,
+    AudioFormat,
     DisconnectCallback,
     GroupUpdateCallback,
     MetadataCallback,
@@ -16,6 +17,7 @@ from .time_sync import SendspinTimeFilter
 
 __all__ = [
     "AudioChunkCallback",
+    "AudioFormat",
     "ClientListener",
     "DisconnectCallback",
     "GroupUpdateCallback",
