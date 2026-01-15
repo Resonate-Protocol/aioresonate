@@ -255,7 +255,7 @@ def _resolve_audio_format(audio_format: AudioFormat) -> tuple[int, str, str, int
 def _convert_s32_to_s24(data: bytes) -> bytes:
     """Convert 32-bit samples to packed 24-bit samples.
 
-    Extracts upper 24 bits from each 32-bit sample by slicing out the LSB.
+    Extracts the upper 24 bits from each 32-bit sample by dropping the LSB.
     Uses numpy when available (~28x faster), falls back to byte slicing.
     """
     if len(data) % 4:
