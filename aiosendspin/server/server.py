@@ -177,12 +177,19 @@ class SendspinServer:
         assert isinstance(websocket, web.WebSocketResponse)
         return websocket
 
-    def connect_to_client(self, url: str) -> None:
+    async def connect_to_client(self, url: str) -> None:
         """
         Connect to the Sendspin client at the given URL.
 
         If an active connection already exists for this URL, nothing will happen.
-        In case a connection attempt fails, a new connection will be attempted automatically.
+        If the initial connection fails, an exception is raised.
+        In case of disconnection after a successful connection, reconnection will
+        be attempted automatically.
+
+        Raises:
+            ClientConnectionError: If the initial connection to the client fails.
+            ClientResponseError: If the client responds with an error HTTP status.
+            TimeoutError: If the initial connection times out.
         """
         logger.debug("Connecting to client at URL: %s", url)
         prev_task = self._connection_tasks.get(url)
@@ -192,12 +199,19 @@ class SendspinServer:
             if retry_event := self._retry_events.get(url):
                 logger.debug("Signaling immediate retry for URL: %s", url)
                 retry_event.set()
-        else:
-            # Create retry event for this connection
-            self._retry_events[url] = asyncio.Event()
-            self._connection_tasks[url] = self._loop.create_task(
-                self._handle_client_connection(url)
-            )
+            return
+
+        # Create a future to wait for initial connection result
+        initial_connect_future: asyncio.Future[None] = self._loop.create_future()
+
+        # Create retry event for this connection
+        self._retry_events[url] = asyncio.Event()
+        self._connection_tasks[url] = self._loop.create_task(
+            self._handle_client_connection(url, initial_connect_future)
+        )
+
+        # Wait for initial connection to complete or fail
+        await initial_connect_future
 
     def disconnect_from_client(self, url: str) -> None:
         """
@@ -213,11 +227,13 @@ class SendspinServer:
             logger.debug("Disconnecting from client at URL: %s", url)
             connection_task.cancel()
 
-    async def _handle_client_connection(self, url: str) -> None:
+    async def _handle_client_connection(  # noqa: PLR0915
+        self, url: str, initial_connect_future: asyncio.Future[None]
+    ) -> None:
         """Handle the actual connection to a client."""
-        # Exponential backoff settings
         backoff = 1.0
         max_backoff = 300.0  # 5 minutes
+        first_connection_succeeded = False
 
         try:
             while True:
@@ -231,7 +247,11 @@ class SendspinServer:
                         # Pyright doesn't recognise the signature
                         timeout=ClientWSTimeout(ws_close=10, ws_receive=60),  # pyright: ignore[reportCallIssue]
                     ) as wsock:
-                        # Reset backoff on successful connect
+                        # Signal initial connection success
+                        if not first_connection_succeeded:
+                            first_connection_succeeded = True
+                            if not initial_connect_future.done():
+                                initial_connect_future.set_result(None)
                         backoff = 1.0
                         client = SendspinClient(
                             self,
@@ -240,16 +260,17 @@ class SendspinServer:
                             wsock_client=wsock,
                         )
                         await client._handle_client()  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
-                    if self._client_session.closed:
-                        logger.debug("Client session closed, stopping connection task for %s", url)
-                        break
-                    if client.closing:
+                    if self._client_session.closed or (client and client.closing):
                         break
                 except asyncio.CancelledError:
-                    break
-                except TimeoutError:
-                    logger.debug("Connection task for %s timed out", url)
-                except (ClientConnectionError, ClientResponseError) as err:
+                    if not initial_connect_future.done():
+                        initial_connect_future.cancel()
+                    raise
+                except (TimeoutError, ClientConnectionError, ClientResponseError) as err:
+                    if not first_connection_succeeded:
+                        if not initial_connect_future.done():
+                            initial_connect_future.set_exception(err)
+                        return
                     logger.debug("Connection task for %s failed: %s", url, err)
 
                 if backoff >= max_backoff:
@@ -260,27 +281,24 @@ class SendspinServer:
                 # Use asyncio.wait_for with the retry event to allow immediate retry
                 if retry_event is not None:
                     try:
-                        # Always returns True when event is set
                         await asyncio.wait_for(retry_event.wait(), timeout=backoff)
                         logger.debug("Immediate retry requested for %s", url)
-                        # Clear the event for next time
                         retry_event.clear()
                     except TimeoutError:
-                        # Normal timeout, continue with exponential backoff
-                        pass
+                        pass  # Normal timeout, continue with exponential backoff
                 else:
                     await asyncio.sleep(backoff)
 
-                # Increase backoff for next retry (exponential)
                 backoff *= 2
         except asyncio.CancelledError:
             pass
-        except Exception:
-            # NOTE: Intentional catch-all to log unexpected exceptions so they are visible.
+        except Exception as err:
+            if not first_connection_succeeded and not initial_connect_future.done():
+                initial_connect_future.set_exception(err)
             logger.exception("Unexpected error occurred")
         finally:
-            self._connection_tasks.pop(url, None)  # Cleanup connection tasks dict
-            self._retry_events.pop(url, None)  # Cleanup retry events dict
+            self._connection_tasks.pop(url, None)
+            self._retry_events.pop(url, None)
 
     def add_event_listener(
         self, callback: Callable[[SendspinServer, SendspinEvent], None]
@@ -587,7 +605,11 @@ class SendspinServer:
         logger.debug("mDNS discovered client at %s", url)
         # Track the URL for this service so we can disconnect when removed
         self._mdns_client_urls[name] = url
-        self.connect_to_client(url)
+        try:
+            await self.connect_to_client(url)
+        except (ClientConnectionError, ClientResponseError, TimeoutError) as err:
+            # Log but continue - client may become available later via mDNS update
+            logger.debug("Initial connection to mDNS discovered client at %s failed: %s", url, err)
 
     def _handle_service_removed(self, name: str) -> None:
         """Handle an mDNS service being removed."""
