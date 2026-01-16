@@ -127,7 +127,8 @@ class ClientHelloPayload(DataClassORJSONMixin):
         player_role_supported = Roles.PLAYER.value in self.supported_roles
         if player_role_supported and self.player_support is None:
             raise ValueError(
-                "player_support must be provided when 'player' role is in supported_roles"
+                "player@v1_support (player_support alias) must be provided when "
+                "'player@v1' is in supported_roles"
             )
         if not player_role_supported:
             self.player_support = None
@@ -136,7 +137,8 @@ class ClientHelloPayload(DataClassORJSONMixin):
         artwork_role_supported = Roles.ARTWORK.value in self.supported_roles
         if artwork_role_supported and self.artwork_support is None:
             raise ValueError(
-                "artwork_support must be provided when 'artwork' role is in supported_roles"
+                "artwork@v1_support (artwork_support alias) must be provided when "
+                "'artwork@v1' is in supported_roles"
             )
         if not artwork_role_supported:
             self.artwork_support = None
@@ -145,7 +147,8 @@ class ClientHelloPayload(DataClassORJSONMixin):
         visualizer_role_supported = Roles.VISUALIZER.value in self.supported_roles
         if visualizer_role_supported and self.visualizer_support is None:
             raise ValueError(
-                "visualizer_support must be provided when 'visualizer' role is in supported_roles"
+                "visualizer@v1_support (visualizer_support alias) must be provided when "
+                "'visualizer@v1' is in supported_roles"
             )
         if not visualizer_role_supported:
             self.visualizer_support = None

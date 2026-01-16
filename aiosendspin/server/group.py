@@ -1210,7 +1210,11 @@ class SendspinGroup:
         client: SendspinClient,
         request: StreamRequestFormatPayload,
     ) -> None:
-        """Handle stream/request-format from a client and send stream/start."""
+        """Handle stream/request-format from a client.
+
+        If a PushStream is active, format switching is delegated to the stream/role
+        layer so stream/start(new) is emitted at a safe boundary.
+        """
         if request.player:
             if not client.check_role(Roles.PLAYER):
                 raise ValueError(
