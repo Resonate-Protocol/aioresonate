@@ -566,7 +566,7 @@ class SendspinClient:
             client_id=self._client_id,
             name=self._client_name,
             version=1,
-            supported_roles=self._roles,
+            supported_roles=[r.value for r in self._roles],
             device_info=self._device_info,
             player_support=self._player_support,
             artwork_support=self._artwork_support,

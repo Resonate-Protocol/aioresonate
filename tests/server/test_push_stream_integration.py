@@ -77,7 +77,7 @@ class TestFullStreamingFlow:
             client_id=client_id,
             name=f"Test Player {client_id}",
             version=1,
-            supported_roles=[Roles.PLAYER],
+            supported_roles=[Roles.PLAYER.value],
             player_support=ClientHelloPlayerSupport(
                 supported_formats=[
                     SupportedAudioFormat(
@@ -358,7 +358,7 @@ class TestMultiChannelStreaming:
             client_id=client_id,
             name=f"Test Player {client_id}",
             version=1,
-            supported_roles=[Roles.PLAYER],
+            supported_roles=[Roles.PLAYER.value],
             player_support=ClientHelloPlayerSupport(
                 supported_formats=[
                     SupportedAudioFormat(
@@ -480,7 +480,7 @@ class TestBackpressureIntegration:
             client_id=client_id,
             name=f"Test Player {client_id}",
             version=1,
-            supported_roles=[Roles.PLAYER],
+            supported_roles=[Roles.PLAYER.value],
             player_support=ClientHelloPlayerSupport(
                 supported_formats=[
                     SupportedAudioFormat(

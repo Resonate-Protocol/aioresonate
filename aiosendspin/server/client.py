@@ -35,6 +35,8 @@ from aiosendspin.models.types import (
     PlaybackStateType,
     Roles,
     ServerMessage,
+    has_role,
+    negotiate_active_roles,
 )
 
 from .controller import ControllerClient
@@ -128,7 +130,7 @@ class SendspinClient:
     _handle_client_connect: Callable[["SendspinClient"], Coroutine[Any, Any, None]]
     _handle_client_disconnect: Callable[["SendspinClient"], None]
     _logger: logging.Logger
-    _roles: list[Roles]
+    _roles: list[str]
     _player: PlayerClient | None = None
     _controller: ControllerClient | None = None
     _metadata_client: MetadataClient | None = None
@@ -279,23 +281,23 @@ class SendspinClient:
         return self._wsock_client is not None
 
     @property
-    def roles(self) -> list[Roles]:
-        """List of roles this client supports."""
+    def roles(self) -> list[str]:
+        """List of versioned role IDs this client has active."""
         return self._roles
 
     def check_role(self, role: Roles) -> bool:
-        """Check if the client supports a specific role."""
-        return role in self._roles
+        """Check if the client has a role active (by role family)."""
+        return has_role(role.value, self._roles)
 
     def _ensure_role(self, role: Roles) -> None:
-        """Raise a ValueError if the client does not support a specific role."""
-        if role not in self._roles:
-            raise ValueError(f"Client does not support role: {role}")
+        """Raise a ValueError if the client does not have a role active."""
+        if not has_role(role.value, self._roles):
+            raise ValueError(f"Client does not have role: {role}")
 
     @property
     def player(self) -> PlayerClient | None:
         """Return the attached player instance, if available."""
-        if self._player is None and Roles.PLAYER in self._roles:
+        if self._player is None and has_role(Roles.PLAYER.value, self._roles):
             self._player = PlayerClient(self)
         return self._player
 
@@ -344,7 +346,7 @@ class SendspinClient:
 
     def requires_initial_state(self) -> bool:
         """Check if this client's roles require sending initial state."""
-        return Roles.PLAYER in self._roles
+        return has_role(Roles.PLAYER.value, self._roles)
 
     def _initial_state_timeout_callback(self) -> None:
         """
@@ -530,19 +532,19 @@ class SendspinClient:
                     return
 
                 self._client_info = client_info
-                self._roles = client_info.supported_roles
+                self._roles = negotiate_active_roles(client_info.supported_roles)
                 self._client_id = client_info.client_id
                 self._logger.info("Client ID set to %s", self._client_id)
                 self._logger = logger.getChild(self._client_id)
 
-                # Initialize role helpers based on supported roles
-                if Roles.PLAYER in self._roles:
+                # Initialize role helpers based on negotiated active roles
+                if has_role(Roles.PLAYER.value, self._roles):
                     self._player = PlayerClient(self)
-                if Roles.CONTROLLER in self._roles:
+                if has_role(Roles.CONTROLLER.value, self._roles):
                     self._controller = ControllerClient(self)
-                if Roles.METADATA in self._roles:
+                if has_role(Roles.METADATA.value, self._roles):
                     self._metadata_client = MetadataClient(self)
-                if Roles.VISUALIZER in self._roles:
+                if has_role(Roles.VISUALIZER.value, self._roles):
                     self._visualizer = VisualizerClient(self)
 
                 self._logger.debug("Sending server/hello in response to client/hello")

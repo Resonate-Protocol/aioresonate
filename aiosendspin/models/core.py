@@ -38,6 +38,7 @@ from .types import (
     PlaybackStateType,
     Roles,
     ServerMessage,
+    has_role,
 )
 from .visualizer import (
     ClientHelloVisualizerSupport,
@@ -86,8 +87,8 @@ class ClientHelloPayload(DataClassORJSONMixin):
     """Friendly name of the client."""
     version: int
     """Version that the Sendspin client implements."""
-    supported_roles: list[Roles]
-    """List of roles the client supports."""
+    supported_roles: list[str]
+    """List of versioned role IDs the client supports (e.g., 'player@v1')."""
     device_info: DeviceInfo | None = None
     """Optional information about the device."""
     player_support: Annotated[ClientHelloPlayerSupport | None, Alias("player@v1_support")] = None
@@ -121,7 +122,7 @@ class ClientHelloPayload(DataClassORJSONMixin):
     def __post_init__(self) -> None:
         """Enforce that support configs match supported roles."""
         # Validate player role and support configuration
-        player_role_supported = Roles.PLAYER in self.supported_roles
+        player_role_supported = has_role(Roles.PLAYER.value, self.supported_roles)
         if player_role_supported and self.player_support is None:
             raise ValueError(
                 "player_support must be provided when 'player' role is in supported_roles"
@@ -130,7 +131,7 @@ class ClientHelloPayload(DataClassORJSONMixin):
             self.player_support = None
 
         # Validate artwork role and support configuration
-        artwork_role_supported = Roles.ARTWORK in self.supported_roles
+        artwork_role_supported = has_role(Roles.ARTWORK.value, self.supported_roles)
         if artwork_role_supported and self.artwork_support is None:
             raise ValueError(
                 "artwork_support must be provided when 'artwork' role is in supported_roles"
@@ -139,7 +140,7 @@ class ClientHelloPayload(DataClassORJSONMixin):
             self.artwork_support = None
 
         # Validate visualizer role and support configuration
-        visualizer_role_supported = Roles.VISUALIZER in self.supported_roles
+        visualizer_role_supported = has_role(Roles.VISUALIZER.value, self.supported_roles)
         if visualizer_role_supported and self.visualizer_support is None:
             raise ValueError(
                 "visualizer_support must be provided when 'visualizer' role is in supported_roles"
@@ -259,8 +260,8 @@ class ServerHelloPayload(DataClassORJSONMixin):
     """Friendly name of the server"""
     version: int
     """Version of the core message format (independent of role versions)."""
-    active_roles: list[Roles]
-    """Versioned roles that are active for this client (e.g., player@v1, controller@v1)."""
+    active_roles: list[str]
+    """Versioned role IDs active for this client (e.g., 'player@v1', 'controller@v1')."""
     connection_reason: ConnectionReason
     """Reason for this connection (relevant for multi-server environments)."""
 

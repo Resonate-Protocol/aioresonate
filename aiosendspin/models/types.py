@@ -194,3 +194,78 @@ class GoodbyeReason(Enum):
     """Client is restarting and will reconnect."""
     USER_REQUEST = "user_request"
     """User explicitly requested to disconnect from this server."""
+
+
+# Role ID helpers for spec-compliant role negotiation
+# Wire format uses versioned strings like "player@v1", not the Roles enum directly
+
+
+def role_family(role_id: str) -> str:
+    """Extract role family from a versioned role ID.
+
+    Examples:
+        role_family("player@v1") -> "player"
+        role_family("controller@v2") -> "controller"
+    """
+    return role_id.split("@", 1)[0]
+
+
+def has_role(role_id: str, supported_roles: list[str]) -> bool:
+    """Check if a role family is present in the supported roles list.
+
+    Checks by family name, so "player@v2" in supported_roles matches
+    a check for "player@v1" family.
+
+    Examples:
+        has_role("player@v1", ["player@v1", "metadata@v1"]) -> True
+        has_role("player@v1", ["controller@v1"]) -> False
+    """
+    target_family = role_family(role_id)
+    return any(role_family(r) == target_family for r in supported_roles)
+
+
+# Server-supported role implementations (versioned)
+# Add new versions here as they are implemented
+SUPPORTED_ROLE_VERSIONS: dict[str, str] = {
+    # family -> highest supported version
+    "player": "player@v1",
+    "controller": "controller@v1",
+    "metadata": "metadata@v1",
+    "artwork": "artwork@v1",
+    "visualizer": "visualizer@v1",
+}
+
+
+def negotiate_active_roles(client_supported_roles: list[str]) -> list[str]:
+    """Negotiate active roles from client's supported roles.
+
+    For each role family the client supports, select the highest version
+    that both client and server support. Unknown role families are ignored.
+
+    Args:
+        client_supported_roles: Versioned role IDs from client/hello
+            (e.g., ["player@v1", "metadata@v1"])
+
+    Returns:
+        List of negotiated versioned role IDs for server/hello active_roles
+    """
+    active: dict[str, str] = {}
+
+    for client_role_id in client_supported_roles:
+        family = role_family(client_role_id)
+
+        # Skip if we already negotiated this family
+        if family in active:
+            continue
+
+        # Skip if server doesn't support this role family
+        if family not in SUPPORTED_ROLE_VERSIONS:
+            continue
+
+        # For now, we only support v1 of each role, so just check
+        # if the client supports the same version we do
+        server_role_id = SUPPORTED_ROLE_VERSIONS[family]
+        if client_role_id == server_role_id:
+            active[family] = server_role_id
+
+    return list(active.values())
