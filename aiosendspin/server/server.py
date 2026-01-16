@@ -121,7 +121,8 @@ class SendspinServer:
             client_session: Optional ClientSession for outgoing connections.
                 If None, a new session will be created.
         """
-        self._clients = set()
+        self._clients: set[SendspinClient] = set()
+        self._pending_clients: set[SendspinClient] = set()
         self._loop = loop
         self._event_cbs = []
         self._id = server_id
@@ -169,7 +170,11 @@ class SendspinServer:
             handle_client_disconnect=self._handle_client_disconnect,
             request=request,
         )
-        await client._handle_client()  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+        self._pending_clients.add(client)
+        try:
+            await client._handle_client()  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+        finally:
+            self._pending_clients.discard(client)
 
         websocket = client.websocket_connection
         # This is a WebSocketResponse since we just created client
@@ -488,6 +493,20 @@ class SendspinServer:
         # Cancel all connection tasks to prevent reconnection attempts
         for task in self._connection_tasks.values():
             task.cancel()
+
+        # Close websockets for pending clients (still in handshake phase)
+        # This allows their handlers to complete and unblock tcp_site.stop()
+        # Use a short timeout to avoid blocking if clients don't respond quickly
+        for client in list(self._pending_clients):
+            wsock = client._wsock_server  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+            if wsock is not None and not wsock.closed:
+                logger.debug("Closing pending client connection")
+                try:
+                    async with asyncio.timeout(1.0):
+                        await wsock.close()
+                except TimeoutError:
+                    logger.debug("Timeout closing pending client websocket")
+                    # Transport will be closed by tcp_site.stop() anyway
 
         # Disconnect all clients before stopping the server
         clients = list(self.clients)
