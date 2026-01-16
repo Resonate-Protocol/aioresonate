@@ -251,7 +251,8 @@ class PlayerRole(Role):
 
         Used when playback stops completely.
         """
-        stream_end = StreamEndMessage(payload=StreamEndPayload(roles=["player"]))
+        # End all streams (roles omitted) for best client compatibility.
+        stream_end = StreamEndMessage(payload=StreamEndPayload(roles=None))
         self._connection.send_message(stream_end)
 
         # Reset stream state

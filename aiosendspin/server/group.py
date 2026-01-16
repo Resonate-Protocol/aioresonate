@@ -803,7 +803,7 @@ class SendspinGroup:
         header = pack_binary_header_raw(message_type, int(self._server.loop.time() * 1_000_000))
 
         if image is None:
-            client.send_message(header)
+            client.try_send_binary(header)
         else:
             channel_state = client_state[channel]
             # Process and encode image in thread to avoid blocking event loop
@@ -814,7 +814,7 @@ class SendspinGroup:
                 channel_state.media_height,
                 channel_state.format,
             )
-            client.send_message(header + img_data)
+            client.try_send_binary(header + img_data)
 
     def _process_and_encode_image(
         self,

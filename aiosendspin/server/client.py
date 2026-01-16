@@ -4,6 +4,7 @@ import asyncio
 import logging
 from collections.abc import Callable, Coroutine
 from contextlib import suppress
+from dataclasses import dataclass
 from enum import Enum
 from typing import TYPE_CHECKING, Any, cast
 
@@ -23,6 +24,7 @@ from aiosendspin.models.core import (
     ServerHelloPayload,
     ServerTimeMessage,
     ServerTimePayload,
+    StreamClearMessage,
     StreamEndMessage,
     StreamRequestFormatMessage,
 )
@@ -72,6 +74,14 @@ class DisconnectBehaviour(Enum):
     """
 
 
+@dataclass(frozen=True, slots=True)
+class _BinaryFrame:
+    """Binary payload with an epoch for droppable queue semantics."""
+
+    epoch: int
+    data: bytes
+
+
 class SendspinClient:
     """
     A Client that is connected to a SendspinServer.
@@ -106,7 +116,7 @@ class SendspinClient:
     """Task responsible for sending JSON and binary data."""
     _message_loop_task: asyncio.Task[None] | None = None
     """Task responsible for receiving and processing messages."""
-    _to_write: asyncio.Queue[ServerMessage | bytes]
+    _to_write: asyncio.Queue[ServerMessage | _BinaryFrame]
     """Queue for messages to be sent to the client through the WebSocket."""
     _group: SendspinGroup
     _event_cbs: list[Callable[["SendspinClient", ClientEvent], None]]
@@ -145,6 +155,8 @@ class SendspinClient:
     """Timestamp when first audio chunk was sent, for grace period on timing warnings."""
     _last_goodbye_reason: GoodbyeReason | None = None
     """Last client/goodbye reason received for this connection (if any)."""
+    _binary_epoch: int = 0
+    """Epoch used to drop queued binary payloads (audio/art/vis) on clear/end."""
 
     def __init__(
         self,
@@ -197,6 +209,11 @@ class SendspinClient:
         self.disconnect_behaviour = DisconnectBehaviour.UNGROUP
         self._set_group(SendspinGroup(server, self))
         self._last_goodbye_reason = None
+        self._binary_epoch = 0
+
+    def drop_pending_binary(self) -> None:
+        """Drop any queued (not-yet-sent) binary payloads for this connection."""
+        self._binary_epoch += 1
 
     async def disconnect(self, *, retry_connection: bool = True) -> None:
         """Disconnect this client from the server."""
@@ -645,9 +662,13 @@ class SendspinClient:
             while not wsock.closed and not self._closing:
                 item = await self._to_write.get()
 
-                if isinstance(item, bytes):
+                if isinstance(item, _BinaryFrame):
+                    # Drop stale binary payloads (e.g., after stream/clear or stream/end).
+                    if item.epoch != self._binary_epoch:
+                        continue
+                    data = item.data
                     # Unpack binary header using helper function
-                    header = unpack_binary_header(item)
+                    header = unpack_binary_header(data)
 
                     # Only validate timestamps for audio chunks, since they are time-sensitive
                     if header.message_type == BinaryMessageType.AUDIO_CHUNK.value:
@@ -669,7 +690,7 @@ class SendspinClient:
                                 (header.timestamp_us - now),
                             )
                     try:
-                        await wsock.send_bytes(item)
+                        await wsock.send_bytes(data)
                     except ConnectionError:
                         self._logger.warning(
                             "Connection error sending binary data, ending writer task"
@@ -705,6 +726,20 @@ class SendspinClient:
         NOTE: Binary messages are directly sent to the client, you need to add the
         header yourself using pack_binary_header().
         """
+        if isinstance(message, bytes):
+            # Binary payloads are always droppable; prefer try_send_binary.
+            if (not self.try_send_binary(message)) and (not self._disconnecting):
+                # Preserve legacy behavior: queue overflow for send_message(bytes) disconnects.
+                self._logger.error("Message queue full, client too slow - disconnecting")
+                task = self._server.loop.create_task(self.disconnect(retry_connection=True))
+                task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
+            return
+
+        # For stream lifecycle messages that must take effect promptly, drop queued binary first
+        # so old audio/art/vis data doesn't keep playing after clear/end.
+        if isinstance(message, (StreamClearMessage, StreamEndMessage)):
+            self.drop_pending_binary()
+
         try:
             self._to_write.put_nowait(message)
         except asyncio.QueueFull:
@@ -715,9 +750,7 @@ class SendspinClient:
                 task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
             return
 
-        if isinstance(message, bytes):
-            pass
-        elif isinstance(message, StreamEndMessage):
+        if isinstance(message, StreamEndMessage):
             # Reset stream start time so next stream gets a fresh grace period
             self._stream_start_time_us = None
         elif not isinstance(message, ServerTimeMessage):
@@ -734,7 +767,7 @@ class SendspinClient:
             True if enqueued, False if the queue is full.
         """
         try:
-            self._to_write.put_nowait(data)
+            self._to_write.put_nowait(_BinaryFrame(epoch=self._binary_epoch, data=data))
         except asyncio.QueueFull:
             return False
         return True
