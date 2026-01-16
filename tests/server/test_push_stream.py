@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from unittest.mock import MagicMock
 from uuid import UUID
 
@@ -16,7 +17,6 @@ from aiosendspin.server.audio import AudioFormat
 from aiosendspin.server.channels import MAIN_CHANNEL, ChannelRouter
 from aiosendspin.server.player_state import PlayerRegistry
 from aiosendspin.server.push_stream import (
-    DurationMismatchError,
     PushStream,
     StreamStoppedError,
 )
@@ -299,8 +299,10 @@ class TestCommitAudio:
             await push_stream.commit_audio()
 
     @pytest.mark.asyncio
-    async def test_commit_validates_duration_alignment(self, push_stream: PushStream) -> None:
-        """commit_audio should raise if channel durations don't match."""
+    async def test_commit_warns_on_duration_misalignment(
+        self, push_stream: PushStream, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """commit_audio should warn if channel durations differ significantly."""
         fmt = AudioFormat(sample_rate=48000, bit_depth=16, channels=2, codec=AudioCodec.PCM)
         channel_a = UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
         channel_b = UUID("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb")
@@ -313,8 +315,10 @@ class TestCommitAudio:
         push_stream.prepare_audio(pcm_25ms, fmt, channel_id=channel_a)
         push_stream.prepare_audio(pcm_50ms, fmt, channel_id=channel_b)
 
-        with pytest.raises(DurationMismatchError):
+        with caplog.at_level(logging.WARNING, logger="aiosendspin.server.push_stream"):
             await push_stream.commit_audio()
+
+        assert "Channel durations differ" in caplog.text
 
     @pytest.mark.asyncio
     async def test_commit_allows_small_duration_differences(self, push_stream: PushStream) -> None:

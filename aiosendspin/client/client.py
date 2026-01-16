@@ -89,11 +89,11 @@ StreamStartCallback = Callable[[StreamStartMessage], None]
 
 # Callback invoked when audio streaming ends.
 # Receives list of roles to end, or None if all roles should be ended.
-StreamEndCallback = Callable[[list[Roles] | None], None]
+StreamEndCallback = Callable[[list[str] | None], None]
 
 # Callback invoked when stream buffers should be cleared (e.g., seek operation).
 # Receives list of roles to clear, or None if all roles should be cleared.
-StreamClearCallback = Callable[[list[Roles] | None], None]
+StreamClearCallback = Callable[[list[str] | None], None]
 
 # Callback invoked with (server_timestamp_us, audio_data, format) when audio chunks arrive.
 AudioChunkCallback = Callable[[int, bytes, PCMFormat], None]
@@ -739,7 +739,7 @@ class SendspinClient:
         logger.info("Stream ended for roles: %s", roles or "all")
 
         # If roles is None or includes player role, end the player stream
-        if roles is None or Roles.PLAYER in roles:
+        if roles is None or "player" in roles:
             self._stream_active = False
             self._current_player = None
             self._current_pcm_format = None
@@ -848,14 +848,14 @@ class SendspinClient:
             except Exception:
                 logger.exception("Error in stream start callback %s", callback)
 
-    def _notify_stream_end(self, roles: list[Roles] | None) -> None:
+    def _notify_stream_end(self, roles: list[str] | None) -> None:
         for callback in list(self._stream_end_callbacks):
             try:
                 callback(roles)
             except Exception:
                 logger.exception("Error in stream end callback %s", callback)
 
-    def _notify_stream_clear(self, roles: list[Roles] | None) -> None:
+    def _notify_stream_clear(self, roles: list[str] | None) -> None:
         for callback in list(self._stream_clear_callbacks):
             try:
                 callback(roles)

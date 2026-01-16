@@ -150,7 +150,39 @@ class SendspinServer:
             loop=self._loop,
             default_buffer_capacity=1_000_000,  # 1MB default, can be overridden per-player
         )
+        self._buffer_tracker_reset_handles: dict[str, asyncio.TimerHandle] = {}
         logger.debug("SendspinServer initialized: id=%s, name=%s", server_id, server_name)
+
+    def _cancel_buffer_tracker_reset(self, client_id: str) -> None:
+        """Cancel any scheduled BufferTracker reset for a client."""
+        handle = self._buffer_tracker_reset_handles.pop(client_id, None)
+        if handle is not None:
+            handle.cancel()
+
+    def _schedule_buffer_tracker_reset(self, client_id: str, disconnect_time_us: int) -> None:
+        """
+        Schedule a BufferTracker reset if the client stays disconnected for long enough.
+
+        This avoids overreacting to brief network blips while ensuring stale buffered-byte
+        estimates do not persist across longer disconnects.
+        """
+        # Duration-based threshold (seconds)
+        reset_after_s = 2.0
+
+        def _maybe_reset() -> None:
+            self._buffer_tracker_reset_handles.pop(client_id, None)
+            record = self._player_registry.get(client_id)
+            if record is None or record.is_connected:
+                return
+            # Only reset if this is still the same disconnect episode.
+            if record.disconnect_time_us != disconnect_time_us:
+                return
+            record.buffer_tracker.reset()
+
+        self._cancel_buffer_tracker_reset(client_id)
+        self._buffer_tracker_reset_handles[client_id] = self._loop.call_later(
+            reset_after_s, _maybe_reset
+        )
 
     def _create_web_application(self) -> web.Application:
         """
@@ -349,6 +381,8 @@ class SendspinServer:
 
         # Wire player clients to PlayerRegistry for state persistence
         if client.check_role(Roles.PLAYER):
+            # Cancel any pending BufferTracker reset from a previous disconnect.
+            self._cancel_buffer_tracker_reset(client.client_id)
             player_record = self._player_registry.get_or_create(client.client_id)
             player_record.connection = client
             player_record.group_id = client.group.group_id
@@ -399,12 +433,20 @@ class SendspinServer:
         if client.check_role(Roles.PLAYER):
             player_record = self._player_registry.get(client.client_id)
             if player_record is not None:
+                # Policy: client/goodbye implies the client intentionally ended the connection,
+                # so buffered audio should be treated as empty immediately.
+                if client.last_goodbye_reason is not None:
+                    player_record.buffer_tracker.reset()
                 # Clean up PlayerRole
                 if player_record.player_role is not None:
                     player_record.player_role.on_disconnect()
                     player_record.player_role = None
                 player_record.connection = None
-                player_record.mark_disconnected(int(self._loop.time() * 1_000_000))
+                disconnect_time_us = int(self._loop.time() * 1_000_000)
+                player_record.mark_disconnected(disconnect_time_us)
+                # Ungraceful disconnect: reset buffered-bytes estimate after a duration threshold.
+                if client.last_goodbye_reason is None:
+                    self._schedule_buffer_tracker_reset(client.client_id, disconnect_time_us)
                 logger.debug(
                     "Detached player %s from PlayerRecord (group_id preserved: %s)",
                     client.client_id,

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 from uuid import UUID
@@ -15,6 +16,8 @@ if TYPE_CHECKING:
     from aiosendspin.server.channels import ChannelRouter
     from aiosendspin.server.player_state import PlayerRecord, PlayerRegistry
     from aiosendspin.server.stream import AudioFormat
+
+_LOGGER = logging.getLogger(__name__)
 
 # Default initial delay before first audio plays (microseconds)
 DEFAULT_INITIAL_DELAY_US = 250_000  # 250ms
@@ -37,10 +40,6 @@ class CachedChunk:
 
 class StreamStoppedError(Exception):
     """Raised when trying to commit audio on a stopped stream."""
-
-
-class DurationMismatchError(Exception):
-    """Raised when prepared channels have mismatched durations."""
 
 
 class PushStream:
@@ -76,8 +75,8 @@ class PushStream:
         self._is_stopped = False
         # Pending audio per channel: channel_id -> (pcm_bytes, audio_format)
         self._channel_buffers: dict[UUID, tuple[bytes, AudioFormat]] = {}
-        # Timing state
-        self._next_chunk_start_us: int | None = None  # Initialized on first commit
+        # Per-channel timing: channel_id -> next_chunk_start_us
+        self._channel_timing: dict[UUID, int] = {}
         # Pipeline manager for encoding
         self._pipeline_manager = PipelineManager()
         # Late joiner cache: pipeline_key -> list of cached chunks
@@ -132,36 +131,36 @@ class PushStream:
         4. Sends chunks to connected players
 
         Returns:
-            The play_start_us timestamp for this commit.
+            The earliest play_start_us timestamp across all channels.
 
         Raises:
             StreamStoppedError: If the stream has been stopped.
-            DurationMismatchError: If prepared channels have mismatched durations.
         """
         # Check if stopped
         if self._is_stopped:
             raise StreamStoppedError("Cannot commit audio on a stopped stream")
 
-        # If no pending audio, return current timing
+        # If no pending audio, return earliest channel timing (or initialize)
         if not self._channel_buffers:
-            if self._next_chunk_start_us is None:
-                # Initialize timing even with no audio
-                now_us = int(self._loop.time() * 1_000_000)
-                self._next_chunk_start_us = now_us + DEFAULT_INITIAL_DELAY_US
-            return self._next_chunk_start_us
+            now_us = int(self._loop.time() * 1_000_000)
+            if not self._channel_timing:
+                # Initialize MAIN_CHANNEL timing if nothing exists
+                self._channel_timing[MAIN_CHANNEL] = now_us + DEFAULT_INITIAL_DELAY_US
+            return min(self._channel_timing.values())
 
-        # Drain channel buffers and validate duration alignment
+        # Drain channel buffers
         prepared = dict(self._channel_buffers)
         self._channel_buffers.clear()
 
-        # Calculate duration for each channel and validate alignment
+        # Calculate duration for each channel and warn on misalignment
         durations_us = self._calculate_channel_durations(prepared)
-        self._validate_duration_alignment(durations_us)
+        self._warn_duration_misalignment(durations_us)
 
-        # Initialize timing on first commit
-        if self._next_chunk_start_us is None:
-            now_us = int(self._loop.time() * 1_000_000)
-            self._next_chunk_start_us = now_us + DEFAULT_INITIAL_DELAY_US
+        # Initialize timing for new channels
+        now_us = int(self._loop.time() * 1_000_000)
+        for channel_id in prepared:
+            if channel_id not in self._channel_timing:
+                self._channel_timing[channel_id] = now_us + DEFAULT_INITIAL_DELAY_US
 
         # Calculate approximate byte count for backpressure (use total of all channels)
         total_bytes = sum(len(pcm) for pcm, _ in prepared.values())
@@ -169,22 +168,30 @@ class PushStream:
         # Apply backpressure: query connected players for wait time
         max_wait_us = self._calculate_backpressure(total_bytes)
         if max_wait_us > 0:
-            self._next_chunk_start_us += max_wait_us
+            # Shift all channel timings equally for group synchronization
+            for channel_id in self._channel_timing:
+                self._channel_timing[channel_id] += max_wait_us
 
-        # Get the play_start_us for this commit
-        play_start_us = self._next_chunk_start_us
+        # Capture play_start_us for each channel before advancing
+        channel_play_start: dict[UUID, int] = {}
+        for channel_id in prepared:
+            channel_play_start[channel_id] = self._channel_timing[channel_id]
 
-        # Advance timing by the audio duration (use first channel's duration)
-        if durations_us:
-            duration_us = next(iter(durations_us.values()))
-            self._next_chunk_start_us += duration_us
+        # Advance each channel's timing by its duration
+        for channel_id, duration_us in durations_us.items():
+            self._channel_timing[channel_id] += duration_us
 
-        # Determine required pipelines and encode
+        # Determine required pipelines and encode.
+        #
+        # NOTE: Avoid running PyAV encoding in a background thread here. In practice,
+        # PyAV/FFmpeg interactions can be sensitive to thread usage in some environments
+        # and may hang under tests. Phase 3 can reintroduce parallelism in a targeted,
+        # well-tested way (encode-only fan-out), rather than offloading the full pipeline.
         pipeline_keys = self._get_required_pipeline_keys(prepared)
         encoded_results = self._pipeline_manager.process(prepared, pipeline_keys)
 
-        # Send chunks to players
-        self._send_chunks_to_players(play_start_us, prepared, encoded_results)
+        # Send chunks to players using per-channel timestamps
+        self._send_chunks_to_players(channel_play_start, prepared, encoded_results)
 
         # Resync any dropped non-blocking players
         self._resync_dropped_players()
@@ -192,7 +199,8 @@ class PushStream:
         # Prune old chunks from cache
         self._prune_chunk_cache()
 
-        return play_start_us
+        # Return earliest play_start_us
+        return min(channel_play_start.values())
 
     def _calculate_backpressure(self, byte_count: int) -> int:
         """
@@ -231,8 +239,8 @@ class PushStream:
             durations[channel_id] = duration_us
         return durations
 
-    def _validate_duration_alignment(self, durations_us: dict[UUID, int]) -> None:
-        """Validate that all channels have approximately the same duration."""
+    def _warn_duration_misalignment(self, durations_us: dict[UUID, int]) -> None:
+        """Log a warning if channel durations differ significantly."""
         if len(durations_us) <= 1:
             return
 
@@ -240,11 +248,13 @@ class PushStream:
         min_dur = min(values)
         max_dur = max(values)
 
-        # Allow up to 5ms (5000 us) difference for rounding
+        # Warn if durations differ by more than 5ms
         tolerance_us = 5000
         if max_dur - min_dur > tolerance_us:
-            raise DurationMismatchError(
-                f"Channel durations differ by {max_dur - min_dur}us (max allowed: {tolerance_us}us)"
+            _LOGGER.warning(
+                "Channel durations differ by %dus (tolerance: %dus)",
+                max_dur - min_dur,
+                tolerance_us,
             )
 
     def _get_player_target_format(
@@ -301,7 +311,7 @@ class PushStream:
 
     def _send_chunks_to_players(
         self,
-        play_start_us: int,
+        channel_play_start: dict[UUID, int],
         prepared: dict[UUID, tuple[bytes, AudioFormat]],
         encoded_results: dict[PipelineKey, list[EncodedChunk]],
     ) -> None:
@@ -313,6 +323,11 @@ class PushStream:
         2. Find the correct pipeline
         3. Send each chunk via PlayerRole (handles stream/start, packing, buffer tracking)
         4. Cache chunks for late joiners
+
+        Args:
+            channel_play_start: Per-channel play start timestamps.
+            prepared: Prepared audio per channel.
+            encoded_results: Encoded chunks per pipeline.
         """
         for player in self._get_group_players():
             # Skip if no PlayerRole (shouldn't happen for connected players)
@@ -348,7 +363,7 @@ class PushStream:
             codec_header_b64 = self._pipeline_manager.get_codec_header_b64(key)
 
             # Send each chunk via PlayerRole (handles stream/start automatically)
-            chunk_start_us = play_start_us
+            chunk_start_us = channel_play_start[channel_id]
             for chunk in chunks:
                 # Send via PlayerRole - handles stream/start, packing, buffer tracking
                 player.player_role.send_audio(
@@ -387,6 +402,13 @@ class PushStream:
 
             send_state = player.player_role.get_send_state()
             if not send_state.needs_resync:
+                continue
+
+            # Avoid sending control messages while the connection is still congested.
+            # stream/clear is a JSON/control message and must not be dropped; if the
+            # queue is full, SendspinClient will disconnect. Instead, wait until the
+            # queue drains below the high-water mark.
+            if player.connection is None or player.connection.queue_high_water():
                 continue
 
             # Perform resync (sends stream/clear, resets state)
@@ -595,8 +617,8 @@ class PushStream:
         # Clear pending audio
         self._channel_buffers.clear()
 
-        # Reset timing
-        self._next_chunk_start_us = None
+        # Reset per-channel timing
+        self._channel_timing.clear()
 
         # Clear chunk cache
         self._chunk_cache.clear()

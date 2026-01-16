@@ -21,7 +21,6 @@ from aiosendspin.models.core import (
     StreamStartPayload,
 )
 from aiosendspin.models.player import StreamStartPlayer
-from aiosendspin.models.types import Roles
 
 if TYPE_CHECKING:
     from aiosendspin.server.client import SendspinClient
@@ -91,14 +90,12 @@ class PlayerRole(Role):
     def on_disconnect(self) -> None:
         """Clean up on disconnect.
 
-        Resets BufferTracker to clear stale buffered-bytes state,
-        ensuring accurate backpressure calculations on reconnect.
+        Note: BufferTracker reset semantics are handled at the server layer
+        (goodbye immediate, otherwise duration-based). Role-level clear/end
+        always resets, but plain disconnect does not unconditionally reset.
         """
         self._stream_started = False
         self._current_format = None
-        # Reset buffer tracker to clear stale state
-        if self._record.buffer_tracker is not None:
-            self._record.buffer_tracker.reset()
 
     @property
     def stream_started(self) -> bool:
@@ -176,7 +173,9 @@ class PlayerRole(Role):
         # Pack binary header and send
         header = pack_binary_header_raw(BinaryMessageType.AUDIO_CHUNK.value, timestamp_us)
         packed_data = header + chunk.data
-        self._connection.send_message(packed_data)
+        if not self._connection.try_send_binary(packed_data):
+            self.mark_needs_resync()
+            return False
 
         # Update send state
         self._send_state.last_sent_timestamp_us = timestamp_us
@@ -201,7 +200,13 @@ class PlayerRole(Role):
         Returns:
             True if sent successfully, False if dropped.
         """
-        self._connection.send_message(packed_data)
+        # Catch-up is also droppable binary data.
+        if not self._record.blocking and self._connection.queue_high_water():
+            self.mark_needs_resync()
+            return False
+        if not self._connection.try_send_binary(packed_data):
+            self.mark_needs_resync()
+            return False
 
         # Update send state
         self._send_state.last_sent_timestamp_us = timestamp_us
@@ -220,7 +225,7 @@ class PlayerRole(Role):
 
         Used for seek operations to discard buffered audio.
         """
-        stream_clear = StreamClearMessage(payload=StreamClearPayload(roles=[Roles.PLAYER]))
+        stream_clear = StreamClearMessage(payload=StreamClearPayload(roles=["player"]))
         self._connection.send_message(stream_clear)
 
         # Reset stream state (stream/start will be re-sent)
@@ -237,7 +242,7 @@ class PlayerRole(Role):
 
         Used when playback stops completely.
         """
-        stream_end = StreamEndMessage(payload=StreamEndPayload(roles=[Roles.PLAYER]))
+        stream_end = StreamEndMessage(payload=StreamEndPayload(roles=["player"]))
         self._connection.send_message(stream_end)
 
         # Reset stream state

@@ -38,7 +38,6 @@ from .types import (
     PlaybackStateType,
     Roles,
     ServerMessage,
-    has_role,
 )
 from .visualizer import (
     ClientHelloVisualizerSupport,
@@ -122,7 +121,10 @@ class ClientHelloPayload(DataClassORJSONMixin):
     def __post_init__(self) -> None:
         """Enforce that support configs match supported roles."""
         # Validate player role and support configuration
-        player_role_supported = has_role(Roles.PLAYER.value, self.supported_roles)
+        # Require support objects only for the exact role version we parse (e.g. "player@v1").
+        # Clients may advertise newer versions (e.g. "player@v2") which this server may not
+        # implement. Those must not trigger v1 support requirements.
+        player_role_supported = Roles.PLAYER.value in self.supported_roles
         if player_role_supported and self.player_support is None:
             raise ValueError(
                 "player_support must be provided when 'player' role is in supported_roles"
@@ -131,7 +133,7 @@ class ClientHelloPayload(DataClassORJSONMixin):
             self.player_support = None
 
         # Validate artwork role and support configuration
-        artwork_role_supported = has_role(Roles.ARTWORK.value, self.supported_roles)
+        artwork_role_supported = Roles.ARTWORK.value in self.supported_roles
         if artwork_role_supported and self.artwork_support is None:
             raise ValueError(
                 "artwork_support must be provided when 'artwork' role is in supported_roles"
@@ -140,7 +142,7 @@ class ClientHelloPayload(DataClassORJSONMixin):
             self.artwork_support = None
 
         # Validate visualizer role and support configuration
-        visualizer_role_supported = has_role(Roles.VISUALIZER.value, self.supported_roles)
+        visualizer_role_supported = Roles.VISUALIZER.value in self.supported_roles
         if visualizer_role_supported and self.visualizer_support is None:
             raise ValueError(
                 "visualizer_support must be provided when 'visualizer' role is in supported_roles"
@@ -393,8 +395,11 @@ class StreamStartMessage(ServerMessage):
     type: Literal["stream/start"] = "stream/start"
 
 
-# Roles that support stream/clear (have buffers to clear)
-STREAM_CLEAR_ROLES = frozenset({Roles.PLAYER, Roles.VISUALIZER})
+# Role family names that support stream/clear (have buffers to clear).
+STREAM_CLEAR_ROLE_FAMILIES = frozenset({"player", "visualizer"})
+
+# Role family names that support stream/end.
+STREAM_END_ROLE_FAMILIES = frozenset({"player", "artwork", "visualizer"})
 
 
 # Server -> Client: stream/clear
@@ -402,17 +407,18 @@ STREAM_CLEAR_ROLES = frozenset({Roles.PLAYER, Roles.VISUALIZER})
 class StreamClearPayload(DataClassORJSONMixin):
     """Instructs clients to clear buffers without ending the stream."""
 
-    roles: list[Roles] | None = None
+    roles: list[str] | None = None
     """Roles to clear: player, visualizer, or both. If omitted, clears both roles."""
 
     def __post_init__(self) -> None:
-        """Validate that only player and visualizer roles are specified."""
+        """Validate that only player and visualizer role families are specified."""
         if self.roles is not None:
-            invalid_roles = set(self.roles) - STREAM_CLEAR_ROLES
+            invalid_roles = set(self.roles) - STREAM_CLEAR_ROLE_FAMILIES
             if invalid_roles:
+                supported = sorted(STREAM_CLEAR_ROLE_FAMILIES)
+                invalid = sorted(invalid_roles)
                 raise ValueError(
-                    f"stream/clear only supports roles {[r.value for r in STREAM_CLEAR_ROLES]}, "
-                    f"got invalid roles: {[r.value for r in invalid_roles]}"
+                    f"stream/clear only supports roles {supported}, got invalid roles: {invalid}"
                 )
 
     class Config(BaseConfig):
@@ -458,8 +464,19 @@ class StreamRequestFormatMessage(ClientMessage):
 class StreamEndPayload(DataClassORJSONMixin):
     """Payload for stream/end message."""
 
-    roles: list[Roles] | None = None
+    roles: list[str] | None = None
     """Roles to end streams for. If omitted, ends all active streams."""
+
+    def __post_init__(self) -> None:
+        """Validate that only known role families are specified."""
+        if self.roles is not None:
+            invalid_roles = set(self.roles) - STREAM_END_ROLE_FAMILIES
+            if invalid_roles:
+                supported = sorted(STREAM_END_ROLE_FAMILIES)
+                invalid = sorted(invalid_roles)
+                raise ValueError(
+                    f"stream/end only supports roles {supported}, got invalid roles: {invalid}"
+                )
 
     class Config(BaseConfig):
         """Config for parsing json messages."""

@@ -99,6 +99,13 @@ class TestFullStreamingFlow:
             conn.sent_messages.append(msg)
 
         conn.send_message.side_effect = track_message
+
+        # Binary path: PlayerRole uses try_send_binary for droppable audio chunks
+        def track_binary(data: bytes) -> bool:
+            conn.sent_messages.append(data)
+            return True
+
+        conn.try_send_binary = MagicMock(side_effect=track_binary)
         # Non-blocking players check queue_high_water - default to False (not full)
         conn.queue_high_water = MagicMock(return_value=False)
         return conn
@@ -380,7 +387,16 @@ class TestMultiChannelStreaming:
             ),
         )
         conn.sent_messages: list = []
-        conn.send_message.side_effect = lambda msg: conn.sent_messages.append(msg)
+
+        def _send_message(msg: object) -> None:
+            conn.sent_messages.append(msg)
+
+        def _try_send_binary(data: bytes) -> bool:
+            conn.sent_messages.append(data)
+            return True
+
+        conn.send_message.side_effect = _send_message
+        conn.try_send_binary = MagicMock(side_effect=_try_send_binary)
         # Non-blocking players check queue_high_water - default to False (not full)
         conn.queue_high_water = MagicMock(return_value=False)
         return conn
@@ -513,7 +529,16 @@ class TestBackpressureIntegration:
             ),
         )
         conn.sent_messages: list = []
-        conn.send_message.side_effect = lambda msg: conn.sent_messages.append(msg)
+
+        def _send_message(msg: object) -> None:
+            conn.sent_messages.append(msg)
+
+        def _try_send_binary(data: bytes) -> bool:
+            conn.sent_messages.append(data)
+            return True
+
+        conn.send_message.side_effect = _send_message
+        conn.try_send_binary = MagicMock(side_effect=_try_send_binary)
         # Non-blocking players check queue_high_water - default to False (not full)
         conn.queue_high_water = MagicMock(return_value=False)
         return conn

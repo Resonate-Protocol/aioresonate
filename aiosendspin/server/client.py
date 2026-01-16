@@ -143,6 +143,8 @@ class SendspinClient:
     """Solo group ID created by an external_source transition."""
     _stream_start_time_us: int | None = None
     """Timestamp when first audio chunk was sent, for grace period on timing warnings."""
+    _last_goodbye_reason: GoodbyeReason | None = None
+    """Last client/goodbye reason received for this connection (if any)."""
 
     def __init__(
         self,
@@ -194,6 +196,7 @@ class SendspinClient:
         self._external_source_solo_group_id = None
         self.disconnect_behaviour = DisconnectBehaviour.UNGROUP
         self._set_group(SendspinGroup(server, self))
+        self._last_goodbye_reason = None
 
     async def disconnect(self, *, retry_connection: bool = True) -> None:
         """Disconnect this client from the server."""
@@ -628,6 +631,7 @@ class SendspinClient:
             # Goodbye message (multi-server support)
             case ClientGoodbyeMessage(payload):
                 self._logger.info("Received client/goodbye with reason: %s", payload.reason)
+                self._last_goodbye_reason = payload.reason
                 # Per spec: auto-reconnect only for 'restart' reason
                 retry = payload.reason == GoodbyeReason.RESTART
                 await self.disconnect(retry_connection=retry)
@@ -719,6 +723,22 @@ class SendspinClient:
         elif not isinstance(message, ServerTimeMessage):
             self._logger.debug("Enqueueing message: %s", type(message).__name__)
 
+    def try_send_binary(self, data: bytes) -> bool:
+        """
+        Try to enqueue a binary message without disconnecting on queue overflow.
+
+        This is intended for large, droppable binary payloads (e.g., audio chunks) where
+        dropping is preferable to tearing down the entire connection.
+
+        Returns:
+            True if enqueued, False if the queue is full.
+        """
+        try:
+            self._to_write.put_nowait(data)
+        except asyncio.QueueFull:
+            return False
+        return True
+
     def queue_high_water(self, threshold: float = 0.8) -> bool:
         """
         Check if the send queue is above the high water mark.
@@ -734,6 +754,11 @@ class SendspinClient:
             return False  # Unlimited queue
         current_size = self._to_write.qsize()
         return current_size >= max_size * threshold
+
+    @property
+    def last_goodbye_reason(self) -> GoodbyeReason | None:
+        """Return the last client/goodbye reason received for this connection, if any."""
+        return self._last_goodbye_reason
 
     def add_event_listener(
         self, callback: Callable[["SendspinClient", ClientEvent], None]

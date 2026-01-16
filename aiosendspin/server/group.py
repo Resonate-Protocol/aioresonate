@@ -454,9 +454,7 @@ class SendspinGroup:
         )
         client.send_message(StreamStartMessage(stream_info))
 
-    def _send_stream_end_msg(
-        self, client: SendspinClient, roles: list[Roles] | None = None
-    ) -> None:
+    def _send_stream_end_msg(self, client: SendspinClient, roles: list[str] | None = None) -> None:
         """Send a stream end message to a client.
 
         Args:
@@ -465,7 +463,7 @@ class SendspinGroup:
         """
         logger.debug("ending stream for %s (%s), roles=%s", client.name, client.client_id, roles)
         # Lifetime of artwork state is bound to the stream
-        if roles is None or Roles.ARTWORK in roles:
+        if roles is None or "artwork" in roles:
             self._client_artwork_state.pop(client.client_id, None)
         client.send_message(StreamEndMessage(payload=StreamEndPayload(roles=roles)))
 
@@ -1263,26 +1261,28 @@ class SendspinGroup:
             # Persist preference (also used when no stream is active).
             record.preferred_format = requested
 
-            # If a push stream is active, inform it so next commit re-sends stream/start.
+            # If a push stream is active, delegate the format switch to the stream/role layer.
+            # Sending stream/start immediately is unsafe: old-format audio may still be in flight
+            # and would then be interpreted as the new format.
             if self._push_stream is not None and not self._push_stream.is_stopped:
                 self._push_stream.on_format_request(client.client_id, requested)
-
-            # Ack with stream/start for the selected format.
-            codec_header_b64 = self._get_codec_header_b64(requested)
-            stream_start = StreamStartPayload(
-                player=StreamStartPlayer(
-                    codec=requested.codec,
-                    sample_rate=requested.sample_rate,
-                    channels=requested.channels,
-                    bit_depth=requested.bit_depth,
-                    codec_header=codec_header_b64,
+            else:
+                # No active stream: ack immediately with stream/start for the selected format.
+                codec_header_b64 = self._get_codec_header_b64(requested)
+                stream_start = StreamStartPayload(
+                    player=StreamStartPlayer(
+                        codec=requested.codec,
+                        sample_rate=requested.sample_rate,
+                        channels=requested.channels,
+                        bit_depth=requested.bit_depth,
+                        codec_header=codec_header_b64,
+                    )
                 )
-            )
-            logger.debug(
-                "Sending stream/start to client %s for player format change",
-                client.client_id,
-            )
-            client.send_message(StreamStartMessage(stream_start))
+                logger.debug(
+                    "Sending stream/start to client %s for player format change",
+                    client.client_id,
+                )
+                client.send_message(StreamStartMessage(stream_start))
 
         if request.artwork:
             if not client.check_role(Roles.ARTWORK):
@@ -1344,10 +1344,4 @@ class SendspinGroup:
                 if artwork:
                     await self._send_media_art_to_client(client, artwork, artwork_request.channel)
 
-        if request.player:
-            if not client.check_role(Roles.PLAYER):
-                raise ValueError(
-                    f"Client {client.client_id} sent player format request "
-                    "but does not have player role"
-                )
-            raise NotImplementedError("Player format changes are not yet implemented")
+        # Player format changes are handled above.
