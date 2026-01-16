@@ -66,6 +66,8 @@ class SendspinServer:
 
     _clients: set[SendspinClient]
     """All clients connected to this server."""
+    _pending_clients: set[SendspinClient]
+    """Clients that have connected but haven't completed the protocol handshake."""
     _loop: asyncio.AbstractEventLoop
     _event_cbs: list[Callable[[SendspinServer, SendspinEvent], None]]
     _connection_tasks: dict[str, asyncio.Task[None]]
