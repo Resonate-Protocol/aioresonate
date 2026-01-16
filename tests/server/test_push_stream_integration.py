@@ -99,6 +99,8 @@ class TestFullStreamingFlow:
             conn.sent_messages.append(msg)
 
         conn.send_message.side_effect = track_message
+        # Non-blocking players check queue_high_water - default to False (not full)
+        conn.queue_high_water = MagicMock(return_value=False)
         return conn
 
     def _register_player(
@@ -379,6 +381,8 @@ class TestMultiChannelStreaming:
         )
         conn.sent_messages: list = []
         conn.send_message.side_effect = lambda msg: conn.sent_messages.append(msg)
+        # Non-blocking players check queue_high_water - default to False (not full)
+        conn.queue_high_water = MagicMock(return_value=False)
         return conn
 
     @pytest.mark.asyncio
@@ -510,6 +514,8 @@ class TestBackpressureIntegration:
         )
         conn.sent_messages: list = []
         conn.send_message.side_effect = lambda msg: conn.sent_messages.append(msg)
+        # Non-blocking players check queue_high_water - default to False (not full)
+        conn.queue_high_water = MagicMock(return_value=False)
         return conn
 
     @pytest.mark.asyncio

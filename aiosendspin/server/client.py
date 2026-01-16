@@ -719,6 +719,22 @@ class SendspinClient:
         elif not isinstance(message, ServerTimeMessage):
             self._logger.debug("Enqueueing message: %s", type(message).__name__)
 
+    def queue_high_water(self, threshold: float = 0.8) -> bool:
+        """
+        Check if the send queue is above the high water mark.
+
+        Args:
+            threshold: Fraction of queue capacity (0.0-1.0) to trigger high water.
+
+        Returns:
+            True if queue is above threshold, False otherwise.
+        """
+        max_size = self._to_write.maxsize
+        if max_size <= 0:
+            return False  # Unlimited queue
+        current_size = self._to_write.qsize()
+        return current_size >= max_size * threshold
+
     def add_event_listener(
         self, callback: Callable[["SendspinClient", ClientEvent], None]
     ) -> Callable[[], None]:

@@ -146,6 +146,7 @@ class PlayerRole(Role):
         Send audio chunk with timestamp.
 
         Automatically sends stream/start if needed (format change or first chunk).
+        For non-blocking players, checks queue high water and drops if needed.
 
         Args:
             chunk: Encoded audio chunk to send.
@@ -154,8 +155,13 @@ class PlayerRole(Role):
             codec_header_b64: Optional base64-encoded codec header.
 
         Returns:
-            True if sent successfully, False if dropped (queue full).
+            True if sent successfully, False if dropped (queue high water).
         """
+        # For non-blocking players, check queue before sending
+        if not self._record.blocking and self._connection.queue_high_water():
+            self.mark_needs_resync()
+            return False
+
         # Check if we need to send stream/start (first chunk or format change)
         if not self._stream_started or self._current_format != audio_format:
             self.send_stream_start(audio_format, codec_header_b64)
@@ -167,6 +173,7 @@ class PlayerRole(Role):
 
         # Update send state
         self._send_state.last_sent_timestamp_us = timestamp_us
+        self._send_state.healthy = True
 
         # Register with buffer tracker
         chunk_end_us = timestamp_us + chunk.duration_us
@@ -250,9 +257,30 @@ class PlayerRole(Role):
 
     def mark_needs_resync(self) -> None:
         """Mark this player as needing resync (dropped audio)."""
+        self._send_state.healthy = False
         self._send_state.needs_resync = True
         self._send_state.dropped_commits += 1
 
     def clear_resync_needed(self) -> None:
         """Clear the needs_resync flag after successful resync."""
         self._send_state.needs_resync = False
+        self._send_state.healthy = True
+
+    def resync(self) -> None:
+        """
+        Resync a dropped player by clearing and restarting the stream.
+
+        Sends stream/clear, resets buffer tracker, and prepares for new stream/start.
+        The next audio send will automatically send stream/start with the correct format.
+        """
+        # Send stream/clear to discard buffered audio on client
+        self.clear_stream()
+
+        # Prepare for new stream/start on next audio send
+        # The send_audio method will send stream/start automatically
+        # We just need to clear the state so it knows to send it
+        self._stream_started = False
+        self._current_format = None
+
+        # Clear the resync flag
+        self.clear_resync_needed()

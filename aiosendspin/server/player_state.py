@@ -39,6 +39,7 @@ class PlayerRecord:
         self._client_id = client_id
         self._volume: int = 100
         self._muted: bool = False
+        self._blocking: bool = False
         self._group_id: str | None = None
         self._connection: SendspinClient | None = None
         self._player_role: PlayerRole | None = None
@@ -74,6 +75,16 @@ class PlayerRecord:
     def muted(self, value: bool) -> None:
         """Set mute state."""
         self._muted = value
+
+    @property
+    def blocking(self) -> bool:
+        """Whether this player blocks backpressure calculation."""
+        return self._blocking
+
+    @blocking.setter
+    def blocking(self, value: bool) -> None:
+        """Set blocking mode."""
+        self._blocking = value
 
     @property
     def group_id(self) -> str | None:

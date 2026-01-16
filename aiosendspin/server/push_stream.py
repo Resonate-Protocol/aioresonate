@@ -186,6 +186,9 @@ class PushStream:
         # Send chunks to players
         self._send_chunks_to_players(play_start_us, prepared, encoded_results)
 
+        # Resync any dropped non-blocking players
+        self._resync_dropped_players()
+
         # Prune old chunks from cache
         self._prune_chunk_cache()
 
@@ -193,16 +196,22 @@ class PushStream:
 
     def _calculate_backpressure(self, byte_count: int) -> int:
         """
-        Calculate backpressure delay based on player buffer capacity.
+        Calculate backpressure delay based on blocking player buffer capacity.
+
+        Only blocking players contribute to backpressure. Non-blocking players
+        are skipped and will be dropped/resynced if they fall behind.
 
         Args:
             byte_count: Approximate bytes being sent to players.
 
         Returns:
-            Maximum wait time in microseconds across all connected players.
+            Maximum wait time in microseconds across all blocking players.
         """
         max_wait_us = 0
         for player in self._get_group_players():
+            # Skip non-blocking players - they don't affect group timing
+            if not player.blocking:
+                continue
             if hasattr(player, "buffer_tracker") and player.buffer_tracker:
                 wait_us = player.buffer_tracker.time_until_capacity(byte_count)
                 max_wait_us = max(max_wait_us, wait_us)
@@ -364,13 +373,34 @@ class PushStream:
                 # Advance to next chunk
                 chunk_start_us = chunk_start_us + chunk.duration_us
 
+    def _resync_dropped_players(self) -> None:
+        """
+        Resync any non-blocking players that were dropped during send.
+
+        For each player needing resync:
+        1. Call resync() which sends stream/clear and resets state
+        2. Player will receive fresh stream/start on next commit
+        """
+        for player in self._get_group_players():
+            if player.player_role is None:
+                continue
+
+            send_state = player.player_role.get_send_state()
+            if not send_state.needs_resync:
+                continue
+
+            # Perform resync (sends stream/clear, resets state)
+            # Next audio send will automatically include stream/start
+            player.player_role.resync()
+
     async def wait_for_buffer_space(self) -> None:
         """
-        Wait until there is buffer space available on players.
+        Wait until there is buffer space available on blocking players.
 
         This is useful for throttling audio production to match
         player consumption rates. Uses an estimated chunk size
-        to determine buffer capacity needs.
+        to determine buffer capacity needs. Non-blocking players
+        are skipped (they don't affect group timing).
         """
         # Estimate chunk size: 25ms of 48kHz stereo 16-bit PCM = 4800 bytes
         # This is a reasonable default for typical audio streaming
@@ -378,6 +408,9 @@ class PushStream:
 
         max_wait_us = 0
         for player in self._get_group_players():
+            # Skip non-blocking players
+            if not player.blocking:
+                continue
             if player.buffer_tracker is not None:
                 wait_us = player.buffer_tracker.time_until_capacity(estimated_chunk_bytes)
                 max_wait_us = max(max_wait_us, wait_us)
