@@ -89,9 +89,16 @@ class PlayerRole(Role):
         self._send_state = PlayerSendState()
 
     def on_disconnect(self) -> None:
-        """Clean up on disconnect."""
+        """Clean up on disconnect.
+
+        Resets BufferTracker to clear stale buffered-bytes state,
+        ensuring accurate backpressure calculations on reconnect.
+        """
         self._stream_started = False
         self._current_format = None
+        # Reset buffer tracker to clear stale state
+        if self._record.buffer_tracker is not None:
+            self._record.buffer_tracker.reset()
 
     @property
     def stream_started(self) -> bool:
