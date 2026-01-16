@@ -65,7 +65,7 @@ class SendspinServer:
     API_PATH = "/sendspin"  # Fixed by protocol
 
     _clients: set[SendspinClient]
-    """All groups managed by this server."""
+    """All clients connected to this server."""
     _loop: asyncio.AbstractEventLoop
     _event_cbs: list[Callable[[SendspinServer, SendspinEvent], None]]
     _connection_tasks: dict[str, asyncio.Task[None]]
