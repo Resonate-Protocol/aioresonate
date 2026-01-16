@@ -9,6 +9,7 @@ from aiosendspin.server.audio import AudioFormat, BufferTracker
 
 if TYPE_CHECKING:
     from aiosendspin.server.client import SendspinClient
+    from aiosendspin.server.roles import PlayerRole
 
 
 class PlayerRecord:
@@ -40,6 +41,7 @@ class PlayerRecord:
         self._muted: bool = False
         self._group_id: str | None = None
         self._connection: SendspinClient | None = None
+        self._player_role: PlayerRole | None = None
         self._preferred_format: AudioFormat | None = None
         self._disconnect_time_us: int | None = None
         self._buffer_tracker = BufferTracker(
@@ -92,6 +94,16 @@ class PlayerRecord:
     def connection(self, value: SendspinClient | None) -> None:
         """Set the WebSocket connection."""
         self._connection = value
+
+    @property
+    def player_role(self) -> PlayerRole | None:
+        """PlayerRole for this connection, or None if disconnected."""
+        return self._player_role
+
+    @player_role.setter
+    def player_role(self, value: PlayerRole | None) -> None:
+        """Set the PlayerRole for this connection."""
+        self._player_role = value
 
     @property
     def is_connected(self) -> bool:

@@ -18,6 +18,7 @@ from aiosendspin.server.audio import AudioFormat
 from aiosendspin.server.channels import ChannelRouter
 from aiosendspin.server.player_state import PlayerRecord, PlayerRegistry
 from aiosendspin.server.push_stream import PushStream
+from aiosendspin.server.roles import PlayerRole
 
 # Standard test audio format: 48kHz stereo 16-bit
 TEST_AUDIO_FORMAT = AudioFormat(sample_rate=48000, bit_depth=16, channels=2)
@@ -105,11 +106,15 @@ class TestFullStreamingFlow:
         player_registry: PlayerRegistry,
         client_id: str,
     ) -> tuple[PlayerRecord, MagicMock]:
-        """Register a player and attach a mock connection."""
+        """Register a player and attach a mock connection with PlayerRole."""
         record = player_registry.get_or_create(client_id)
         record.group_id = "test-group"
         conn = self._create_mock_connection(client_id)
         record.connection = conn
+        # Create and attach PlayerRole for the connection
+        player_role = PlayerRole(_record=record, _connection=conn)
+        player_role.on_connect()
+        record.player_role = player_role
         return record, conn
 
     @pytest.mark.asyncio
@@ -393,12 +398,18 @@ class TestMultiChannelStreaming:
         record1.group_id = "test-group"
         conn1 = self._create_mock_connection("player-1")
         record1.connection = conn1
+        role1 = PlayerRole(_record=record1, _connection=conn1)
+        role1.on_connect()
+        record1.player_role = role1
         channel_router.set_channel("player-1", channel_a)
 
         record2 = player_registry.get_or_create("player-2")
         record2.group_id = "test-group"
         conn2 = self._create_mock_connection("player-2")
         record2.connection = conn2
+        role2 = PlayerRole(_record=record2, _connection=conn2)
+        role2.on_connect()
+        record2.player_role = role2
         channel_router.set_channel("player-2", channel_b)
 
         # Create different audio for each channel (modify content)
@@ -432,6 +443,9 @@ class TestMultiChannelStreaming:
         record.group_id = "test-group"
         conn = self._create_mock_connection("player-1")
         record.connection = conn
+        player_role = PlayerRole(_record=record, _connection=conn)
+        player_role.on_connect()
+        record.player_role = player_role
 
         # Act: Push audio to main channel (default)
         push_stream.prepare_audio(pcm_48000_stereo_16bit, TEST_AUDIO_FORMAT)
@@ -511,6 +525,10 @@ class TestBackpressureIntegration:
         record.group_id = "test-group"
         conn = self._create_mock_connection("player-1")
         record.connection = conn
+        # Create and attach PlayerRole
+        player_role = PlayerRole(_record=record, _connection=conn)
+        player_role.on_connect()
+        record.player_role = player_role
 
         # Initial state: buffer tracker is empty
         assert record.buffer_tracker is not None

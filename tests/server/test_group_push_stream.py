@@ -37,6 +37,8 @@ class TestGroupStartStream:
         client = MagicMock()
         client.client_id = "test-client"
         client.check_role.return_value = True
+        # Explicitly set player to None to prevent auto-mock creating player.volume
+        client.player = None
         return client
 
     def test_start_stream_returns_push_stream(
@@ -140,6 +142,8 @@ class TestPlayerJoinWithActiveStream:
         client.check_role.return_value = True
         client.group = MagicMock()
         client.group.stop = AsyncMock()
+        # Explicitly set player to None to prevent auto-mock creating player.volume
+        client.player = None
         return client
 
     @pytest.fixture
@@ -154,6 +158,11 @@ class TestPlayerJoinWithActiveStream:
         client.group.stop = AsyncMock()
         client.group._clients = []  # noqa: SLF001
         client.ungroup = AsyncMock()
+        # Set player to a mock with proper int values for volume calculation
+        player_mock = MagicMock()
+        player_mock.volume = 100
+        player_mock.muted = False
+        client.player = player_mock
         return client
 
     @pytest.mark.asyncio

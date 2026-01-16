@@ -8,15 +8,6 @@ from typing import TYPE_CHECKING
 from uuid import UUID
 
 from aiosendspin.models import BinaryMessageType, pack_binary_header_raw
-from aiosendspin.models.core import (
-    StreamClearMessage,
-    StreamClearPayload,
-    StreamEndMessage,
-    StreamEndPayload,
-    StreamStartMessage,
-    StreamStartPayload,
-)
-from aiosendspin.models.player import StreamStartPlayer
 from aiosendspin.server.channels import MAIN_CHANNEL
 from aiosendspin.server.pipeline import EncodedChunk, PipelineKey, PipelineManager
 
@@ -89,8 +80,6 @@ class PushStream:
         self._next_chunk_start_us: int | None = None  # Initialized on first commit
         # Pipeline manager for encoding
         self._pipeline_manager = PipelineManager()
-        # Track players that have received stream/start (by client_id)
-        self._player_started: set[str] = set()
         # Late joiner cache: pipeline_key -> list of cached chunks
         self._chunk_cache: dict[PipelineKey, list[CachedChunk]] = {}
 
@@ -308,15 +297,19 @@ class PushStream:
         encoded_results: dict[PipelineKey, list[EncodedChunk]],
     ) -> None:
         """
-        Send encoded chunks to connected players.
+        Send encoded chunks to connected players via their PlayerRole.
 
         For each connected player:
         1. Determine their channel and target format
         2. Find the correct pipeline
-        3. Send each chunk with appropriate timestamp
-        4. Register chunks with buffer tracker
+        3. Send each chunk via PlayerRole (handles stream/start, packing, buffer tracking)
+        4. Cache chunks for late joiners
         """
         for player in self._get_group_players():
+            # Skip if no PlayerRole (shouldn't happen for connected players)
+            if player.player_role is None:
+                continue
+
             # Get player's assigned channel
             channel_id = self._channel_router.get_channel(player.client_id)
 
@@ -342,27 +335,23 @@ class PushStream:
             if not chunks:
                 continue
 
-            # Send stream/start if this is first audio for this player
-            if player.client_id not in self._player_started:
-                self._send_stream_start(player, target_format, key)
-                self._player_started.add(player.client_id)
+            # Get codec header for this pipeline
+            codec_header_b64 = self._pipeline_manager.get_codec_header_b64(key)
 
-            # Send each chunk with contiguous timestamps
+            # Send each chunk via PlayerRole (handles stream/start automatically)
             chunk_start_us = play_start_us
             for chunk in chunks:
-                chunk_end_us = chunk_start_us + chunk.duration_us
+                # Send via PlayerRole - handles stream/start, packing, buffer tracking
+                player.player_role.send_audio(
+                    chunk=chunk,
+                    timestamp_us=chunk_start_us,
+                    audio_format=target_format,
+                    codec_header_b64=codec_header_b64,
+                )
 
-                # Pack binary header and send
+                # Cache chunk for late joiners (need to pack data for cache)
                 header = pack_binary_header_raw(BinaryMessageType.AUDIO_CHUNK.value, chunk_start_us)
                 packed_data = header + chunk.data
-                if player.connection is not None:
-                    player.connection.send_message(packed_data)
-
-                # Register with buffer tracker
-                if player.buffer_tracker is not None:
-                    player.buffer_tracker.register(chunk_end_us, chunk.byte_count)
-
-                # Cache chunk for late joiners
                 cached = CachedChunk(
                     timestamp_us=chunk_start_us,
                     data=packed_data,
@@ -373,42 +362,7 @@ class PushStream:
                 self._chunk_cache[key].append(cached)
 
                 # Advance to next chunk
-                chunk_start_us = chunk_end_us
-
-    def _send_stream_start(
-        self,
-        player: PlayerRecord,
-        target_format: AudioFormat,
-        pipeline_key: PipelineKey,
-    ) -> None:
-        """
-        Send stream/start message to a player.
-
-        Args:
-            player: Player to send to.
-            target_format: Audio format for this player.
-            pipeline_key: Pipeline key (for codec header lookup).
-        """
-        if player.connection is None:
-            return
-
-        # Get codec header if applicable (e.g., FLAC)
-        codec_header_b64 = self._pipeline_manager.get_codec_header_b64(pipeline_key)
-
-        # Create stream/start message
-        stream_start = StreamStartMessage(
-            payload=StreamStartPayload(
-                player=StreamStartPlayer(
-                    codec=target_format.codec,
-                    sample_rate=target_format.sample_rate,
-                    channels=target_format.channels,
-                    bit_depth=target_format.bit_depth,
-                    codec_header=codec_header_b64,
-                )
-            )
-        )
-
-        player.connection.send_message(stream_start)
+                chunk_start_us = chunk_start_us + chunk.duration_us
 
     async def wait_for_buffer_space(self) -> None:
         """
@@ -493,13 +447,13 @@ class PushStream:
         """
         Handle a player joining (late joiner catch-up).
 
-        Sends stream/start and cached chunks to the player.
+        Sends stream/start and cached chunks to the player via PlayerRole.
 
         Args:
             player_id: Player ID that joined.
         """
         player = self._player_registry.get(player_id)
-        if player is None or player.connection is None:
+        if player is None or player.player_role is None:
             return
 
         # Get cached chunks for this player
@@ -524,29 +478,27 @@ class PushStream:
         if pipeline_key is None or target_format is None:
             return
 
-        # Send stream/start
-        self._send_stream_start(player, target_format, pipeline_key)
-        self._player_started.add(player_id)
+        # Get codec header for this pipeline
+        codec_header_b64 = self._pipeline_manager.get_codec_header_b64(pipeline_key)
 
-        # Send cached chunks
+        # Send stream/start via PlayerRole
+        player.player_role.send_stream_start(target_format, codec_header_b64)
+
+        # Send cached chunks via PlayerRole
         for chunk in cached_chunks:
-            player.connection.send_message(chunk.data)
-            # Register with buffer tracker
-            if player.buffer_tracker is not None:
-                # Estimate end time from chunk timestamp + duration
-                # Since we don't store duration in CachedChunk, use a rough estimate
-                # (chunk duration is typically 25ms = 25000 us)
-                estimated_duration_us = 25_000
-                chunk_end_us = chunk.timestamp_us + estimated_duration_us
-                player.buffer_tracker.register(chunk_end_us, chunk.byte_count)
+            player.player_role.send_cached_chunk(
+                packed_data=chunk.data,
+                timestamp_us=chunk.timestamp_us,
+                byte_count=chunk.byte_count,
+            )
 
     def on_format_request(self, player_id: str, new_format: AudioFormat) -> bool:
         """
         Handle a format change request from a player.
 
         Validates the format against the player's supported formats,
-        updates the preferred format, and triggers a new stream/start
-        on the next commit.
+        updates the preferred format, and notifies PlayerRole to send
+        new stream/start on next audio.
 
         Args:
             player_id: Player ID requesting the format change.
@@ -580,8 +532,9 @@ class PushStream:
         # Update preferred format
         player.preferred_format = new_format
 
-        # Remove from _player_started so next commit sends new stream/start
-        self._player_started.discard(player_id)
+        # Notify PlayerRole of format change (triggers new stream/start on next audio)
+        if player.player_role is not None:
+            player.player_role.on_format_change(new_format)
 
         return True
 
@@ -590,25 +543,21 @@ class PushStream:
         Stop the stream.
 
         After calling stop(), commit_audio() will raise StreamStoppedError.
-        Sends stream/end message to connected players.
+        Sends stream/end message to connected players via their PlayerRole.
         """
         self._is_stopped = True
 
-        # Send stream/end to connected players and reset buffer trackers
-        stream_end = StreamEndMessage(payload=StreamEndPayload())
+        # Send stream/end via PlayerRole (handles buffer tracker reset)
         for player in self._get_group_players():
-            if player.connection is not None:
-                player.connection.send_message(stream_end)
-            # Reset buffer tracker to prevent stale data on next play
-            if player.buffer_tracker is not None:
-                player.buffer_tracker.reset()
+            if player.player_role is not None:
+                player.player_role.end_stream()
 
     def clear(self) -> None:
         """
         Clear all pending audio and reset timing.
 
         This is used for seek operations where buffered audio is discarded.
-        Sends stream/clear to connected players and resets their buffer trackers.
+        Sends stream/clear to connected players via their PlayerRole.
         """
         # Clear pending audio
         self._channel_buffers.clear()
@@ -616,16 +565,10 @@ class PushStream:
         # Reset timing
         self._next_chunk_start_us = None
 
-        # Reset player_started set (stream/start will be re-sent)
-        self._player_started.clear()
-
         # Clear chunk cache
         self._chunk_cache.clear()
 
-        # Send stream/clear and reset buffer trackers for connected players
-        stream_clear = StreamClearMessage(payload=StreamClearPayload())
+        # Send stream/clear via PlayerRole (handles buffer tracker reset)
         for player in self._get_group_players():
-            if player.connection is not None:
-                player.connection.send_message(stream_clear)
-            if player.buffer_tracker is not None:
-                player.buffer_tracker.reset()
+            if player.player_role is not None:
+                player.player_role.clear_stream()

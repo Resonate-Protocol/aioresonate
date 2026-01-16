@@ -26,6 +26,7 @@ from aiosendspin.util import get_local_ip
 from .audio import AudioFormat
 from .client import SendspinClient
 from .player_state import PlayerRegistry
+from .roles import PlayerRole
 
 logger = logging.getLogger(__name__)
 
@@ -353,6 +354,10 @@ class SendspinServer:
             player_record.group_id = client.group.group_id
             # Clear disconnect time since we're now connected
             player_record._disconnect_time_us = None  # noqa: SLF001
+            # Create and attach PlayerRole for this connection
+            player_role = PlayerRole(_record=player_record, _connection=client)
+            player_role.on_connect()
+            player_record.player_role = player_role
             # Update buffer capacity from client-reported capabilities
             if client.info.player_support is not None:
                 player_record.buffer_tracker.capacity_bytes = (
@@ -394,6 +399,10 @@ class SendspinServer:
         if client.check_role(Roles.PLAYER):
             player_record = self._player_registry.get(client.client_id)
             if player_record is not None:
+                # Clean up PlayerRole
+                if player_record.player_role is not None:
+                    player_record.player_role.on_disconnect()
+                    player_record.player_role = None
                 player_record.connection = None
                 player_record.mark_disconnected(int(self._loop.time() * 1_000_000))
                 logger.debug(

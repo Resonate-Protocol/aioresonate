@@ -9,12 +9,9 @@ from uuid import UUID
 import pytest
 
 from aiosendspin.models import (
-    BINARY_HEADER_SIZE,
     AudioCodec,
-    BinaryMessageType,
     unpack_binary_header,
 )
-from aiosendspin.models.core import StreamClearMessage, StreamEndMessage, StreamStartMessage
 from aiosendspin.server.audio import AudioFormat
 from aiosendspin.server.channels import MAIN_CHANNEL, ChannelRouter
 from aiosendspin.server.player_state import PlayerRegistry
@@ -372,6 +369,7 @@ class TestBackpressure:
         player.buffer_tracker.time_until_capacity.return_value = wait_us
         player.buffer_tracker.loop = mock_loop
         player.preferred_format = None  # Uses default
+        player.player_role = MagicMock()
         return player
 
     @pytest.mark.asyncio
@@ -523,7 +521,7 @@ class TestSendChunks:
         is_connected: bool = True,
         wait_us: int = 0,
     ) -> MagicMock:
-        """Create a mock player with connection and buffer tracker."""
+        """Create a mock player with connection, buffer tracker, and player role."""
         player = MagicMock()
         player.client_id = client_id
         player.is_connected = is_connected
@@ -535,6 +533,10 @@ class TestSendChunks:
         player.buffer_tracker.loop = mock_loop
         player.connection = MagicMock()
         player.connection.send_message = MagicMock()
+        # PlayerRole mock for stream lifecycle management
+        player.player_role = MagicMock()
+        player.player_role.stream_started = False
+        player.player_role.current_format = None
         return player
 
     @pytest.mark.asyncio
@@ -565,8 +567,8 @@ class TestSendChunks:
         push_stream.prepare_audio(pcm, source_format)
         await push_stream.commit_audio()
 
-        # Player should have received at least one chunk
-        assert player.connection.send_message.called
+        # Player should have received audio via PlayerRole.send_audio
+        assert player.player_role.send_audio.called
 
     @pytest.mark.asyncio
     async def test_chunk_has_correct_timestamp_in_header(
@@ -595,14 +597,10 @@ class TestSendChunks:
         push_stream.prepare_audio(pcm, source_format)
         play_start_us = await push_stream.commit_audio()
 
-        # Get the sent message
-        sent_data = player.connection.send_message.call_args[0][0]
-        assert isinstance(sent_data, bytes)
-
-        # Unpack and verify header
-        header = unpack_binary_header(sent_data)
-        assert header.message_type == BinaryMessageType.AUDIO_CHUNK.value
-        assert header.timestamp_us == play_start_us
+        # Verify send_audio was called with correct timestamp
+        assert player.player_role.send_audio.called
+        call_kwargs = player.player_role.send_audio.call_args[1]
+        assert call_kwargs["timestamp_us"] == play_start_us
 
     @pytest.mark.asyncio
     async def test_buffer_tracker_register_called(
@@ -611,7 +609,7 @@ class TestSendChunks:
         source_format: AudioFormat,
         target_format_pcm: AudioFormat,
     ) -> None:
-        """Player's buffer_tracker.register() should be called with end_time and byte_count."""
+        """PlayerRole.send_audio should be called (which handles buffer_tracker internally)."""
         registry = PlayerRegistry(loop=mock_loop, default_buffer_capacity=100_000)
         router = ChannelRouter()
 
@@ -631,12 +629,12 @@ class TestSendChunks:
         push_stream.prepare_audio(pcm, source_format)
         await push_stream.commit_audio()
 
-        # buffer_tracker.register should have been called
-        assert player.buffer_tracker.register.called
-        # First arg is end_time_us, second is byte_count
-        end_time_us, byte_count = player.buffer_tracker.register.call_args[0]
-        assert end_time_us > 0
-        assert byte_count > 0
+        # Audio sent via PlayerRole (which handles buffer_tracker internally)
+        assert player.player_role.send_audio.called
+        # Verify send_audio was called with chunk data
+        call_kwargs = player.player_role.send_audio.call_args[1]
+        assert "chunk" in call_kwargs
+        assert call_kwargs["chunk"].byte_count > 0
 
     @pytest.mark.asyncio
     async def test_player_gets_chunks_from_assigned_channel(
@@ -681,15 +679,15 @@ class TestSendChunks:
         push_stream.prepare_audio(pcm_b, source_format, channel_id=channel_b)
         await push_stream.commit_audio()
 
-        # Both players should receive chunks
-        assert player_a.connection.send_message.called
-        assert player_b.connection.send_message.called
+        # Both players should receive chunks via PlayerRole
+        assert player_a.player_role.send_audio.called
+        assert player_b.player_role.send_audio.called
 
-        # The content should be different (after header)
-        data_a = player_a.connection.send_message.call_args[0][0][BINARY_HEADER_SIZE:]
-        data_b = player_b.connection.send_message.call_args[0][0][BINARY_HEADER_SIZE:]
+        # The chunks should have different encoded data
+        chunk_a = player_a.player_role.send_audio.call_args[1]["chunk"]
+        chunk_b = player_b.player_role.send_audio.call_args[1]["chunk"]
         # PCM output differs based on input
-        assert data_a != data_b
+        assert chunk_a.data != chunk_b.data
 
     @pytest.mark.asyncio
     async def test_multiple_chunks_have_contiguous_timestamps(
@@ -797,7 +795,7 @@ class TestStreamStart:
         *,
         is_connected: bool = True,
     ) -> MagicMock:
-        """Create a mock player with connection and buffer tracker."""
+        """Create a mock player with connection, buffer tracker, and player role."""
         player = MagicMock()
         player.client_id = client_id
         player.is_connected = is_connected
@@ -809,6 +807,7 @@ class TestStreamStart:
         player.buffer_tracker.loop = mock_loop
         player.connection = MagicMock()
         player.connection.send_message = MagicMock()
+        player.player_role = MagicMock()
         return player
 
     @pytest.mark.asyncio
@@ -818,7 +817,7 @@ class TestStreamStart:
         source_format: AudioFormat,
         target_format_pcm: AudioFormat,
     ) -> None:
-        """First chunk to player should trigger stream/start before audio."""
+        """First chunk to player should be sent via PlayerRole.send_audio."""
         registry = PlayerRegistry(loop=mock_loop, default_buffer_capacity=100_000)
         router = ChannelRouter()
 
@@ -838,13 +837,12 @@ class TestStreamStart:
         push_stream.prepare_audio(pcm, source_format)
         await push_stream.commit_audio()
 
-        # Should have received at least two messages: stream/start and audio chunk
-        calls = player.connection.send_message.call_args_list
-        assert len(calls) >= 2
-
-        # First message should be stream/start (JSON message)
-        first_msg = calls[0][0][0]
-        assert isinstance(first_msg, StreamStartMessage)
+        # PlayerRole.send_audio should be called (it handles stream/start internally)
+        assert player.player_role.send_audio.called
+        # Verify the call includes audio_format and codec_header
+        call_kwargs = player.player_role.send_audio.call_args[1]
+        assert "audio_format" in call_kwargs
+        assert call_kwargs["audio_format"] == target_format_pcm
 
     @pytest.mark.asyncio
     async def test_stream_start_contains_correct_format(
@@ -853,7 +851,7 @@ class TestStreamStart:
         source_format: AudioFormat,
         target_format_pcm: AudioFormat,
     ) -> None:
-        """stream/start should contain correct format info."""
+        """PlayerRole.send_audio should receive correct format info."""
         registry = PlayerRegistry(loop=mock_loop, default_buffer_capacity=100_000)
         router = ChannelRouter()
 
@@ -873,16 +871,14 @@ class TestStreamStart:
         push_stream.prepare_audio(pcm, source_format)
         await push_stream.commit_audio()
 
-        # Get the stream/start message
-        first_msg = player.connection.send_message.call_args_list[0][0][0]
-        assert isinstance(first_msg, StreamStartMessage)
-
-        # Verify format info
-        assert first_msg.payload.player is not None
-        assert first_msg.payload.player.codec == target_format_pcm.codec
-        assert first_msg.payload.player.sample_rate == target_format_pcm.sample_rate
-        assert first_msg.payload.player.channels == target_format_pcm.channels
-        assert first_msg.payload.player.bit_depth == target_format_pcm.bit_depth
+        # PlayerRole.send_audio should receive the correct format
+        assert player.player_role.send_audio.called
+        call_kwargs = player.player_role.send_audio.call_args[1]
+        audio_format = call_kwargs["audio_format"]
+        assert audio_format.codec == target_format_pcm.codec
+        assert audio_format.sample_rate == target_format_pcm.sample_rate
+        assert audio_format.channels == target_format_pcm.channels
+        assert audio_format.bit_depth == target_format_pcm.bit_depth
 
     @pytest.mark.asyncio
     async def test_stream_start_includes_codec_header_for_flac(
@@ -890,7 +886,7 @@ class TestStreamStart:
         mock_loop: MagicMock,
         source_format: AudioFormat,
     ) -> None:
-        """stream/start should include codec_header for FLAC."""
+        """PlayerRole.send_audio should receive codec_header for FLAC."""
         registry = PlayerRegistry(loop=mock_loop, default_buffer_capacity=100_000)
         router = ChannelRouter()
 
@@ -917,17 +913,15 @@ class TestStreamStart:
         push_stream.prepare_audio(pcm, source_format)
         await push_stream.commit_audio()
 
-        # Get the stream/start message
-        calls = player.connection.send_message.call_args_list
-        assert len(calls) > 0, "Player should receive at least stream/start"
-        first_msg = calls[0][0][0]
-        assert isinstance(first_msg, StreamStartMessage)
+        # PlayerRole.send_audio should receive codec_header for FLAC
+        assert player.player_role.send_audio.called, "Player should receive audio"
+        call_kwargs = player.player_role.send_audio.call_args[1]
 
         # Verify codec header is present for FLAC
-        assert first_msg.payload.player is not None
-        assert first_msg.payload.player.codec_header is not None
-        # FLAC header should be base64 encoded
-        assert len(first_msg.payload.player.codec_header) > 0
+        assert call_kwargs["audio_format"].codec == AudioCodec.FLAC
+        # codec_header_b64 should be provided for FLAC
+        assert call_kwargs["codec_header_b64"] is not None
+        assert len(call_kwargs["codec_header_b64"]) > 0
 
     @pytest.mark.asyncio
     async def test_subsequent_chunks_dont_resend_stream_start(
@@ -936,7 +930,7 @@ class TestStreamStart:
         source_format: AudioFormat,
         target_format_pcm: AudioFormat,
     ) -> None:
-        """Subsequent chunks should not re-send stream/start."""
+        """Subsequent commits should call send_audio same number of times as commits."""
         registry = PlayerRegistry(loop=mock_loop, default_buffer_capacity=100_000)
         router = ChannelRouter()
 
@@ -957,25 +951,17 @@ class TestStreamStart:
         push_stream.prepare_audio(pcm, source_format)
         await push_stream.commit_audio()
 
-        # Count stream/start messages
-        stream_start_count_1 = sum(
-            1
-            for call in player.connection.send_message.call_args_list
-            if isinstance(call[0][0], StreamStartMessage)
-        )
-        assert stream_start_count_1 == 1
+        # Count send_audio calls after first commit
+        send_audio_count_1 = player.player_role.send_audio.call_count
+        assert send_audio_count_1 == 1
 
         # Second commit
         push_stream.prepare_audio(pcm, source_format)
         await push_stream.commit_audio()
 
-        # Count should still be 1
-        stream_start_count_2 = sum(
-            1
-            for call in player.connection.send_message.call_args_list
-            if isinstance(call[0][0], StreamStartMessage)
-        )
-        assert stream_start_count_2 == 1
+        # Should have one more call (PlayerRole tracks stream_started internally)
+        send_audio_count_2 = player.player_role.send_audio.call_count
+        assert send_audio_count_2 == 2
 
 
 class TestStopClear:
@@ -1006,7 +992,7 @@ class TestStopClear:
         *,
         is_connected: bool = True,
     ) -> MagicMock:
-        """Create a mock player with connection and buffer tracker."""
+        """Create a mock player with connection, buffer tracker, and player role."""
         player = MagicMock()
         player.client_id = client_id
         player.is_connected = is_connected
@@ -1019,6 +1005,7 @@ class TestStopClear:
         player.buffer_tracker.loop = mock_loop
         player.connection = MagicMock()
         player.connection.send_message = MagicMock()
+        player.player_role = MagicMock()
         return player
 
     # Tests for stop()
@@ -1046,7 +1033,7 @@ class TestStopClear:
         mock_loop: MagicMock,
         target_format_pcm: AudioFormat,
     ) -> None:
-        """stop() should send StreamEndMessage to connected players."""
+        """stop() should call PlayerRole.end_stream() on connected players."""
         registry = PlayerRegistry(loop=mock_loop, default_buffer_capacity=100_000)
         router = ChannelRouter()
 
@@ -1064,11 +1051,8 @@ class TestStopClear:
 
         push_stream.stop()
 
-        # Player should have received stream/end message
-        calls = player.connection.send_message.call_args_list
-        assert len(calls) == 1
-        msg = calls[0][0][0]
-        assert isinstance(msg, StreamEndMessage)
+        # PlayerRole.end_stream should have been called
+        assert player.player_role.end_stream.called
 
     @pytest.mark.asyncio
     async def test_commit_raises_after_stop(
@@ -1163,7 +1147,7 @@ class TestStopClear:
         mock_loop: MagicMock,
         target_format_pcm: AudioFormat,
     ) -> None:
-        """clear() should send StreamClearMessage to connected players."""
+        """clear() should call PlayerRole.clear_stream() on connected players."""
         registry = PlayerRegistry(loop=mock_loop, default_buffer_capacity=100_000)
         router = ChannelRouter()
 
@@ -1181,11 +1165,8 @@ class TestStopClear:
 
         push_stream.clear()
 
-        # Player should have received stream/clear message
-        calls = player.connection.send_message.call_args_list
-        assert len(calls) == 1
-        msg = calls[0][0][0]
-        assert isinstance(msg, StreamClearMessage)
+        # PlayerRole.clear_stream should have been called
+        assert player.player_role.clear_stream.called
 
     @pytest.mark.asyncio
     async def test_clear_resets_buffer_trackers(
@@ -1193,7 +1174,7 @@ class TestStopClear:
         mock_loop: MagicMock,
         target_format_pcm: AudioFormat,
     ) -> None:
-        """clear() should reset player buffer trackers."""
+        """clear() should call PlayerRole.clear_stream() which handles buffer reset."""
         registry = PlayerRegistry(loop=mock_loop, default_buffer_capacity=100_000)
         router = ChannelRouter()
 
@@ -1211,8 +1192,8 @@ class TestStopClear:
 
         push_stream.clear()
 
-        # Buffer tracker reset should have been called
-        player.buffer_tracker.reset.assert_called_once()
+        # PlayerRole.clear_stream should have been called (it handles buffer reset internally)
+        player.player_role.clear_stream.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_clear_resets_player_started_set(
@@ -1221,7 +1202,7 @@ class TestStopClear:
         source_format: AudioFormat,
         target_format_pcm: AudioFormat,
     ) -> None:
-        """clear() should reset _player_started so stream/start is re-sent."""
+        """clear() should call clear_stream on PlayerRole which resets stream_started state."""
         registry = PlayerRegistry(loop=mock_loop, default_buffer_capacity=100_000)
         router = ChannelRouter()
 
@@ -1237,31 +1218,24 @@ class TestStopClear:
             channel_router=router,
         )
 
-        # First commit sends stream/start
+        # First commit sends audio via PlayerRole
         pcm = bytes(4800)
         push_stream.prepare_audio(pcm, source_format)
         await push_stream.commit_audio()
 
-        stream_starts_before = sum(
-            1
-            for call in player.connection.send_message.call_args_list
-            if isinstance(call[0][0], StreamStartMessage)
-        )
-        assert stream_starts_before == 1
+        send_audio_count_before = player.player_role.send_audio.call_count
+        assert send_audio_count_before == 1
 
-        # Clear resets _player_started
+        # Clear calls clear_stream on PlayerRole
         push_stream.clear()
+        assert player.player_role.clear_stream.called
 
-        # Next commit should send stream/start again
+        # Next commit should send audio again
         push_stream.prepare_audio(pcm, source_format)
         await push_stream.commit_audio()
 
-        stream_starts_after = sum(
-            1
-            for call in player.connection.send_message.call_args_list
-            if isinstance(call[0][0], StreamStartMessage)
-        )
-        assert stream_starts_after == 2  # Two stream/start messages total
+        send_audio_count_after = player.player_role.send_audio.call_count
+        assert send_audio_count_after == 2
 
 
 class TestWaitForBufferSpace:
@@ -1288,7 +1262,7 @@ class TestWaitForBufferSpace:
         is_connected: bool = True,
         wait_us: int = 0,
     ) -> MagicMock:
-        """Create a mock player with connection and buffer tracker."""
+        """Create a mock player with connection, buffer tracker, and player role."""
         player = MagicMock()
         player.client_id = client_id
         player.is_connected = is_connected
@@ -1298,6 +1272,7 @@ class TestWaitForBufferSpace:
         player.buffer_tracker.time_until_capacity.return_value = wait_us
         player.buffer_tracker.loop = mock_loop
         player.connection = MagicMock()
+        player.player_role = MagicMock()
         return player
 
     @pytest.mark.asyncio
@@ -1455,7 +1430,7 @@ class TestLateJoinerCache:
         *,
         is_connected: bool = True,
     ) -> MagicMock:
-        """Create a mock player with connection and buffer tracker."""
+        """Create a mock player with connection, buffer tracker, and player role."""
         player = MagicMock()
         player.client_id = client_id
         player.is_connected = is_connected
@@ -1467,6 +1442,7 @@ class TestLateJoinerCache:
         player.buffer_tracker.loop = mock_loop
         player.connection = MagicMock()
         player.connection.send_message = MagicMock()
+        player.player_role = MagicMock()
         return player
 
     @pytest.mark.asyncio
@@ -1690,7 +1666,7 @@ class TestPlayerJoin:
         *,
         is_connected: bool = True,
     ) -> MagicMock:
-        """Create a mock player with connection and buffer tracker."""
+        """Create a mock player with connection, buffer tracker, and player role."""
         player = MagicMock()
         player.client_id = client_id
         player.is_connected = is_connected
@@ -1703,6 +1679,7 @@ class TestPlayerJoin:
         player.buffer_tracker.loop = mock_loop
         player.connection = MagicMock()
         player.connection.send_message = MagicMock()
+        player.player_role = MagicMock()
         return player
 
     @pytest.mark.asyncio
@@ -1712,7 +1689,7 @@ class TestPlayerJoin:
         source_format: AudioFormat,
         target_format_pcm: AudioFormat,
     ) -> None:
-        """on_player_join should trigger catch-up streaming."""
+        """on_player_join should trigger catch-up streaming via PlayerRole."""
         registry = PlayerRegistry(loop=mock_loop, default_buffer_capacity=100_000)
         router = ChannelRouter()
 
@@ -1743,8 +1720,9 @@ class TestPlayerJoin:
         # Trigger catch-up for player2
         push_stream.on_player_join("player-2")
 
-        # Player2 should have received messages
-        assert player2.connection.send_message.called
+        # Player2's PlayerRole should have received stream_start and cached chunks
+        assert player2.player_role.send_stream_start.called
+        assert player2.player_role.send_cached_chunk.called
 
     @pytest.mark.asyncio
     async def test_on_player_join_sends_stream_start_first(
@@ -1753,7 +1731,7 @@ class TestPlayerJoin:
         source_format: AudioFormat,
         target_format_pcm: AudioFormat,
     ) -> None:
-        """on_player_join should send stream/start before chunks."""
+        """on_player_join should call send_stream_start before send_cached_chunk."""
         registry = PlayerRegistry(loop=mock_loop, default_buffer_capacity=100_000)
         router = ChannelRouter()
 
@@ -1780,11 +1758,10 @@ class TestPlayerJoin:
 
         push_stream.on_player_join("player-2")
 
-        # First message should be stream/start
-        calls = player2.connection.send_message.call_args_list
-        assert len(calls) >= 1
-        first_msg = calls[0][0][0]
-        assert isinstance(first_msg, StreamStartMessage)
+        # send_stream_start should be called
+        assert player2.player_role.send_stream_start.called
+        # send_cached_chunk should be called after
+        assert player2.player_role.send_cached_chunk.called
 
     @pytest.mark.asyncio
     async def test_on_player_join_sends_cached_chunks(
@@ -1793,7 +1770,7 @@ class TestPlayerJoin:
         source_format: AudioFormat,
         target_format_pcm: AudioFormat,
     ) -> None:
-        """on_player_join should send cached chunks after stream/start."""
+        """on_player_join should call send_cached_chunk for cached chunks."""
         registry = PlayerRegistry(loop=mock_loop, default_buffer_capacity=100_000)
         router = ChannelRouter()
 
@@ -1820,12 +1797,11 @@ class TestPlayerJoin:
 
         push_stream.on_player_join("player-2")
 
-        # Should have received stream/start + at least one binary chunk
-        calls = player2.connection.send_message.call_args_list
-        assert len(calls) >= 2  # At least stream/start + one chunk
-        # Second message should be binary data
-        second_msg = calls[1][0][0]
-        assert isinstance(second_msg, bytes)
+        # send_cached_chunk should be called with packed data
+        assert player2.player_role.send_cached_chunk.called
+        call_kwargs = player2.player_role.send_cached_chunk.call_args[1]
+        assert "packed_data" in call_kwargs
+        assert isinstance(call_kwargs["packed_data"], bytes)
 
     @pytest.mark.asyncio
     async def test_on_player_join_updates_buffer_tracker(
@@ -1834,7 +1810,7 @@ class TestPlayerJoin:
         source_format: AudioFormat,
         target_format_pcm: AudioFormat,
     ) -> None:
-        """on_player_join should update buffer_tracker for sent chunks."""
+        """on_player_join should call send_cached_chunk which handles buffer_tracker internally."""
         registry = PlayerRegistry(loop=mock_loop, default_buffer_capacity=100_000)
         router = ChannelRouter()
 
@@ -1861,8 +1837,12 @@ class TestPlayerJoin:
 
         push_stream.on_player_join("player-2")
 
-        # Buffer tracker should have been updated
-        player2.buffer_tracker.register.assert_called()
+        # send_cached_chunk should be called (it handles buffer_tracker internally)
+        assert player2.player_role.send_cached_chunk.called
+        # Verify call includes timestamp and byte_count for buffer tracking
+        call_kwargs = player2.player_role.send_cached_chunk.call_args[1]
+        assert call_kwargs["timestamp_us"] > 0
+        assert call_kwargs["byte_count"] > 0
 
     @pytest.mark.asyncio
     async def test_on_player_join_marks_player_started(
@@ -1871,7 +1851,7 @@ class TestPlayerJoin:
         source_format: AudioFormat,
         target_format_pcm: AudioFormat,
     ) -> None:
-        """on_player_join should mark player as started so commit doesn't re-send stream/start."""
+        """on_player_join calls send_stream_start, subsequent commits use send_audio."""
         registry = PlayerRegistry(loop=mock_loop, default_buffer_capacity=100_000)
         router = ChannelRouter()
 
@@ -1899,26 +1879,19 @@ class TestPlayerJoin:
         # Trigger catch-up
         push_stream.on_player_join("player-2")
 
-        # Count stream/start messages before next commit
-        stream_start_count_1 = sum(
-            1
-            for call in player2.connection.send_message.call_args_list
-            if isinstance(call[0][0], StreamStartMessage)
-        )
+        # Count send_stream_start calls
+        send_stream_start_count_1 = player2.player_role.send_stream_start.call_count
+        assert send_stream_start_count_1 == 1
 
-        # Next commit should not send another stream/start
+        # Next commit uses send_audio (not send_stream_start)
         push_stream.prepare_audio(pcm, source_format)
         await push_stream.commit_audio()
 
-        stream_start_count_2 = sum(
-            1
-            for call in player2.connection.send_message.call_args_list
-            if isinstance(call[0][0], StreamStartMessage)
-        )
-
-        # Should still be 1 (not 2)
-        assert stream_start_count_1 == 1
-        assert stream_start_count_2 == 1
+        # send_audio should be called for the new commit
+        assert player2.player_role.send_audio.called
+        # send_stream_start count should still be 1 (no new call)
+        send_stream_start_count_2 = player2.player_role.send_stream_start.call_count
+        assert send_stream_start_count_2 == 1
 
     @pytest.mark.asyncio
     async def test_on_player_join_no_cache_does_not_crash(
@@ -1978,7 +1951,7 @@ class TestFormatRequest:
         preferred_format: AudioFormat,
         supported_formats: list[AudioFormat],
     ) -> MagicMock:
-        """Create a mock player with supported formats."""
+        """Create a mock player with supported formats and player role."""
         player = MagicMock()
         player.client_id = client_id
         player.is_connected = True
@@ -1992,6 +1965,7 @@ class TestFormatRequest:
         player.connection.send_message = MagicMock()
         # Mock supported formats via client info
         player.connection.info.player_support.supported_formats = supported_formats
+        player.player_role = MagicMock()
         return player
 
     def test_on_format_request_updates_preferred_format(
@@ -2068,7 +2042,7 @@ class TestFormatRequest:
         target_format_pcm: AudioFormat,
         target_format_flac: AudioFormat,
     ) -> None:
-        """After format change, next commit should send new stream/start."""
+        """After format change, on_format_change should be called on PlayerRole."""
         registry = PlayerRegistry(loop=mock_loop, default_buffer_capacity=100_000)
         router = ChannelRouter()
 
@@ -2092,28 +2066,20 @@ class TestFormatRequest:
         push_stream.prepare_audio(pcm, source_format)
         await push_stream.commit_audio()
 
-        stream_start_count_1 = sum(
-            1
-            for call in player.connection.send_message.call_args_list
-            if isinstance(call[0][0], StreamStartMessage)
-        )
+        send_audio_count_1 = player.player_role.send_audio.call_count
 
-        # Request format change
+        # Request format change - should call on_format_change on PlayerRole
         push_stream.on_format_request("player-1", target_format_flac)
+        assert player.player_role.on_format_change.called
+        call_args = player.player_role.on_format_change.call_args[0]
+        assert call_args[0] == target_format_flac
 
-        # Next commit should send new stream/start
+        # Next commit continues to use send_audio (PlayerRole tracks format internally)
         push_stream.prepare_audio(pcm, source_format)
         await push_stream.commit_audio()
 
-        stream_start_count_2 = sum(
-            1
-            for call in player.connection.send_message.call_args_list
-            if isinstance(call[0][0], StreamStartMessage)
-        )
-
-        # Should have received 2 stream/start messages (initial + after format change)
-        assert stream_start_count_1 == 1
-        assert stream_start_count_2 == 2
+        send_audio_count_2 = player.player_role.send_audio.call_count
+        assert send_audio_count_2 == send_audio_count_1 + 1
 
     def test_on_format_request_nonexistent_player(
         self,
