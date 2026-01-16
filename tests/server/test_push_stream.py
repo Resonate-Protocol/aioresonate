@@ -1801,11 +1801,13 @@ class TestPlayerJoin:
 
         push_stream.on_player_join("player-2")
 
-        # send_cached_chunk should be called with packed data
+        # send_cached_chunk should be called with raw payload + duration
         assert player2.player_role.send_cached_chunk.called
         call_kwargs = player2.player_role.send_cached_chunk.call_args[1]
-        assert "packed_data" in call_kwargs
-        assert isinstance(call_kwargs["packed_data"], bytes)
+        assert "payload" in call_kwargs
+        assert isinstance(call_kwargs["payload"], bytes)
+        assert "duration_us" in call_kwargs
+        assert isinstance(call_kwargs["duration_us"], int)
 
     @pytest.mark.asyncio
     async def test_on_player_join_updates_buffer_tracker(
@@ -1843,9 +1845,10 @@ class TestPlayerJoin:
 
         # send_cached_chunk should be called (it handles buffer_tracker internally)
         assert player2.player_role.send_cached_chunk.called
-        # Verify call includes timestamp and byte_count for buffer tracking
+        # Verify call includes timestamp, duration, and byte_count for buffer tracking
         call_kwargs = player2.player_role.send_cached_chunk.call_args[1]
         assert call_kwargs["timestamp_us"] > 0
+        assert call_kwargs["duration_us"] > 0
         assert call_kwargs["byte_count"] > 0
 
     @pytest.mark.asyncio

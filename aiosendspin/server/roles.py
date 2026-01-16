@@ -188,13 +188,20 @@ class PlayerRole(Role):
 
         return True
 
-    def send_cached_chunk(self, packed_data: bytes, timestamp_us: int, byte_count: int) -> bool:
+    def send_cached_chunk(
+        self,
+        payload: bytes,
+        timestamp_us: int,
+        duration_us: int,
+        byte_count: int,
+    ) -> bool:
         """
-        Send a pre-packed cached chunk (for late joiner catch-up).
+        Send a cached chunk (for late joiner catch-up).
 
         Args:
-            packed_data: Pre-packed binary data (header + audio).
+            payload: Encoded audio payload bytes (without binary header).
             timestamp_us: Playback timestamp for this chunk.
+            duration_us: Duration of this chunk in microseconds.
             byte_count: Size of the encoded audio (for buffer tracking).
 
         Returns:
@@ -204,6 +211,9 @@ class PlayerRole(Role):
         if not self._record.blocking and self._connection.queue_high_water():
             self.mark_needs_resync()
             return False
+
+        header = pack_binary_header_raw(BinaryMessageType.AUDIO_CHUNK.value, timestamp_us)
+        packed_data = header + payload
         if not self._connection.try_send_binary(packed_data):
             self.mark_needs_resync()
             return False
@@ -211,9 +221,8 @@ class PlayerRole(Role):
         # Update send state
         self._send_state.last_sent_timestamp_us = timestamp_us
 
-        # Register with buffer tracker (estimate duration as 25ms)
-        estimated_duration_us = 25_000
-        chunk_end_us = timestamp_us + estimated_duration_us
+        # Register with buffer tracker using the real duration.
+        chunk_end_us = timestamp_us + duration_us
         if self._record.buffer_tracker is not None:
             self._record.buffer_tracker.register(chunk_end_us, byte_count)
 

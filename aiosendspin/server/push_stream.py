@@ -8,7 +8,6 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 from uuid import UUID
 
-from aiosendspin.models import BinaryMessageType, pack_binary_header_raw
 from aiosendspin.server.channels import MAIN_CHANNEL
 from aiosendspin.server.pipeline import EncodedChunk, PipelineKey, PipelineManager
 
@@ -32,8 +31,10 @@ class CachedChunk:
 
     timestamp_us: int
     """Start timestamp for this chunk."""
-    data: bytes
-    """Encoded audio data (with binary header)."""
+    duration_us: int
+    """Duration of this chunk in microseconds."""
+    payload: bytes
+    """Encoded audio payload bytes (without binary header)."""
     byte_count: int
     """Size of encoded audio data (without header)."""
 
@@ -373,12 +374,11 @@ class PushStream:
                     codec_header_b64=codec_header_b64,
                 )
 
-                # Cache chunk for late joiners (need to pack data for cache)
-                header = pack_binary_header_raw(BinaryMessageType.AUDIO_CHUNK.value, chunk_start_us)
-                packed_data = header + chunk.data
+                # Cache chunk for late joiners (store raw payload + duration; role packs headers)
                 cached = CachedChunk(
                     timestamp_us=chunk_start_us,
-                    data=packed_data,
+                    duration_us=chunk.duration_us,
+                    payload=chunk.data,
                     byte_count=chunk.byte_count,
                 )
                 if key not in self._chunk_cache:
@@ -542,8 +542,9 @@ class PushStream:
         # Send cached chunks via PlayerRole
         for chunk in cached_chunks:
             player.player_role.send_cached_chunk(
-                packed_data=chunk.data,
+                payload=chunk.payload,
                 timestamp_us=chunk.timestamp_us,
+                duration_us=chunk.duration_us,
                 byte_count=chunk.byte_count,
             )
 
