@@ -147,6 +147,35 @@ class TestPipelineManagerAddPipeline:
         )
         assert key1 != key2
 
+    def test_encoders_not_shared_across_channels(
+        self,
+        manager: PipelineManager,
+        source_format: AudioFormat,
+        target_format_flac: AudioFormat,
+    ) -> None:
+        """
+        Encoders must not be shared across independent streams (channels).
+
+        Audio encoders are stream-stateful; sharing one encoder instance across two
+        channels can corrupt output.
+        """
+        channel_a = UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
+        channel_b = UUID("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb")
+
+        manager.add_pipeline(
+            channel_id=channel_a,
+            source_format=source_format,
+            target_format=target_format_flac,
+        )
+        manager.add_pipeline(
+            channel_id=channel_b,
+            source_format=source_format,
+            target_format=target_format_flac,
+        )
+
+        # Private state assertion: we should have one encoder per channel for the same codec/params.
+        assert len(manager._encoders) == 2  # noqa: SLF001
+
 
 class TestPipelineManagerProcess:
     """Tests for processing audio through pipelines."""

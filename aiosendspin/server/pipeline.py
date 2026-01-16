@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, NamedTuple
 
@@ -14,6 +16,19 @@ if TYPE_CHECKING:
 
     import av
 
+# Shared thread pool for CPU-bound encoding work
+_ENCODER_POOL: ThreadPoolExecutor | None = None
+
+
+def _get_encoder_pool() -> ThreadPoolExecutor:
+    """Get or create the shared encoder thread pool."""
+    global _ENCODER_POOL  # noqa: PLW0603
+    if _ENCODER_POOL is None:
+        # Use a small pool since encoding is CPU-bound and doesn't benefit
+        # from too much parallelism on typical hardware
+        _ENCODER_POOL = ThreadPoolExecutor(max_workers=4, thread_name_prefix="encoder")
+    return _ENCODER_POOL
+
 
 class PipelineKey(NamedTuple):
     """Unique key for a pipeline: (channel_id, source_format, target_format)."""
@@ -21,6 +36,33 @@ class PipelineKey(NamedTuple):
     channel_id: UUID
     source_format: AudioFormat
     target_format: AudioFormat
+
+
+class ResamplerKey(NamedTuple):
+    """Key for sharing resamplers: (channel_id, source_format, target PCM params).
+
+    Resamplers convert PCM from source format to target sample rate/channels/bit_depth.
+    The codec is irrelevant for resampling, so multiple target formats with different
+    codecs but the same PCM parameters can share a resampler.
+    """
+
+    channel_id: UUID
+    source_format: AudioFormat
+    target_sample_rate: int
+    target_channels: int
+    target_bit_depth: int
+
+
+class EncoderKey(NamedTuple):
+    """Key for sharing encoders within a single stream.
+
+    Encoders are stream-stateful and must not be shared across independent streams
+    (e.g., different channels). We key encoders by the resampler output parameters
+    for a specific channel + the codec.
+    """
+
+    resampler_key: ResamplerKey
+    codec: AudioCodec
 
 
 @dataclass(frozen=True)
@@ -38,29 +80,52 @@ class EncodedChunk:
 
 
 @dataclass
-class _PipelineState:
-    """Internal state for a single encoding pipeline."""
+class _ResamplerState:
+    """Shared resampler state keyed by ResamplerKey."""
 
-    key: PipelineKey
-    """Pipeline key for identification."""
+    key: ResamplerKey
+    """Resampler key for identification."""
     resampler: av.AudioResampler
     """PyAV audio resampler."""
+    source_av_format: str
+    """PyAV format string for source."""
+    source_av_layout: str
+    """PyAV channel layout for source."""
+    target_av_format: str
+    """PyAV format string for target (after resampling)."""
+    target_layout: str
+    """PyAV channel layout for target."""
+    target_frame_stride: int
+    """Bytes per frame in target format."""
+
+
+@dataclass
+class _EncoderState:
+    """Shared encoder state keyed by EncoderKey."""
+
+    key: EncoderKey
+    """Encoder key for identification."""
     encoder: av.AudioCodecContext | None
     """PyAV encoder (None for PCM)."""
     codec_header: bytes | None
     """Codec header bytes (e.g., FLAC streaminfo)."""
     chunk_samples: int
     """Number of samples per output chunk."""
-    target_frame_stride: int
-    """Bytes per frame in target format."""
-    target_av_format: str
-    """PyAV format string for target."""
-    target_layout: str
-    """PyAV channel layout for target."""
-    source_av_format: str
-    """PyAV format string for source."""
-    source_av_layout: str
-    """PyAV channel layout for source."""
+
+
+@dataclass
+class _PipelineState:
+    """Internal state for a single encoding pipeline.
+
+    Each pipeline references shared resampler and encoder states.
+    """
+
+    key: PipelineKey
+    """Pipeline key for identification."""
+    resampler_key: ResamplerKey
+    """Key to the shared resampler state."""
+    encoder_key: EncoderKey
+    """Key to the shared encoder state."""
     buffer: bytearray = field(default_factory=bytearray)
     """Resampled PCM buffer awaiting encoding."""
 
@@ -69,13 +134,18 @@ class PipelineManager:
     """
     Manages encoding pipelines for push-based streaming.
 
-    Each pipeline encodes audio from a source format to a target format.
+    Uses two-level keying to share resamplers and encoders:
+    - Resamplers are shared when source format and target PCM params match
+    - Encoders are shared when target format (including codec) matches
+
     Pipelines are identified by (channel_id, source_format, target_format).
     """
 
     def __init__(self) -> None:
         """Create a new PipelineManager."""
         self._pipelines: dict[PipelineKey, _PipelineState] = {}
+        self._resamplers: dict[ResamplerKey, _ResamplerState] = {}
+        self._encoders: dict[EncoderKey, _EncoderState] = {}
 
     def add_pipeline(
         self,
@@ -89,6 +159,7 @@ class PipelineManager:
 
         If a pipeline with the same (channel_id, source_format, target_format)
         already exists, returns the existing key (deduplication).
+        Resamplers and encoders are shared across pipelines when possible.
 
         Args:
             channel_id: The channel this pipeline encodes from.
@@ -107,15 +178,54 @@ class PipelineManager:
         if key in self._pipelines:
             return key
 
-        # Create the pipeline
+        # Create the pipeline with shared resampler and encoder
         self._pipelines[key] = self._create_pipeline_state(key)
         return key
 
     def _create_pipeline_state(self, key: PipelineKey) -> _PipelineState:
-        """Create internal pipeline state with resampler and encoder."""
-        av = _get_av()
+        """Create internal pipeline state, reusing shared resampler and encoder."""
         source_format = key.source_format
         target_format = key.target_format
+
+        # Create or get shared resampler
+        resampler_key = ResamplerKey(
+            channel_id=key.channel_id,
+            source_format=source_format,
+            target_sample_rate=target_format.sample_rate,
+            target_channels=target_format.channels,
+            target_bit_depth=target_format.bit_depth,
+        )
+        if resampler_key not in self._resamplers:
+            self._resamplers[resampler_key] = self._create_resampler_state(
+                resampler_key, source_format, target_format
+            )
+
+        # Create or get encoder for this stream + codec.
+        # Note: encoders must not be shared across channels.
+        encoder_key = EncoderKey(resampler_key=resampler_key, codec=target_format.codec)
+        if encoder_key not in self._encoders:
+            resampler_state = self._resamplers[resampler_key]
+            self._encoders[encoder_key] = self._create_encoder_state(
+                encoder_key,
+                target_format,
+                input_audio_layout=resampler_state.target_layout,
+                input_audio_format=resampler_state.target_av_format,
+            )
+
+        return _PipelineState(
+            key=key,
+            resampler_key=resampler_key,
+            encoder_key=encoder_key,
+        )
+
+    def _create_resampler_state(
+        self,
+        key: ResamplerKey,
+        source_format: AudioFormat,
+        target_format: AudioFormat,
+    ) -> _ResamplerState:
+        """Create a new resampler state."""
+        av = _get_av()
 
         # Get source format params
         _source_bytes_per_sample, source_av_format, source_layout = _resolve_audio_format(
@@ -134,24 +244,36 @@ class PipelineManager:
             rate=target_format.sample_rate,
         )
 
-        # Create encoder
-        encoder, codec_header, chunk_samples = self._build_encoder(
-            target_format,
-            input_audio_layout=target_layout,
-            input_audio_format=target_av_format,
-        )
-
-        return _PipelineState(
+        return _ResamplerState(
             key=key,
             resampler=resampler,
+            source_av_format=source_av_format,
+            source_av_layout=source_layout,
+            target_av_format=target_av_format,
+            target_layout=target_layout,
+            target_frame_stride=target_bytes_per_sample * target_format.channels,
+        )
+
+    def _create_encoder_state(
+        self,
+        key: EncoderKey,
+        target_format: AudioFormat,
+        *,
+        input_audio_layout: str,
+        input_audio_format: str,
+    ) -> _EncoderState:
+        """Create a new encoder state."""
+        encoder, codec_header, chunk_samples = self._build_encoder(
+            target_format,
+            input_audio_layout=input_audio_layout,
+            input_audio_format=input_audio_format,
+        )
+
+        return _EncoderState(
+            key=key,
             encoder=encoder,
             codec_header=codec_header,
             chunk_samples=chunk_samples,
-            target_frame_stride=target_bytes_per_sample * target_format.channels,
-            target_av_format=target_av_format,
-            target_layout=target_layout,
-            source_av_format=source_av_format,
-            source_av_layout=source_layout,
         )
 
     def _build_encoder(
@@ -212,7 +334,11 @@ class PipelineManager:
         """
         if key not in self._pipelines:
             return None
-        return self._pipelines[key].codec_header
+        pipeline = self._pipelines[key]
+        encoder_state = self._encoders.get(pipeline.encoder_key)
+        if encoder_state is None:
+            return None
+        return encoder_state.codec_header
 
     def get_codec_header_b64(self, key: PipelineKey) -> str | None:
         """
@@ -233,14 +359,19 @@ class PipelineManager:
         """
         Remove a pipeline.
 
+        Note: Shared resampler and encoder states are not removed since
+        they may be used by other pipelines. They will be cleared on reset().
+
         Args:
             key: Pipeline key to remove.
         """
         self._pipelines.pop(key, None)
 
     def reset(self) -> None:
-        """Clear all pipelines."""
+        """Clear all pipelines, resamplers, and encoders."""
         self._pipelines.clear()
+        self._resamplers.clear()
+        self._encoders.clear()
 
     def process(
         self,
@@ -248,7 +379,7 @@ class PipelineManager:
         pipeline_keys: set[PipelineKey],
     ) -> dict[PipelineKey, list[EncodedChunk]]:
         """
-        Process prepared PCM through requested pipelines.
+        Process prepared PCM through requested pipelines (sync version).
 
         Args:
             prepared_by_channel: Dict of channel_id -> (pcm_bytes, audio_format).
@@ -259,32 +390,73 @@ class PipelineManager:
         """
         result: dict[PipelineKey, list[EncodedChunk]] = {}
 
+        # Group pipelines by shared resampler key so we only resample once per key.
+        pipelines_by_resampler: dict[ResamplerKey, list[_PipelineState]] = {}
         for key in pipeline_keys:
-            if key not in self._pipelines:
+            pipeline = self._pipelines.get(key)
+            if pipeline is None:
                 continue
+            pipelines_by_resampler.setdefault(pipeline.resampler_key, []).append(pipeline)
 
-            channel_id = key.channel_id
+        # Resample once per resampler key, then fan-out to pipeline buffers.
+        for resampler_key, pipelines in pipelines_by_resampler.items():
+            channel_id = resampler_key.channel_id
             if channel_id not in prepared_by_channel:
                 continue
 
             pcm_data, source_format = prepared_by_channel[channel_id]
-            pipeline = self._pipelines[key]
+            resampler_state = self._resamplers[resampler_key]
+            resampled_pcm = self._resample_to_pcm_bytes(resampler_state, pcm_data, source_format)
+            if not resampled_pcm:
+                continue
 
-            # Process PCM through this pipeline
-            chunks = self._process_pipeline(pipeline, pcm_data, source_format)
+            for pipeline in pipelines:
+                pipeline.buffer.extend(resampled_pcm)
+
+        # Drain each requested pipeline buffer into encoded chunks.
+        for key in pipeline_keys:
+            pipeline = self._pipelines.get(key)
+            if pipeline is None:
+                continue
+            chunks = self._drain_pipeline_buffer(pipeline)
             result[key] = chunks
 
         return result
 
-    def _process_pipeline(
+    async def process_async(
         self,
-        pipeline: _PipelineState,
+        prepared_by_channel: dict[UUID, tuple[bytes, AudioFormat]],
+        pipeline_keys: set[PipelineKey],
+    ) -> dict[PipelineKey, list[EncodedChunk]]:
+        """
+        Process prepared PCM through requested pipelines (async version).
+
+        Runs encoding in a thread pool to avoid blocking the event loop.
+        Uses a shared ThreadPoolExecutor for CPU-bound encoding work.
+
+        Args:
+            prepared_by_channel: Dict of channel_id -> (pcm_bytes, audio_format).
+            pipeline_keys: Set of pipeline keys to process.
+
+        Returns:
+            Dict of pipeline_key -> list of EncodedChunks produced.
+        """
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(
+            _get_encoder_pool(),
+            self.process,
+            prepared_by_channel,
+            pipeline_keys,
+        )
+
+    def _resample_to_pcm_bytes(
+        self,
+        resampler_state: _ResamplerState,
         pcm_data: bytes,
         source_format: AudioFormat,
-    ) -> list[EncodedChunk]:
-        """Process PCM data through a single pipeline."""
+    ) -> bytes:
+        """Resample PCM data to the target PCM format for a resampler key."""
         av = _get_av()
-        chunks: list[EncodedChunk] = []
 
         # Calculate sample count from input
         bytes_per_sample = source_format.bit_depth // 8
@@ -292,62 +464,66 @@ class PipelineManager:
         sample_count = len(pcm_data) // frame_stride
 
         if sample_count == 0:
-            return chunks
+            return b""
 
         # Create input frame
         frame = av.AudioFrame(
-            format=pipeline.source_av_format,
-            layout=pipeline.source_av_layout,
+            format=resampler_state.source_av_format,
+            layout=resampler_state.source_av_layout,
             samples=sample_count,
         )
         frame.sample_rate = source_format.sample_rate
         frame.planes[0].update(pcm_data)
 
         # Resample
-        out_frames = pipeline.resampler.resample(frame)
+        out_frames = resampler_state.resampler.resample(frame)
+        out_pcm = bytearray()
         for out_frame in out_frames:
-            expected = pipeline.target_frame_stride * out_frame.samples
+            expected = resampler_state.target_frame_stride * out_frame.samples
             pcm_bytes = bytes(out_frame.planes[0])[:expected]
-            pipeline.buffer.extend(pcm_bytes)
+            out_pcm.extend(pcm_bytes)
 
-        # Drain buffer into chunks
-        chunks.extend(self._drain_pipeline_buffer(pipeline))
-
-        return chunks
+        return bytes(out_pcm)
 
     def _drain_pipeline_buffer(self, pipeline: _PipelineState) -> list[EncodedChunk]:
-        """Drain the pipeline buffer into encoded chunks."""
+        """Drain the pipeline buffer into encoded chunks using shared encoder."""
         av = _get_av()
         chunks: list[EncodedChunk] = []
         target_format = pipeline.key.target_format
 
-        frame_stride = pipeline.target_frame_stride
-        while len(pipeline.buffer) >= frame_stride * pipeline.chunk_samples:
-            chunk_size = pipeline.chunk_samples * frame_stride
+        # Get shared resampler and encoder states
+        resampler_state = self._resamplers[pipeline.resampler_key]
+        encoder_state = self._encoders[pipeline.encoder_key]
+
+        frame_stride = resampler_state.target_frame_stride
+        chunk_samples = encoder_state.chunk_samples
+
+        while len(pipeline.buffer) >= frame_stride * chunk_samples:
+            chunk_size = chunk_samples * frame_stride
             chunk_pcm = bytes(pipeline.buffer[:chunk_size])
             del pipeline.buffer[:chunk_size]
 
-            if pipeline.encoder is None:
+            if encoder_state.encoder is None:
                 # PCM path: output directly
-                duration_us = int(pipeline.chunk_samples * 1_000_000 / target_format.sample_rate)
+                duration_us = int(chunk_samples * 1_000_000 / target_format.sample_rate)
                 chunks.append(
                     EncodedChunk(
                         data=chunk_pcm,
                         byte_count=len(chunk_pcm),
-                        sample_count=pipeline.chunk_samples,
+                        sample_count=chunk_samples,
                         duration_us=duration_us,
                     )
                 )
             else:
                 # Encoder path: encode and emit packets
                 frame = av.AudioFrame(
-                    format=pipeline.target_av_format,
-                    layout=pipeline.target_layout,
-                    samples=pipeline.chunk_samples,
+                    format=resampler_state.target_av_format,
+                    layout=resampler_state.target_layout,
+                    samples=chunk_samples,
                 )
                 frame.sample_rate = target_format.sample_rate
                 frame.planes[0].update(chunk_pcm)
-                packets = pipeline.encoder.encode(frame)
+                packets = encoder_state.encoder.encode(frame)
 
                 for packet in packets:
                     if not packet.duration or packet.duration <= 0:
