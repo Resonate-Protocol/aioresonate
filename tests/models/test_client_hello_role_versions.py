@@ -22,7 +22,7 @@ def test_player_support_required_only_for_v1_role_id() -> None:
 
 def test_player_support_still_required_for_player_v1() -> None:
     """player@v1 requires player@v1_support (player_support alias)."""
-    with pytest.raises(ValueError, match="player_support must be provided"):
+    with pytest.raises(ValueError, match="player@v1_support"):
         ClientHelloPayload(
             client_id="c1",
             name="Client",
