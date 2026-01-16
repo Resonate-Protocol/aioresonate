@@ -465,8 +465,13 @@ class PushStream:
         if player is None:
             return []
 
-        # Get current time
+        # Get current time and enforce a minimum lead time for late joiners.
+        #
+        # Late joiners need enough time to receive stream/start, buffer audio, and
+        # schedule playback accurately. Sending chunks with timestamps too close to
+        # "now" can lead to dropped chunks and audible gaps.
         now_us = int(self._loop.time() * 1_000_000)
+        min_timestamp_us = now_us + DEFAULT_INITIAL_DELAY_US
 
         # Find matching pipeline keys for this channel
         result: list[CachedChunk] = []
@@ -478,8 +483,8 @@ class PushStream:
             if player.preferred_format is not None and key.target_format != player.preferred_format:
                 continue
 
-            # Filter to future chunks only
-            result.extend(chunk for chunk in chunks if chunk.timestamp_us >= now_us)
+            # Filter to chunks far enough in the future for reliable scheduling
+            result.extend(chunk for chunk in chunks if chunk.timestamp_us >= min_timestamp_us)
 
         # Sort by timestamp
         result.sort(key=lambda c: c.timestamp_us)

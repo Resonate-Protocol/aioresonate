@@ -383,11 +383,16 @@ class SendspinServer:
         if client.check_role(Roles.PLAYER):
             # Cancel any pending BufferTracker reset from a previous disconnect.
             self._cancel_buffer_tracker_reset(client.client_id)
-            player_record = self._player_registry.get_or_create(client.client_id)
+            existing_record = self._player_registry.get(client.client_id)
+            player_record = existing_record or self._player_registry.get_or_create(client.client_id)
             player_record.connection = client
             player_record.group_id = client.group.group_id
             # Clear disconnect time since we're now connected
             player_record._disconnect_time_us = None  # noqa: SLF001
+            # Default policy: players are blocking (use BufferTracker for backpressure)
+            # unless an application has explicitly configured otherwise.
+            if existing_record is None:
+                player_record.blocking = True
             # Create and attach PlayerRole for this connection
             player_role = PlayerRole(_record=player_record, _connection=client)
             player_role.on_connect()

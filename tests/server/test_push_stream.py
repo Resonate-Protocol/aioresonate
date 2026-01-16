@@ -1519,8 +1519,8 @@ class TestLateJoinerCache:
         chunks = push_stream.get_catchup_chunks("player-1")
         # All returned chunks should have recent timestamps
         for chunk in chunks:
-            # Chunk timestamps should be >= now (2000.0s = 2_000_000_000 us)
-            assert chunk.timestamp_us >= 2_000_000_000
+            # Late joiners enforce a minimum lead time (DEFAULT_INITIAL_DELAY_US).
+            assert chunk.timestamp_us >= 2_000_250_000
 
     @pytest.mark.asyncio
     async def test_get_catchup_chunks_returns_for_player_channel(
@@ -1603,10 +1603,10 @@ class TestLateJoinerCache:
         # Get current time in microseconds
         now_us = int(mock_loop.time() * 1_000_000)
 
-        # All returned chunks should have timestamps >= now
+        # All returned chunks should have timestamps >= now + DEFAULT_INITIAL_DELAY_US
         chunks = push_stream.get_catchup_chunks("player-1")
         for chunk in chunks:
-            assert chunk.timestamp_us >= now_us
+            assert chunk.timestamp_us >= now_us + 250_000
 
     @pytest.mark.asyncio
     async def test_clear_clears_cache(
