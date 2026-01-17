@@ -575,16 +575,6 @@ class SendspinClient:
                     await self.disconnect(retry_connection=False)
                     return
 
-                # Validate that supported_roles is not empty
-                # Empty roles indicates a server-to-server connection (protocol violation)
-                if not client_info.supported_roles:
-                    self._logger.error(
-                        "Invalid protocol: client sent empty supported_roles "
-                        "(likely server-to-server connection)"
-                    )
-                    await self.disconnect(retry_connection=False)
-                    return
-
                 self._client_info = client_info
                 self._roles = client_info.supported_roles
                 self._client_id = client_info.client_id
