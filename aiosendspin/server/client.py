@@ -117,6 +117,10 @@ class SendspinClient:
     """Flag to track if initial client/state has been received (for roles that require it)."""
     _initial_state_timeout_handle: asyncio.TimerHandle | None = None
     """Timeout handle for initial state reception (for roles that require it)."""
+    _client_hello_received: bool = False
+    """Flag to track if client/hello has been received."""
+    _client_hello_timeout_handle: asyncio.TimerHandle | None = None
+    """Timeout handle for initial client/hello reception."""
     disconnect_behaviour: DisconnectBehaviour
     """
     Controls the disconnect behavior for this client.
@@ -186,6 +190,8 @@ class SendspinClient:
         self._server_hello_sent = False
         self._initial_state_received = False
         self._initial_state_timeout_handle = None
+        self._client_hello_received = False
+        self._client_hello_timeout_handle = None
         self._roles = []
         self._client_state = ClientStateType.SYNCHRONIZED
         self._previous_group_id = None
@@ -199,6 +205,14 @@ class SendspinClient:
             self._closing = True
         self._disconnecting = True
         self._logger.debug("Disconnecting client")
+
+        # Cancel any pending timeouts
+        if self._client_hello_timeout_handle:
+            self._client_hello_timeout_handle.cancel()
+            self._client_hello_timeout_handle = None
+        if self._initial_state_timeout_handle:
+            self._initial_state_timeout_handle.cancel()
+            self._initial_state_timeout_handle = None
 
         if self.disconnect_behaviour == DisconnectBehaviour.UNGROUP:
             await self.ungroup()
@@ -346,6 +360,25 @@ class SendspinClient:
         """Check if this client's roles require sending initial state."""
         return Roles.PLAYER in self._roles
 
+    def _client_hello_timeout_callback(self) -> None:
+        """
+        Handle client/hello timeout.
+
+        Logs an error and disconnects the client. This usually indicates a
+        server-to-server connection where both sides are waiting for client/hello.
+        """
+        if self._client_hello_received:
+            # Hello was received just as timeout fired
+            return
+
+        self._logger.error(
+            "Timeout waiting for client/hello from %s (possible server-to-server connection)",
+            self._request.remote if self._request else "unknown",
+        )
+        # Disconnect without retry - this is a protocol violation
+        task = self._server.loop.create_task(self.disconnect(retry_connection=False))
+        task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
+
     def _initial_state_timeout_callback(self) -> None:
         """
         Handle initial state timeout.
@@ -419,6 +452,12 @@ class SendspinClient:
                 raise
 
         self._logger.info("Connection established")
+
+        # Start timeout (10 seconds) for receiving client/hello
+        # This prevents hanging forever when a server connects to another server
+        self._client_hello_timeout_handle = self._server.loop.call_later(
+            10.0, self._client_hello_timeout_callback
+        )
 
         self._logger.debug("Creating writer task")
         self._writer_task = self._server.loop.create_task(self._writer())
@@ -521,10 +560,27 @@ class SendspinClient:
             # Core messages
             case ClientHelloMessage(client_info):
                 self._logger.info("Received client/hello")
+
+                # Mark that we received client/hello and cancel timeout
+                self._client_hello_received = True
+                if self._client_hello_timeout_handle:
+                    self._client_hello_timeout_handle.cancel()
+                    self._client_hello_timeout_handle = None
+
                 if client_info.version != 1:
                     self._logger.error(
                         "Incompatible protocol version %s (only '1' is supported)",
                         client_info.version,
+                    )
+                    await self.disconnect(retry_connection=False)
+                    return
+
+                # Validate that supported_roles is not empty
+                # Empty roles indicates a server-to-server connection (protocol violation)
+                if not client_info.supported_roles:
+                    self._logger.error(
+                        "Invalid protocol: client sent empty supported_roles "
+                        "(likely server-to-server connection)"
                     )
                     await self.disconnect(retry_connection=False)
                     return
