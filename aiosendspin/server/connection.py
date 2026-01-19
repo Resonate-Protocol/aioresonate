@@ -208,12 +208,16 @@ class SendspinConnection:
     def _initial_state_timeout_callback(self) -> None:
         if self._initial_state_received:
             return
+        self._initial_state_timeout_handle = None
         self._logger.warning(
             "Client %s failed to send required initial state within timeout (spec violation)",
             self._client_id or "unknown",
         )
-        task = self._server.loop.create_task(self.disconnect(retry_connection=True))
-        task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
+        # Be lenient: keep the connection and mark the client as connected anyway.
+        # Some clients may not send an initial state update promptly.
+        if self._client is not None:
+            self._initial_state_received = True
+            self._client.mark_connected()
 
     async def _setup_connection(self) -> None:
         """Prepare a server-side WebSocketResponse, if applicable."""

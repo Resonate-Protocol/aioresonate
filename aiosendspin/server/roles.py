@@ -23,9 +23,9 @@ from aiosendspin.models.core import (
 from aiosendspin.models.player import StreamStartPlayer
 
 if TYPE_CHECKING:
+    from aiosendspin.server.audio import AudioFormat
     from aiosendspin.server.client import SendspinClient
     from aiosendspin.server.pipeline import EncodedChunk
-    from aiosendspin.server.stream import AudioFormat
 
 
 class Role(ABC):
