@@ -1099,7 +1099,14 @@ class SendspinGroup:
             self._clients = []
         else:
             self._clients.remove(client)
-            self._send_stream_end_msg(client)
+            # End the stream for the removed client. Use PlayerRole so role-local
+            # stream state and BufferTracker stay consistent (critical for regrouping).
+            if client.player_role is not None:
+                client.player_role.end_stream()
+                # Artwork state lifetime is bound to the stream.
+                self._client_artwork_state.pop(client.client_id, None)
+            else:
+                self._send_stream_end_msg(client)
         if not self._clients:
             # Emit event for group deletion, no clients left
             self._signal_event(GroupDeletedEvent())
