@@ -115,6 +115,8 @@ class _EncoderState:
     """Codec header bytes (e.g., FLAC streaminfo)."""
     chunk_samples: int
     """Number of samples per output chunk."""
+    pending_timestamp_us: int | None = None
+    """Timestamp of the earliest encoded sample not yet emitted as packets."""
 
 
 @dataclass
@@ -566,7 +568,12 @@ class PipelineManager:
                 )
                 pipeline.buffer_start_timestamp_us += duration_us
             else:
-                # Encoder path: encode and emit packets
+                # Encoder path: encode and emit packets.
+                #
+                # Some encoders may accept input frames without immediately emitting
+                # packets (internal delay). Track the earliest not-yet-emitted
+                # timestamp on the encoder state so packets can be timestamped
+                # correctly when they do appear.
                 frame = av.AudioFrame(
                     format=resampler_state.target_av_format,
                     layout=resampler_state.target_layout,
@@ -574,23 +581,33 @@ class PipelineManager:
                 )
                 frame.sample_rate = target_format.sample_rate
                 frame.planes[0].update(chunk_pcm)
+
+                # Advance the input timeline regardless of packet output: the encoder
+                # has consumed `chunk_samples` at the target sample rate.
+                input_duration_us = int(chunk_samples * 1_000_000 / target_format.sample_rate)
+                pipeline.buffer_start_timestamp_us += input_duration_us
+
+                if encoder_state.pending_timestamp_us is None:
+                    encoder_state.pending_timestamp_us = chunk_timestamp_us
+
                 packets = encoder_state.encoder.encode(frame)
 
                 for packet in packets:
                     if not packet.duration or packet.duration <= 0:
                         raise ValueError(f"Invalid packet duration: {packet.duration!r}")
                     duration_us = int(packet.duration * 1_000_000 / target_format.sample_rate)
+                    assert encoder_state.pending_timestamp_us is not None
+                    packet_ts_us = encoder_state.pending_timestamp_us
                     chunks.append(
                         EncodedChunk(
-                            timestamp_us=chunk_timestamp_us,
+                            timestamp_us=packet_ts_us,
                             data=bytes(packet),
                             byte_count=len(bytes(packet)),
                             sample_count=packet.duration,
                             duration_us=duration_us,
                         )
                     )
-                    chunk_timestamp_us += duration_us
-                pipeline.buffer_start_timestamp_us = chunk_timestamp_us
+                    encoder_state.pending_timestamp_us += duration_us
 
         if not pipeline.buffer:
             pipeline.buffer_start_timestamp_us = None
