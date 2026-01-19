@@ -24,12 +24,23 @@ _LOGGER = logging.getLogger(__name__)
 # Default initial delay before first audio plays (microseconds)
 DEFAULT_INITIAL_DELAY_US = 250_000  # 250ms
 
+# Minimum lead time (from now) for sending catch-up audio to late joiners.
+# This must be lower than DEFAULT_INITIAL_DELAY_US, otherwise a steady-state low-latency
+# stream may have no chunks whose *start* timestamp is >= now + DEFAULT_INITIAL_DELAY_US.
+LATE_JOINER_MIN_LEAD_US = 100_000  # 100ms
+
 # How long to keep encoding/caching a removed player's format. This enables quick
 # group/ungroup/regroup to stay synced without having to schedule audio very close to "now".
 PIPELINE_KEEPALIVE_US = 2_000_000  # 2s
 
 # Default cache window for late joiner chunks (microseconds)
 DEFAULT_CACHE_WINDOW_US = 10_000_000  # 10 seconds
+
+# Amount of PCM history to include when building a first-time catch-up pipeline.
+# Some resamplers/encoders may require a small warm-up window before emitting
+# stable output packets. We encode this pre-roll but only *send* chunks that
+# start far enough in the future (see LATE_JOINER_MIN_LEAD_US).
+CATCHUP_PREROLL_US = 500_000  # 0.5s
 
 
 @dataclass(frozen=True)
@@ -44,6 +55,14 @@ class CachedChunk:
     """Encoded audio payload bytes (without binary header)."""
     byte_count: int
     """Size of encoded audio data (without header)."""
+
+
+@dataclass(frozen=True)
+class _PcmCacheItem:
+    start_timestamp_us: int
+    duration_us: int
+    pcm: bytes
+    audio_format: AudioFormat
 
 
 class StreamStoppedError(Exception):
@@ -89,6 +108,9 @@ class PushStream:
         self._pipeline_manager = PipelineManager()
         # Late joiner cache: pipeline_key -> list of cached chunks
         self._chunk_cache: dict[PipelineKey, list[CachedChunk]] = {}
+        # Raw PCM cache per channel for late-join re-encoding.
+        self._pcm_cache: dict[UUID, list[_PcmCacheItem]] = {}
+        self._last_catchup_pipeline_key: PipelineKey | None = None
         # Keepalive pipelines for recently removed players: (channel_id, target_format) -> expiry_us
         self._keepalive_pipelines: dict[tuple[UUID, AudioFormat], int] = {}
 
@@ -212,14 +234,53 @@ class PushStream:
         # and may hang under tests. Phase 3 can reintroduce parallelism in a targeted,
         # well-tested way (encode-only fan-out), rather than offloading the full pipeline.
         pipeline_keys = self._get_required_pipeline_keys(prepared)
+        consumer_keys: set[PipelineKey] = set()
+        for player in self._get_group_players():
+            channel_id = self._channel_router.get_channel(player.client_id)
+            if channel_id not in prepared:
+                continue
+            _, source_format = prepared[channel_id]
+            target_format = self._get_player_target_format(player, source_format)
+            consumer_keys.add(
+                PipelineKey(
+                    channel_id=channel_id,
+                    source_format=source_format,
+                    target_format=target_format,
+                )
+            )
+
+        keepalive_keys: set[PipelineKey] = set()
+        for channel_id, target_format in self._keepalive_pipelines:
+            if channel_id not in prepared:
+                continue
+            _, source_format = prepared[channel_id]
+            keepalive_keys.add(
+                PipelineKey(
+                    channel_id=channel_id,
+                    source_format=source_format,
+                    target_format=target_format,
+                )
+            )
         prepared_with_timestamps: dict[UUID, tuple[bytes, AudioFormat, int]] = {
             channel_id: (pcm, fmt, channel_play_start[channel_id])
             for channel_id, (pcm, fmt) in prepared.items()
         }
         encoded_results = self._pipeline_manager.process(prepared_with_timestamps, pipeline_keys)
 
+        # Store raw PCM for possible late-join catch-up in unique formats.
+        self._store_pcm_cache(
+            prepared, channel_play_start=channel_play_start, durations_us=durations_us
+        )
+
         # Send chunks to players using per-channel timestamps
         self._send_chunks_to_players(prepared, encoded_results)
+
+        # Cache chunks for late joiners (once per pipeline, not per player).
+        #
+        # Cache for:
+        # - Any pipeline actively consumed by a connected player
+        # - Keepalive pipelines for recently removed players (so quick regroup can catch up)
+        self._cache_encoded_results(encoded_results, consumer_keys | keepalive_keys)
 
         # Resync any dropped non-blocking players
         self._resync_dropped_players()
@@ -266,6 +327,42 @@ class PushStream:
             duration_us = int(sample_count * 1_000_000 / fmt.sample_rate)
             durations[channel_id] = duration_us
         return durations
+
+    def _prune_pcm_cache(self) -> None:
+        """Drop PCM cache blocks that are fully in the past."""
+        now_us = self._clock.now_us()
+        for channel_id in list(self._pcm_cache.keys()):
+            self._pcm_cache[channel_id] = [
+                item
+                for item in self._pcm_cache[channel_id]
+                if item.start_timestamp_us + item.duration_us >= now_us
+            ]
+            if not self._pcm_cache[channel_id]:
+                del self._pcm_cache[channel_id]
+
+    def _store_pcm_cache(
+        self,
+        prepared: dict[UUID, tuple[bytes, AudioFormat]],
+        *,
+        channel_play_start: dict[UUID, int],
+        durations_us: dict[UUID, int],
+    ) -> None:
+        """Store committed PCM for potential late-join re-encoding."""
+        now_us = self._clock.now_us()
+        max_ts_us = now_us + DEFAULT_CACHE_WINDOW_US
+        for channel_id, (pcm, fmt) in prepared.items():
+            start_us = channel_play_start[channel_id]
+            if start_us > max_ts_us:
+                continue
+            self._pcm_cache.setdefault(channel_id, []).append(
+                _PcmCacheItem(
+                    start_timestamp_us=start_us,
+                    duration_us=durations_us[channel_id],
+                    pcm=pcm,
+                    audio_format=fmt,
+                )
+            )
+        self._prune_pcm_cache()
 
     def _warn_duration_misalignment(self, durations_us: dict[UUID, int]) -> None:
         """Log a warning if channel durations differ significantly."""
@@ -408,24 +505,32 @@ class PushStream:
             # Send each chunk via PlayerRole (handles stream/start automatically)
             for chunk in chunks:
                 # Send via PlayerRole - handles stream/start, packing, buffer tracking
-                sent = player.player_role.send_audio(
+                player.player_role.send_audio(
                     chunk=chunk,
                     timestamp_us=chunk.timestamp_us,
                     audio_format=target_format,
                     codec_header_b64=codec_header_b64,
                 )
 
-                # Cache chunk for late joiners (store raw payload + duration; role packs headers)
-                if sent:
-                    cached = CachedChunk(
-                        timestamp_us=chunk.timestamp_us,
-                        duration_us=chunk.duration_us,
-                        payload=chunk.data,
-                        byte_count=chunk.byte_count,
-                    )
-                    if key not in self._chunk_cache:
-                        self._chunk_cache[key] = []
-                    self._chunk_cache[key].append(cached)
+    def _cache_encoded_results(
+        self,
+        encoded_results: dict[PipelineKey, list[EncodedChunk]],
+        cache_keys: set[PipelineKey],
+    ) -> None:
+        """Cache encoded chunks for late joiner catch-up."""
+        for key in cache_keys:
+            chunks = encoded_results.get(key)
+            if not chunks:
+                continue
+            self._chunk_cache.setdefault(key, []).extend(
+                CachedChunk(
+                    timestamp_us=chunk.timestamp_us,
+                    duration_us=chunk.duration_us,
+                    payload=chunk.data,
+                    byte_count=chunk.byte_count,
+                )
+                for chunk in chunks
+            )
 
     def _resync_dropped_players(self) -> None:
         """
@@ -515,7 +620,7 @@ class PushStream:
         # schedule playback accurately. Sending chunks with timestamps too close to
         # "now" can lead to dropped chunks and audible gaps.
         now_us = self._clock.now_us()
-        min_timestamp_us = now_us + DEFAULT_INITIAL_DELAY_US
+        min_timestamp_us = now_us + LATE_JOINER_MIN_LEAD_US
 
         # Find matching pipeline keys for this channel
         result: list[CachedChunk] = []
@@ -552,15 +657,18 @@ class PushStream:
             if expiry_us <= now_us:
                 del self._keepalive_pipelines[keepalive_key]
 
-    def on_player_leave(self, player_id: str) -> None:
+        self._prune_pcm_cache()
+
+    def on_player_leave(self, player_id: str, *, target_format: AudioFormat | None = None) -> None:
         """Keep the player's format pipeline warm briefly for seamless quick rejoin."""
-        player = self._get_player_by_id(player_id)
-        if player is None:
-            return
-        channel_id = self._channel_router.get_channel(player_id)
-        target_format = player.preferred_format
+        if target_format is None:
+            player = self._get_player_by_id(player_id)
+            if player is None:
+                return
+            target_format = player.preferred_format
         if target_format is None:
             return
+        channel_id = self._channel_router.get_channel(player_id)
         self._keepalive_pipelines[(channel_id, target_format)] = (
             self._clock.now_us() + PIPELINE_KEEPALIVE_US
         )
@@ -580,6 +688,12 @@ class PushStream:
 
         # Get cached chunks for this player
         cached_chunks = self.get_catchup_chunks(player_id)
+        if not cached_chunks:
+            cached_chunks = self._build_encoded_catchup_from_pcm_cache(player_id)
+            catchup_key = self._last_catchup_pipeline_key
+            if cached_chunks and catchup_key is not None:
+                self._chunk_cache.setdefault(catchup_key, []).extend(cached_chunks)
+
         if not cached_chunks:
             return
 
@@ -614,6 +728,56 @@ class PushStream:
                 duration_us=chunk.duration_us,
                 byte_count=chunk.byte_count,
             )
+
+    def _build_encoded_catchup_from_pcm_cache(self, player_id: str) -> list[CachedChunk]:
+        """Encode catch-up chunks from cached PCM when no encoded cache exists yet."""
+        self._last_catchup_pipeline_key = None
+        player = self._get_player_by_id(player_id)
+        if player is None:
+            return []
+        channel_id = self._channel_router.get_channel(player_id)
+        target_format = player.preferred_format
+        if target_format is None:
+            return []
+
+        now_us = self._clock.now_us()
+        send_min_ts_us = now_us + LATE_JOINER_MIN_LEAD_US
+        max_ts_us = now_us + DEFAULT_CACHE_WINDOW_US
+
+        prime_min_ts_us = send_min_ts_us - CATCHUP_PREROLL_US
+        pcm_items = [
+            item
+            for item in self._pcm_cache.get(channel_id, [])
+            if prime_min_ts_us <= item.start_timestamp_us <= max_ts_us
+        ]
+        if not pcm_items:
+            return []
+
+        pcm_items.sort(key=lambda i: i.start_timestamp_us)
+        out: list[CachedChunk] = []
+        for item in pcm_items:
+            key = self._pipeline_manager.add_pipeline(
+                channel_id=channel_id,
+                source_format=item.audio_format,
+                target_format=target_format,
+            )
+            prepared_with_timestamps: dict[UUID, tuple[bytes, AudioFormat, int]] = {
+                channel_id: (item.pcm, item.audio_format, item.start_timestamp_us)
+            }
+            encoded = self._pipeline_manager.process(prepared_with_timestamps, {key})
+            out.extend(
+                CachedChunk(
+                    timestamp_us=chunk.timestamp_us,
+                    duration_us=chunk.duration_us,
+                    payload=chunk.data,
+                    byte_count=chunk.byte_count,
+                )
+                for chunk in encoded.get(key, [])
+            )
+            self._last_catchup_pipeline_key = key
+
+        out.sort(key=lambda c: c.timestamp_us)
+        return [chunk for chunk in out if chunk.timestamp_us >= send_min_ts_us]
 
     def on_format_request(self, player_id: str, new_format: AudioFormat) -> bool:
         """

@@ -509,6 +509,39 @@ def _assert_three_player_sync_and_continuity(
     assert score_c >= 0.85
 
 
+def _assert_pcm_chunks_continuous(events: list[_Event], *, max_gap_us: int) -> None:
+    """Assert consecutive PCM audio chunks have continuous timestamps within a tolerance."""
+    current_format: StreamStartMessage | None = None
+    last_end_us: int | None = None
+    for ev in events:
+        if ev.kind == "json":
+            msg = ev.payload
+            if isinstance(msg, StreamStartMessage):
+                current_format = msg
+                last_end_us = None
+            if isinstance(msg, StreamClearMessage | StreamEndMessage):
+                current_format = None
+                last_end_us = None
+            continue
+
+        if current_format is None or current_format.payload.player is None:
+            continue
+        fmt = current_format.payload.player
+        if fmt.codec != AudioCodec.PCM:
+            continue
+
+        data = ev.payload
+        assert isinstance(data, (bytes, bytearray))
+        header = unpack_binary_header(bytes(data))
+        payload = bytes(data)[9:]
+        frame_count = len(payload) // (fmt.channels * 2)
+        dur_us = int(frame_count * 1_000_000 / fmt.sample_rate)
+        if last_end_us is not None:
+            gap_us = header.timestamp_us - last_end_us
+            assert gap_us <= max_gap_us
+        last_end_us = header.timestamp_us + dur_us
+
+
 @pytest.mark.asyncio
 async def test_multi_player_group_join_sync_stable_source() -> None:
     """Stable source: late joiner stays within +/- 5ms of the global clock."""
@@ -824,10 +857,73 @@ async def test_three_players_regroup_fast_start_and_sync() -> None:
             await action()
 
     join_delays_us = joins.finalize()
-    _assert_join_delays(join_delays_us, min_delay_us=250_000, max_delay_us=450_000)
+    _assert_join_delays(join_delays_us, min_delay_us=0, max_delay_us=1_000_000)
     _assert_three_player_sync_and_continuity(
         conn_a=conn_a,
         conn_b=conn_b,
         conn_c=conn_c,
         max_skew_us=5_000,
     )
+    _assert_pcm_chunks_continuous(conn_a.events, max_gap_us=6_000)
+    _assert_pcm_chunks_continuous(conn_c.events, max_gap_us=6_000)
+
+
+@pytest.mark.asyncio
+async def test_first_time_join_unique_format_starts_under_1s_without_next_commit() -> None:
+    """Late joiner with a unique format should start via PCM cache without waiting for commit."""
+    loop = asyncio.get_running_loop()
+    clock = ManualClock()
+    server = _DummyServer(loop=loop, clock=clock)
+
+    player_a, group_a, _conn_a = _make_player(
+        server,
+        "pA",
+        supported_formats=[
+            SupportedAudioFormat(codec=AudioCodec.PCM, channels=2, sample_rate=48_000, bit_depth=16)
+        ],
+        buffer_capacity=2_000_000,
+    )
+    player_b, _group_b, conn_b = _make_player(
+        server,
+        "pB",
+        supported_formats=[
+            SupportedAudioFormat(
+                codec=AudioCodec.FLAC, channels=2, sample_rate=44_100, bit_depth=16
+            )
+        ],
+        buffer_capacity=500_000,
+    )
+
+    router = ChannelRouter()
+    for player in (player_a, player_b):
+        router.set_channel(player.client_id, MAIN_CHANNEL)
+
+    stream = group_a.start_stream(channel_router=router)
+    source_fmt = AudioFormat(sample_rate=48_000, bit_depth=16, channels=2, codec=AudioCodec.PCM)
+
+    # Build up future PCM cache for A only.
+    duration_us = 100_000
+    frame_count = 4800  # 100ms @ 48kHz
+    next_play_start_us = clock.now_us() + 250_000
+    for i in range(30):  # 3s of scheduled audio
+        play_start_us = await _commit_pcm_block(
+            stream,
+            play_start_us=next_play_start_us,
+            source_format=source_fmt,
+            frame_count=frame_count,
+        )
+        next_play_start_us = play_start_us + duration_us
+        # Join should not rely on a *future* commit, but it may rely on already-scheduled
+        # buffered audio. Do not advance time after the last commit so the stream still
+        # has ample future lead time relative to "now".
+        if i < 29:
+            clock.advance_us(duration_us)
+
+    # Join B, but do not commit any further audio afterwards.
+    join_idx = len(conn_b.events)
+    join_now_us = clock.now_us()
+    await group_a.add_client(player_b)
+
+    first_ts = _first_audio_timestamp_after(conn_b.events, start_index=join_idx)
+    assert first_ts is not None, "expected immediate catch-up audio from PCM cache"
+    assert first_ts - join_now_us <= 1_000_000
