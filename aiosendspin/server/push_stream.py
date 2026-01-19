@@ -196,10 +196,14 @@ class PushStream:
         # and may hang under tests. Phase 3 can reintroduce parallelism in a targeted,
         # well-tested way (encode-only fan-out), rather than offloading the full pipeline.
         pipeline_keys = self._get_required_pipeline_keys(prepared)
-        encoded_results = self._pipeline_manager.process(prepared, pipeline_keys)
+        prepared_with_timestamps: dict[UUID, tuple[bytes, AudioFormat, int]] = {
+            channel_id: (pcm, fmt, channel_play_start[channel_id])
+            for channel_id, (pcm, fmt) in prepared.items()
+        }
+        encoded_results = self._pipeline_manager.process(prepared_with_timestamps, pipeline_keys)
 
         # Send chunks to players using per-channel timestamps
-        self._send_chunks_to_players(channel_play_start, prepared, encoded_results)
+        self._send_chunks_to_players(prepared, encoded_results)
 
         # Resync any dropped non-blocking players
         self._resync_dropped_players()
@@ -319,7 +323,6 @@ class PushStream:
 
     def _send_chunks_to_players(
         self,
-        channel_play_start: dict[UUID, int],
         prepared: dict[UUID, tuple[bytes, AudioFormat]],
         encoded_results: dict[PipelineKey, list[EncodedChunk]],
     ) -> None:
@@ -333,7 +336,6 @@ class PushStream:
         4. Cache chunks for late joiners
 
         Args:
-            channel_play_start: Per-channel play start timestamps.
             prepared: Prepared audio per channel.
             encoded_results: Encoded chunks per pipeline.
         """
@@ -371,29 +373,26 @@ class PushStream:
             codec_header_b64 = self._pipeline_manager.get_codec_header_b64(key)
 
             # Send each chunk via PlayerRole (handles stream/start automatically)
-            chunk_start_us = channel_play_start[channel_id]
             for chunk in chunks:
                 # Send via PlayerRole - handles stream/start, packing, buffer tracking
-                player.player_role.send_audio(
+                sent = player.player_role.send_audio(
                     chunk=chunk,
-                    timestamp_us=chunk_start_us,
+                    timestamp_us=chunk.timestamp_us,
                     audio_format=target_format,
                     codec_header_b64=codec_header_b64,
                 )
 
                 # Cache chunk for late joiners (store raw payload + duration; role packs headers)
-                cached = CachedChunk(
-                    timestamp_us=chunk_start_us,
-                    duration_us=chunk.duration_us,
-                    payload=chunk.data,
-                    byte_count=chunk.byte_count,
-                )
-                if key not in self._chunk_cache:
-                    self._chunk_cache[key] = []
-                self._chunk_cache[key].append(cached)
-
-                # Advance to next chunk
-                chunk_start_us = chunk_start_us + chunk.duration_us
+                if sent:
+                    cached = CachedChunk(
+                        timestamp_us=chunk.timestamp_us,
+                        duration_us=chunk.duration_us,
+                        payload=chunk.data,
+                        byte_count=chunk.byte_count,
+                    )
+                    if key not in self._chunk_cache:
+                        self._chunk_cache[key] = []
+                    self._chunk_cache[key].append(cached)
 
     def _resync_dropped_players(self) -> None:
         """
@@ -640,6 +639,9 @@ class PushStream:
 
         # Clear chunk cache
         self._chunk_cache.clear()
+
+        # Reset encoding pipelines to drop any buffered resampler/encoder state.
+        self._pipeline_manager.reset()
 
         # Send stream/clear via PlayerRole (handles buffer tracker reset)
         for player in self._get_group_players():

@@ -69,6 +69,8 @@ class EncoderKey(NamedTuple):
 class EncodedChunk:
     """Encoded audio chunk ready for delivery (no timestamps assigned yet)."""
 
+    timestamp_us: int
+    """Start timestamp for this chunk in microseconds."""
     data: bytes
     """Encoded audio data."""
     byte_count: int
@@ -97,6 +99,8 @@ class _ResamplerState:
     """PyAV channel layout for target."""
     target_frame_stride: int
     """Bytes per frame in target format."""
+    pending_timestamp_us: int | None = None
+    """Timestamp of the earliest audio sample not yet emitted by this resampler."""
 
 
 @dataclass
@@ -128,6 +132,8 @@ class _PipelineState:
     """Key to the shared encoder state."""
     buffer: bytearray = field(default_factory=bytearray)
     """Resampled PCM buffer awaiting encoding."""
+    buffer_start_timestamp_us: int | None = None
+    """Timestamp of the first sample in buffer."""
 
 
 class PipelineManager:
@@ -375,14 +381,15 @@ class PipelineManager:
 
     def process(
         self,
-        prepared_by_channel: dict[UUID, tuple[bytes, AudioFormat]],
+        prepared_by_channel: dict[UUID, tuple[bytes, AudioFormat, int]],
         pipeline_keys: set[PipelineKey],
     ) -> dict[PipelineKey, list[EncodedChunk]]:
         """
         Process prepared PCM through requested pipelines (sync version).
 
         Args:
-            prepared_by_channel: Dict of channel_id -> (pcm_bytes, audio_format).
+            prepared_by_channel: Dict of channel_id -> (pcm_bytes, audio_format,
+                start_timestamp_us).
             pipeline_keys: Set of pipeline keys to process.
 
         Returns:
@@ -404,13 +411,25 @@ class PipelineManager:
             if channel_id not in prepared_by_channel:
                 continue
 
-            pcm_data, source_format = prepared_by_channel[channel_id]
+            pcm_data, source_format, input_start_timestamp_us = prepared_by_channel[channel_id]
             resampler_state = self._resamplers[resampler_key]
+            if resampler_state.pending_timestamp_us is None:
+                resampler_state.pending_timestamp_us = input_start_timestamp_us
+
             resampled_pcm = self._resample_to_pcm_bytes(resampler_state, pcm_data, source_format)
             if not resampled_pcm:
                 continue
 
+            resampled_start_ts = resampler_state.pending_timestamp_us
+            assert resampled_start_ts is not None
+
+            sample_count = len(resampled_pcm) // resampler_state.target_frame_stride
+            duration_us = int(sample_count * 1_000_000 / resampler_key.target_sample_rate)
+            resampler_state.pending_timestamp_us += duration_us
+
             for pipeline in pipelines:
+                if not pipeline.buffer and pipeline.buffer_start_timestamp_us is None:
+                    pipeline.buffer_start_timestamp_us = resampled_start_ts
                 pipeline.buffer.extend(resampled_pcm)
 
         # Drain each requested pipeline buffer into encoded chunks.
@@ -425,7 +444,7 @@ class PipelineManager:
 
     async def process_async(
         self,
-        prepared_by_channel: dict[UUID, tuple[bytes, AudioFormat]],
+        prepared_by_channel: dict[UUID, tuple[bytes, AudioFormat, int]],
         pipeline_keys: set[PipelineKey],
     ) -> dict[PipelineKey, list[EncodedChunk]]:
         """
@@ -435,7 +454,8 @@ class PipelineManager:
         Uses a shared ThreadPoolExecutor for CPU-bound encoding work.
 
         Args:
-            prepared_by_channel: Dict of channel_id -> (pcm_bytes, audio_format).
+            prepared_by_channel: Dict of channel_id -> (pcm_bytes, audio_format,
+                start_timestamp_us).
             pipeline_keys: Set of pipeline keys to process.
 
         Returns:
@@ -499,21 +519,26 @@ class PipelineManager:
         chunk_samples = encoder_state.chunk_samples
 
         while len(pipeline.buffer) >= frame_stride * chunk_samples:
+            if pipeline.buffer_start_timestamp_us is None:
+                raise RuntimeError("Pipeline buffer has data without a timestamp")
             chunk_size = chunk_samples * frame_stride
             chunk_pcm = bytes(pipeline.buffer[:chunk_size])
             del pipeline.buffer[:chunk_size]
+            chunk_timestamp_us = pipeline.buffer_start_timestamp_us
 
             if encoder_state.encoder is None:
                 # PCM path: output directly
                 duration_us = int(chunk_samples * 1_000_000 / target_format.sample_rate)
                 chunks.append(
                     EncodedChunk(
+                        timestamp_us=chunk_timestamp_us,
                         data=chunk_pcm,
                         byte_count=len(chunk_pcm),
                         sample_count=chunk_samples,
                         duration_us=duration_us,
                     )
                 )
+                pipeline.buffer_start_timestamp_us += duration_us
             else:
                 # Encoder path: encode and emit packets
                 frame = av.AudioFrame(
@@ -531,11 +556,17 @@ class PipelineManager:
                     duration_us = int(packet.duration * 1_000_000 / target_format.sample_rate)
                     chunks.append(
                         EncodedChunk(
+                            timestamp_us=chunk_timestamp_us,
                             data=bytes(packet),
                             byte_count=len(bytes(packet)),
                             sample_count=packet.duration,
                             duration_us=duration_us,
                         )
                     )
+                    chunk_timestamp_us += duration_us
+                pipeline.buffer_start_timestamp_us = chunk_timestamp_us
+
+        if not pipeline.buffer:
+            pipeline.buffer_start_timestamp_us = None
 
         return chunks

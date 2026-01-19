@@ -49,13 +49,15 @@ class TestEncodedChunk:
     """Tests for EncodedChunk structure."""
 
     def test_encoded_chunk_has_required_fields(self) -> None:
-        """EncodedChunk should have data, byte_count, sample_count, duration_us."""
+        """EncodedChunk should have timestamp_us, data, byte_count, sample_count, duration_us."""
         chunk = EncodedChunk(
+            timestamp_us=123,
             data=b"\x00\x01\x02\x03",
             byte_count=4,
             sample_count=100,
             duration_us=2500,
         )
+        assert chunk.timestamp_us == 123
         assert chunk.data == b"\x00\x01\x02\x03"
         assert chunk.byte_count == 4
         assert chunk.sample_count == 100
@@ -215,7 +217,7 @@ class TestPipelineManagerProcess:
 
         # 25ms of stereo 16-bit 48kHz = 1200 samples * 4 bytes = 4800 bytes
         pcm = bytes(4800)
-        prepared = {MAIN_CHANNEL: (pcm, source_format)}
+        prepared = {MAIN_CHANNEL: (pcm, source_format, 0)}
 
         result = manager.process(prepared, {key})
 
@@ -245,7 +247,7 @@ class TestPipelineManagerProcess:
         )
 
         pcm = bytes(4800)
-        prepared = {MAIN_CHANNEL: (pcm, source_format)}
+        prepared = {MAIN_CHANNEL: (pcm, source_format, 0)}
 
         # Only request PCM pipeline
         result = manager.process(prepared, {key_pcm})
@@ -267,7 +269,7 @@ class TestPipelineManagerProcess:
         )
 
         pcm = bytes(4800)
-        prepared = {MAIN_CHANNEL: (pcm, source_format)}
+        prepared = {MAIN_CHANNEL: (pcm, source_format, 0)}
 
         result = manager.process(prepared, {key})
 
@@ -288,7 +290,7 @@ class TestPipelineManagerProcess:
         )
 
         pcm = bytes(4800)
-        prepared = {MAIN_CHANNEL: (pcm, source_format)}
+        prepared = {MAIN_CHANNEL: (pcm, source_format, 0)}
 
         result = manager.process(prepared, {key})
 
