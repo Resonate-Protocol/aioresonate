@@ -1107,6 +1107,12 @@ class SendspinGroup:
                 self._client_artwork_state.pop(client.client_id, None)
             else:
                 self._send_stream_end_msg(client)
+            if (
+                self._push_stream is not None
+                and not self._push_stream.is_stopped
+                and client.check_role(Roles.PLAYER)
+            ):
+                self._push_stream.on_player_leave(client.client_id)
         if not self._clients:
             # Emit event for group deletion, no clients left
             self._signal_event(GroupDeletedEvent())

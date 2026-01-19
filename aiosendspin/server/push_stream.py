@@ -24,6 +24,10 @@ _LOGGER = logging.getLogger(__name__)
 # Default initial delay before first audio plays (microseconds)
 DEFAULT_INITIAL_DELAY_US = 250_000  # 250ms
 
+# How long to keep encoding/caching a removed player's format. This enables quick
+# group/ungroup/regroup to stay synced without having to schedule audio very close to "now".
+PIPELINE_KEEPALIVE_US = 2_000_000  # 2s
+
 # Default cache window for late joiner chunks (microseconds)
 DEFAULT_CACHE_WINDOW_US = 10_000_000  # 10 seconds
 
@@ -85,6 +89,8 @@ class PushStream:
         self._pipeline_manager = PipelineManager()
         # Late joiner cache: pipeline_key -> list of cached chunks
         self._chunk_cache: dict[PipelineKey, list[CachedChunk]] = {}
+        # Keepalive pipelines for recently removed players: (channel_id, target_format) -> expiry_us
+        self._keepalive_pipelines: dict[tuple[UUID, AudioFormat], int] = {}
 
     @property
     def is_stopped(self) -> bool:
@@ -329,6 +335,23 @@ class PushStream:
             )
             pipeline_keys.add(key)
 
+        # Keep recently-removed player formats warm for a short window so quick regrouping can
+        # catch up with continuous cached audio, rather than starting late and drifting.
+        now_us = self._clock.now_us()
+        for (channel_id, target_format), expiry_us in list(self._keepalive_pipelines.items()):
+            if expiry_us <= now_us:
+                del self._keepalive_pipelines[(channel_id, target_format)]
+                continue
+            if channel_id not in prepared:
+                continue
+            _, source_format = prepared[channel_id]
+            key = self._pipeline_manager.add_pipeline(
+                channel_id=channel_id,
+                source_format=source_format,
+                target_format=target_format,
+            )
+            pipeline_keys.add(key)
+
         return pipeline_keys
 
     def _send_chunks_to_players(
@@ -523,6 +546,24 @@ class PushStream:
             # Remove empty lists
             if not self._chunk_cache[key]:
                 del self._chunk_cache[key]
+
+        # Drop expired keepalive entries as well.
+        for keepalive_key, expiry_us in list(self._keepalive_pipelines.items()):
+            if expiry_us <= now_us:
+                del self._keepalive_pipelines[keepalive_key]
+
+    def on_player_leave(self, player_id: str) -> None:
+        """Keep the player's format pipeline warm briefly for seamless quick rejoin."""
+        player = self._get_player_by_id(player_id)
+        if player is None:
+            return
+        channel_id = self._channel_router.get_channel(player_id)
+        target_format = player.preferred_format
+        if target_format is None:
+            return
+        self._keepalive_pipelines[(channel_id, target_format)] = (
+            self._clock.now_us() + PIPELINE_KEEPALIVE_US
+        )
 
     def on_player_join(self, player_id: str) -> None:
         """
