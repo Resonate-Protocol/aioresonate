@@ -119,6 +119,27 @@ async def test_commit_audio_sends_stream_start_and_binary(mock_loop: Any) -> Non
 
 
 @pytest.mark.asyncio
+async def test_queue_high_water_drops_audio_even_for_blocking_player(mock_loop: Any) -> None:
+    """When the connection queue is congested, audio is dropped and the player is resynced."""
+    group = _DummyGroup(clients=[])
+    client, conn = _make_connected_player(mock_loop, group, "p1")
+    conn.high_water = True
+
+    stream = PushStream(
+        loop=mock_loop, clock=LoopClock(mock_loop), group=group, channel_router=ChannelRouter()
+    )
+    stream.prepare_audio(
+        bytes(4800),
+        AudioFormat(sample_rate=48000, bit_depth=16, channels=2, codec=AudioCodec.PCM),
+    )
+    await stream.commit_audio()
+
+    assert not conn.sent_binary
+    assert client.player_role is not None
+    assert client.player_role.get_send_state().needs_resync
+
+
+@pytest.mark.asyncio
 async def test_stop_sends_stream_end_and_resets_buffer_tracker(mock_loop: Any) -> None:
     """Stop sends stream/end and resets BufferTracker state."""
     group = _DummyGroup(clients=[])

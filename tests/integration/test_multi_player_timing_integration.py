@@ -683,8 +683,8 @@ async def test_multi_player_sync_with_jittery_source_is_continuous() -> None:
 
 
 @pytest.mark.asyncio
-async def test_unstable_source_creates_late_audio_after_gap() -> None:
-    """Unstable source: a long production gap causes audio timestamps to fall behind now()."""
+async def test_production_gap_rebases_timeline() -> None:
+    """A long production gap should rebase timestamps so audio is not scheduled in the past."""
     loop = asyncio.get_running_loop()
     clock = ManualClock()
     server = _DummyServer(loop=loop, clock=clock)
@@ -723,7 +723,8 @@ async def test_unstable_source_creates_late_audio_after_gap() -> None:
         next_play_start_us, sample_rate=source_fmt.sample_rate, frame_count=1200
     )
     stream.prepare_audio(pcm, source_fmt)
-    await stream.commit_audio()
+    play_start_us = await stream.commit_audio()
+    assert resume_now_us + 250_000 <= play_start_us <= resume_now_us + 350_000
 
     # Find the first audio chunk timestamp sent after the gap.
     first_after_gap_ts: int | None = None
@@ -735,7 +736,7 @@ async def test_unstable_source_creates_late_audio_after_gap() -> None:
         break
 
     assert first_after_gap_ts is not None
-    assert first_after_gap_ts < resume_now_us - 250_000
+    assert resume_now_us + 250_000 <= first_after_gap_ts <= resume_now_us + 350_000
 
 
 @pytest.mark.asyncio
