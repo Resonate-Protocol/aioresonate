@@ -221,12 +221,12 @@ class SendspinConnection:
 
     async def _setup_connection(self) -> None:
         """Prepare a server-side WebSocketResponse, if applicable."""
-        if self._wsock_server is None:
-            return
-        assert self._request is not None
-        async with asyncio.timeout(10):
-            await self._wsock_server.prepare(self._request)
+        if self._wsock_server is not None:
+            assert self._request is not None
+            async with asyncio.timeout(10):
+                await self._wsock_server.prepare(self._request)
 
+        # Start writer task for both client-initiated and server-initiated connections.
         self._logger.info("Connection established")
         self._writer_task = self._server.loop.create_task(self._writer())
 
