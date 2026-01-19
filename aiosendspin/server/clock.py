@@ -23,3 +23,18 @@ class LoopClock:
     def now_us(self) -> int:
         """Return current loop time in microseconds."""
         return int(self.loop.time() * 1_000_000)
+
+
+@dataclass(slots=True)
+class ManualClock:
+    """Manually-advanced clock used in tests."""
+
+    now_us_value: int = 0
+
+    def now_us(self) -> int:
+        """Return current manual time in microseconds."""
+        return self.now_us_value
+
+    def advance_us(self, delta_us: int) -> None:
+        """Advance the clock by delta_us microseconds."""
+        self.now_us_value += delta_us
