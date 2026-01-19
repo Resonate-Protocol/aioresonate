@@ -415,6 +415,32 @@ class PipelineManager:
             resampler_state = self._resamplers[resampler_key]
             if resampler_state.pending_timestamp_us is None:
                 resampler_state.pending_timestamp_us = input_start_timestamp_us
+            else:
+                # If this resampler hasn't been used for a while (e.g., no players requiring this
+                # format) and then becomes active again, its pending timestamp can drift far away
+                # from the group's current play_start. Resync to the current input start and drop
+                # any buffered state to avoid timeline discontinuities for late joiners.
+                drift_us = abs(resampler_state.pending_timestamp_us - input_start_timestamp_us)
+                if drift_us > 20_000:
+                    av = _get_av()
+                    resampler_state.pending_timestamp_us = input_start_timestamp_us
+                    resampler_state.resampler = av.AudioResampler(
+                        format=resampler_state.target_av_format,
+                        layout=resampler_state.target_layout,
+                        rate=resampler_key.target_sample_rate,
+                    )
+                    for pipeline in pipelines:
+                        pipeline.buffer.clear()
+                        pipeline.buffer_start_timestamp_us = None
+                        # Reset the encoder state as well. Encoders are stream-stateful, and
+                        # resuming an encoder after a long inactivity window can introduce
+                        # priming/latency artifacts that break timestamp alignment for late joiners.
+                        self._encoders[pipeline.encoder_key] = self._create_encoder_state(
+                            pipeline.encoder_key,
+                            pipeline.key.target_format,
+                            input_audio_layout=resampler_state.target_layout,
+                            input_audio_format=resampler_state.target_av_format,
+                        )
 
             resampled_pcm = self._resample_to_pcm_bytes(resampler_state, pcm_data, source_format)
             if not resampled_pcm:
