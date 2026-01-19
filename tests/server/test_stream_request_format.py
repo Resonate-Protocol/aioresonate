@@ -13,8 +13,25 @@ from aiosendspin.models.player import (
     SupportedAudioFormat,
 )
 from aiosendspin.models.types import AudioCodec, Roles
+from aiosendspin.server.client import SendspinClient
 from aiosendspin.server.group import SendspinGroup
-from aiosendspin.server.player_state import PlayerRegistry
+
+
+class _FakeConnection:
+    def __init__(self) -> None:
+        self.sent: list[object] = []
+
+    async def disconnect(self, *, retry_connection: bool = True) -> None:  # noqa: ARG002
+        return
+
+    def send_message(self, message: object) -> None:
+        self.sent.append(message)
+
+    def try_send_binary(self, data: bytes) -> bool:  # noqa: ARG002
+        return True
+
+    def queue_high_water(self, threshold: float = 0.8) -> bool:  # noqa: ARG002
+        return False
 
 
 @pytest.fixture
@@ -27,33 +44,42 @@ def mock_loop() -> MagicMock:
 
 @pytest.fixture
 def mock_server(mock_loop: MagicMock) -> MagicMock:
-    """Mock server with a PlayerRegistry."""
+    """Mock server."""
     server = MagicMock()
     server.loop = mock_loop
-    server.player_registry = PlayerRegistry(loop=mock_loop, default_buffer_capacity=100_000)
     return server
 
 
-def _make_player_client(client_id: str) -> MagicMock:
-    client = MagicMock()
-    client.client_id = client_id
-    client.name = client_id
-    client.check_role.side_effect = lambda role: role == Roles.PLAYER
-    client.send_message = MagicMock()
-    client.disconnect = AsyncMock()
+def _make_player_client(
+    server: MagicMock,
+    client_id: str,
+) -> tuple[SendspinClient, _FakeConnection]:
+    client = SendspinClient(server, client_id=client_id)
+    SendspinGroup(server, client)
 
-    client.info = MagicMock()
-    client.info.player_support = ClientHelloPlayerSupport(
+    conn = _FakeConnection()
+    hello = MagicMock()
+    hello.client_id = client_id
+    hello.name = client_id
+    hello.player_support = ClientHelloPlayerSupport(
         supported_formats=[
             SupportedAudioFormat(codec=AudioCodec.PCM, sample_rate=48000, bit_depth=16, channels=2),
             SupportedAudioFormat(
-                codec=AudioCodec.FLAC, sample_rate=48000, bit_depth=16, channels=2
+                codec=AudioCodec.FLAC,
+                sample_rate=48000,
+                bit_depth=16,
+                channels=2,
             ),
         ],
         buffer_capacity=100_000,
         supported_commands=[],
     )
-    return client
+    hello.artwork_support = None
+    hello.visualizer_support = None
+
+    client.attach_connection(conn, client_info=hello, active_roles=[Roles.PLAYER.value])
+    client.mark_connected()
+    return client, conn
 
 
 @pytest.mark.asyncio
@@ -77,12 +103,7 @@ async def test_player_format_request_does_not_send_stream_start_when_stream_acti
     group = SendspinGroup(mock_server, owner)
     group.start_stream()
 
-    client = _make_player_client("p1")
-
-    # Register connection-independent player state so PushStream can apply the request
-    record = mock_server.player_registry.get_or_create(client.client_id)
-    record.connection = client
-    record.player_role = MagicMock()
+    client, conn = _make_player_client(mock_server, "p1")
 
     request = StreamRequestFormatPayload(
         player=StreamRequestFormatPlayer(
@@ -92,9 +113,7 @@ async def test_player_format_request_does_not_send_stream_start_when_stream_acti
     await group.handle_stream_format_request(client, request)
 
     # No immediate stream/start should be sent while streaming is active.
-    assert not any(
-        isinstance(call.args[0], StreamStartMessage) for call in client.send_message.call_args_list
-    )
+    assert not any(isinstance(msg, StreamStartMessage) for msg in conn.sent)
 
 
 @pytest.mark.asyncio
@@ -112,7 +131,7 @@ async def test_player_format_request_sends_stream_start_when_no_stream_active(
 
     group = SendspinGroup(mock_server, owner)
 
-    client = _make_player_client("p1")
+    client, conn = _make_player_client(mock_server, "p1")
     request = StreamRequestFormatPayload(
         player=StreamRequestFormatPlayer(
             codec=AudioCodec.FLAC, sample_rate=48000, channels=2, bit_depth=16
@@ -120,6 +139,4 @@ async def test_player_format_request_sends_stream_start_when_no_stream_active(
     )
     await group.handle_stream_format_request(client, request)
 
-    assert any(
-        isinstance(call.args[0], StreamStartMessage) for call in client.send_message.call_args_list
-    )
+    assert any(isinstance(msg, StreamStartMessage) for msg in conn.sent)

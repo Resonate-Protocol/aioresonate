@@ -210,12 +210,9 @@ class SendspinGroup:
         self._playback_lock = asyncio.Lock()
         self._push_stream: PushStream | None = None
 
-        # Set group reference and update PlayerRecord.group_id for initial clients
+        # Set group reference for initial clients
         for client in self._clients:
             client._set_group(self)  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
-            if client.check_role(Roles.PLAYER):
-                record = self._server.player_registry.get_or_create(client.client_id)
-                record.group_id = self._group_id
 
         logger.debug(
             "SendspinGroup initialized with %d client(s): %s",
@@ -243,8 +240,7 @@ class SendspinGroup:
 
         self._push_stream = PushStream(
             loop=self._server.loop,
-            group_id=self._group_id,
-            player_registry=self._server.player_registry,
+            group=self,
             channel_router=channel_router,
         )
         # Starting a stream implies the group is actively playing.
@@ -305,48 +301,80 @@ class SendspinGroup:
         self._last_sent_supported_commands = supported_commands
 
         for client in self._clients:
-            # Send group/update to all clients
-            client.send_message(group_message)
+            self._send_group_update_to_client(client, group_message, controller_state)
 
-            # Build server/state payload with relevant fields for this client
-            metadata_for_client = None
-            if client.check_role(Roles.METADATA):
-                if self._current_metadata is not None:
-                    metadata_update = self._current_metadata.snapshot_update(
-                        int(self._server.loop.time() * 1_000_000)
-                    )
-                else:
-                    metadata_update = Metadata.cleared_update(
-                        int(self._server.loop.time() * 1_000_000)
-                    )
-                # Use calculated track progress for actively playing content
-                if self._current_metadata is not None:
-                    current_progress = self._get_current_track_progress()
-                    # Update the progress object with current calculated progress
-                    if (
-                        current_progress is not None
-                        and self._current_metadata.track_duration is not None
-                        and self._current_metadata.playback_speed is not None
-                    ):
-                        metadata_update.progress = Progress(
-                            track_progress=current_progress,
-                            track_duration=self._current_metadata.track_duration,
-                            playback_speed=self._current_metadata.playback_speed,
-                        )
-                metadata_for_client = metadata_update
+    def _send_group_update_to_client(
+        self,
+        client: SendspinClient,
+        group_message: GroupUpdateServerMessage,
+        controller_state: ControllerStatePayload,
+    ) -> None:
+        """Send group/update and the relevant server/state fields to a single client."""
+        client.send_message(group_message)
 
-            controller_for_client = None
-            if client.check_role(Roles.CONTROLLER):
-                controller_for_client = controller_state
-
-            # Send single server/state message with all relevant payloads
-            if metadata_for_client is not None or controller_for_client is not None:
-                state_message = ServerStateMessage(
-                    ServerStatePayload(
-                        metadata=metadata_for_client, controller=controller_for_client
-                    )
+        metadata_for_client = None
+        if client.check_role(Roles.METADATA):
+            if self._current_metadata is not None:
+                metadata_update = self._current_metadata.snapshot_update(
+                    int(self._server.loop.time() * 1_000_000)
                 )
-                client.send_message(state_message)
+            else:
+                metadata_update = Metadata.cleared_update(int(self._server.loop.time() * 1_000_000))
+            if self._current_metadata is not None:
+                current_progress = self._get_current_track_progress()
+                if (
+                    current_progress is not None
+                    and self._current_metadata.track_duration is not None
+                    and self._current_metadata.playback_speed is not None
+                ):
+                    metadata_update.progress = Progress(
+                        track_progress=current_progress,
+                        track_duration=self._current_metadata.track_duration,
+                        playback_speed=self._current_metadata.playback_speed,
+                    )
+            metadata_for_client = metadata_update
+
+        controller_for_client = controller_state if client.check_role(Roles.CONTROLLER) else None
+
+        if metadata_for_client is None and controller_for_client is None:
+            return
+
+        state_message = ServerStateMessage(
+            ServerStatePayload(metadata=metadata_for_client, controller=controller_for_client)
+        )
+        client.send_message(state_message)
+
+    def on_client_connected(self, client: SendspinClient) -> None:
+        """Send current group state to a client that just finished handshaking."""
+        if client not in self._clients:
+            return
+
+        group_message = GroupUpdateServerMessage(
+            GroupUpdateServerPayload(
+                playback_state=self._current_state,
+                group_id=self.group_id,
+                group_name=self.group_name,
+            )
+        )
+        supported_commands = self._get_supported_commands()
+        controller_state = ControllerStatePayload(
+            supported_commands=supported_commands,
+            volume=self.volume,
+            muted=self.muted,
+        )
+        self._last_sent_volume = self.volume
+        self._last_sent_muted = self.muted
+        self._last_sent_supported_commands = supported_commands
+
+        self._send_group_update_to_client(client, group_message, controller_state)
+
+        if (
+            self._push_stream is not None
+            and not self._push_stream.is_stopped
+            and client.check_role(Roles.PLAYER)
+        ):
+            logger.debug("Player %s joining active push stream", client.client_id)
+            self._push_stream.on_player_join(client.client_id)
 
     def _send_controller_state_to_clients(self) -> None:
         """Send server/state with controller payload to all controller clients."""
@@ -1079,9 +1107,8 @@ class SendspinGroup:
             self._signal_event(GroupMemberRemovedEvent(client.client_id))
         # Each client needs to be in a group, add it to a new one
         new_group = SendspinGroup(self._server, client)
-        client._set_group(new_group)  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
         # Send group update to notify client of their new solo group
-        new_group._send_group_update_to_clients()
+        new_group.on_client_connected(client)
 
     async def add_client(self, client: SendspinClient) -> None:
         """
@@ -1123,11 +1150,6 @@ class SendspinGroup:
 
         # Then set the group (which will emit ClientGroupChangedEvent)
         client._set_group(self)  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
-
-        # Update PlayerRecord.group_id for player clients
-        if client.check_role(Roles.PLAYER):
-            record = self._server.player_registry.get_or_create(client.client_id)
-            record.group_id = self._group_id
 
         # Handle player joining/reconnecting with active PushStream
         if (
@@ -1228,10 +1250,9 @@ class SendspinGroup:
                 )
 
             supported = client.info.player_support.supported_formats
-            record = self._server.player_registry.get_or_create(client.client_id)
 
             # Start with current preferred format (if any), otherwise the client's top preference.
-            base = record.preferred_format or AudioFormat(
+            base = client.preferred_format or AudioFormat(
                 codec=supported[0].codec,
                 sample_rate=supported[0].sample_rate,
                 bit_depth=supported[0].bit_depth,
@@ -1263,7 +1284,7 @@ class SendspinGroup:
                 requested = base
 
             # Persist preference (also used when no stream is active).
-            record.preferred_format = requested
+            client.preferred_format = requested
 
             # If a push stream is active, delegate the format switch to the stream/role layer.
             # Sending stream/start immediately is unsafe: old-format audio may still be in flight

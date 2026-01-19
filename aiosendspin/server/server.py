@@ -1,4 +1,4 @@
-"""Sendspin Server implementation to connect to and manage many Sendspin Clients."""
+"""Sendspin Server implementation to connect to and manage many Sendspin clients."""
 
 from __future__ import annotations
 
@@ -9,7 +9,13 @@ from contextlib import suppress
 from dataclasses import dataclass
 from ipaddress import ip_address
 
-from aiohttp import ClientConnectionError, ClientResponseError, ClientTimeout, ClientWSTimeout, web
+from aiohttp import (
+    ClientConnectionError,
+    ClientResponseError,
+    ClientTimeout,
+    ClientWSTimeout,
+    web,
+)
 from aiohttp.client import ClientSession
 from zeroconf import (
     InterfaceChoice,
@@ -20,13 +26,11 @@ from zeroconf import (
 )
 from zeroconf.asyncio import AsyncServiceBrowser, AsyncServiceInfo, AsyncZeroconf
 
-from aiosendspin.models.types import Roles
 from aiosendspin.util import get_local_ip
 
-from .audio import AudioFormat
 from .client import SendspinClient
-from .player_state import PlayerRegistry
-from .roles import PlayerRole
+from .connection import SendspinConnection
+from .group import SendspinGroup
 
 logger = logging.getLogger(__name__)
 
@@ -37,14 +41,14 @@ class SendspinEvent:
 
 @dataclass
 class ClientAddedEvent(SendspinEvent):
-    """A new client was added."""
+    """A new persistent client/device was added."""
 
     client_id: str
 
 
 @dataclass
 class ClientRemovedEvent(SendspinEvent):
-    """A client disconnected from the server."""
+    """A persistent client/device was removed from the server."""
 
     client_id: str
 
@@ -56,57 +60,15 @@ def _get_first_valid_ip(addresses: list[str]) -> str | None:
             addr = ip_address(addr_str)
         except ValueError:
             continue
-        # Skip link-local addresses (169.254.x.x for IPv4, fe80:: for IPv6)
-        # and unspecified addresses (0.0.0.0, ::)
         if not addr.is_link_local and not addr.is_unspecified:
             return addr_str
     return None
 
 
 class SendspinServer:
-    """Sendspin Server implementation to connect to and manage many Sendspin Clients."""
+    """Sendspin Server implementation to connect to and manage many Sendspin clients."""
 
     API_PATH = "/sendspin"  # Fixed by protocol
-
-    _clients: set[SendspinClient]
-    """All groups managed by this server."""
-    _loop: asyncio.AbstractEventLoop
-    _event_cbs: list[Callable[[SendspinServer, SendspinEvent], None]]
-    _connection_tasks: dict[str, asyncio.Task[None]]
-    """
-    All tasks managing client connections.
-
-    This only includes connections initiated via connect_to_client (Server -> Client).
-    """
-    _retry_events: dict[str, asyncio.Event]
-    """
-    For each connection task in _connection_tasks, this holds an asyncio.Event.
-
-    This event is used to signal an immediate retry of the connection, in case the connection is
-    sleeping during a backoff period.
-    """
-    _id: str
-    _name: str
-    _client_session: ClientSession
-    """The client session used to connect to clients."""
-    _owns_session: bool
-    """Whether this server instance owns the client session."""
-    _app: web.Application | None
-    """
-    Web application instance for the server.
-
-    This is used to handle incoming WebSocket connections from clients.
-    """
-    _app_runner: web.AppRunner | None
-    """App runner for the web application."""
-    _tcp_site: web.TCPSite | None
-    """TCP site for the web application."""
-    _zc: AsyncZeroconf | None
-    """AsyncZeroconf instance."""
-    _mdns_service: AsyncServiceInfo | None
-    """Registered mDNS service."""
-    _mdns_browser: AsyncServiceBrowser | None
-    """mDNS service browser for client discovery."""
 
     def __init__(
         self,
@@ -115,182 +77,146 @@ class SendspinServer:
         server_name: str,
         client_session: ClientSession | None = None,
     ) -> None:
-        """
-        Initialize a new Sendspin Server.
-
-        Args:
-            loop: The asyncio event loop to use for asynchronous operations.
-            server_id: Unique identifier for this server instance.
-            server_name: Human-readable name for this server.
-            client_session: Optional ClientSession for outgoing connections.
-                If None, a new session will be created.
-        """
-        self._clients = set()
+        """Initialize a Sendspin server instance."""
         self._loop = loop
-        self._event_cbs = []
         self._id = server_id
         self._name = server_name
+
+        self._clients: dict[str, SendspinClient] = {}
+        self._event_cbs: list[Callable[[SendspinServer, SendspinEvent], None]] = []
+
         if client_session is None:
             self._client_session = ClientSession(loop=self._loop, timeout=ClientTimeout(total=30))
             self._owns_session = True
         else:
             self._client_session = client_session
             self._owns_session = False
-        self._connection_tasks = {}
-        self._retry_events = {}
-        self._mdns_client_urls: dict[str, str] = {}  # mDNS service name -> WebSocket URL
-        self._app = None
-        self._app_runner = None
-        self._tcp_site = None
-        self._zc = None
-        self._mdns_service = None
-        self._mdns_browser = None
-        # PlayerRegistry for managing player state across reconnects
-        self._player_registry = PlayerRegistry(
-            loop=self._loop,
-            default_buffer_capacity=1_000_000,  # 1MB default, can be overridden per-player
-        )
-        self._buffer_tracker_reset_handles: dict[str, asyncio.TimerHandle] = {}
+
+        self._connection_tasks: dict[str, asyncio.Task[None]] = {}
+        self._retry_events: dict[str, asyncio.Event] = {}
+
+        self._mdns_client_urls: dict[str, str] = {}
+        self._app: web.Application | None = None
+        self._app_runner: web.AppRunner | None = None
+        self._tcp_site: web.TCPSite | None = None
+        self._zc: AsyncZeroconf | None = None
+        self._mdns_service: AsyncServiceInfo | None = None
+        self._mdns_browser: AsyncServiceBrowser | None = None
+
         logger.debug("SendspinServer initialized: id=%s, name=%s", server_id, server_name)
 
-    def _cancel_buffer_tracker_reset(self, client_id: str) -> None:
-        """Cancel any scheduled BufferTracker reset for a client."""
-        handle = self._buffer_tracker_reset_handles.pop(client_id, None)
-        if handle is not None:
-            handle.cancel()
-
-    def _schedule_buffer_tracker_reset(self, client_id: str, disconnect_time_us: int) -> None:
-        """
-        Schedule a BufferTracker reset if the client stays disconnected for long enough.
-
-        This avoids overreacting to brief network blips while ensuring stale buffered-byte
-        estimates do not persist across longer disconnects.
-        """
-        # Duration-based threshold (seconds)
-        reset_after_s = 2.0
-
-        def _maybe_reset() -> None:
-            self._buffer_tracker_reset_handles.pop(client_id, None)
-            record = self._player_registry.get(client_id)
-            if record is None or record.is_connected:
-                return
-            # Only reset if this is still the same disconnect episode.
-            if record.disconnect_time_us != disconnect_time_us:
-                return
-            record.buffer_tracker.reset()
-
-        self._cancel_buffer_tracker_reset(client_id)
-        self._buffer_tracker_reset_handles[client_id] = self._loop.call_later(
-            reset_after_s, _maybe_reset
-        )
-
     def _create_web_application(self) -> web.Application:
-        """
-        Create and configure the aiohttp web application.
-
-        Returns:
-            Configured aiohttp web.Application instance.
-        """
         app = web.Application()
         app.router.add_get(self.API_PATH, self.on_client_connect)
         return app
 
     @property
     def loop(self) -> asyncio.AbstractEventLoop:
-        """Read-only access to the event loop used by this server."""
+        """Return the asyncio loop used by the server."""
         return self._loop
 
     @property
-    def player_registry(self) -> PlayerRegistry:
-        """Read-only access to the player registry for state persistence."""
-        return self._player_registry
+    def id(self) -> str:
+        """Return the server identifier advertised to clients."""
+        return self._id
+
+    @property
+    def name(self) -> str:
+        """Return the human-readable server name."""
+        return self._name
+
+    @property
+    def clients(self) -> list[SendspinClient]:
+        """All known clients (including disconnected)."""
+        return list(self._clients.values())
+
+    @property
+    def connected_clients(self) -> list[SendspinClient]:
+        """All currently connected clients."""
+        return [c for c in self._clients.values() if c.is_connected]
+
+    def get_client(self, client_id: str) -> SendspinClient | None:
+        """Get a persistent client device by id, if known."""
+        return self._clients.get(client_id)
+
+    def get_or_create_client(self, client_id: str) -> SendspinClient:
+        """Get or create a persistent client device by id."""
+        client = self._clients.get(client_id)
+        if client is None:
+            client = SendspinClient(self, client_id=client_id)
+            self._clients[client_id] = client
+            SendspinGroup(self, client)
+            self._signal_event(ClientAddedEvent(client_id))
+        return client
+
+    def add_event_listener(
+        self, callback: Callable[[SendspinServer, SendspinEvent], None]
+    ) -> Callable[[], None]:
+        """Register a callback for server events and return an unsubscribe callable."""
+        self._event_cbs.append(callback)
+
+        def _remove() -> None:
+            with suppress(ValueError):
+                self._event_cbs.remove(callback)
+
+        return _remove
+
+    def _signal_event(self, event: SendspinEvent) -> None:
+        for cb in self._event_cbs:
+            try:
+                cb(self, event)
+            except Exception:
+                logger.exception("Error in event listener")
 
     async def on_client_connect(self, request: web.Request) -> web.StreamResponse:
         """Handle an incoming WebSocket connection from a Sendspin client."""
         logger.debug("Incoming client connection from %s", request.remote)
 
-        client = SendspinClient(
-            self,
-            handle_client_connect=self._handle_client_connect,
-            handle_client_disconnect=self._handle_client_disconnect,
-            request=request,
-        )
-        await client._handle_client()  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+        conn = SendspinConnection(self, request=request)
+        await conn._handle_client()  # noqa: SLF001
 
-        websocket = client.websocket_connection
-        # This is a WebSocketResponse since we just created client
-        # as client-initiated.
+        websocket = conn.websocket_connection
         assert isinstance(websocket, web.WebSocketResponse)
         return websocket
 
     def connect_to_client(self, url: str) -> None:
-        """
-        Connect to the Sendspin client at the given URL.
-
-        If an active connection already exists for this URL, nothing will happen.
-        In case a connection attempt fails, a new connection will be attempted automatically.
-        """
-        logger.debug("Connecting to client at URL: %s", url)
+        """Connect to a Sendspin client at the given URL with automatic retries."""
         prev_task = self._connection_tasks.get(url)
         if prev_task is not None:
-            logger.debug("Connection is already active for URL: %s", url)
-            # Signal immediate retry if we have a retry event (connection is in backoff)
             if retry_event := self._retry_events.get(url):
-                logger.debug("Signaling immediate retry for URL: %s", url)
                 retry_event.set()
-        else:
-            # Create retry event for this connection
-            self._retry_events[url] = asyncio.Event()
-            self._connection_tasks[url] = self._loop.create_task(
-                self._handle_client_connection(url)
-            )
+            return
+
+        self._retry_events[url] = asyncio.Event()
+        self._connection_tasks[url] = self._loop.create_task(self._handle_client_connection(url))
 
     def disconnect_from_client(self, url: str) -> None:
-        """
-        Disconnect from the Sendspin client that was previously connected at the given URL.
-
-        If no connection was established at this URL, or the connection is already closed,
-        this will do nothing.
-
-        NOTE: this will only disconnect connections that were established via connect_to_client.
-        """
+        """Disconnect a server-initiated connection previously established via connect_to_client."""
         connection_task = self._connection_tasks.pop(url, None)
         if connection_task is not None:
-            logger.debug("Disconnecting from client at URL: %s", url)
             connection_task.cancel()
 
     async def _handle_client_connection(self, url: str) -> None:
-        """Handle the actual connection to a client."""
-        # Exponential backoff settings
+        """Handle a server-initiated WebSocket connection task."""
         backoff = 1.0
-        max_backoff = 300.0  # 5 minutes
+        max_backoff = 300.0
 
         try:
             while True:
-                client: SendspinClient | None = None
                 retry_event = self._retry_events.get(url)
-
                 try:
                     async with self._client_session.ws_connect(
                         url,
                         heartbeat=30,
-                        # Pyright doesn't recognise the signature
                         timeout=ClientWSTimeout(ws_close=10, ws_receive=60),  # pyright: ignore[reportCallIssue]
                     ) as wsock:
-                        # Reset backoff on successful connect
                         backoff = 1.0
-                        client = SendspinClient(
-                            self,
-                            handle_client_connect=self._handle_client_connect,
-                            handle_client_disconnect=self._handle_client_disconnect,
-                            wsock_client=wsock,
-                        )
-                        await client._handle_client()  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+                        conn = SendspinConnection(self, wsock_client=wsock)
+                        await conn._handle_client()  # noqa: SLF001
+
                     if self._client_session.closed:
-                        logger.debug("Client session closed, stopping connection task for %s", url)
                         break
-                    if client.closing:
-                        break
+
                 except asyncio.CancelledError:
                     break
                 except TimeoutError:
@@ -302,188 +228,22 @@ class SendspinServer:
                     break
 
                 logger.debug("Trying to reconnect to client at %s in %.1fs", url, backoff)
-
-                # Use asyncio.wait_for with the retry event to allow immediate retry
                 if retry_event is not None:
                     try:
-                        # Always returns True when event is set
                         await asyncio.wait_for(retry_event.wait(), timeout=backoff)
-                        logger.debug("Immediate retry requested for %s", url)
-                        # Clear the event for next time
                         retry_event.clear()
                     except TimeoutError:
-                        # Normal timeout, continue with exponential backoff
                         pass
                 else:
                     await asyncio.sleep(backoff)
-
-                # Increase backoff for next retry (exponential)
                 backoff *= 2
         except asyncio.CancelledError:
             pass
         except Exception:
-            # NOTE: Intentional catch-all to log unexpected exceptions so they are visible.
             logger.exception("Unexpected error occurred")
         finally:
-            self._connection_tasks.pop(url, None)  # Cleanup connection tasks dict
-            self._retry_events.pop(url, None)  # Cleanup retry events dict
-
-    def add_event_listener(
-        self, callback: Callable[[SendspinServer, SendspinEvent], None]
-    ) -> Callable[[], None]:
-        """
-        Register a callback to listen for state changes of the server.
-
-        State changes include:
-        - A new client was connected
-        - A client disconnected
-
-        Returns a function to remove the listener.
-        """
-        self._event_cbs.append(callback)
-
-        def _remove() -> None:
-            with suppress(ValueError):
-                self._event_cbs.remove(callback)
-
-        return _remove
-
-    def _signal_event(self, event: SendspinEvent) -> None:
-        """Signal an event to all registered listeners."""
-        for cb in self._event_cbs:
-            try:
-                cb(self, event)
-            except Exception:
-                logger.exception("Error in event listener")
-
-    async def _handle_client_connect(self, client: SendspinClient) -> None:
-        """
-        Register the client to the server.
-
-        Should only be called once all data like the client id was received.
-        If a client with the same ID already exists, the old connection is closed.
-        """
-        if client in self._clients:
-            return
-
-        # Check for existing client with same ID and disconnect it
-        if (existing := self.get_client(client.client_id)) is not None:
-            logger.info("Client %s reconnected, closing previous connection", client.client_id)
-            # Fire removal event before awaiting disconnect to ensure correct event order
-            self._handle_client_disconnect(existing)
-            try:
-                await existing.disconnect(retry_connection=False)
-            except Exception:
-                logger.exception("Error disconnecting replaced client %s", client.client_id)
-
-        logger.debug("Adding client %s (%s) to server", client.client_id, client.name)
-        self._clients.add(client)
-
-        # Wire player clients to PlayerRegistry for state persistence
-        if client.check_role(Roles.PLAYER):
-            # Cancel any pending BufferTracker reset from a previous disconnect.
-            self._cancel_buffer_tracker_reset(client.client_id)
-            existing_record = self._player_registry.get(client.client_id)
-            player_record = existing_record or self._player_registry.get_or_create(client.client_id)
-            player_record.connection = client
-            player_record.group_id = client.group.group_id
-            # Clear disconnect time since we're now connected
-            player_record._disconnect_time_us = None  # noqa: SLF001
-            # Default policy: players are blocking (use BufferTracker for backpressure)
-            # unless an application has explicitly configured otherwise.
-            if existing_record is None:
-                player_record.blocking = True
-            # Create and attach PlayerRole for this connection
-            player_role = PlayerRole(_record=player_record, _connection=client)
-            player_role.on_connect()
-            player_record.player_role = player_role
-            # Update buffer capacity from client-reported capabilities
-            if client.info.player_support is not None:
-                player_record.buffer_tracker.capacity_bytes = (
-                    client.info.player_support.buffer_capacity
-                )
-                # Ensure we have a valid preferred format that the client supports.
-                supported = client.info.player_support.supported_formats
-                default_format = AudioFormat(
-                    codec=supported[0].codec,
-                    sample_rate=supported[0].sample_rate,
-                    bit_depth=supported[0].bit_depth,
-                    channels=supported[0].channels,
-                )
-                if player_record.preferred_format is None or not any(
-                    fmt.codec == player_record.preferred_format.codec
-                    and fmt.sample_rate == player_record.preferred_format.sample_rate
-                    and fmt.bit_depth == player_record.preferred_format.bit_depth
-                    and fmt.channels == player_record.preferred_format.channels
-                    for fmt in supported
-                ):
-                    player_record.preferred_format = default_format
-            logger.debug(
-                "Attached player %s to PlayerRecord (group_id=%s)",
-                client.client_id,
-                player_record.group_id,
-            )
-
-        self._signal_event(ClientAddedEvent(client.client_id))
-
-    def _handle_client_disconnect(self, client: SendspinClient) -> None:
-        """Unregister the client from the server."""
-        if client not in self._clients:
-            return
-
-        logger.debug("Removing client %s from server", client.client_id)
-        self._clients.remove(client)
-
-        # Update PlayerRecord for player clients (record persists for reconnection)
-        if client.check_role(Roles.PLAYER):
-            player_record = self._player_registry.get(client.client_id)
-            if player_record is not None:
-                # Policy: client/goodbye implies the client intentionally ended the connection,
-                # so buffered audio should be treated as empty immediately.
-                if client.last_goodbye_reason is not None:
-                    player_record.buffer_tracker.reset()
-                # Clean up PlayerRole
-                if player_record.player_role is not None:
-                    player_record.player_role.on_disconnect()
-                    player_record.player_role = None
-                player_record.connection = None
-                disconnect_time_us = int(self._loop.time() * 1_000_000)
-                player_record.mark_disconnected(disconnect_time_us)
-                # Ungraceful disconnect: reset buffered-bytes estimate after a duration threshold.
-                if client.last_goodbye_reason is None:
-                    self._schedule_buffer_tracker_reset(client.client_id, disconnect_time_us)
-                logger.debug(
-                    "Detached player %s from PlayerRecord (group_id preserved: %s)",
-                    client.client_id,
-                    player_record.group_id,
-                )
-
-        self._signal_event(ClientRemovedEvent(client.client_id))
-
-    @property
-    def clients(self) -> set[SendspinClient]:
-        """Get the set of all clients connected to this server."""
-        return self._clients
-
-    def get_client(self, client_id: str) -> SendspinClient | None:
-        """Get the client with the given id."""
-        logger.debug("Looking for client with id: %s", client_id)
-        for client in self.clients:
-            if client.client_id == client_id:
-                logger.debug("Found client %s", client_id)
-                return client
-        logger.debug("Client %s not found", client_id)
-        return None
-
-    @property
-    def id(self) -> str:
-        """Get the unique identifier of this server."""
-        return self._id
-
-    @property
-    def name(self) -> str:
-        """Get the name of this server."""
-        return self._name
+            self._connection_tasks.pop(url, None)
+            self._retry_events.pop(url, None)
 
     async def start_server(
         self,
@@ -493,23 +253,7 @@ class SendspinServer:
         *,
         discover_clients: bool = True,
     ) -> None:
-        """
-        Start the Sendspin Server.
-
-        This will start the Sendspin server to connect to clients for both:
-        - Client initiated connections: This will advertise this server via mDNS as _sendspin-server
-        - Server initiated connections: This will listen for all _sendspin._tcp mDNS services and
-          automatically connect to them.
-
-        :param port: The TCP port to bind the server to.
-        :param host: The IP address for the server to listen on
-            (e.g., "0.0.0.0" for all interfaces).
-        :param advertise_addresses: List of IP addresses to advertise via mDNS.
-            If None, auto-detects the local IP address.
-        :param discover_clients: If True, enable automatic mDNS discovery of clients.
-            If False, the server will still advertise itself and accept incoming connections,
-            but will not actively connect to discovered clients.
-        """
+        """Start the server HTTP listener and (optionally) mDNS discovery/advertising."""
         if self._app is not None:
             logger.warning("Server is already running")
             return
@@ -527,12 +271,12 @@ class SendspinServer:
             )
             await self._tcp_site.start()
             logger.info("Sendspin server started successfully on %s:%d", host, port)
-            # Start mDNS advertise and discovery
+
             self._zc = AsyncZeroconf(
                 ip_version=IPVersion.V4Only,
                 interfaces=[host] if host != "0.0.0.0" else InterfaceChoice.Default,
             )
-            # Determine IP addresses to advertise
+
             if advertise_addresses is not None:
                 addresses = advertise_addresses
             elif local_ip := get_local_ip():
@@ -548,7 +292,7 @@ class SendspinServer:
                 logger.warning(
                     "No IP addresses available for mDNS advertising. "
                     "Clients may not be able to discover this server. "
-                    "Consider specifying addresses manually via advertise_addresses parameter."
+                    "Consider specifying addresses manually via advertise_addresses."
                 )
 
             if discover_clients:
@@ -565,48 +309,41 @@ class SendspinServer:
             raise
 
     async def stop_server(self) -> None:
-        """Stop the HTTP server."""
+        """Stop the server HTTP listener and mDNS services."""
         await self._stop_mdns()
 
         if self._tcp_site:
             await self._tcp_site.stop()
             self._tcp_site = None
-            logger.debug("TCP site stopped")
 
         if self._app_runner:
             await self._app_runner.cleanup()
             self._app_runner = None
-            logger.debug("App runner cleaned up")
 
         if self._app:
             await self._app.shutdown()
             self._app = None
 
     async def close(self) -> None:
-        """Close the server and cleanup resources."""
-        # Cancel all connection tasks to prevent reconnection attempts
+        """Close the server and disconnect all active connections."""
         for task in self._connection_tasks.values():
             task.cancel()
 
-        # Disconnect all clients before stopping the server
-        clients = list(self.clients)
-        disconnect_tasks = []
-        for client in clients:
-            logger.debug("Disconnecting client %s", client.client_id)
-            disconnect_tasks.append(client.disconnect(retry_connection=False))
+        disconnect_tasks: list[asyncio.Task[None]] = []
+        for client in self._clients.values():
+            if client.connection is None:
+                continue
+            disconnect_tasks.append(
+                self._loop.create_task(client.connection.disconnect(retry_connection=False))
+            )
         if disconnect_tasks:
-            results = await asyncio.gather(*disconnect_tasks, return_exceptions=True)
-            for client, result in zip(clients, results, strict=True):
-                if isinstance(result, Exception):
-                    logger.warning("Error disconnecting client %s: %s", client.client_id, result)
+            await asyncio.gather(*disconnect_tasks, return_exceptions=True)
 
         await self.stop_server()
         if self._owns_session and not self._client_session.closed:
             await self._client_session.close()
-            logger.debug("Closed internal client session for server %s", self._name)
 
     async def _start_mdns_advertising(self, addresses: list[str], port: int, path: str) -> None:
-        """Start advertising this server via mDNS."""
         assert self._zc is not None
         if self._mdns_service is not None:
             await self._zc.async_unregister_service(self._mdns_service)
@@ -630,7 +367,6 @@ class SendspinServer:
             logger.error("Sendspin server with identical name present in the local network!")
 
     async def _start_mdns_discovery(self) -> None:
-        """Automatically connect to Sendspin clients when discovered via mDNS."""
         assert self._zc is not None
 
         service_type = "_sendspin._tcp.local."
@@ -639,7 +375,6 @@ class SendspinServer:
             service_type,
             handlers=[self._on_mdns_service_state_change],
         )
-        logger.debug("mDNS discovery started for clients")
 
     def _on_mdns_service_state_change(
         self,
@@ -648,7 +383,6 @@ class SendspinServer:
         name: str,
         state_change: ServiceStateChange,
     ) -> None:
-        """Handle mDNS service state callback (called from zeroconf thread)."""
         if state_change in (ServiceStateChange.Added, ServiceStateChange.Updated):
 
             def _schedule_add() -> None:
@@ -662,22 +396,15 @@ class SendspinServer:
             self._loop.call_soon_threadsafe(lambda: self._handle_service_removed(name))
 
     async def _handle_service_added(self, zeroconf: Zeroconf, service_type: str, name: str) -> None:
-        """Handle a new mDNS service being added."""
-        # Try cache first for faster discovery, fall back to network request
         info = AsyncServiceInfo(service_type, name)
         if not info.load_from_cache(zeroconf):
             await info.async_request(zeroconf, 3000)
 
         if not info.parsed_addresses():
-            logger.debug("No addresses found for discovered service %s", name)
             return
 
-        # Filter out link-local and unspecified addresses
         address = _get_first_valid_ip(info.parsed_addresses())
         if address is None:
-            logger.debug(
-                "No valid (non-link-local) addresses found for discovered service %s", name
-            )
             return
 
         port = info.port
@@ -690,36 +417,24 @@ class SendspinServer:
                     break
 
         if port is None:
-            logger.warning("Sendspin client discovered at %s has no port, ignoring", address)
             return
         if path is None or not str(path).startswith("/"):
-            logger.warning(
-                "Sendspin client discovered at %s:%i has no or invalid path property, ignoring",
-                address,
-                port,
-            )
             return
 
         url = f"ws://{address}:{port}{path}"
-        logger.debug("mDNS discovered client at %s", url)
-        # Track the URL for this service so we can disconnect when removed
         self._mdns_client_urls[name] = url
         self.connect_to_client(url)
 
     def _handle_service_removed(self, name: str) -> None:
-        """Handle an mDNS service being removed."""
         url = self._mdns_client_urls.pop(name, None)
         if url is not None:
-            logger.debug("mDNS client removed: %s", url)
             self.disconnect_from_client(url)
 
     async def _stop_mdns(self) -> None:
-        """Stop mDNS advertise and discovery if active."""
         if self._zc is None:
             return
         try:
             if self._mdns_browser is not None:
-                # AsyncServiceBrowser cleanup
                 await self._mdns_browser.async_cancel()
             if self._mdns_service is not None:
                 await self._zc.async_unregister_service(self._mdns_service)

@@ -101,7 +101,7 @@ class ControllerClient:
         groups_seen: set[str] = set()
         unique_groups: list[SendspinGroup] = []
 
-        for client in server._clients:  # noqa: SLF001
+        for client in server.connected_clients:
             group = client.group
             group_id = group.group_id
             if group_id not in groups_seen:
@@ -205,7 +205,7 @@ class ControllerClient:
             return None
 
         server = self.client._server  # noqa: SLF001
-        for client in server._clients:  # noqa: SLF001
+        for client in server.connected_clients:
             if client.group.group_id == group_id:
                 return client.group
         return None

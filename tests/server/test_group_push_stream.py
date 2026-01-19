@@ -9,7 +9,6 @@ import pytest
 from aiosendspin.models.types import Roles
 from aiosendspin.server.channels import ChannelRouter
 from aiosendspin.server.group import SendspinGroup
-from aiosendspin.server.player_state import PlayerRegistry
 from aiosendspin.server.push_stream import PushStream
 
 
@@ -25,10 +24,9 @@ class TestGroupStartStream:
 
     @pytest.fixture
     def mock_server(self, mock_loop: MagicMock) -> MagicMock:
-        """Create a mock server with player registry."""
+        """Create a mock server."""
         server = MagicMock()
         server.loop = mock_loop
-        server.player_registry = PlayerRegistry(loop=mock_loop, default_buffer_capacity=100_000)
         return server
 
     @pytest.fixture
@@ -52,17 +50,16 @@ class TestGroupStartStream:
 
         assert isinstance(stream, PushStream)
 
-    def test_start_stream_uses_server_registry(
+    def test_start_stream_uses_group(
         self,
         mock_server: MagicMock,
         mock_client: MagicMock,
     ) -> None:
-        """start_stream() should use the server's player registry."""
+        """start_stream() should bind the PushStream to the group."""
         group = SendspinGroup(mock_server, mock_client)
         stream = group.start_stream()
 
-        # The stream should use the server's player registry
-        assert stream._player_registry is mock_server.player_registry  # noqa: SLF001
+        assert stream._group is group  # noqa: SLF001
 
     def test_start_stream_uses_server_loop(
         self,
@@ -128,10 +125,9 @@ class TestPlayerJoinWithActiveStream:
 
     @pytest.fixture
     def mock_server(self, mock_loop: MagicMock) -> MagicMock:
-        """Create a mock server with player registry."""
+        """Create a mock server."""
         server = MagicMock()
         server.loop = mock_loop
-        server.player_registry = PlayerRegistry(loop=mock_loop, default_buffer_capacity=100_000)
         return server
 
     @pytest.fixture

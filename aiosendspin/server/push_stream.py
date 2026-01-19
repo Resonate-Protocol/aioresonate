@@ -8,13 +8,15 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 from uuid import UUID
 
+from aiosendspin.models.types import Roles
 from aiosendspin.server.channels import MAIN_CHANNEL
 from aiosendspin.server.pipeline import EncodedChunk, PipelineKey, PipelineManager
 
 if TYPE_CHECKING:
+    from aiosendspin.server.audio import AudioFormat
     from aiosendspin.server.channels import ChannelRouter
-    from aiosendspin.server.player_state import PlayerRecord, PlayerRegistry
-    from aiosendspin.server.stream import AudioFormat
+    from aiosendspin.server.client import SendspinClient
+    from aiosendspin.server.group import SendspinGroup
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -56,8 +58,7 @@ class PushStream:
         self,
         *,
         loop: asyncio.AbstractEventLoop,
-        group_id: str,
-        player_registry: PlayerRegistry,
+        group: SendspinGroup,
         channel_router: ChannelRouter,
     ) -> None:
         """
@@ -65,13 +66,11 @@ class PushStream:
 
         Args:
             loop: Event loop for timing and async operations.
-            group_id: ID of the group this stream belongs to.
-            player_registry: Registry for player state management.
+            group: Group this stream belongs to.
             channel_router: Router for channel assignments.
         """
         self._loop = loop
-        self._group_id = group_id
-        self._player_registry = player_registry
+        self._group = group
         self._channel_router = channel_router
         self._is_stopped = False
         # Pending audio per channel: channel_id -> (pcm_bytes, audio_format)
@@ -88,9 +87,13 @@ class PushStream:
         """Whether this stream has been stopped."""
         return self._is_stopped
 
-    def _get_group_players(self) -> list[PlayerRecord]:
-        """Get all connected players in this stream's group."""
-        return [p for p in self._player_registry.get_in_group(self._group_id) if p.is_connected]
+    def _get_group_players(self) -> list[SendspinClient]:
+        """Get all connected player clients in this stream's group."""
+        return [
+            c
+            for c in self._group.clients
+            if c.is_connected and c.player_role is not None and c.check_role(Roles.PLAYER)
+        ]
 
     def has_pending_audio(self) -> bool:
         """Return True if there is pending audio to commit."""
@@ -221,7 +224,7 @@ class PushStream:
             # Skip non-blocking players - they don't affect group timing
             if not player.blocking:
                 continue
-            if hasattr(player, "buffer_tracker") and player.buffer_tracker:
+            if player.buffer_tracker is not None:
                 wait_us = player.buffer_tracker.time_until_capacity(byte_count)
                 max_wait_us = max(max_wait_us, wait_us)
         return max_wait_us
@@ -260,7 +263,7 @@ class PushStream:
 
     def _get_player_target_format(
         self,
-        player: PlayerRecord,
+        player: SendspinClient,
         source_format: AudioFormat,
     ) -> AudioFormat:
         """
@@ -445,6 +448,12 @@ class PushStream:
         """Return True if there are cached chunks for late joiners."""
         return any(len(chunks) > 0 for chunks in self._chunk_cache.values())
 
+    def _get_player_by_id(self, player_id: str) -> SendspinClient | None:
+        for client in self._group.clients:
+            if client.client_id == player_id:
+                return client
+        return None
+
     def get_catchup_chunks(self, player_id: str) -> list[CachedChunk]:
         """
         Get cached chunks for a player's channel and format.
@@ -460,8 +469,7 @@ class PushStream:
         # Get player's channel
         channel_id = self._channel_router.get_channel(player_id)
 
-        # Get player record for format selection
-        player = self._player_registry.get(player_id)
+        player = self._get_player_by_id(player_id)
         if player is None:
             return []
 
@@ -512,8 +520,8 @@ class PushStream:
         Args:
             player_id: Player ID that joined.
         """
-        player = self._player_registry.get(player_id)
-        if player is None or player.player_role is None:
+        player = self._get_player_by_id(player_id)
+        if player is None or not player.is_connected or player.player_role is None:
             return
 
         # Get cached chunks for this player
@@ -568,12 +576,12 @@ class PushStream:
         Returns:
             True if format change was accepted, False if invalid or player not found.
         """
-        player = self._player_registry.get(player_id)
-        if player is None or player.connection is None:
+        player = self._get_player_by_id(player_id)
+        if player is None or not player.is_connected:
             return False
 
         # Get supported formats from client info
-        player_support = player.connection.info.player_support
+        player_support = player.info.player_support
         if player_support is None:
             return False
         supported = player_support.supported_formats

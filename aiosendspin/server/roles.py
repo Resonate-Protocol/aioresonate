@@ -25,7 +25,6 @@ from aiosendspin.models.player import StreamStartPlayer
 if TYPE_CHECKING:
     from aiosendspin.server.client import SendspinClient
     from aiosendspin.server.pipeline import EncodedChunk
-    from aiosendspin.server.player_state import PlayerRecord
     from aiosendspin.server.stream import AudioFormat
 
 
@@ -67,10 +66,8 @@ class PlayerRole(Role):
     - Send state management
     """
 
-    _record: PlayerRecord
-    """The connection-independent player record."""
-    _connection: SendspinClient
-    """The current WebSocket connection."""
+    _client: SendspinClient
+    """Persistent client/device state."""
     _stream_started: bool = field(default=False, init=False)
     """Whether stream/start has been sent for the current format."""
     _current_format: AudioFormat | None = field(default=None, init=False)
@@ -90,7 +87,7 @@ class PlayerRole(Role):
     def on_disconnect(self) -> None:
         """Clean up on disconnect.
 
-        Note: BufferTracker reset semantics are handled at the server layer
+        Note: BufferTracker reset semantics are handled at the persistent client layer
         (goodbye immediate, otherwise duration-based). Role-level clear/end
         always resets, but plain disconnect does not unconditionally reset.
         """
@@ -134,7 +131,7 @@ class PlayerRole(Role):
                 )
             )
         )
-        self._connection.send_message(stream_start)
+        self._client.send_message(stream_start)
         self._stream_started = True
         self._current_format = audio_format
         self._codec_header_b64 = codec_header_b64
@@ -162,7 +159,7 @@ class PlayerRole(Role):
             True if sent successfully, False if dropped (queue high water).
         """
         # For non-blocking players, check queue before sending
-        if not self._record.blocking and self._connection.queue_high_water():
+        if not self._client.blocking and self._client.queue_high_water():
             self.mark_needs_resync()
             return False
 
@@ -173,7 +170,7 @@ class PlayerRole(Role):
         # Pack binary header and send
         header = pack_binary_header_raw(BinaryMessageType.AUDIO_CHUNK.value, timestamp_us)
         packed_data = header + chunk.data
-        if not self._connection.try_send_binary(packed_data):
+        if not self._client.try_send_binary(packed_data):
             self.mark_needs_resync()
             return False
 
@@ -183,8 +180,8 @@ class PlayerRole(Role):
 
         # Register with buffer tracker
         chunk_end_us = timestamp_us + chunk.duration_us
-        if self._record.buffer_tracker is not None:
-            self._record.buffer_tracker.register(chunk_end_us, chunk.byte_count)
+        if self._client.buffer_tracker is not None:
+            self._client.buffer_tracker.register(chunk_end_us, chunk.byte_count)
 
         return True
 
@@ -208,13 +205,13 @@ class PlayerRole(Role):
             True if sent successfully, False if dropped.
         """
         # Catch-up is also droppable binary data.
-        if not self._record.blocking and self._connection.queue_high_water():
+        if not self._client.blocking and self._client.queue_high_water():
             self.mark_needs_resync()
             return False
 
         header = pack_binary_header_raw(BinaryMessageType.AUDIO_CHUNK.value, timestamp_us)
         packed_data = header + payload
-        if not self._connection.try_send_binary(packed_data):
+        if not self._client.try_send_binary(packed_data):
             self.mark_needs_resync()
             return False
 
@@ -223,8 +220,8 @@ class PlayerRole(Role):
 
         # Register with buffer tracker using the real duration.
         chunk_end_us = timestamp_us + duration_us
-        if self._record.buffer_tracker is not None:
-            self._record.buffer_tracker.register(chunk_end_us, byte_count)
+        if self._client.buffer_tracker is not None:
+            self._client.buffer_tracker.register(chunk_end_us, byte_count)
 
         return True
 
@@ -235,15 +232,15 @@ class PlayerRole(Role):
         Used for seek operations to discard buffered audio.
         """
         stream_clear = StreamClearMessage(payload=StreamClearPayload(roles=["player"]))
-        self._connection.send_message(stream_clear)
+        self._client.send_message(stream_clear)
 
         # Reset stream state (stream/start will be re-sent)
         self._stream_started = False
         self._current_format = None
 
         # Reset buffer tracker
-        if self._record.buffer_tracker is not None:
-            self._record.buffer_tracker.reset()
+        if self._client.buffer_tracker is not None:
+            self._client.buffer_tracker.reset()
 
     def end_stream(self) -> None:
         """
@@ -253,15 +250,15 @@ class PlayerRole(Role):
         """
         # End all streams (roles omitted) for best client compatibility.
         stream_end = StreamEndMessage(payload=StreamEndPayload(roles=None))
-        self._connection.send_message(stream_end)
+        self._client.send_message(stream_end)
 
         # Reset stream state
         self._stream_started = False
         self._current_format = None
 
         # Reset buffer tracker
-        if self._record.buffer_tracker is not None:
-            self._record.buffer_tracker.reset()
+        if self._client.buffer_tracker is not None:
+            self._client.buffer_tracker.reset()
 
     def on_format_change(self, new_format: AudioFormat) -> None:  # noqa: ARG002
         """
