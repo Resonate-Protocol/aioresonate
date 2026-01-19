@@ -223,7 +223,7 @@ class SendspinClient:
             capacity = self.info.player_support.buffer_capacity
             if self._buffer_tracker is None:
                 self._buffer_tracker = BufferTracker(
-                    loop=self._server.loop,
+                    clock=self._server.clock,
                     client_id=self._client_id,
                     capacity_bytes=capacity,
                 )
@@ -271,7 +271,7 @@ class SendspinClient:
             self._player_role = None
 
         self._connection = None
-        self._disconnect_time_us = int(self._server.loop.time() * 1_000_000)
+        self._disconnect_time_us = self._server.clock.now_us()
 
         if self._buffer_tracker is None:
             return

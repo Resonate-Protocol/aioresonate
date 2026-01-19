@@ -14,12 +14,14 @@ from aiosendspin.models.types import AudioCodec, PlayerCommand, Roles
 from aiosendspin.server.audio import AudioFormat
 from aiosendspin.server.channels import ChannelRouter
 from aiosendspin.server.client import SendspinClient
+from aiosendspin.server.clock import LoopClock
 from aiosendspin.server.push_stream import PushStream
 
 
 @dataclass(slots=True)
 class _DummyServer:
     loop: Any
+    clock: Any
     id: str = "srv"
     name: str = "server"
 
@@ -58,7 +60,7 @@ def _make_connected_player(
     client_id: str,
 ) -> tuple[SendspinClient, _FakeConnection]:
     """Create a connected player client with a fake connection."""
-    server = _DummyServer(loop=mock_loop)
+    server = _DummyServer(loop=mock_loop, clock=LoopClock(mock_loop))
     client = SendspinClient(server, client_id=client_id)
     client._group = group  # noqa: SLF001
     group.clients.append(client)
@@ -99,7 +101,9 @@ async def test_commit_audio_sends_stream_start_and_binary(mock_loop: Any) -> Non
     group = _DummyGroup(clients=[])
     client, conn = _make_connected_player(mock_loop, group, "p1")
 
-    stream = PushStream(loop=mock_loop, group=group, channel_router=ChannelRouter())
+    stream = PushStream(
+        loop=mock_loop, clock=LoopClock(mock_loop), group=group, channel_router=ChannelRouter()
+    )
     stream.prepare_audio(
         bytes(4800),
         AudioFormat(sample_rate=48000, bit_depth=16, channels=2, codec=AudioCodec.PCM),
@@ -120,7 +124,9 @@ async def test_stop_sends_stream_end_and_resets_buffer_tracker(mock_loop: Any) -
     group = _DummyGroup(clients=[])
     client, conn = _make_connected_player(mock_loop, group, "p1")
 
-    stream = PushStream(loop=mock_loop, group=group, channel_router=ChannelRouter())
+    stream = PushStream(
+        loop=mock_loop, clock=LoopClock(mock_loop), group=group, channel_router=ChannelRouter()
+    )
     stream.prepare_audio(
         bytes(4800),
         AudioFormat(sample_rate=48000, bit_depth=16, channels=2, codec=AudioCodec.PCM),
@@ -140,7 +146,9 @@ async def test_clear_sends_stream_clear(mock_loop: Any) -> None:
     group = _DummyGroup(clients=[])
     _, conn = _make_connected_player(mock_loop, group, "p1")
 
-    stream = PushStream(loop=mock_loop, group=group, channel_router=ChannelRouter())
+    stream = PushStream(
+        loop=mock_loop, clock=LoopClock(mock_loop), group=group, channel_router=ChannelRouter()
+    )
     stream.prepare_audio(
         bytes(4800),
         AudioFormat(sample_rate=48000, bit_depth=16, channels=2, codec=AudioCodec.PCM),
@@ -156,7 +164,9 @@ async def test_on_player_join_sends_catchup_chunks(mock_loop: Any) -> None:
     """Late join triggers stream/start and cached audio catch-up."""
     group = _DummyGroup(clients=[])
     _, conn1 = _make_connected_player(mock_loop, group, "p1")
-    stream = PushStream(loop=mock_loop, group=group, channel_router=ChannelRouter())
+    stream = PushStream(
+        loop=mock_loop, clock=LoopClock(mock_loop), group=group, channel_router=ChannelRouter()
+    )
 
     stream.prepare_audio(
         bytes(4800),
@@ -179,7 +189,9 @@ async def test_non_blocking_player_resync_waits_for_queue_to_drain(mock_loop: An
     client, conn = _make_connected_player(mock_loop, group, "p1")
     client.blocking = False
 
-    stream = PushStream(loop=mock_loop, group=group, channel_router=ChannelRouter())
+    stream = PushStream(
+        loop=mock_loop, clock=LoopClock(mock_loop), group=group, channel_router=ChannelRouter()
+    )
 
     conn.high_water = True
     stream.prepare_audio(

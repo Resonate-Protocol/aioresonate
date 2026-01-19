@@ -11,12 +11,14 @@ from aiosendspin.models.core import ClientHelloPayload
 from aiosendspin.models.player import ClientHelloPlayerSupport, SupportedAudioFormat
 from aiosendspin.models.types import AudioCodec, GoodbyeReason, PlayerCommand, Roles
 from aiosendspin.server.client import SendspinClient
+from aiosendspin.server.clock import LoopClock
 from aiosendspin.server.group import SendspinGroup
 
 
 @dataclass(slots=True)
 class _DummyServer:
     loop: asyncio.AbstractEventLoop
+    clock: LoopClock
     id: str = "srv"
     name: str = "server"
 
@@ -60,7 +62,7 @@ def _player_hello(client_id: str) -> ClientHelloPayload:
 async def test_goodbye_disconnect_resets_buffer_tracker() -> None:
     """client/goodbye disconnect resets BufferTracker immediately."""
     loop = asyncio.get_running_loop()
-    server = _DummyServer(loop=loop)
+    server = _DummyServer(loop=loop, clock=LoopClock(loop))
     client = SendspinClient(server, client_id="player-1")
     SendspinGroup(server, client)
 
@@ -83,7 +85,7 @@ async def test_goodbye_disconnect_resets_buffer_tracker() -> None:
 async def test_ungraceful_disconnect_delays_buffer_tracker_reset() -> None:
     """Ungraceful disconnect delays BufferTracker reset to tolerate brief blips."""
     loop = asyncio.get_running_loop()
-    server = _DummyServer(loop=loop)
+    server = _DummyServer(loop=loop, clock=LoopClock(loop))
     client = SendspinClient(server, client_id="player-1")
     SendspinGroup(server, client)
 
@@ -107,7 +109,7 @@ async def test_ungraceful_disconnect_delays_buffer_tracker_reset() -> None:
 async def test_reconnect_cancels_scheduled_buffer_tracker_reset() -> None:
     """Reconnect cancels the pending delayed BufferTracker reset."""
     loop = asyncio.get_running_loop()
-    server = _DummyServer(loop=loop)
+    server = _DummyServer(loop=loop, clock=LoopClock(loop))
     client = SendspinClient(server, client_id="player-1")
     SendspinGroup(server, client)
 

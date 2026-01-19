@@ -242,7 +242,7 @@ class SendspinConnection:
         assert wsock is not None
         try:
             async for msg in wsock:
-                timestamp_us = int(self._server.loop.time() * 1_000_000)
+                timestamp_us = self._server.clock.now_us()
 
                 if msg.type in (WSMsgType.CLOSE, WSMsgType.CLOSING, WSMsgType.CLOSED):
                     break
@@ -321,7 +321,7 @@ class SendspinConnection:
                     ServerTimePayload(
                         client_transmitted=client_time.client_transmitted,
                         server_received=timestamp_us,
-                        server_transmitted=int(self._server.loop.time() * 1_000_000),
+                        server_transmitted=self._server.clock.now_us(),
                     )
                 )
             )
@@ -388,7 +388,7 @@ class SendspinConnection:
                     header = unpack_binary_header(data)
 
                     if header.message_type == BinaryMessageType.AUDIO_CHUNK.value:
-                        now = int(self._server.loop.time() * 1_000_000)
+                        now = self._server.clock.now_us()
                         if self._stream_start_time_us is None:
                             self._stream_start_time_us = now
                         in_grace_period = (now - self._stream_start_time_us) < 2_000_000

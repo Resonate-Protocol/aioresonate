@@ -14,6 +14,7 @@ from aiosendspin.models.player import (
 )
 from aiosendspin.models.types import AudioCodec, Roles
 from aiosendspin.server.client import SendspinClient
+from aiosendspin.server.clock import LoopClock
 from aiosendspin.server.group import SendspinGroup
 
 
@@ -47,6 +48,7 @@ def mock_server(mock_loop: MagicMock) -> MagicMock:
     """Mock server."""
     server = MagicMock()
     server.loop = mock_loop
+    server.clock = LoopClock(mock_loop)
     return server
 
 

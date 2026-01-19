@@ -29,6 +29,7 @@ from zeroconf.asyncio import AsyncServiceBrowser, AsyncServiceInfo, AsyncZerocon
 from aiosendspin.util import get_local_ip
 
 from .client import SendspinClient
+from .clock import Clock, LoopClock
 from .connection import SendspinConnection
 from .group import SendspinGroup
 
@@ -76,11 +77,14 @@ class SendspinServer:
         server_id: str,
         server_name: str,
         client_session: ClientSession | None = None,
+        *,
+        clock: Clock | None = None,
     ) -> None:
         """Initialize a Sendspin server instance."""
         self._loop = loop
         self._id = server_id
         self._name = server_name
+        self._clock: Clock = clock or LoopClock(loop)
 
         self._clients: dict[str, SendspinClient] = {}
         self._event_cbs: list[Callable[[SendspinServer, SendspinEvent], None]] = []
@@ -114,6 +118,11 @@ class SendspinServer:
     def loop(self) -> asyncio.AbstractEventLoop:
         """Return the asyncio loop used by the server."""
         return self._loop
+
+    @property
+    def clock(self) -> Clock:
+        """Time source used for timestamping."""
+        return self._clock
 
     @property
     def id(self) -> str:

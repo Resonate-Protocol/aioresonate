@@ -7,11 +7,14 @@ import logging
 import types
 from collections import deque
 from dataclasses import dataclass
-from typing import NamedTuple
+from typing import TYPE_CHECKING, NamedTuple
 
 from aiosendspin.models import AudioCodec
 
 logger = logging.getLogger(__name__)
+
+if TYPE_CHECKING:
+    from aiosendspin.server.clock import Clock
 
 
 def _get_av() -> types.ModuleType:
@@ -56,7 +59,7 @@ class BufferTracker:
     def __init__(
         self,
         *,
-        loop: asyncio.AbstractEventLoop,
+        clock: Clock,
         client_id: str,
         capacity_bytes: int,
     ) -> None:
@@ -64,11 +67,11 @@ class BufferTracker:
         Initialize the buffer tracker for a client.
 
         Args:
-            loop: The event loop for timing calculations.
+            clock: Time source used for timing calculations.
             client_id: Identifier for the client being tracked.
             capacity_bytes: Maximum buffer capacity in bytes reported by the client.
         """
-        self._loop = loop
+        self._clock = clock
         self.client_id = client_id
         self.capacity_bytes = capacity_bytes
         self.buffered_chunks: deque[BufferedChunk] = deque()
@@ -77,7 +80,7 @@ class BufferTracker:
     def prune_consumed(self, now_us: int | None = None) -> int:
         """Drop finished chunks and return the timestamp used for the calculation."""
         if now_us is None:
-            now_us = int(self._loop.time() * 1_000_000)
+            now_us = self._clock.now_us()
         while self.buffered_chunks and self.buffered_chunks[0].end_time_us <= now_us:
             self.buffered_bytes -= self.buffered_chunks.popleft().byte_count
         self.buffered_bytes = max(self.buffered_bytes, 0)

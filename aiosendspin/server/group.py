@@ -240,6 +240,7 @@ class SendspinGroup:
 
         self._push_stream = PushStream(
             loop=self._server.loop,
+            clock=self._server.clock,
             group=self,
             channel_router=channel_router,
         )
@@ -316,10 +317,10 @@ class SendspinGroup:
         if client.check_role(Roles.METADATA):
             if self._current_metadata is not None:
                 metadata_update = self._current_metadata.snapshot_update(
-                    int(self._server.loop.time() * 1_000_000)
+                    self._server.clock.now_us()
                 )
             else:
-                metadata_update = Metadata.cleared_update(int(self._server.loop.time() * 1_000_000))
+                metadata_update = Metadata.cleared_update(self._server.clock.now_us())
             if self._current_metadata is not None:
                 current_progress = self._get_current_track_progress()
                 if (
@@ -506,7 +507,7 @@ class SendspinGroup:
         Returns:
             True if stop was scheduled, False if nothing to do
         """
-        now_us = int(self._server.loop.time() * 1_000_000)
+        now_us = self._server.clock.now_us()
         if stop_time_us <= now_us:
             return False
 
@@ -633,7 +634,7 @@ class SendspinGroup:
             and self.has_active_stream
             and self._current_metadata.playback_speed is not None
         ):
-            current_time_us = int(self._server.loop.time() * 1_000_000)
+            current_time_us = self._server.clock.now_us()
             elapsed_us = current_time_us - self._track_progress_timestamp_us
             # playback_speed is stored as int * 1000 (e.g., 1000 = normal speed)
             # Convert elapsed microseconds to milliseconds, accounting for playback speed
@@ -670,7 +671,7 @@ class SendspinGroup:
             metadata: The new metadata to send to clients.
         """
         # TODO: integrate this more closely with play_media?
-        timestamp = int(self._server.loop.time() * 1_000_000)
+        timestamp = self._server.clock.now_us()
 
         if metadata is not None:
             if metadata.timestamp_us is None:
@@ -828,7 +829,7 @@ class SendspinGroup:
             return
 
         message_type = BinaryMessageType.ARTWORK_CHANNEL_0.value + channel
-        header = pack_binary_header_raw(message_type, int(self._server.loop.time() * 1_000_000))
+        header = pack_binary_header_raw(message_type, self._server.clock.now_us())
 
         if image is None:
             client.try_send_binary(header)
@@ -1176,7 +1177,7 @@ class SendspinGroup:
         if client.check_role(Roles.METADATA):
             if self._current_metadata is not None:
                 metadata_update = self._current_metadata.snapshot_update(
-                    int(self._server.loop.time() * 1_000_000)
+                    self._server.clock.now_us()
                 )
                 # Use calculated track progress for actively playing content
                 current_progress = self._get_current_track_progress()
@@ -1194,9 +1195,7 @@ class SendspinGroup:
                 metadata_for_client = metadata_update
             else:
                 # Explicitly clear metadata for clients joining a group without existing metadata
-                metadata_for_client = Metadata.cleared_update(
-                    int(self._server.loop.time() * 1_000_000)
-                )
+                metadata_for_client = Metadata.cleared_update(self._server.clock.now_us())
 
         controller_for_client = None
         if client.check_role(Roles.CONTROLLER):

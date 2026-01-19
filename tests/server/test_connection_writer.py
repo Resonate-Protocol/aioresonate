@@ -10,12 +10,14 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from aiosendspin.models.core import ServerTimeMessage, ServerTimePayload
+from aiosendspin.server.clock import LoopClock
 from aiosendspin.server.connection import SendspinConnection
 
 
 @dataclass(slots=True)
 class _DummyServer:
     loop: asyncio.AbstractEventLoop
+    clock: LoopClock
     id: str = "srv"
     name: str = "server"
 
@@ -27,7 +29,7 @@ class _DummyServer:
 async def test_server_initiated_connection_starts_writer_task() -> None:
     """Server-initiated connections must start a writer task so enqueued messages are sent."""
     loop = asyncio.get_running_loop()
-    server = _DummyServer(loop=loop)
+    server = _DummyServer(loop=loop, clock=LoopClock(loop))
 
     wsock = MagicMock()
     wsock.closed = False

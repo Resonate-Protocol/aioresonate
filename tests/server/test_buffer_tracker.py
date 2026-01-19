@@ -5,6 +5,7 @@ from __future__ import annotations
 from unittest.mock import MagicMock
 
 from aiosendspin.server.audio import BufferTracker
+from aiosendspin.server.clock import LoopClock
 
 
 class TestBufferTrackerCapacity:
@@ -15,7 +16,7 @@ class TestBufferTrackerCapacity:
     ) -> None:
         """Empty tracker should have capacity for any chunk smaller than buffer size."""
         tracker = BufferTracker(
-            loop=mock_loop,
+            clock=LoopClock(mock_loop),
             client_id="test-client",
             capacity_bytes=100_000,
         )
@@ -26,7 +27,7 @@ class TestBufferTrackerCapacity:
     def test_has_capacity_returns_true_for_zero_bytes(self, mock_loop: MagicMock) -> None:
         """Zero bytes should always have capacity."""
         tracker = BufferTracker(
-            loop=mock_loop,
+            clock=LoopClock(mock_loop),
             client_id="test-client",
             capacity_bytes=100_000,
         )
@@ -35,7 +36,7 @@ class TestBufferTrackerCapacity:
     def test_has_capacity_returns_true_for_oversized_chunk(self, mock_loop: MagicMock) -> None:
         """Oversized chunks are allowed through with a warning."""
         tracker = BufferTracker(
-            loop=mock_loop,
+            clock=LoopClock(mock_loop),
             client_id="test-client",
             capacity_bytes=100,
         )
@@ -49,7 +50,7 @@ class TestBufferTrackerRegister:
     def test_register_tracks_buffered_bytes(self, mock_loop: MagicMock) -> None:
         """Registered bytes should be tracked in buffered_bytes."""
         tracker = BufferTracker(
-            loop=mock_loop,
+            clock=LoopClock(mock_loop),
             client_id="test-client",
             capacity_bytes=100_000,
         )
@@ -59,7 +60,7 @@ class TestBufferTrackerRegister:
     def test_register_multiple_chunks_accumulates_bytes(self, mock_loop: MagicMock) -> None:
         """Multiple registrations should accumulate."""
         tracker = BufferTracker(
-            loop=mock_loop,
+            clock=LoopClock(mock_loop),
             client_id="test-client",
             capacity_bytes=100_000,
         )
@@ -71,7 +72,7 @@ class TestBufferTrackerRegister:
     def test_register_zero_bytes_is_ignored(self, mock_loop: MagicMock) -> None:
         """Registering zero bytes should have no effect."""
         tracker = BufferTracker(
-            loop=mock_loop,
+            clock=LoopClock(mock_loop),
             client_id="test-client",
             capacity_bytes=100_000,
         )
@@ -86,7 +87,7 @@ class TestBufferTrackerPrune:
     def test_prune_removes_chunks_past_end_time(self, mock_loop: MagicMock) -> None:
         """Chunks with end_time <= now should be removed."""
         tracker = BufferTracker(
-            loop=mock_loop,
+            clock=LoopClock(mock_loop),
             client_id="test-client",
             capacity_bytes=100_000,
         )
@@ -101,11 +102,11 @@ class TestBufferTrackerPrune:
         assert tracker.buffered_bytes == 20_000
         assert len(tracker.buffered_chunks) == 2
 
-    def test_prune_uses_loop_time_when_now_not_provided(self, mock_loop: MagicMock) -> None:
-        """When now_us is None, should use loop.time()."""
+    def test_prune_uses_clock_when_now_not_provided(self, mock_loop: MagicMock) -> None:
+        """When now_us is None, should use the provided clock."""
         mock_loop.time.return_value = 1.5  # 1.5 seconds = 1_500_000 us
         tracker = BufferTracker(
-            loop=mock_loop,
+            clock=LoopClock(mock_loop),
             client_id="test-client",
             capacity_bytes=100_000,
         )
@@ -118,7 +119,7 @@ class TestBufferTrackerPrune:
     def test_prune_removes_all_past_chunks(self, mock_loop: MagicMock) -> None:
         """Should remove all chunks when time advances past all of them."""
         tracker = BufferTracker(
-            loop=mock_loop,
+            clock=LoopClock(mock_loop),
             client_id="test-client",
             capacity_bytes=100_000,
         )
@@ -136,7 +137,7 @@ class TestBufferTrackerTimeUntilCapacity:
     def test_returns_zero_when_has_capacity(self, mock_loop: MagicMock) -> None:
         """Should return 0 when buffer has room."""
         tracker = BufferTracker(
-            loop=mock_loop,
+            clock=LoopClock(mock_loop),
             client_id="test-client",
             capacity_bytes=100_000,
         )
@@ -145,7 +146,7 @@ class TestBufferTrackerTimeUntilCapacity:
     def test_returns_zero_for_zero_bytes(self, mock_loop: MagicMock) -> None:
         """Should return 0 for zero bytes needed."""
         tracker = BufferTracker(
-            loop=mock_loop,
+            clock=LoopClock(mock_loop),
             client_id="test-client",
             capacity_bytes=100_000,
         )
@@ -155,7 +156,7 @@ class TestBufferTrackerTimeUntilCapacity:
     def test_returns_zero_for_oversized_chunk(self, mock_loop: MagicMock) -> None:
         """Oversized chunks should return 0 (allowed through)."""
         tracker = BufferTracker(
-            loop=mock_loop,
+            clock=LoopClock(mock_loop),
             client_id="test-client",
             capacity_bytes=100,
         )
@@ -165,7 +166,7 @@ class TestBufferTrackerTimeUntilCapacity:
         """Should calculate time until capacity is available."""
         mock_loop.time.return_value = 0.0
         tracker = BufferTracker(
-            loop=mock_loop,
+            clock=LoopClock(mock_loop),
             client_id="test-client",
             capacity_bytes=100_000,
         )
@@ -180,7 +181,7 @@ class TestBufferTrackerTimeUntilCapacity:
         """Should calculate time based on when space becomes available."""
         mock_loop.time.return_value = 0.0
         tracker = BufferTracker(
-            loop=mock_loop,
+            clock=LoopClock(mock_loop),
             client_id="test-client",
             capacity_bytes=100_000,
         )
@@ -200,7 +201,7 @@ class TestBufferTrackerReset:
     def test_reset_clears_all_chunks(self, mock_loop: MagicMock) -> None:
         """Reset should clear all tracked chunks."""
         tracker = BufferTracker(
-            loop=mock_loop,
+            clock=LoopClock(mock_loop),
             client_id="test-client",
             capacity_bytes=100_000,
         )
@@ -215,7 +216,7 @@ class TestBufferTrackerReset:
     def test_reset_allows_fresh_registrations(self, mock_loop: MagicMock) -> None:
         """After reset, should work normally for new registrations."""
         tracker = BufferTracker(
-            loop=mock_loop,
+            clock=LoopClock(mock_loop),
             client_id="test-client",
             capacity_bytes=100_000,
         )

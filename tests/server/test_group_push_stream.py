@@ -8,6 +8,7 @@ import pytest
 
 from aiosendspin.models.types import Roles
 from aiosendspin.server.channels import ChannelRouter
+from aiosendspin.server.clock import LoopClock
 from aiosendspin.server.group import SendspinGroup
 from aiosendspin.server.push_stream import PushStream
 
@@ -27,6 +28,7 @@ class TestGroupStartStream:
         """Create a mock server."""
         server = MagicMock()
         server.loop = mock_loop
+        server.clock = LoopClock(mock_loop)
         return server
 
     @pytest.fixture
@@ -128,6 +130,7 @@ class TestPlayerJoinWithActiveStream:
         """Create a mock server."""
         server = MagicMock()
         server.loop = mock_loop
+        server.clock = LoopClock(mock_loop)
         return server
 
     @pytest.fixture

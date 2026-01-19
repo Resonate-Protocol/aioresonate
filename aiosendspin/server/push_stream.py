@@ -16,6 +16,7 @@ if TYPE_CHECKING:
     from aiosendspin.server.audio import AudioFormat
     from aiosendspin.server.channels import ChannelRouter
     from aiosendspin.server.client import SendspinClient
+    from aiosendspin.server.clock import Clock
     from aiosendspin.server.group import SendspinGroup
 
 _LOGGER = logging.getLogger(__name__)
@@ -58,6 +59,7 @@ class PushStream:
         self,
         *,
         loop: asyncio.AbstractEventLoop,
+        clock: Clock,
         group: SendspinGroup,
         channel_router: ChannelRouter,
     ) -> None:
@@ -66,10 +68,12 @@ class PushStream:
 
         Args:
             loop: Event loop for timing and async operations.
+            clock: Time source used for timestamping.
             group: Group this stream belongs to.
             channel_router: Router for channel assignments.
         """
         self._loop = loop
+        self._clock = clock
         self._group = group
         self._channel_router = channel_router
         self._is_stopped = False
@@ -146,7 +150,7 @@ class PushStream:
 
         # If no pending audio, return earliest channel timing (or initialize)
         if not self._channel_buffers:
-            now_us = int(self._loop.time() * 1_000_000)
+            now_us = self._clock.now_us()
             if not self._channel_timing:
                 # Initialize MAIN_CHANNEL timing if nothing exists
                 self._channel_timing[MAIN_CHANNEL] = now_us + DEFAULT_INITIAL_DELAY_US
@@ -161,7 +165,7 @@ class PushStream:
         self._warn_duration_misalignment(durations_us)
 
         # Initialize timing for new channels
-        now_us = int(self._loop.time() * 1_000_000)
+        now_us = self._clock.now_us()
         for channel_id in prepared:
             if channel_id not in self._channel_timing:
                 self._channel_timing[channel_id] = now_us + DEFAULT_INITIAL_DELAY_US
@@ -478,7 +482,7 @@ class PushStream:
         # Late joiners need enough time to receive stream/start, buffer audio, and
         # schedule playback accurately. Sending chunks with timestamps too close to
         # "now" can lead to dropped chunks and audible gaps.
-        now_us = int(self._loop.time() * 1_000_000)
+        now_us = self._clock.now_us()
         min_timestamp_us = now_us + DEFAULT_INITIAL_DELAY_US
 
         # Find matching pipeline keys for this channel
@@ -500,7 +504,7 @@ class PushStream:
 
     def _prune_chunk_cache(self) -> None:
         """Remove old chunks from the cache."""
-        now_us = int(self._loop.time() * 1_000_000)
+        now_us = self._clock.now_us()
 
         for key in list(self._chunk_cache.keys()):
             # Filter out chunks older than now

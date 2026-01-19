@@ -15,12 +15,14 @@ from aiosendspin.models.core import (
     StreamEndMessage,
     StreamEndPayload,
 )
+from aiosendspin.server.clock import LoopClock
 from aiosendspin.server.connection import SendspinConnection
 
 
 class _DummyServer:
     def __init__(self, loop: asyncio.AbstractEventLoop) -> None:
         self.loop = loop
+        self.clock = LoopClock(loop)
         self.id = "srv"
         self.name = "server"
 
