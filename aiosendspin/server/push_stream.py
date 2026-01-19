@@ -180,6 +180,16 @@ class PushStream:
             for channel_id in self._channel_timing:
                 self._channel_timing[channel_id] += max_wait_us
 
+        # If audio production stalls (e.g., the upstream source blocks), the scheduled
+        # play timeline can drift into the past. Rebase the timeline so new audio is
+        # always scheduled with at least the default initial delay from "now".
+        min_timing_us = min(self._channel_timing.values())
+        target_min_us = now_us + DEFAULT_INITIAL_DELAY_US
+        if min_timing_us < target_min_us:
+            shift_us = target_min_us - min_timing_us
+            for channel_id in self._channel_timing:
+                self._channel_timing[channel_id] += shift_us
+
         # Capture play_start_us for each channel before advancing
         channel_play_start: dict[UUID, int] = {}
         for channel_id in prepared:
@@ -414,7 +424,7 @@ class PushStream:
             # stream/clear is a JSON/control message and must not be dropped; if the
             # queue is full, SendspinClient will disconnect. Instead, wait until the
             # queue drains below the high-water mark.
-            if player.connection is None or player.connection.queue_high_water():
+            if player.connection is None or player.connection.queue_high_water(threshold=0.5):
                 continue
 
             # Perform resync (sends stream/clear, resets state)

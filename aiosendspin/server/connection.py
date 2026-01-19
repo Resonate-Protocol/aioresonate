@@ -168,7 +168,7 @@ class SendspinConnection:
                 task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
             return
 
-        if isinstance(message, StreamEndMessage):
+        if isinstance(message, StreamClearMessage | StreamEndMessage):
             self._stream_start_time_us = None
         elif not isinstance(message, ServerTimeMessage):
             self._logger.debug("Enqueueing message: %s", type(message).__name__)

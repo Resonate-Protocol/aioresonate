@@ -158,8 +158,9 @@ class PlayerRole(Role):
         Returns:
             True if sent successfully, False if dropped (queue high water).
         """
-        # For non-blocking players, check queue before sending
-        if not self._client.blocking and self._client.queue_high_water():
+        # Avoid building large per-connection backlogs: binary audio is droppable for all
+        # players. If the outgoing queue is congested, drop and schedule a resync.
+        if self._client.queue_high_water(threshold=0.5):
             self.mark_needs_resync()
             return False
 
@@ -205,7 +206,7 @@ class PlayerRole(Role):
             True if sent successfully, False if dropped.
         """
         # Catch-up is also droppable binary data.
-        if not self._client.blocking and self._client.queue_high_water():
+        if self._client.queue_high_water(threshold=0.5):
             self.mark_needs_resync()
             return False
 
