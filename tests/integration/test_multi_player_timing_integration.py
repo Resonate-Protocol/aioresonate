@@ -785,8 +785,8 @@ async def test_three_players_regroup_fast_start_and_sync() -> None:
         supported_formats=[
             SupportedAudioFormat(codec=AudioCodec.PCM, channels=2, sample_rate=48_000, bit_depth=16)
         ],
-        # ~500ms @ 48kHz stereo s16: 0.5 * 48_000 * 2ch * 2 bytes ≈ 96_000 bytes
-        buffer_capacity=96_000,
+        # Large buffer to simulate a stable/high-capacity device.
+        buffer_capacity=2_000_000,
     )
     player_b, _group_b, conn_b = _make_player(
         server,
@@ -884,8 +884,8 @@ async def test_first_time_join_unique_format_starts_under_1s_without_next_commit
         supported_formats=[
             SupportedAudioFormat(codec=AudioCodec.PCM, channels=2, sample_rate=48_000, bit_depth=16)
         ],
-        # ~500ms @ 48kHz stereo s16: 0.5 * 48_000 * 2ch * 2 bytes ≈ 96_000 bytes
-        buffer_capacity=96_000,
+        # Large buffer to simulate a stable/high-capacity device.
+        buffer_capacity=2_000_000,
     )
     player_b, _group_b, conn_b = _make_player(
         server,
