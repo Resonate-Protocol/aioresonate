@@ -785,7 +785,8 @@ async def test_three_players_regroup_fast_start_and_sync() -> None:
         supported_formats=[
             SupportedAudioFormat(codec=AudioCodec.PCM, channels=2, sample_rate=48_000, bit_depth=16)
         ],
-        buffer_capacity=2_000_000,
+        # ~500ms @ 48kHz stereo s16: 0.5 * 48_000 * 2ch * 2 bytes ≈ 96_000 bytes
+        buffer_capacity=96_000,
     )
     player_b, _group_b, conn_b = _make_player(
         server,
@@ -795,7 +796,8 @@ async def test_three_players_regroup_fast_start_and_sync() -> None:
                 codec=AudioCodec.FLAC, channels=2, sample_rate=44_100, bit_depth=16
             )
         ],
-        buffer_capacity=500_000,
+        # Compressed bytes; approximate ~500ms for typical FLAC frames in our test signal.
+        buffer_capacity=60_000,
     )
     player_c, _group_c, conn_c = _make_player(
         server,
@@ -803,7 +805,8 @@ async def test_three_players_regroup_fast_start_and_sync() -> None:
         supported_formats=[
             SupportedAudioFormat(codec=AudioCodec.PCM, channels=2, sample_rate=32_000, bit_depth=16)
         ],
-        buffer_capacity=1_000_000,
+        # ~500ms @ 32kHz stereo s16: 0.5 * 32_000 * 2ch * 2 bytes ≈ 64_000 bytes
+        buffer_capacity=64_000,
     )
 
     router = ChannelRouter()
@@ -881,7 +884,8 @@ async def test_first_time_join_unique_format_starts_under_1s_without_next_commit
         supported_formats=[
             SupportedAudioFormat(codec=AudioCodec.PCM, channels=2, sample_rate=48_000, bit_depth=16)
         ],
-        buffer_capacity=2_000_000,
+        # ~500ms @ 48kHz stereo s16: 0.5 * 48_000 * 2ch * 2 bytes ≈ 96_000 bytes
+        buffer_capacity=96_000,
     )
     player_b, _group_b, conn_b = _make_player(
         server,
@@ -891,7 +895,8 @@ async def test_first_time_join_unique_format_starts_under_1s_without_next_commit
                 codec=AudioCodec.FLAC, channels=2, sample_rate=44_100, bit_depth=16
             )
         ],
-        buffer_capacity=500_000,
+        # Compressed bytes; approximate ~500ms for typical FLAC frames in our test signal.
+        buffer_capacity=60_000,
     )
 
     router = ChannelRouter()
