@@ -1126,7 +1126,7 @@ class SendspinGroup:
         # Send group update to notify client of their new solo group
         new_group.on_client_connected(client)
 
-    async def add_client(self, client: SendspinClient) -> None:
+    async def add_client(self, client: SendspinClient) -> None:  # noqa: PLR0915
         """
         Add a client to this group.
 
@@ -1138,7 +1138,22 @@ class SendspinGroup:
             client: The client to add to this group.
         """
         logger.debug("adding %s to group with members: %s", client.client_id, self._clients)
-        await client.group.stop()
+        old_group = client.group
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(
+                "add_client(%s): stopping previous group=%s active=%s members=%s",
+                client.client_id,
+                old_group.group_id,
+                old_group.has_active_stream,
+                [c.client_id for c in old_group.clients],
+            )
+        stopped = await old_group.stop()
+        if stopped and logger.isEnabledFor(logging.DEBUG):
+            logger.debug(
+                "add_client(%s): previous group=%s stopped playback",
+                client.client_id,
+                old_group.group_id,
+            )
         if client in self._clients:
             return
         # Remove it from any existing group first

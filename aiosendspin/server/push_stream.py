@@ -553,6 +553,15 @@ class PushStream:
             # queue is full, SendspinClient will disconnect. Instead, wait until the
             # queue drains below the high-water mark.
             if player.connection is None or player.connection.queue_high_water(threshold=0.5):
+                if _LOGGER.isEnabledFor(logging.DEBUG):
+                    qsize, qmax = player.queue_status()
+                    _LOGGER.debug(
+                        "Resync deferred for %s: queue=%s/%s dropped_commits=%s",
+                        player.client_id,
+                        qsize,
+                        qmax,
+                        send_state.dropped_commits,
+                    )
                 continue
 
             # Perform resync (sends stream/clear, resets state)
@@ -716,6 +725,18 @@ class PushStream:
 
         # Get codec header for this pipeline
         codec_header_b64 = self._pipeline_manager.get_codec_header_b64(pipeline_key)
+
+        if _LOGGER.isEnabledFor(logging.DEBUG):
+            first_ts = cached_chunks[0].timestamp_us
+            last_ts = cached_chunks[-1].timestamp_us
+            _LOGGER.debug(
+                "Late join catch-up for %s: chunks=%s ts_range=%s..%s format=%s",
+                player_id,
+                len(cached_chunks),
+                first_ts,
+                last_ts,
+                target_format,
+            )
 
         # Send stream/start via PlayerRole
         player.player_role.send_stream_start(target_format, codec_header_b64)

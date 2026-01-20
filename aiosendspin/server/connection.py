@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from contextlib import suppress
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, cast
@@ -107,6 +108,8 @@ class SendspinConnection:
         self._last_goodbye_reason: GoodbyeReason | None = None
         self._binary_epoch = 0
         self._stream_start_time_us: int | None = None
+        self._last_late_audio_log_s: float = 0.0
+        self._late_audio_skips_since_log: int = 0
 
     @property
     def websocket_connection(self) -> web.WebSocketResponse | ClientWebSocketResponse:
@@ -142,6 +145,10 @@ class SendspinConnection:
         if max_size <= 0:
             return False
         return self._to_write.qsize() >= max_size * threshold
+
+    def queue_status(self) -> tuple[int, int]:
+        """Return (qsize, maxsize) for the outgoing queue."""
+        return self._to_write.qsize(), self._to_write.maxsize
 
     def send_message(self, message: ServerMessage | bytes) -> None:
         """
@@ -392,10 +399,25 @@ class SendspinConnection:
                         if self._stream_start_time_us is None:
                             self._stream_start_time_us = now
                         in_grace_period = (now - self._stream_start_time_us) < 2_000_000
-                        if header.timestamp_us - now < 0 and not in_grace_period:
-                            self._logger.warning(
-                                "Audio chunk should have played already, skipping it"
-                            )
+                        late_by_us = now - header.timestamp_us
+                        if late_by_us > 0 and not in_grace_period:
+                            self._late_audio_skips_since_log += 1
+                            now_s = time.monotonic()
+                            if now_s - self._last_late_audio_log_s >= 1.0:
+                                qsize, qmax = self.queue_status()
+                                self._logger.warning(
+                                    "Late audio: skipping %s chunk(s); "
+                                    "late_by_us=%s ts_us=%s now_us=%s "
+                                    "queue=%s/%s",
+                                    self._late_audio_skips_since_log,
+                                    late_by_us,
+                                    header.timestamp_us,
+                                    now,
+                                    qsize,
+                                    qmax,
+                                )
+                                self._late_audio_skips_since_log = 0
+                                self._last_late_audio_log_s = now_s
                             continue
 
                     await wsock.send_bytes(data)

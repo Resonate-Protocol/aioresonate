@@ -7,6 +7,7 @@ and stream state management.
 
 from __future__ import annotations
 
+import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
@@ -76,6 +77,9 @@ class PlayerRole(Role):
     """Base64-encoded codec header (e.g., for FLAC)."""
     _send_state: PlayerSendState = field(default_factory=PlayerSendState, init=False)
     """Current send state for this player."""
+    _last_drop_log_s: float = field(default=0.0, init=False)
+    _drops_since_log: int = field(default=0, init=False)
+    """Rate-limited drop logging for diagnosing stutter."""
 
     def on_connect(self) -> None:
         """Reset stream state on new connection."""
@@ -161,6 +165,18 @@ class PlayerRole(Role):
         # Avoid building large per-connection backlogs: binary audio is droppable for all
         # players. If the outgoing queue is congested, drop and schedule a resync.
         if self._client.queue_high_water(threshold=0.5):
+            self._drops_since_log += 1
+            now_s = time.monotonic()
+            if now_s - self._last_drop_log_s >= 1.0:
+                qsize, qmax = self._client.queue_status()
+                self._client._logger.warning(  # noqa: SLF001
+                    "Dropping audio due to queue high water: drops=%s queue=%s/%s",
+                    self._drops_since_log,
+                    qsize,
+                    qmax,
+                )
+                self._drops_since_log = 0
+                self._last_drop_log_s = now_s
             self.mark_needs_resync()
             return False
 
@@ -172,6 +188,18 @@ class PlayerRole(Role):
         header = pack_binary_header_raw(BinaryMessageType.AUDIO_CHUNK.value, timestamp_us)
         packed_data = header + chunk.data
         if not self._client.try_send_binary(packed_data):
+            self._drops_since_log += 1
+            now_s = time.monotonic()
+            if now_s - self._last_drop_log_s >= 1.0:
+                qsize, qmax = self._client.queue_status()
+                self._client._logger.warning(  # noqa: SLF001
+                    "Dropping audio due to enqueue failure: drops=%s queue=%s/%s",
+                    self._drops_since_log,
+                    qsize,
+                    qmax,
+                )
+                self._drops_since_log = 0
+                self._last_drop_log_s = now_s
             self.mark_needs_resync()
             return False
 
@@ -207,12 +235,14 @@ class PlayerRole(Role):
         """
         # Catch-up is also droppable binary data.
         if self._client.queue_high_water(threshold=0.5):
+            self._drops_since_log += 1
             self.mark_needs_resync()
             return False
 
         header = pack_binary_header_raw(BinaryMessageType.AUDIO_CHUNK.value, timestamp_us)
         packed_data = header + payload
         if not self._client.try_send_binary(packed_data):
+            self._drops_since_log += 1
             self.mark_needs_resync()
             return False
 

@@ -12,7 +12,7 @@ import logging
 from collections.abc import Callable
 from contextlib import suppress
 from enum import Enum
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from aiosendspin.models.core import ClientHelloPayload
 from aiosendspin.models.types import ClientStateType, Roles, has_role
@@ -319,6 +319,17 @@ class SendspinClient:
         if self._connection is None:
             return False
         return self._connection.queue_high_water(threshold=threshold)
+
+    def queue_status(self) -> tuple[int, int]:
+        """Return (qsize, maxsize) for the outgoing queue (0,0 if disconnected)."""
+        if self._connection is None:
+            return 0, 0
+        queue_status = getattr(self._connection, "queue_status", None)
+        if not callable(queue_status):
+            return 0, 0
+        queue_status_fn = cast("Callable[[], tuple[int, int]]", queue_status)
+        qsize, qmax = queue_status_fn()
+        return int(qsize), int(qmax)
 
     # ---- Player streaming state ----
 
