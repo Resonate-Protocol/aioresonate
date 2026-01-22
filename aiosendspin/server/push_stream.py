@@ -311,6 +311,14 @@ class PushStream:
                 continue
             if player.buffer_tracker is not None:
                 wait_us = player.buffer_tracker.time_until_capacity(byte_count)
+                if wait_us > 0 and _LOGGER.isEnabledFor(logging.DEBUG):
+                    _LOGGER.debug(
+                        "Backpressure from %s: wait_us=%s buffered=%s capacity=%s",
+                        player.client_id,
+                        wait_us,
+                        player.buffer_tracker.buffered_bytes,
+                        player.buffer_tracker.capacity_bytes,
+                    )
                 max_wait_us = max(max_wait_us, wait_us)
         return max_wait_us
 
@@ -566,6 +574,12 @@ class PushStream:
 
             # Perform resync (sends stream/clear, resets state)
             # Next audio send will automatically include stream/start
+            if _LOGGER.isEnabledFor(logging.INFO):
+                _LOGGER.info(
+                    "Resyncing player %s after dropped audio: dropped_commits=%s",
+                    player.client_id,
+                    send_state.dropped_commits,
+                )
             player.player_role.resync()
 
     async def wait_for_buffer_space(self) -> None:
