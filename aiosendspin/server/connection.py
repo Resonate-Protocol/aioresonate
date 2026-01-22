@@ -57,6 +57,7 @@ class _BinaryFrame:
     data: bytes
     buffer_end_time_us: int | None = None
     buffer_byte_count: int | None = None
+    duration_us: int | None = None
 
 
 class SendspinConnection:
@@ -139,6 +140,7 @@ class SendspinConnection:
         *,
         buffer_end_time_us: int | None = None,
         buffer_byte_count: int | None = None,
+        duration_us: int | None = None,
     ) -> bool:
         """Try to enqueue a binary message without disconnecting on queue overflow."""
         try:
@@ -148,6 +150,7 @@ class SendspinConnection:
                     data=data,
                     buffer_end_time_us=buffer_end_time_us,
                     buffer_byte_count=buffer_byte_count,
+                    duration_us=duration_us,
                 )
             )
         except asyncio.QueueFull:
@@ -444,6 +447,14 @@ class SendspinConnection:
                         and (buffer_tracker := self._client.buffer_tracker) is not None
                     ):
                         buffer_tracker.register(item.buffer_end_time_us, item.buffer_byte_count)
+
+                    # Rate limit audio to ~110% of real-time to avoid bursty delivery
+                    if (
+                        header.message_type == BinaryMessageType.AUDIO_CHUNK.value
+                        and item.duration_us is not None
+                    ):
+                        delay_s = item.duration_us / 1.1 / 1_000_000
+                        await asyncio.sleep(delay_s)
                     continue
 
                 await wsock.send_str(item.to_json())

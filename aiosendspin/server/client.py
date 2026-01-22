@@ -14,9 +14,8 @@ from contextlib import suppress
 from enum import Enum
 from typing import TYPE_CHECKING, cast
 
-from aiosendspin.models.core import ClientHelloPayload
 from aiosendspin.models import AudioCodec
-from aiosendspin.models.core import StreamStartMessage
+from aiosendspin.models.core import ClientHelloPayload, StreamStartMessage
 from aiosendspin.models.types import ClientStateType, Roles, has_role
 from aiosendspin.server.audio import AudioFormat, BufferTracker
 from aiosendspin.server.events import ClientEvent, ClientGroupChangedEvent
@@ -322,6 +321,7 @@ class SendspinClient:
         *,
         buffer_end_time_us: int | None = None,
         buffer_byte_count: int | None = None,
+        duration_us: int | None = None,
     ) -> bool:
         """Try to enqueue a droppable binary payload for this client."""
         if self._connection is None:
@@ -330,6 +330,7 @@ class SendspinClient:
             data,
             buffer_end_time_us=buffer_end_time_us,
             buffer_byte_count=buffer_byte_count,
+            duration_us=duration_us,
         )
 
     def queue_high_water(self, threshold: float = 0.8) -> bool:

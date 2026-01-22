@@ -192,6 +192,7 @@ class PlayerRole(Role):
             packed_data,
             buffer_end_time_us=chunk_end_us,
             buffer_byte_count=chunk.byte_count,
+            duration_us=chunk.duration_us,
         ):
             self._drops_since_log += 1
             now_s = time.monotonic()
@@ -246,6 +247,7 @@ class PlayerRole(Role):
             packed_data,
             buffer_end_time_us=chunk_end_us,
             buffer_byte_count=byte_count,
+            duration_us=duration_us,
         ):
             self._drops_since_log += 1
             self.mark_needs_resync()
