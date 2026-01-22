@@ -55,6 +55,8 @@ class _BinaryFrame:
 
     epoch: int
     data: bytes
+    buffer_end_time_us: int | None = None
+    buffer_byte_count: int | None = None
 
 
 class SendspinConnection:
@@ -131,10 +133,23 @@ class SendspinConnection:
         """Drop any queued (not-yet-sent) binary payloads for this connection."""
         self._binary_epoch += 1
 
-    def try_send_binary(self, data: bytes) -> bool:
+    def try_send_binary(
+        self,
+        data: bytes,
+        *,
+        buffer_end_time_us: int | None = None,
+        buffer_byte_count: int | None = None,
+    ) -> bool:
         """Try to enqueue a binary message without disconnecting on queue overflow."""
         try:
-            self._to_write.put_nowait(_BinaryFrame(epoch=self._binary_epoch, data=data))
+            self._to_write.put_nowait(
+                _BinaryFrame(
+                    epoch=self._binary_epoch,
+                    data=data,
+                    buffer_end_time_us=buffer_end_time_us,
+                    buffer_byte_count=buffer_byte_count,
+                )
+            )
         except asyncio.QueueFull:
             return False
         return True
@@ -421,6 +436,13 @@ class SendspinConnection:
                             continue
 
                     await wsock.send_bytes(data)
+                    if (
+                        item.buffer_end_time_us is not None
+                        and item.buffer_byte_count is not None
+                        and self._client is not None
+                        and (buffer_tracker := self._client.buffer_tracker) is not None
+                    ):
+                        buffer_tracker.register(item.buffer_end_time_us, item.buffer_byte_count)
                     continue
 
                 await wsock.send_str(item.to_json())

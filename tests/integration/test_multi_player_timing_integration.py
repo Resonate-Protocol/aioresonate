@@ -48,6 +48,7 @@ class _CaptureConnection:
 
     def __init__(self) -> None:
         self.events: list[_Event] = []
+        self.buffer_tracker = None
 
     async def disconnect(self, *, retry_connection: bool = True) -> None:  # noqa: ARG002
         return
@@ -55,8 +56,20 @@ class _CaptureConnection:
     def send_message(self, message: object) -> None:
         self.events.append(_Event(kind="json", payload=message))
 
-    def try_send_binary(self, data: bytes) -> bool:
+    def try_send_binary(
+        self,
+        data: bytes,
+        *,
+        buffer_end_time_us: int | None = None,
+        buffer_byte_count: int | None = None,
+    ) -> bool:
         self.events.append(_Event(kind="bin", payload=data))
+        if (
+            self.buffer_tracker is not None
+            and buffer_end_time_us is not None
+            and buffer_byte_count is not None
+        ):
+            self.buffer_tracker.register(buffer_end_time_us, buffer_byte_count)
         return True
 
     def queue_high_water(self, threshold: float = 0.8) -> bool:  # noqa: ARG002
@@ -191,6 +204,7 @@ def _make_player(
 
     client.attach_connection(conn, client_info=hello, active_roles=[Roles.PLAYER.value])
     client.mark_connected()
+    conn.buffer_tracker = client.buffer_tracker
     return client, group, conn
 
 

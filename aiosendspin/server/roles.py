@@ -187,7 +187,12 @@ class PlayerRole(Role):
         # Pack binary header and send
         header = pack_binary_header_raw(BinaryMessageType.AUDIO_CHUNK.value, timestamp_us)
         packed_data = header + chunk.data
-        if not self._client.try_send_binary(packed_data):
+        chunk_end_us = timestamp_us + chunk.duration_us
+        if not self._client.try_send_binary(
+            packed_data,
+            buffer_end_time_us=chunk_end_us,
+            buffer_byte_count=chunk.byte_count,
+        ):
             self._drops_since_log += 1
             now_s = time.monotonic()
             if now_s - self._last_drop_log_s >= 1.0:
@@ -206,11 +211,6 @@ class PlayerRole(Role):
         # Update send state
         self._send_state.last_sent_timestamp_us = timestamp_us
         self._send_state.healthy = True
-
-        # Register with buffer tracker
-        chunk_end_us = timestamp_us + chunk.duration_us
-        if self._client.buffer_tracker is not None:
-            self._client.buffer_tracker.register(chunk_end_us, chunk.byte_count)
 
         return True
 
@@ -241,18 +241,18 @@ class PlayerRole(Role):
 
         header = pack_binary_header_raw(BinaryMessageType.AUDIO_CHUNK.value, timestamp_us)
         packed_data = header + payload
-        if not self._client.try_send_binary(packed_data):
+        chunk_end_us = timestamp_us + duration_us
+        if not self._client.try_send_binary(
+            packed_data,
+            buffer_end_time_us=chunk_end_us,
+            buffer_byte_count=byte_count,
+        ):
             self._drops_since_log += 1
             self.mark_needs_resync()
             return False
 
         # Update send state
         self._send_state.last_sent_timestamp_us = timestamp_us
-
-        # Register with buffer tracker using the real duration.
-        chunk_end_us = timestamp_us + duration_us
-        if self._client.buffer_tracker is not None:
-            self._client.buffer_tracker.register(chunk_end_us, byte_count)
 
         return True
 

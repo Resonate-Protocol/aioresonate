@@ -57,7 +57,19 @@ def test_player_role_send_cached_chunk_packs_header_and_tracks_duration() -> Non
     client = MagicMock()
     client.buffer_tracker = tracker
     client.queue_high_water = MagicMock(return_value=False)
-    client.try_send_binary = MagicMock(side_effect=lambda data: (sent.append(data), True)[1])
+
+    def _try_send_binary(
+        data: bytes,
+        *,
+        buffer_end_time_us: int | None = None,
+        buffer_byte_count: int | None = None,
+    ) -> bool:
+        sent.append(data)
+        if buffer_end_time_us is not None and buffer_byte_count is not None:
+            tracker.register(buffer_end_time_us, buffer_byte_count)
+        return True
+
+    client.try_send_binary = MagicMock(side_effect=_try_send_binary)
     client.send_message = MagicMock()
 
     role = PlayerRole(_client=client)

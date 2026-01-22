@@ -308,11 +308,21 @@ class SendspinClient:
             return
         self._connection.send_message(message)
 
-    def try_send_binary(self, data: bytes) -> bool:
+    def try_send_binary(
+        self,
+        data: bytes,
+        *,
+        buffer_end_time_us: int | None = None,
+        buffer_byte_count: int | None = None,
+    ) -> bool:
         """Try to enqueue a droppable binary payload for this client."""
         if self._connection is None:
             return False
-        return self._connection.try_send_binary(data)
+        return self._connection.try_send_binary(
+            data,
+            buffer_end_time_us=buffer_end_time_us,
+            buffer_byte_count=buffer_byte_count,
+        )
 
     def queue_high_water(self, threshold: float = 0.8) -> bool:
         """Return True if the outgoing queue is above a high-water mark."""

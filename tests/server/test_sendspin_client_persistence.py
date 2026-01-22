@@ -30,7 +30,13 @@ class _DummyConnection:
     def send_message(self, message: object) -> None:  # noqa: ARG002
         return
 
-    def try_send_binary(self, data: bytes) -> bool:  # noqa: ARG002
+    def try_send_binary(
+        self,
+        data: bytes,  # noqa: ARG002
+        *,
+        buffer_end_time_us: int | None = None,  # noqa: ARG002
+        buffer_byte_count: int | None = None,  # noqa: ARG002
+    ) -> bool:
         return True
 
     def queue_high_water(self, threshold: float = 0.8) -> bool:  # noqa: ARG002
