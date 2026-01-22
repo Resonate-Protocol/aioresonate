@@ -720,6 +720,10 @@ class PushStream:
         if not cached_chunks:
             return
 
+        cached_chunks = self._limit_catchup_chunks(player, cached_chunks)
+        if not cached_chunks:
+            return
+
         # Get player's channel and format for stream/start
         channel_id = self._channel_router.get_channel(player_id)
 
@@ -763,6 +767,40 @@ class PushStream:
                 duration_us=chunk.duration_us,
                 byte_count=chunk.byte_count,
             )
+
+    def _limit_catchup_chunks(
+        self,
+        player: SendspinClient,
+        cached_chunks: list[CachedChunk],
+    ) -> list[CachedChunk]:
+        """Limit catch-up chunks to avoid overfilling player buffers."""
+        if not cached_chunks or player.buffer_tracker is None:
+            return cached_chunks
+
+        capacity = player.buffer_tracker.capacity_bytes
+        if capacity <= 0:
+            return cached_chunks
+
+        max_bytes = int(capacity * 0.8)
+        total = 0
+        limited: list[CachedChunk] = []
+        for chunk in cached_chunks:
+            if total + chunk.byte_count > max_bytes and limited:
+                break
+            total += chunk.byte_count
+            limited.append(chunk)
+
+        if len(limited) < len(cached_chunks) and _LOGGER.isEnabledFor(logging.DEBUG):
+            _LOGGER.debug(
+                "Limiting catch-up for %s: chunks=%s->%s bytes=%s/%s",
+                player.client_id,
+                len(cached_chunks),
+                len(limited),
+                total,
+                capacity,
+            )
+
+        return limited
 
     def _build_encoded_catchup_from_pcm_cache(self, player_id: str) -> list[CachedChunk]:
         """Encode catch-up chunks from cached PCM when no encoded cache exists yet."""
