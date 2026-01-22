@@ -1281,11 +1281,15 @@ class SendspinGroup:
             supported = client.info.player_support.supported_formats
 
             # Start with current preferred format (if any), otherwise the client's top preference.
+            preferred = next(
+                (fmt for fmt in supported if fmt.codec == AudioCodec.OPUS),
+                supported[0],
+            )
             base = client.preferred_format or AudioFormat(
-                codec=supported[0].codec,
-                sample_rate=supported[0].sample_rate,
-                bit_depth=supported[0].bit_depth,
-                channels=supported[0].channels,
+                codec=preferred.codec,
+                sample_rate=preferred.sample_rate,
+                bit_depth=preferred.bit_depth,
+                channels=preferred.channels,
             )
 
             player_req = request.player

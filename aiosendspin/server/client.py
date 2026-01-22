@@ -15,6 +15,8 @@ from enum import Enum
 from typing import TYPE_CHECKING, cast
 
 from aiosendspin.models.core import ClientHelloPayload
+from aiosendspin.models import AudioCodec
+from aiosendspin.models.core import StreamStartMessage
 from aiosendspin.models.types import ClientStateType, Roles, has_role
 from aiosendspin.server.audio import AudioFormat, BufferTracker
 from aiosendspin.server.events import ClientEvent, ClientGroupChangedEvent
@@ -231,11 +233,15 @@ class SendspinClient:
                 self._buffer_tracker.capacity_bytes = capacity
 
             supported = self.info.player_support.supported_formats
+            preferred = next(
+                (fmt for fmt in supported if fmt.codec == AudioCodec.OPUS),
+                supported[0],
+            )
             default_format = AudioFormat(
-                codec=supported[0].codec,
-                sample_rate=supported[0].sample_rate,
-                bit_depth=supported[0].bit_depth,
-                channels=supported[0].channels,
+                codec=preferred.codec,
+                sample_rate=preferred.sample_rate,
+                bit_depth=preferred.bit_depth,
+                channels=preferred.channels,
             )
             if self._preferred_format is None or not any(
                 fmt.codec == self._preferred_format.codec
@@ -306,6 +312,8 @@ class SendspinClient:
         """Send a message if connected; otherwise no-op."""
         if self._connection is None:
             return
+        if isinstance(message, StreamStartMessage):
+            self._logger.info("Sending stream/start: %s", message.payload)
         self._connection.send_message(message)
 
     def try_send_binary(
@@ -365,7 +373,7 @@ class SendspinClient:
     @property
     def blocking(self) -> bool:
         """Return whether this player participates in backpressure timing."""
-        return self._blocking
+        return False
 
     @blocking.setter
     def blocking(self, value: bool) -> None:

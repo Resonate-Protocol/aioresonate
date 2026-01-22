@@ -310,6 +310,7 @@ class SendspinConnection:
             self._client_id = client_info.client_id
             self._active_roles = negotiate_active_roles(client_info.supported_roles)
             self._logger = logger.getChild(self._client_id)
+            self._logger.info("Received client/hello: %s", client_info)
 
             client = self._server.get_or_create_client(self._client_id)
             client.attach_connection(self, client_info=client_info, active_roles=self._active_roles)
