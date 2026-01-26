@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 from uuid import UUID
 
-from aiosendspin.models.types import Roles
+from aiosendspin.models.types import AudioCodec, Roles
 from aiosendspin.server.channels import MAIN_CHANNEL
 from aiosendspin.server.pipeline import EncodedChunk, PipelineKey, PipelineManager
 
@@ -112,8 +112,9 @@ class PushStream:
         # Raw PCM cache per channel for late-join re-encoding.
         self._pcm_cache: dict[UUID, list[_PcmCacheItem]] = {}
         self._last_catchup_pipeline_key: PipelineKey | None = None
-        # Keepalive pipelines for recently removed players: (channel_id, target_format) -> expiry_us
-        self._keepalive_pipelines: dict[tuple[UUID, AudioFormat], int] = {}
+        # Keepalive pipelines for recently removed players:
+        # (channel_id, target_format, codec) -> expiry_us
+        self._keepalive_pipelines: dict[tuple[UUID, AudioFormat, AudioCodec], int] = {}
         # Role-based streaming tracking (for hook-based flow)
         self._started_roles: set[Role] = set()
         self._backpressured_roles: set[Role] = set()
@@ -258,16 +259,18 @@ class PushStream:
                 continue
             _, source_format = prepared[channel_id]
             target_format = self._get_player_target_format(player, source_format)
+            target_codec = self._get_player_target_codec(player)
             consumer_keys.add(
                 PipelineKey(
                     channel_id=channel_id,
                     source_format=source_format,
                     target_format=target_format,
+                    codec=target_codec,
                 )
             )
 
         keepalive_keys: set[PipelineKey] = set()
-        for channel_id, target_format in self._keepalive_pipelines:
+        for channel_id, target_format, target_codec in self._keepalive_pipelines:
             if channel_id not in prepared:
                 continue
             _, source_format = prepared[channel_id]
@@ -276,6 +279,7 @@ class PushStream:
                     channel_id=channel_id,
                     source_format=source_format,
                     target_format=target_format,
+                    codec=target_codec,
                 )
             )
         prepared_with_timestamps: dict[UUID, tuple[bytes, AudioFormat, int]] = {
@@ -423,6 +427,17 @@ class PushStream:
         # Default to source format (no resampling/encoding needed)
         return source_format
 
+    def _get_player_target_codec(self, player: SendspinClient) -> AudioCodec:
+        """
+        Get the target codec for a player.
+
+        Uses player's preferred_codec if set, otherwise defaults to PCM.
+        """
+        if player.preferred_codec is not None:
+            return player.preferred_codec
+        # Default to PCM (no encoding)
+        return AudioCodec.PCM
+
     def _get_required_pipeline_keys(
         self,
         prepared: dict[UUID, tuple[bytes, AudioFormat]],
@@ -448,21 +463,25 @@ class PushStream:
 
             _, source_format = prepared[channel_id]
             target_format = self._get_player_target_format(player, source_format)
+            target_codec = self._get_player_target_codec(player)
 
             # Add or get pipeline
             key = self._pipeline_manager.add_pipeline(
                 channel_id=channel_id,
                 source_format=source_format,
                 target_format=target_format,
+                codec=target_codec,
             )
             pipeline_keys.add(key)
 
         # Keep recently-removed player formats warm for a short window so quick regrouping can
         # catch up with continuous cached audio, rather than starting late and drifting.
         now_us = self._clock.now_us()
-        for (channel_id, target_format), expiry_us in list(self._keepalive_pipelines.items()):
+        for (channel_id, target_format, target_codec), expiry_us in list(
+            self._keepalive_pipelines.items()
+        ):
             if expiry_us <= now_us:
-                del self._keepalive_pipelines[(channel_id, target_format)]
+                del self._keepalive_pipelines[(channel_id, target_format, target_codec)]
                 continue
             if channel_id not in prepared:
                 continue
@@ -471,6 +490,7 @@ class PushStream:
                 channel_id=channel_id,
                 source_format=source_format,
                 target_format=target_format,
+                codec=target_codec,
             )
             pipeline_keys.add(key)
 
@@ -508,12 +528,14 @@ class PushStream:
 
             _, source_format = prepared[channel_id]
             target_format = self._get_player_target_format(player, source_format)
+            target_codec = self._get_player_target_codec(player)
 
             # Find the pipeline key for this player
             key = PipelineKey(
                 channel_id=channel_id,
                 source_format=source_format,
                 target_format=target_format,
+                codec=target_codec,
             )
 
             # Skip if no encoded chunks for this pipeline
@@ -534,6 +556,7 @@ class PushStream:
                     chunk=chunk,
                     timestamp_us=chunk.timestamp_us,
                     audio_format=target_format,
+                    codec=target_codec,
                     codec_header_b64=codec_header_b64,
                 )
 
@@ -699,17 +722,26 @@ class PushStream:
 
         self._prune_pcm_cache()
 
-    def on_player_leave(self, player_id: str, *, target_format: AudioFormat | None = None) -> None:
+    def on_player_leave(
+        self,
+        player_id: str,
+        *,
+        target_format: AudioFormat | None = None,
+        target_codec: AudioCodec | None = None,
+    ) -> None:
         """Keep the player's format pipeline warm briefly for seamless quick rejoin."""
-        if target_format is None:
+        if target_format is None or target_codec is None:
             player = self._get_player_by_id(player_id)
             if player is None:
                 return
-            target_format = player.preferred_format
-        if target_format is None:
+            if target_format is None:
+                target_format = player.preferred_format
+            if target_codec is None:
+                target_codec = player.preferred_codec
+        if target_format is None or target_codec is None:
             return
         channel_id = self._channel_router.get_channel(player_id)
-        self._keepalive_pipelines[(channel_id, target_format)] = (
+        self._keepalive_pipelines[(channel_id, target_format, target_codec)] = (
             self._clock.now_us() + PIPELINE_KEEPALIVE_US
         )
 
@@ -746,16 +778,20 @@ class PushStream:
 
         # Find a matching pipeline key for stream/start
         target_format = player.preferred_format
+        target_codec = player.preferred_codec
         pipeline_key: PipelineKey | None = None
         for key in self._chunk_cache:
-            if key.channel_id == channel_id and (
-                target_format is None or key.target_format == target_format
+            if (
+                key.channel_id == channel_id
+                and (target_format is None or key.target_format == target_format)
+                and (target_codec is None or key.codec == target_codec)
             ):
                 pipeline_key = key
                 target_format = key.target_format
+                target_codec = key.codec
                 break
 
-        if pipeline_key is None or target_format is None:
+        if pipeline_key is None or target_format is None or target_codec is None:
             return
 
         # Get codec header for this pipeline
@@ -765,16 +801,17 @@ class PushStream:
             first_ts = cached_chunks[0].timestamp_us
             last_ts = cached_chunks[-1].timestamp_us
             _LOGGER.debug(
-                "Late join catch-up for %s: chunks=%s ts_range=%s..%s format=%s",
+                "Late join catch-up for %s: chunks=%s ts_range=%s..%s format=%s codec=%s",
                 player_id,
                 len(cached_chunks),
                 first_ts,
                 last_ts,
                 target_format,
+                target_codec,
             )
 
         # Send stream/start via PlayerRole
-        player.player_role.send_stream_start(target_format, codec_header_b64)
+        player.player_role.send_stream_start(target_format, target_codec, codec_header_b64)
 
         # Send cached chunks via PlayerRole
         for chunk in cached_chunks:
@@ -827,7 +864,8 @@ class PushStream:
             return []
         channel_id = self._channel_router.get_channel(player_id)
         target_format = player.preferred_format
-        if target_format is None:
+        target_codec = player.preferred_codec
+        if target_format is None or target_codec is None:
             return []
 
         now_us = self._clock.now_us()
@@ -850,6 +888,7 @@ class PushStream:
                 channel_id=channel_id,
                 source_format=item.audio_format,
                 target_format=target_format,
+                codec=target_codec,
             )
             prepared_with_timestamps: dict[UUID, tuple[bytes, AudioFormat, int]] = {
                 channel_id: (item.pcm, item.audio_format, item.start_timestamp_us)
@@ -869,7 +908,12 @@ class PushStream:
         out.sort(key=lambda c: c.timestamp_us)
         return [chunk for chunk in out if chunk.timestamp_us >= send_min_ts_us]
 
-    def on_format_request(self, player_id: str, new_format: AudioFormat) -> bool:
+    def on_format_request(
+        self,
+        player_id: str,
+        new_format: AudioFormat,
+        new_codec: AudioCodec | None = None,
+    ) -> bool:
         """
         Handle a format change request from a player.
 
@@ -880,6 +924,7 @@ class PushStream:
         Args:
             player_id: Player ID requesting the format change.
             new_format: The requested audio format.
+            new_codec: The requested codec, or None to keep current.
 
         Returns:
             True if format change was accepted, False if invalid or player not found.
@@ -894,9 +939,14 @@ class PushStream:
             return False
         supported = player_support.supported_formats
 
+        # Use current codec if not specified
+        effective_codec = new_codec if new_codec is not None else player.preferred_codec
+        if effective_codec is None:
+            effective_codec = AudioCodec.PCM
+
         # Validate format against supported formats
         is_supported = any(
-            fmt.codec == new_format.codec
+            fmt.codec == effective_codec
             and fmt.sample_rate == new_format.sample_rate
             and fmt.channels == new_format.channels
             and fmt.bit_depth == new_format.bit_depth
@@ -906,8 +956,10 @@ class PushStream:
         if not is_supported:
             return False
 
-        # Update preferred format
+        # Update preferred format and codec
         player.preferred_format = new_format
+        if new_codec is not None:
+            player.preferred_codec = new_codec
 
         # Notify PlayerRole of format change (triggers new stream/start on next audio)
         if player.player_role is not None:

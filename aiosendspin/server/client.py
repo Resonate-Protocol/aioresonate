@@ -90,6 +90,7 @@ class SendspinClient:
         self._player_role: PlayerRole | None = None
         self._buffer_tracker: BufferTracker | None = None
         self._preferred_format: AudioFormat | None = None
+        self._preferred_codec: AudioCodec | None = None
         self._blocking: bool = True
 
         # Disconnect bookkeeping for delayed BufferTracker reset policy.
@@ -237,19 +238,22 @@ class SendspinClient:
                 supported[0],
             )
             default_format = AudioFormat(
-                codec=preferred.codec,
                 sample_rate=preferred.sample_rate,
                 bit_depth=preferred.bit_depth,
                 channels=preferred.channels,
             )
+            default_codec = preferred.codec
+            # Check if current preferred format+codec is still supported
+            current_codec = self._preferred_codec or default_codec
             if self._preferred_format is None or not any(
-                fmt.codec == self._preferred_format.codec
+                fmt.codec == current_codec
                 and fmt.sample_rate == self._preferred_format.sample_rate
                 and fmt.bit_depth == self._preferred_format.bit_depth
                 and fmt.channels == self._preferred_format.channels
                 for fmt in supported
             ):
                 self._preferred_format = default_format
+                self._preferred_codec = default_codec
 
             self._player_role = PlayerRole(_client=self)
             self._player_role.on_connect()
@@ -381,6 +385,15 @@ class SendspinClient:
     @preferred_format.setter
     def preferred_format(self, value: AudioFormat | None) -> None:
         self._preferred_format = value
+
+    @property
+    def preferred_codec(self) -> AudioCodec | None:
+        """Return the preferred audio codec for the player role, if set."""
+        return self._preferred_codec
+
+    @preferred_codec.setter
+    def preferred_codec(self, value: AudioCodec | None) -> None:
+        self._preferred_codec = value
 
     @property
     def blocking(self) -> bool:

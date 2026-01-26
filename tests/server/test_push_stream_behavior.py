@@ -121,7 +121,7 @@ async def test_commit_audio_sends_stream_start_and_binary(mock_loop: Any) -> Non
     )
     stream.prepare_audio(
         bytes(4800),
-        AudioFormat(sample_rate=48000, bit_depth=16, channels=2, codec=AudioCodec.PCM),
+        AudioFormat(sample_rate=48000, bit_depth=16, channels=2),
     )
     await stream.commit_audio()
 
@@ -145,7 +145,7 @@ async def test_queue_high_water_drops_audio_even_for_blocking_player(mock_loop: 
     )
     stream.prepare_audio(
         bytes(4800),
-        AudioFormat(sample_rate=48000, bit_depth=16, channels=2, codec=AudioCodec.PCM),
+        AudioFormat(sample_rate=48000, bit_depth=16, channels=2),
     )
     await stream.commit_audio()
 
@@ -165,7 +165,7 @@ async def test_stop_sends_stream_end_and_resets_buffer_tracker(mock_loop: Any) -
     )
     stream.prepare_audio(
         bytes(4800),
-        AudioFormat(sample_rate=48000, bit_depth=16, channels=2, codec=AudioCodec.PCM),
+        AudioFormat(sample_rate=48000, bit_depth=16, channels=2),
     )
     await stream.commit_audio()
     assert client.buffer_tracker is not None
@@ -187,7 +187,7 @@ async def test_clear_sends_stream_clear(mock_loop: Any) -> None:
     )
     stream.prepare_audio(
         bytes(4800),
-        AudioFormat(sample_rate=48000, bit_depth=16, channels=2, codec=AudioCodec.PCM),
+        AudioFormat(sample_rate=48000, bit_depth=16, channels=2),
     )
     await stream.commit_audio()
 
@@ -206,7 +206,7 @@ async def test_on_player_join_sends_catchup_chunks(mock_loop: Any) -> None:
 
     stream.prepare_audio(
         bytes(4800),
-        AudioFormat(sample_rate=48000, bit_depth=16, channels=2, codec=AudioCodec.PCM),
+        AudioFormat(sample_rate=48000, bit_depth=16, channels=2),
     )
     await stream.commit_audio()
     assert conn1.sent_binary
@@ -232,7 +232,7 @@ async def test_non_blocking_player_resync_waits_for_queue_to_drain(mock_loop: An
     conn.high_water = True
     stream.prepare_audio(
         bytes(4800),
-        AudioFormat(sample_rate=48000, bit_depth=16, channels=2, codec=AudioCodec.PCM),
+        AudioFormat(sample_rate=48000, bit_depth=16, channels=2),
     )
     await stream.commit_audio()
     assert not any(isinstance(m, StreamClearMessage) for m in conn.sent_json)
@@ -240,7 +240,7 @@ async def test_non_blocking_player_resync_waits_for_queue_to_drain(mock_loop: An
     conn.high_water = False
     stream.prepare_audio(
         bytes(4800),
-        AudioFormat(sample_rate=48000, bit_depth=16, channels=2, codec=AudioCodec.PCM),
+        AudioFormat(sample_rate=48000, bit_depth=16, channels=2),
     )
     await stream.commit_audio()
     assert any(isinstance(m, StreamClearMessage) for m in conn.sent_json)

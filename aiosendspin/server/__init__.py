@@ -27,7 +27,9 @@ __all__ = [
     "VolumeChangedEvent",
 ]
 
-from .audio import AudioCodec, AudioFormat
+from aiosendspin.models.types import AudioCodec
+
+from .audio import AudioFormat
 from .client import DisconnectBehaviour, SendspinClient
 from .events import ClientEvent, ClientGroupChangedEvent, VolumeChangedEvent
 from .group import (

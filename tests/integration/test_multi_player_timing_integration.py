@@ -587,7 +587,7 @@ async def test_multi_player_group_join_sync_stable_source() -> None:
 
     stream = group_a.start_stream(channel_router=router)
 
-    source_fmt = AudioFormat(sample_rate=48_000, bit_depth=16, channels=2, codec=AudioCodec.PCM)
+    source_fmt = AudioFormat(sample_rate=48_000, bit_depth=16, channels=2)
 
     next_play_start_us = clock.now_us() + 250_000
 
@@ -674,7 +674,7 @@ async def test_multi_player_sync_with_jittery_source_is_continuous() -> None:
     stream = group_a.start_stream(channel_router=router)
     await group_a.add_client(player_b)
 
-    source_fmt = AudioFormat(sample_rate=48_000, bit_depth=16, channels=2, codec=AudioCodec.PCM)
+    source_fmt = AudioFormat(sample_rate=48_000, bit_depth=16, channels=2)
 
     next_play_start_us = clock.now_us() + 250_000
 
@@ -747,7 +747,7 @@ async def test_production_gap_rebases_timeline() -> None:
     )
 
     stream = group_a.start_stream(channel_router=ChannelRouter())
-    source_fmt = AudioFormat(sample_rate=48_000, bit_depth=16, channels=2, codec=AudioCodec.PCM)
+    source_fmt = AudioFormat(sample_rate=48_000, bit_depth=16, channels=2)
 
     next_play_start_us = clock.now_us() + 250_000
 
@@ -829,7 +829,7 @@ async def test_three_players_regroup_fast_start_and_sync() -> None:
         router.set_channel(player.client_id, MAIN_CHANNEL)
 
     stream = group_a.start_stream(channel_router=router)
-    source_fmt = AudioFormat(sample_rate=48_000, bit_depth=16, channels=2, codec=AudioCodec.PCM)
+    source_fmt = AudioFormat(sample_rate=48_000, bit_depth=16, channels=2)
 
     # 100ms per commit to ensure FLAC yields packets promptly.
     duration_us = 100_000
@@ -919,7 +919,7 @@ async def test_first_time_join_unique_format_starts_under_1s_without_next_commit
         router.set_channel(player.client_id, MAIN_CHANNEL)
 
     stream = group_a.start_stream(channel_router=router)
-    source_fmt = AudioFormat(sample_rate=48_000, bit_depth=16, channels=2, codec=AudioCodec.PCM)
+    source_fmt = AudioFormat(sample_rate=48_000, bit_depth=16, channels=2)
 
     # Build up future PCM cache for A only.
     duration_us = 100_000

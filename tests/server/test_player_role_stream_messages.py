@@ -102,8 +102,8 @@ def test_player_role_send_stream_start_drops_without_transport() -> None:
     role = PlayerRole(_client=client)
     role._has_transport = False  # noqa: SLF001
 
-    audio_format = AudioFormat(sample_rate=48000, bit_depth=16, channels=2, codec=AudioCodec.PCM)
-    role.send_stream_start(audio_format)
+    audio_format = AudioFormat(sample_rate=48000, bit_depth=16, channels=2)
+    role.send_stream_start(audio_format, AudioCodec.PCM)
 
     client.send_message.assert_not_called()
 

@@ -31,11 +31,12 @@ def _get_encoder_pool() -> ThreadPoolExecutor:
 
 
 class PipelineKey(NamedTuple):
-    """Unique key for a pipeline: (channel_id, source_format, target_format)."""
+    """Unique key for a pipeline: (channel_id, source_format, target_format, codec)."""
 
     channel_id: UUID
     source_format: AudioFormat
     target_format: AudioFormat
+    codec: AudioCodec
 
 
 class ResamplerKey(NamedTuple):
@@ -161,18 +162,20 @@ class PipelineManager:
         channel_id: UUID,
         source_format: AudioFormat,
         target_format: AudioFormat,
+        codec: AudioCodec,
     ) -> PipelineKey:
         """
         Add or get an encoding pipeline.
 
-        If a pipeline with the same (channel_id, source_format, target_format)
+        If a pipeline with the same (channel_id, source_format, target_format, codec)
         already exists, returns the existing key (deduplication).
         Resamplers and encoders are shared across pipelines when possible.
 
         Args:
             channel_id: The channel this pipeline encodes from.
             source_format: Source audio format (input PCM).
-            target_format: Target audio format (output).
+            target_format: Target audio format (output PCM parameters).
+            codec: Target audio codec for encoding.
 
         Returns:
             PipelineKey identifying this pipeline.
@@ -181,6 +184,7 @@ class PipelineManager:
             channel_id=channel_id,
             source_format=source_format,
             target_format=target_format,
+            codec=codec,
         )
 
         if key in self._pipelines:
@@ -210,12 +214,13 @@ class PipelineManager:
 
         # Create or get encoder for this stream + codec.
         # Note: encoders must not be shared across channels.
-        encoder_key = EncoderKey(resampler_key=resampler_key, codec=target_format.codec)
+        encoder_key = EncoderKey(resampler_key=resampler_key, codec=key.codec)
         if encoder_key not in self._encoders:
             resampler_state = self._resamplers[resampler_key]
             self._encoders[encoder_key] = self._create_encoder_state(
                 encoder_key,
                 target_format,
+                codec=key.codec,
                 input_audio_layout=resampler_state.target_layout,
                 input_audio_format=resampler_state.target_av_format,
             )
@@ -267,12 +272,14 @@ class PipelineManager:
         key: EncoderKey,
         target_format: AudioFormat,
         *,
+        codec: AudioCodec,
         input_audio_layout: str,
         input_audio_format: str,
     ) -> _EncoderState:
         """Create a new encoder state."""
         encoder, codec_header, chunk_samples = self._build_encoder(
             target_format,
+            codec=codec,
             input_audio_layout=input_audio_layout,
             input_audio_format=input_audio_format,
         )
@@ -288,40 +295,41 @@ class PipelineManager:
         self,
         audio_format: AudioFormat,
         *,
+        codec: AudioCodec,
         input_audio_layout: str,
         input_audio_format: str,
     ) -> tuple[av.AudioCodecContext | None, bytes | None, int]:
         """Create and configure an encoder for the target audio format."""
-        if audio_format.codec == AudioCodec.PCM:
+        if codec == AudioCodec.PCM:
             samples_per_chunk = int(audio_format.sample_rate * 0.025)
             return None, None, samples_per_chunk
 
         av = _get_av()
-        codec = "libopus" if audio_format.codec == AudioCodec.OPUS else audio_format.codec.value
+        codec_name = "libopus" if codec == AudioCodec.OPUS else codec.value
 
-        encoder = av.AudioCodecContext.create(codec, "w")
+        encoder = av.AudioCodecContext.create(codec_name, "w")
         encoder.sample_rate = audio_format.sample_rate
         encoder.layout = input_audio_layout
         encoder.format = input_audio_format
-        if audio_format.codec == AudioCodec.FLAC:
+        if codec == AudioCodec.FLAC:
             encoder.options = {"compression_level": "5"}
 
         with av.logging.Capture():
             encoder.open()
 
         header = bytes(encoder.extradata) if encoder.extradata else b""
-        if audio_format.codec == AudioCodec.FLAC and header:
+        if codec == AudioCodec.FLAC and header:
             # For FLAC, construct proper FLAC stream header
             # See https://datatracker.ietf.org/doc/rfc9639/ Section 8.1
             header = b"fLaC\x80" + len(header).to_bytes(3, "big") + header
 
         # Calculate samples per chunk
-        if audio_format.codec == AudioCodec.FLAC:
+        if codec == AudioCodec.FLAC:
             samples_per_chunk = int(audio_format.sample_rate * 0.025)
         elif encoder.frame_size and encoder.frame_size > 0:
             samples_per_chunk = int(encoder.frame_size)
         else:
-            msg = f"Codec {audio_format.codec.value} encoder has invalid frame_size"
+            msg = f"Codec {codec.value} encoder has invalid frame_size"
             raise ValueError(f"{msg}: {encoder.frame_size}")
 
         return encoder, header if header else None, samples_per_chunk
@@ -440,6 +448,7 @@ class PipelineManager:
                         self._encoders[pipeline.encoder_key] = self._create_encoder_state(
                             pipeline.encoder_key,
                             pipeline.key.target_format,
+                            codec=pipeline.key.codec,
                             input_audio_layout=resampler_state.target_layout,
                             input_audio_format=resampler_state.target_av_format,
                         )

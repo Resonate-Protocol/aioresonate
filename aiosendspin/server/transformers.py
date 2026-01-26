@@ -9,7 +9,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol, TypeVar, runtime_checkable
 
-from aiosendspin.models import AudioCodec
 from aiosendspin.server.audio import AudioFormat, _get_av, _resolve_audio_format
 
 if TYPE_CHECKING:
@@ -154,7 +153,6 @@ class FlacEncoder:
             sample_rate=self._sample_rate,
             bit_depth=self._bit_depth,
             channels=self._channels,
-            codec=AudioCodec.FLAC,
         )
         _, self._av_format, self._av_layout = _resolve_audio_format(audio_format)
 

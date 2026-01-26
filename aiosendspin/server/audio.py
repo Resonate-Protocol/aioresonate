@@ -9,8 +9,6 @@ from collections import deque
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, NamedTuple
 
-from aiosendspin.models import AudioCodec
-
 logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
@@ -26,7 +24,11 @@ def _get_av() -> types.ModuleType:
 
 @dataclass(frozen=True)
 class AudioFormat:
-    """Audio format of a stream."""
+    """PCM audio format descriptor.
+
+    This describes the raw PCM audio parameters without specifying an encoding codec.
+    The codec is determined by the transformer (e.g., FlacEncoder, PcmPassthrough).
+    """
 
     sample_rate: int
     """Sample rate in Hz (e.g., 44100, 48000)."""
@@ -34,8 +36,6 @@ class AudioFormat:
     """Bit depth in bits per sample (16 or 24)."""
     channels: int
     """Number of audio channels (1 for mono, 2 for stereo)."""
-    codec: AudioCodec = AudioCodec.PCM
-    """Audio codec of the stream."""
 
 
 class BufferedChunk(NamedTuple):
@@ -197,7 +197,6 @@ def _resolve_audio_format(audio_format: AudioFormat) -> tuple[int, str, str]:
 
 
 __all__ = [
-    "AudioCodec",
     "AudioFormat",
     "BufferTracker",
 ]

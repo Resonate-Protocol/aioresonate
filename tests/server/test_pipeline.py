@@ -19,12 +19,9 @@ class TestPipelineKey:
         """PipelineKey should have channel_id field."""
         key = PipelineKey(
             channel_id=MAIN_CHANNEL,
-            source_format=AudioFormat(
-                sample_rate=44100, bit_depth=16, channels=2, codec=AudioCodec.PCM
-            ),
-            target_format=AudioFormat(
-                sample_rate=48000, bit_depth=16, channels=2, codec=AudioCodec.FLAC
-            ),
+            source_format=AudioFormat(sample_rate=44100, bit_depth=16, channels=2),
+            target_format=AudioFormat(sample_rate=48000, bit_depth=16, channels=2),
+            codec=AudioCodec.FLAC,
         )
         assert key.channel_id == MAIN_CHANNEL
 
@@ -32,12 +29,9 @@ class TestPipelineKey:
         """PipelineKey should be hashable for use as dict key."""
         key = PipelineKey(
             channel_id=MAIN_CHANNEL,
-            source_format=AudioFormat(
-                sample_rate=44100, bit_depth=16, channels=2, codec=AudioCodec.PCM
-            ),
-            target_format=AudioFormat(
-                sample_rate=48000, bit_depth=16, channels=2, codec=AudioCodec.FLAC
-            ),
+            source_format=AudioFormat(sample_rate=44100, bit_depth=16, channels=2),
+            target_format=AudioFormat(sample_rate=48000, bit_depth=16, channels=2),
+            codec=AudioCodec.FLAC,
         )
         # Should not raise
         hash(key)
@@ -84,12 +78,12 @@ class TestPipelineManagerAddPipeline:
     @pytest.fixture
     def source_format(self) -> AudioFormat:
         """Source PCM format."""
-        return AudioFormat(sample_rate=44100, bit_depth=16, channels=2, codec=AudioCodec.PCM)
+        return AudioFormat(sample_rate=44100, bit_depth=16, channels=2)
 
     @pytest.fixture
     def target_format_flac(self) -> AudioFormat:
         """Target FLAC format."""
-        return AudioFormat(sample_rate=48000, bit_depth=16, channels=2, codec=AudioCodec.FLAC)
+        return AudioFormat(sample_rate=48000, bit_depth=16, channels=2)
 
     def test_add_pipeline_returns_key(
         self,
@@ -102,11 +96,13 @@ class TestPipelineManagerAddPipeline:
             channel_id=MAIN_CHANNEL,
             source_format=source_format,
             target_format=target_format_flac,
+            codec=AudioCodec.FLAC,
         )
         assert isinstance(key, PipelineKey)
         assert key.channel_id == MAIN_CHANNEL
         assert key.source_format == source_format
         assert key.target_format == target_format_flac
+        assert key.codec == AudioCodec.FLAC
 
     def test_add_same_pipeline_twice_returns_same_key(
         self,
@@ -114,16 +110,18 @@ class TestPipelineManagerAddPipeline:
         source_format: AudioFormat,
         target_format_flac: AudioFormat,
     ) -> None:
-        """Adding same (channel, source, target) twice should return same key (dedup)."""
+        """Adding same (channel, source, target, codec) twice should return same key (dedup)."""
         key1 = manager.add_pipeline(
             channel_id=MAIN_CHANNEL,
             source_format=source_format,
             target_format=target_format_flac,
+            codec=AudioCodec.FLAC,
         )
         key2 = manager.add_pipeline(
             channel_id=MAIN_CHANNEL,
             source_format=source_format,
             target_format=target_format_flac,
+            codec=AudioCodec.FLAC,
         )
         assert key1 == key2
 
@@ -141,11 +139,13 @@ class TestPipelineManagerAddPipeline:
             channel_id=channel_a,
             source_format=source_format,
             target_format=target_format_flac,
+            codec=AudioCodec.FLAC,
         )
         key2 = manager.add_pipeline(
             channel_id=channel_b,
             source_format=source_format,
             target_format=target_format_flac,
+            codec=AudioCodec.FLAC,
         )
         assert key1 != key2
 
@@ -168,11 +168,13 @@ class TestPipelineManagerAddPipeline:
             channel_id=channel_a,
             source_format=source_format,
             target_format=target_format_flac,
+            codec=AudioCodec.FLAC,
         )
         manager.add_pipeline(
             channel_id=channel_b,
             source_format=source_format,
             target_format=target_format_flac,
+            codec=AudioCodec.FLAC,
         )
 
         # Private state assertion: we should have one encoder per channel for the same codec/params.
@@ -190,17 +192,17 @@ class TestPipelineManagerProcess:
     @pytest.fixture
     def source_format(self) -> AudioFormat:
         """Source PCM format."""
-        return AudioFormat(sample_rate=48000, bit_depth=16, channels=2, codec=AudioCodec.PCM)
+        return AudioFormat(sample_rate=48000, bit_depth=16, channels=2)
 
     @pytest.fixture
     def target_format_pcm(self) -> AudioFormat:
         """Target PCM format (no encoding)."""
-        return AudioFormat(sample_rate=48000, bit_depth=16, channels=2, codec=AudioCodec.PCM)
+        return AudioFormat(sample_rate=48000, bit_depth=16, channels=2)
 
     @pytest.fixture
     def target_format_flac(self) -> AudioFormat:
         """Target FLAC format."""
-        return AudioFormat(sample_rate=48000, bit_depth=16, channels=2, codec=AudioCodec.FLAC)
+        return AudioFormat(sample_rate=48000, bit_depth=16, channels=2)
 
     def test_process_returns_dict_of_encoded_chunks(
         self,
@@ -213,6 +215,7 @@ class TestPipelineManagerProcess:
             channel_id=MAIN_CHANNEL,
             source_format=source_format,
             target_format=target_format_pcm,
+            codec=AudioCodec.PCM,
         )
 
         # 25ms of stereo 16-bit 48kHz = 1200 samples * 4 bytes = 4800 bytes
@@ -239,11 +242,13 @@ class TestPipelineManagerProcess:
             channel_id=MAIN_CHANNEL,
             source_format=source_format,
             target_format=target_format_pcm,
+            codec=AudioCodec.PCM,
         )
         key_flac = manager.add_pipeline(
             channel_id=MAIN_CHANNEL,
             source_format=source_format,
             target_format=target_format_flac,
+            codec=AudioCodec.FLAC,
         )
 
         pcm = bytes(4800)
@@ -266,6 +271,7 @@ class TestPipelineManagerProcess:
             channel_id=MAIN_CHANNEL,
             source_format=source_format,
             target_format=target_format_pcm,
+            codec=AudioCodec.PCM,
         )
 
         pcm = bytes(4800)
@@ -287,6 +293,7 @@ class TestPipelineManagerProcess:
             channel_id=MAIN_CHANNEL,
             source_format=source_format,
             target_format=target_format_pcm,
+            codec=AudioCodec.PCM,
         )
 
         pcm = bytes(4800)
@@ -309,7 +316,7 @@ class TestPipelineManagerCodecHeader:
     @pytest.fixture
     def source_format(self) -> AudioFormat:
         """Source PCM format."""
-        return AudioFormat(sample_rate=48000, bit_depth=16, channels=2, codec=AudioCodec.PCM)
+        return AudioFormat(sample_rate=48000, bit_depth=16, channels=2)
 
     def test_get_codec_header_returns_none_for_pcm(
         self,
@@ -317,11 +324,12 @@ class TestPipelineManagerCodecHeader:
         source_format: AudioFormat,
     ) -> None:
         """get_codec_header should return None for PCM pipelines."""
-        target_pcm = AudioFormat(sample_rate=48000, bit_depth=16, channels=2, codec=AudioCodec.PCM)
+        target_pcm = AudioFormat(sample_rate=48000, bit_depth=16, channels=2)
         key = manager.add_pipeline(
             channel_id=MAIN_CHANNEL,
             source_format=source_format,
             target_format=target_pcm,
+            codec=AudioCodec.PCM,
         )
 
         header = manager.get_codec_header(key)
@@ -333,13 +341,12 @@ class TestPipelineManagerCodecHeader:
         source_format: AudioFormat,
     ) -> None:
         """get_codec_header should return bytes for FLAC pipelines."""
-        target_flac = AudioFormat(
-            sample_rate=48000, bit_depth=16, channels=2, codec=AudioCodec.FLAC
-        )
+        target_flac = AudioFormat(sample_rate=48000, bit_depth=16, channels=2)
         key = manager.add_pipeline(
             channel_id=MAIN_CHANNEL,
             source_format=source_format,
             target_format=target_flac,
+            codec=AudioCodec.FLAC,
         )
 
         header = manager.get_codec_header(key)
@@ -360,12 +367,12 @@ class TestPipelineManagerRemoveAndReset:
     @pytest.fixture
     def source_format(self) -> AudioFormat:
         """Source PCM format."""
-        return AudioFormat(sample_rate=48000, bit_depth=16, channels=2, codec=AudioCodec.PCM)
+        return AudioFormat(sample_rate=48000, bit_depth=16, channels=2)
 
     @pytest.fixture
     def target_format(self) -> AudioFormat:
         """Target PCM format."""
-        return AudioFormat(sample_rate=48000, bit_depth=16, channels=2, codec=AudioCodec.PCM)
+        return AudioFormat(sample_rate=48000, bit_depth=16, channels=2)
 
     def test_remove_pipeline(
         self,
@@ -378,6 +385,7 @@ class TestPipelineManagerRemoveAndReset:
             channel_id=MAIN_CHANNEL,
             source_format=source_format,
             target_format=target_format,
+            codec=AudioCodec.PCM,
         )
 
         manager.remove_pipeline(key)
@@ -397,6 +405,7 @@ class TestPipelineManagerRemoveAndReset:
             channel_id=MAIN_CHANNEL,
             source_format=source_format,
             target_format=target_format,
+            codec=AudioCodec.PCM,
         )
         # Should not raise
         manager.remove_pipeline(key)
@@ -412,6 +421,7 @@ class TestPipelineManagerRemoveAndReset:
             channel_id=MAIN_CHANNEL,
             source_format=source_format,
             target_format=target_format,
+            codec=AudioCodec.PCM,
         )
 
         manager.reset()
@@ -429,6 +439,7 @@ class TestPipelineManagerRemoveAndReset:
             channel_id=MAIN_CHANNEL,
             source_format=source_format,
             target_format=target_format,
+            codec=AudioCodec.PCM,
         )
 
         assert manager.has_pipeline(key) is True
@@ -437,5 +448,6 @@ class TestPipelineManagerRemoveAndReset:
             channel_id=UUID("11111111-1111-1111-1111-111111111111"),
             source_format=source_format,
             target_format=target_format,
+            codec=AudioCodec.PCM,
         )
         assert manager.has_pipeline(fake_key) is False

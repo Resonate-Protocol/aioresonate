@@ -32,7 +32,7 @@ def test_player_role_has_role_family() -> None:
 def test_player_role_has_preferred_format_property() -> None:
     """PlayerRole exposes preferred_format property."""
     client = MagicMock()
-    audio_format = AudioFormat(sample_rate=48000, bit_depth=16, channels=2, codec=AudioCodec.PCM)
+    audio_format = AudioFormat(sample_rate=48000, bit_depth=16, channels=2)
     role = PlayerRole(client=client, preferred_format=audio_format)
     assert role.preferred_format == audio_format
 

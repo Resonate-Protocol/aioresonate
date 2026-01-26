@@ -110,8 +110,8 @@ async def test_buffer_tracker_does_not_backpressure_until_send() -> None:
                 sample_rate=48000,
                 bit_depth=16,
                 channels=2,
-                codec=AudioCodec.PCM,
             ),
+            codec=AudioCodec.PCM,
         )
         assert sent is True
 

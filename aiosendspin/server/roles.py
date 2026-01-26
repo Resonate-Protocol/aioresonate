@@ -259,6 +259,7 @@ class PlayerRole(Role):
     def send_stream_start(
         self,
         audio_format: AudioFormat,
+        codec: AudioCodec,
         codec_header_b64: str | None = None,
     ) -> None:
         """
@@ -266,12 +267,13 @@ class PlayerRole(Role):
 
         Args:
             audio_format: Audio format for this stream.
+            codec: Audio codec for encoding.
             codec_header_b64: Optional base64-encoded codec header.
         """
         stream_start = StreamStartMessage(
             payload=StreamStartPayload(
                 player=StreamStartPlayer(
-                    codec=audio_format.codec,
+                    codec=codec,
                     sample_rate=audio_format.sample_rate,
                     channels=audio_format.channels,
                     bit_depth=audio_format.bit_depth,
@@ -289,6 +291,7 @@ class PlayerRole(Role):
         chunk: EncodedChunk,
         timestamp_us: int,
         audio_format: AudioFormat,
+        codec: AudioCodec,
         codec_header_b64: str | None = None,
     ) -> bool:
         """
@@ -301,6 +304,7 @@ class PlayerRole(Role):
             chunk: Encoded audio chunk to send.
             timestamp_us: Playback timestamp in microseconds.
             audio_format: Audio format for this chunk.
+            codec: Audio codec for encoding.
             codec_header_b64: Optional base64-encoded codec header.
 
         Returns:
@@ -326,7 +330,7 @@ class PlayerRole(Role):
 
         # Check if we need to send stream/start (first chunk or format change)
         if not self._stream_started or self._current_format != audio_format:
-            self.send_stream_start(audio_format, codec_header_b64)
+            self.send_stream_start(audio_format, codec, codec_header_b64)
 
         # Pack binary header and send
         header = pack_binary_header_raw(BinaryMessageType.AUDIO_CHUNK.value, timestamp_us)

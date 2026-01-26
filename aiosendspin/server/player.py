@@ -10,9 +10,9 @@ from aiosendspin.models.player import (
     PlayerCommandPayload,
     PlayerStatePayload,
 )
-from aiosendspin.models.types import PlayerCommand
+from aiosendspin.models.types import AudioCodec, PlayerCommand
 
-from .audio import AudioCodec, AudioFormat
+from .audio import AudioFormat
 from .events import VolumeChangedEvent
 
 if TYPE_CHECKING:
@@ -130,7 +130,7 @@ class PlayerClient:
     def determine_optimal_format(
         self,
         source_format: AudioFormat,
-    ) -> AudioFormat:
+    ) -> tuple[AudioFormat, AudioCodec]:
         """
         Determine the optimal audio format for this client given a source format.
 
@@ -141,7 +141,7 @@ class PlayerClient:
             source_format: The source audio format to match against.
 
         Returns:
-            AudioFormat: The optimal format for this client.
+            Tuple of (AudioFormat, AudioCodec): The optimal format and codec for this client.
         """
         support = self.support
         if not support or not support.supported_formats:
@@ -235,4 +235,4 @@ class PlayerClient:
                 "Adjusted channels for client %s: %s", self.client.client_id, channels
             )
 
-        return AudioFormat(sample_rate, bit_depth, channels, selected_codec)
+        return AudioFormat(sample_rate, bit_depth, channels), selected_codec

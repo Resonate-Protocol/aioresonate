@@ -264,7 +264,7 @@ class SendspinGroup:
         if self._push_stream is not None:
             self._push_stream.stop()
 
-    def _get_codec_header_b64(self, fmt: AudioFormat) -> str | None:
+    def _get_codec_header_b64(self, fmt: AudioFormat, codec: AudioCodec) -> str | None:
         """Generate codec header (base64) for a target format if applicable."""
         try:
             pipeline_manager = PipelineManager()
@@ -273,12 +273,12 @@ class SendspinGroup:
                 sample_rate=fmt.sample_rate,
                 bit_depth=fmt.bit_depth,
                 channels=fmt.channels,
-                codec=AudioCodec.PCM,
             )
             key = pipeline_manager.add_pipeline(
                 channel_id=MAIN_CHANNEL,
                 source_format=source_format,
                 target_format=fmt,
+                codec=codec,
             )
             return pipeline_manager.get_codec_header_b64(key)
         except Exception:
@@ -1122,7 +1122,9 @@ class SendspinGroup:
                 and client.check_role(Roles.PLAYER)
             ):
                 self._push_stream.on_player_leave(
-                    client.client_id, target_format=client.preferred_format
+                    client.client_id,
+                    target_format=client.preferred_format,
+                    target_codec=client.preferred_codec,
                 )
         if not self._clients:
             # Emit event for group deletion, no clients left
@@ -1290,58 +1292,66 @@ class SendspinGroup:
             supported = client.info.player_support.supported_formats
 
             # Start with current preferred format (if any), otherwise the client's top preference.
-            preferred = next(
+            # Prefer OPUS codec when available.
+            preferred_supported = next(
                 (fmt for fmt in supported if fmt.codec == AudioCodec.OPUS),
                 supported[0],
             )
-            base = client.preferred_format or AudioFormat(
-                codec=preferred.codec,
-                sample_rate=preferred.sample_rate,
-                bit_depth=preferred.bit_depth,
-                channels=preferred.channels,
+            base_format = client.preferred_format or AudioFormat(
+                sample_rate=preferred_supported.sample_rate,
+                bit_depth=preferred_supported.bit_depth,
+                channels=preferred_supported.channels,
             )
+            # Codec preference: use client's preferred codec, otherwise use from supported format.
+            # Note: We track codec separately from AudioFormat now.
+            base_codec = client.preferred_codec or preferred_supported.codec
 
             player_req = request.player
-            requested = AudioFormat(
-                codec=player_req.codec or base.codec,
-                sample_rate=player_req.sample_rate or base.sample_rate,
-                bit_depth=player_req.bit_depth or base.bit_depth,
-                channels=player_req.channels or base.channels,
+            requested_codec = player_req.codec or base_codec
+            requested_format = AudioFormat(
+                sample_rate=player_req.sample_rate or base_format.sample_rate,
+                bit_depth=player_req.bit_depth or base_format.bit_depth,
+                channels=player_req.channels or base_format.channels,
             )
 
             # Validate requested format is supported; fall back to client's top preference.
             if not any(
-                fmt.codec == requested.codec
-                and fmt.sample_rate == requested.sample_rate
-                and fmt.bit_depth == requested.bit_depth
-                and fmt.channels == requested.channels
+                fmt.codec == requested_codec
+                and fmt.sample_rate == requested_format.sample_rate
+                and fmt.bit_depth == requested_format.bit_depth
+                and fmt.channels == requested_format.channels
                 for fmt in supported
             ):
                 logger.warning(
-                    "Client %s requested unsupported format %s, falling back to %s",
+                    "Client %s requested unsupported format %s codec=%s, falling back to %s",
                     client.client_id,
-                    requested,
-                    base,
+                    requested_format,
+                    requested_codec,
+                    base_format,
                 )
-                requested = base
+                requested_format = base_format
+                requested_codec = base_codec
 
             # Persist preference (also used when no stream is active).
-            client.preferred_format = requested
+            client.preferred_format = requested_format
+            client.preferred_codec = requested_codec
 
             # If a push stream is active, delegate the format switch to the stream/role layer.
             # Sending stream/start immediately is unsafe: old-format audio may still be in flight
             # and would then be interpreted as the new format.
             if self._push_stream is not None and not self._push_stream.is_stopped:
-                self._push_stream.on_format_request(client.client_id, requested)
+                self._push_stream.on_format_request(
+                    client.client_id, requested_format, requested_codec
+                )
             else:
                 # No active stream: ack immediately with stream/start for the selected format.
-                codec_header_b64 = self._get_codec_header_b64(requested)
+                codec_header_b64 = self._get_codec_header_b64(requested_format, requested_codec)
                 stream_start = StreamStartPayload(
                     player=StreamStartPlayer(
-                        codec=requested.codec,
-                        sample_rate=requested.sample_rate,
-                        channels=requested.channels,
-                        bit_depth=requested.bit_depth,
+                        codec=requested_codec,
+                        sample_rate=requested_format.sample_rate,
+                        channels=requested_format.channels,
+                        bit_depth=requested_format.bit_depth,
                         codec_header=codec_header_b64,
                     )
                 )
