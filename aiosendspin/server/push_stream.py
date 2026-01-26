@@ -12,6 +12,7 @@ from aiosendspin.models.types import AudioCodec, Roles
 from aiosendspin.server.audio import AudioFormat, _get_av, _resolve_audio_format
 from aiosendspin.server.channels import MAIN_CHANNEL
 from aiosendspin.server.pipeline import EncodedChunk, PipelineKey, PipelineManager
+from aiosendspin.server.roles import AudioChunk
 
 if TYPE_CHECKING:
     import av
@@ -20,7 +21,7 @@ if TYPE_CHECKING:
     from aiosendspin.server.client import SendspinClient
     from aiosendspin.server.clock import Clock
     from aiosendspin.server.group import SendspinGroup
-    from aiosendspin.server.roles import Role
+    from aiosendspin.server.roles import AudioRequirements, Role
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -160,6 +161,8 @@ class PushStream:
         self._backpressured_roles: set[Role] = set()
         # Inline resamplers (replacing PipelineManager resampler logic)
         self._resamplers: dict[_ResamplerKey, _ResamplerState] = {}
+        # New role-based chunk cache: (channel_id, transformer_id) -> list of cached chunks
+        self._role_chunk_cache: dict[tuple[UUID, int], list[CachedChunk]] = {}
 
     @property
     def is_stopped(self) -> bool:
@@ -454,11 +457,18 @@ class PushStream:
         # - Keepalive pipelines for recently removed players (so quick regroup can catch up)
         self._cache_encoded_results(encoded_results, consumer_keys | keepalive_keys)
 
+        # NEW: Role-based audio delivery via hooks
+        role_cache_results = self._deliver_audio_to_roles(prepared, channel_play_start)
+        # Merge role-based cache results into the new cache
+        for cache_key, chunks in role_cache_results.items():
+            self._role_chunk_cache.setdefault(cache_key, []).extend(chunks)
+
         # Resync any dropped non-blocking players
         self._resync_dropped_players()
 
         # Prune old chunks from cache
         self._prune_chunk_cache()
+        self._prune_role_chunk_cache()
 
         # Return earliest play_start_us
         return min(channel_play_start.values())
@@ -711,6 +721,155 @@ class PushStream:
                     codec_header_b64=codec_header_b64,
                 )
 
+    def _group_roles_by_pcm_requirements(
+        self,
+        prepared: dict[UUID, tuple[bytes, AudioFormat]],
+    ) -> dict[tuple[UUID, int, int, int], list[tuple[SendspinClient, Role, AudioRequirements]]]:
+        """Group roles by their PCM requirements (channel_id, sample_rate, bit_depth, channels)."""
+        # Key type: (channel_id, sample_rate, bit_depth, channels)
+        roles_by_pcm: dict[
+            tuple[UUID, int, int, int], list[tuple[SendspinClient, Role, AudioRequirements]]
+        ] = {}
+
+        for client, role in self._get_audio_roles():
+            req = role.get_audio_requirements()
+            if req is None:
+                continue
+
+            channel_id = req.channel_id or MAIN_CHANNEL
+            if channel_id not in prepared:
+                continue
+
+            pcm_key = (channel_id, req.sample_rate, req.bit_depth, req.channels)
+            roles_by_pcm.setdefault(pcm_key, []).append((client, role, req))
+
+        return roles_by_pcm
+
+    def _resample_for_roles(
+        self,
+        roles_by_pcm: dict[
+            tuple[UUID, int, int, int], list[tuple[SendspinClient, Role, AudioRequirements]]
+        ],
+        prepared: dict[UUID, tuple[bytes, AudioFormat]],
+        channel_play_start: dict[UUID, int],
+    ) -> dict[tuple[UUID, int, int, int], tuple[bytes, int]]:
+        """Resample PCM once per unique PCM key. Returns (channel, rate, depth, ch) -> (pcm, ts)."""
+        resampled: dict[tuple[UUID, int, int, int], tuple[bytes, int]] = {}
+
+        for pcm_key in roles_by_pcm:
+            channel_id, target_sample_rate, target_bit_depth, target_channels = pcm_key
+            source_pcm, source_format = prepared[channel_id]
+            input_timestamp_us = channel_play_start[channel_id]
+
+            target_format = AudioFormat(
+                sample_rate=target_sample_rate,
+                bit_depth=target_bit_depth,
+                channels=target_channels,
+            )
+
+            resampler_key = _ResamplerKey(
+                channel_id=channel_id,
+                source_format=source_format,
+                target_sample_rate=target_sample_rate,
+                target_channels=target_channels,
+                target_bit_depth=target_bit_depth,
+            )
+
+            resampler_state = self._get_or_create_resampler(
+                resampler_key, source_format, target_format
+            )
+            pcm_out, output_ts = self._resample_pcm(
+                resampler_state, source_pcm, source_format, input_timestamp_us
+            )
+            resampled[pcm_key] = (pcm_out, output_ts)
+
+        return resampled
+
+    def _transform_and_deliver(
+        self,
+        roles_by_pcm: dict[
+            tuple[UUID, int, int, int], list[tuple[SendspinClient, Role, AudioRequirements]]
+        ],
+        resampled_pcm: dict[tuple[UUID, int, int, int], tuple[bytes, int]],
+    ) -> dict[tuple[UUID, int], list[CachedChunk]]:
+        """Transform PCM and deliver to roles. Returns cache results."""
+        # (channel_id, transformer_id) -> (data, timestamp_us, duration_us)
+        transformed: dict[tuple[UUID, int], tuple[bytes, int, int]] = {}
+        # Track roles per transform key
+        roles_by_transform: dict[
+            tuple[UUID, int], list[tuple[SendspinClient, Role, AudioRequirements]]
+        ] = {}
+
+        for pcm_key, roles_list in roles_by_pcm.items():
+            channel_id, rate, depth, channels = pcm_key
+            pcm_data, output_ts = resampled_pcm[pcm_key]
+
+            # Calculate duration
+            frame_stride = (depth // 8) * channels
+            sample_count = len(pcm_data) // frame_stride if frame_stride > 0 else 0
+            duration_us = int(sample_count * 1_000_000 / rate) if rate > 0 else 0
+
+            # Group by transformer
+            by_transformer: dict[int, list[tuple[SendspinClient, Role, AudioRequirements]]] = {}
+            for client, role, req in roles_list:
+                tid = id(req.transformer) if req.transformer else 0
+                by_transformer.setdefault(tid, []).append((client, role, req))
+
+            for tid, grouped in by_transformer.items():
+                tkey = (channel_id, tid)
+                roles_by_transform.setdefault(tkey, []).extend(grouped)
+
+                if tkey not in transformed:
+                    transformer = grouped[0][2].transformer
+                    if transformer is None:
+                        transformed[tkey] = (pcm_data, output_ts, duration_us)
+                    else:
+                        data = transformer.process(pcm_data, output_ts, duration_us)
+                        transformed[tkey] = (data, output_ts, duration_us)
+
+        # Deliver and cache
+        cache_results: dict[tuple[UUID, int], list[CachedChunk]] = {}
+
+        for tkey, (data, ts, dur) in transformed.items():
+            chunk = AudioChunk(data=data, timestamp_us=ts, duration_us=dur, byte_count=len(data))
+            cached = CachedChunk(
+                timestamp_us=ts, duration_us=dur, payload=data, byte_count=len(data)
+            )
+            cache_results.setdefault(tkey, []).append(cached)
+
+            for _client, role, _req in roles_by_transform.get(tkey, []):
+                if role not in self._started_roles:
+                    role.on_stream_start()
+                    self._started_roles.add(role)
+
+                if not role.on_audio_chunk(chunk):
+                    self._backpressured_roles.add(role)
+
+        return cache_results
+
+    def _deliver_audio_to_roles(
+        self,
+        prepared: dict[UUID, tuple[bytes, AudioFormat]],
+        channel_play_start: dict[UUID, int],
+    ) -> dict[tuple[UUID, int], list[CachedChunk]]:
+        """
+        Deliver audio to roles using the new hook-based flow.
+
+        This method:
+        1. Groups roles by unique PCM requirements
+        2. Resamples source PCM to each unique target format
+        3. Transforms and delivers via role.on_audio_chunk()
+
+        Returns:
+            Dict of (channel_id, transformer_id) -> list of CachedChunk for late joiners.
+        """
+        roles_by_pcm = self._group_roles_by_pcm_requirements(prepared)
+        if not roles_by_pcm:
+            return {}
+
+        resampled = self._resample_for_roles(roles_by_pcm, prepared, channel_play_start)
+        return self._transform_and_deliver(roles_by_pcm, resampled)
+
     def _cache_encoded_results(
         self,
         encoded_results: dict[PipelineKey, list[EncodedChunk]],
@@ -872,6 +1031,19 @@ class PushStream:
                 del self._keepalive_pipelines[keepalive_key]
 
         self._prune_pcm_cache()
+
+    def _prune_role_chunk_cache(self) -> None:
+        """Remove old chunks from the role-based cache."""
+        now_us = self._clock.now_us()
+
+        for key in list(self._role_chunk_cache.keys()):
+            # Filter out chunks older than now
+            self._role_chunk_cache[key] = [
+                chunk for chunk in self._role_chunk_cache[key] if chunk.timestamp_us >= now_us
+            ]
+            # Remove empty lists
+            if not self._role_chunk_cache[key]:
+                del self._role_chunk_cache[key]
 
     def on_player_leave(
         self,
@@ -1160,6 +1332,7 @@ class PushStream:
 
         # Clear chunk cache
         self._chunk_cache.clear()
+        self._role_chunk_cache.clear()
 
         # Reset encoding pipelines to drop any buffered resampler/encoder state.
         self._pipeline_manager.reset()
