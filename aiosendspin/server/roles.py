@@ -7,13 +7,14 @@ and stream state management.
 
 from __future__ import annotations
 
+import base64
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 from uuid import UUID
 
-from aiosendspin.models import BinaryMessageType, pack_binary_header_raw
+from aiosendspin.models import AudioCodec, BinaryMessageType, pack_binary_header_raw
 from aiosendspin.models.core import (
     StreamClearMessage,
     StreamClearPayload,
@@ -23,6 +24,7 @@ from aiosendspin.models.core import (
     StreamStartPayload,
 )
 from aiosendspin.models.player import StreamStartPlayer
+from aiosendspin.server.transformers import FlacEncoder
 
 if TYPE_CHECKING:
     from aiosendspin.models.types import ServerMessage
@@ -212,9 +214,16 @@ class PlayerRole(Role):
     _drops_since_log: int = field(default=0, init=False)
     """Rate-limited drop logging for diagnosing stutter."""
 
+    _audio_requirements: AudioRequirements | None = field(default=None, init=False)
+    """Audio requirements for the new hook-based streaming."""
+
     def get_stream_requirements(self) -> StreamRequirements:
         """Player role sends binary audio streams."""
         return StreamRequirements()
+
+    def get_audio_requirements(self) -> AudioRequirements | None:
+        """Return audio requirements for hook-based streaming."""
+        return self._audio_requirements
 
     def on_connect(self) -> None:
         """Reset stream state on new connection."""
@@ -471,3 +480,75 @@ class PlayerRole(Role):
 
         # Clear the resync flag
         self.clear_resync_needed()
+
+    # --- New hook-based streaming methods ---
+    # These will be called by PushStream after Task 5 refactoring.
+    # The old methods (send_audio, send_stream_start, etc.) remain until Task 6.
+
+    def on_stream_start(self) -> None:
+        """Send stream/start message using transformer header."""
+        req = self.get_audio_requirements()
+        if req is None:
+            return
+
+        transformer = req.transformer
+        header = transformer.get_header() if transformer else None
+        header_b64 = base64.b64encode(header).decode() if header else None
+
+        # Determine codec from transformer type
+        codec = AudioCodec.FLAC if isinstance(transformer, FlacEncoder) else AudioCodec.PCM
+
+        stream_start = StreamStartMessage(
+            payload=StreamStartPayload(
+                player=StreamStartPlayer(
+                    codec=codec,
+                    sample_rate=req.sample_rate,
+                    channels=req.channels,
+                    bit_depth=req.bit_depth,
+                    codec_header=header_b64,
+                )
+            )
+        )
+        self.send_message(stream_start)
+        self._stream_started = True
+
+    def on_audio_chunk(self, chunk: AudioChunk) -> bool:
+        """Pack and send binary audio. Return False for backpressure."""
+        # Check backpressure
+        if self._client.queue_high_water(threshold=0.5):
+            self.mark_needs_resync()
+            return False
+
+        # Pack binary header and send
+        header = pack_binary_header_raw(BinaryMessageType.AUDIO_CHUNK.value, chunk.timestamp_us)
+        packed_data = header + chunk.data
+        chunk_end_us = chunk.timestamp_us + chunk.duration_us
+
+        if not self._client.try_send_binary(
+            packed_data,
+            buffer_end_time_us=chunk_end_us,
+            buffer_byte_count=chunk.byte_count,
+            duration_us=chunk.duration_us,
+        ):
+            self.mark_needs_resync()
+            return False
+
+        self._send_state.last_sent_timestamp_us = chunk.timestamp_us
+        self._send_state.healthy = True
+        return True
+
+    def on_stream_clear(self) -> None:
+        """Send stream/clear and reset state."""
+        stream_clear = StreamClearMessage(payload=StreamClearPayload(roles=["player"]))
+        self.send_message(stream_clear)
+        self._stream_started = False
+        if self._buffer_tracker is not None:
+            self._buffer_tracker.reset()
+
+    def on_stream_end(self) -> None:
+        """Send stream/end and reset state."""
+        stream_end = StreamEndMessage(payload=StreamEndPayload(roles=None))
+        self.send_message(stream_end)
+        self._stream_started = False
+        if self._buffer_tracker is not None:
+            self._buffer_tracker.reset()

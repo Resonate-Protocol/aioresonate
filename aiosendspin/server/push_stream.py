@@ -18,6 +18,7 @@ if TYPE_CHECKING:
     from aiosendspin.server.client import SendspinClient
     from aiosendspin.server.clock import Clock
     from aiosendspin.server.group import SendspinGroup
+    from aiosendspin.server.roles import Role
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -113,6 +114,9 @@ class PushStream:
         self._last_catchup_pipeline_key: PipelineKey | None = None
         # Keepalive pipelines for recently removed players: (channel_id, target_format) -> expiry_us
         self._keepalive_pipelines: dict[tuple[UUID, AudioFormat], int] = {}
+        # Role-based streaming tracking (for hook-based flow)
+        self._started_roles: set[Role] = set()
+        self._backpressured_roles: set[Role] = set()
 
     @property
     def is_stopped(self) -> bool:
@@ -126,6 +130,19 @@ class PushStream:
             for c in self._group.clients
             if c.is_connected and c.player_role is not None and c.check_role(Roles.PLAYER)
         ]
+
+    def _get_audio_roles(self) -> list[tuple[SendspinClient, Role]]:
+        """Get all roles that need audio from connected clients."""
+        result: list[tuple[SendspinClient, Role]] = []
+        for client in self._group.clients:
+            if not client.is_connected:
+                continue
+            result.extend(
+                (client, role)
+                for role in client.active_roles
+                if role.get_audio_requirements() is not None
+            )
+        return result
 
     def has_pending_audio(self) -> bool:
         """Return True if there is pending audio to commit."""
@@ -903,21 +920,34 @@ class PushStream:
         Stop the stream.
 
         After calling stop(), commit_audio() will raise StreamStoppedError.
-        Sends stream/end message to connected players via their PlayerRole.
+        Sends stream/end message to all roles via hooks.
         """
         self._is_stopped = True
 
-        # Send stream/end via PlayerRole (handles buffer tracker reset)
+        # Track which roles we've notified via hooks (using id() since Role is not hashable)
+        notified_role_ids: set[int] = set()
+
+        # Send stream/end to all roles with audio requirements via hooks
+        for _client, role in self._get_audio_roles():
+            role.on_stream_end()
+            notified_role_ids.add(id(role))
+
+        # Also call end_stream() on PlayerRole for backward compatibility
+        # (PlayerRole may not have audio requirements set yet during migration)
         for player in self._get_group_players():
-            if player.player_role is not None:
+            if player.player_role is not None and id(player.player_role) not in notified_role_ids:
                 player.player_role.end_stream()
+
+        # Clear role tracking state
+        self._started_roles.clear()
+        self._backpressured_roles.clear()
 
     def clear(self) -> None:
         """
         Clear all pending audio and reset timing.
 
         This is used for seek operations where buffered audio is discarded.
-        Sends stream/clear to connected players via their PlayerRole.
+        Sends stream/clear to all roles via hooks.
         """
         # Clear pending audio
         self._channel_buffers.clear()
@@ -931,7 +961,20 @@ class PushStream:
         # Reset encoding pipelines to drop any buffered resampler/encoder state.
         self._pipeline_manager.reset()
 
-        # Send stream/clear via PlayerRole (handles buffer tracker reset)
+        # Clear role tracking state
+        self._started_roles.clear()
+        self._backpressured_roles.clear()
+
+        # Track which roles we've notified via hooks (using id() since Role is not hashable)
+        notified_role_ids: set[int] = set()
+
+        # Send stream/clear to all roles with audio requirements via hooks
+        for _client, role in self._get_audio_roles():
+            role.on_stream_clear()
+            notified_role_ids.add(id(role))
+
+        # Also call clear_stream() on PlayerRole for backward compatibility
+        # (PlayerRole may not have audio requirements set yet during migration)
         for player in self._get_group_players():
-            if player.player_role is not None:
+            if player.player_role is not None and id(player.player_role) not in notified_role_ids:
                 player.player_role.clear_stream()
