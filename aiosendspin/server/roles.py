@@ -29,6 +29,7 @@ if TYPE_CHECKING:
     from aiosendspin.server.audio import AudioFormat, BufferTracker
     from aiosendspin.server.client import SendspinClient
     from aiosendspin.server.pipeline import EncodedChunk
+    from aiosendspin.server.transformers import AudioTransformer
 
 
 @dataclass(frozen=True)
@@ -65,8 +66,17 @@ class AudioRequirements:
     audio via on_audio_chunk() calls.
     """
 
-    target_format: AudioFormat
-    """The audio format this role needs."""
+    sample_rate: int
+    """Target sample rate in Hz."""
+
+    bit_depth: int
+    """Target bit depth (8, 16, 24, 32)."""
+
+    channels: int
+    """Number of audio channels."""
+
+    transformer: AudioTransformer | None = None
+    """Optional transformer for encoding. None means raw PCM."""
 
     channel_id: UUID | None = None
     """Channel to receive audio from. None means main channel."""
@@ -250,7 +260,7 @@ class PlayerRole(Role):
                 )
             )
         )
-        self._client.send_message(stream_start)
+        self.send_message(stream_start)
         self._stream_started = True
         self._current_format = audio_format
         self._codec_header_b64 = codec_header_b64
@@ -380,7 +390,7 @@ class PlayerRole(Role):
         Used for seek operations to discard buffered audio.
         """
         stream_clear = StreamClearMessage(payload=StreamClearPayload(roles=["player"]))
-        self._client.send_message(stream_clear)
+        self.send_message(stream_clear)
 
         # Reset stream state (stream/start will be re-sent)
         self._stream_started = False
@@ -398,7 +408,7 @@ class PlayerRole(Role):
         """
         # End all streams (roles omitted) for best client compatibility.
         stream_end = StreamEndMessage(payload=StreamEndPayload(roles=None))
-        self._client.send_message(stream_end)
+        self.send_message(stream_end)
 
         # Reset stream state
         self._stream_started = False

@@ -8,8 +8,6 @@ from uuid import UUID
 
 import pytest
 
-from aiosendspin.models import AudioCodec
-from aiosendspin.server.audio import AudioFormat
 from aiosendspin.server.roles import (
     AudioChunk,
     AudioRequirements,
@@ -37,31 +35,57 @@ class TestStreamRequirements:
 class TestAudioRequirements:
     """Tests for AudioRequirements dataclass."""
 
-    def test_audio_requirements_with_target_format(self) -> None:
-        """AudioRequirements captures target format."""
-        fmt = AudioFormat(sample_rate=48000, bit_depth=16, channels=2, codec=AudioCodec.OPUS)
-        req = AudioRequirements(target_format=fmt)
-        assert req.target_format == fmt
+    def test_audio_requirements_with_pcm_format(self) -> None:
+        """AudioRequirements captures PCM format without transformer."""
+        req = AudioRequirements(
+            sample_rate=48000,
+            bit_depth=16,
+            channels=2,
+        )
+        assert req.sample_rate == 48000
+        assert req.bit_depth == 16
+        assert req.channels == 2
+        assert req.transformer is None
+        assert req.channel_id is None
+
+    def test_audio_requirements_with_transformer(self) -> None:
+        """AudioRequirements can include a transformer."""
+
+        class DummyTransformer:
+            def process(self, pcm: bytes, _timestamp_us: int, _duration_us: int) -> bytes:
+                return pcm
+
+            def get_header(self) -> bytes | None:
+                return None
+
+            def reset(self) -> None:
+                pass
+
+        transformer = DummyTransformer()
+        req = AudioRequirements(
+            sample_rate=48000,
+            bit_depth=16,
+            channels=2,
+            transformer=transformer,
+        )
+        assert req.transformer is transformer
 
     def test_audio_requirements_with_channel_id(self) -> None:
         """AudioRequirements can specify a channel."""
         channel = UUID("12345678-1234-5678-1234-567812345678")
-        fmt = AudioFormat(sample_rate=48000, bit_depth=16, channels=2)
-        req = AudioRequirements(target_format=fmt, channel_id=channel)
+        req = AudioRequirements(
+            sample_rate=48000,
+            bit_depth=16,
+            channels=2,
+            channel_id=channel,
+        )
         assert req.channel_id == channel
-
-    def test_audio_requirements_channel_defaults_to_none(self) -> None:
-        """AudioRequirements channel_id defaults to None (main channel)."""
-        fmt = AudioFormat(sample_rate=48000, bit_depth=16, channels=2)
-        req = AudioRequirements(target_format=fmt)
-        assert req.channel_id is None
 
     def test_audio_requirements_is_frozen(self) -> None:
         """AudioRequirements is immutable."""
-        fmt = AudioFormat(sample_rate=48000, bit_depth=16, channels=2)
-        req = AudioRequirements(target_format=fmt)
+        req = AudioRequirements(sample_rate=48000, bit_depth=16, channels=2)
         with pytest.raises(AttributeError):
-            req.target_format = fmt  # type: ignore[misc]
+            req.sample_rate = 44100  # type: ignore[misc]
 
 
 class TestPlayerRoleRequirements:
