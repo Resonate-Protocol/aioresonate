@@ -536,16 +536,21 @@ class PushStream:
                     if transformer is None:
                         transformed[tkey] = (pcm_data, output_ts, duration_us)
                     else:
+                        # TODO: Update to handle list[bytes] when transformers are updated
                         data = transformer.process(pcm_data, output_ts, duration_us)
-                        transformed[tkey] = (data, output_ts, duration_us)
+                        transformed[tkey] = (data, output_ts, duration_us)  # type: ignore[assignment]
 
         # Deliver and cache
         cache_results: dict[tuple[UUID, int], list[CachedChunk]] = {}
 
-        for tkey, (data, ts, dur) in transformed.items():
-            chunk = AudioChunk(data=data, timestamp_us=ts, duration_us=dur, byte_count=len(data))
+        for tkey, (data, ts, dur) in transformed.items():  # type: ignore[assignment]
+            # TODO: Update to handle list[bytes] when transformers are updated
+            chunk = AudioChunk(data=data, timestamp_us=ts, duration_us=dur, byte_count=len(data))  # type: ignore[arg-type]
             cached = CachedChunk(
-                timestamp_us=ts, duration_us=dur, payload=data, byte_count=len(data)
+                timestamp_us=ts,
+                duration_us=dur,
+                payload=data,  # type: ignore[arg-type]
+                byte_count=len(data),
             )
             cache_results.setdefault(tkey, []).append(cached)
 

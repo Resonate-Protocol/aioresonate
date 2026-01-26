@@ -25,8 +25,13 @@ class AudioTransformer(Protocol):
     Examples: FlacEncoder, OpusEncoder, FFTComputer for visualizer.
     """
 
-    def process(self, pcm: bytes, timestamp_us: int, duration_us: int) -> bytes:
-        """Transform PCM chunk into output format.
+    @property
+    def frame_duration_us(self) -> int:
+        """Duration of each output frame in microseconds."""
+        ...
+
+    def process(self, pcm: bytes, timestamp_us: int, duration_us: int) -> list[bytes]:
+        """Transform PCM chunk into output frames.
 
         Args:
             pcm: Raw PCM audio data (already resampled to target format).
@@ -34,7 +39,16 @@ class AudioTransformer(Protocol):
             duration_us: Duration of this chunk in microseconds.
 
         Returns:
-            Transformed bytes (encoded audio, frequency bins, etc.).
+            List of encoded frames. May be empty if buffering incomplete frame.
+            May contain multiple frames if input spans multiple frame boundaries.
+        """
+        ...
+
+    def flush(self) -> list[bytes]:
+        """Flush remaining buffered audio at stream end.
+
+        Returns:
+            Final frame(s), possibly padded with silence.
         """
         ...
 

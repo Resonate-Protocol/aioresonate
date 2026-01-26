@@ -17,8 +17,15 @@ class TestAudioTransformerProtocol:
         """AudioTransformer requires process() method."""
 
         class ValidTransformer:
-            def process(self, pcm: bytes, _timestamp_us: int, _duration_us: int) -> bytes:
-                return pcm
+            @property
+            def frame_duration_us(self) -> int:
+                return 25_000
+
+            def process(self, pcm: bytes, _timestamp_us: int, _duration_us: int) -> list[bytes]:
+                return [pcm]
+
+            def flush(self) -> list[bytes]:
+                return []
 
             def get_header(self) -> bytes | None:
                 return None
@@ -28,14 +35,21 @@ class TestAudioTransformerProtocol:
 
         # Should be recognized as implementing the protocol
         transformer: AudioTransformer = ValidTransformer()
-        assert transformer.process(b"test", 0, 1000) == b"test"
+        assert transformer.process(b"test", 0, 1000) == [b"test"]
 
     def test_protocol_defines_get_header_method(self) -> None:
         """AudioTransformer requires get_header() method."""
 
         class TransformerWithHeader:
-            def process(self, pcm: bytes, _timestamp_us: int, _duration_us: int) -> bytes:
-                return pcm
+            @property
+            def frame_duration_us(self) -> int:
+                return 25_000
+
+            def process(self, pcm: bytes, _timestamp_us: int, _duration_us: int) -> list[bytes]:
+                return [pcm]
+
+            def flush(self) -> list[bytes]:
+                return []
 
             def get_header(self) -> bytes | None:
                 return b"header"
@@ -53,8 +67,15 @@ class TestAudioTransformerProtocol:
             def __init__(self) -> None:
                 self.reset_count = 0
 
-            def process(self, pcm: bytes, _timestamp_us: int, _duration_us: int) -> bytes:
-                return pcm
+            @property
+            def frame_duration_us(self) -> int:
+                return 25_000
+
+            def process(self, pcm: bytes, _timestamp_us: int, _duration_us: int) -> list[bytes]:
+                return [pcm]
+
+            def flush(self) -> list[bytes]:
+                return []
 
             def get_header(self) -> bytes | None:
                 return None
@@ -65,6 +86,52 @@ class TestAudioTransformerProtocol:
         transformer = ResettableTransformer()
         transformer.reset()
         assert transformer.reset_count == 1
+
+    def test_protocol_defines_frame_duration_us_property(self) -> None:
+        """AudioTransformer requires frame_duration_us property."""
+
+        class TransformerWithFrameDuration:
+            @property
+            def frame_duration_us(self) -> int:
+                return 25_000
+
+            def process(self, pcm: bytes, _timestamp_us: int, _duration_us: int) -> list[bytes]:
+                return [pcm]
+
+            def flush(self) -> list[bytes]:
+                return []
+
+            def get_header(self) -> bytes | None:
+                return None
+
+            def reset(self) -> None:
+                pass
+
+        transformer: AudioTransformer = TransformerWithFrameDuration()
+        assert transformer.frame_duration_us == 25_000
+
+    def test_protocol_defines_flush_method(self) -> None:
+        """AudioTransformer requires flush() method."""
+
+        class TransformerWithFlush:
+            @property
+            def frame_duration_us(self) -> int:
+                return 25_000
+
+            def process(self, pcm: bytes, _timestamp_us: int, _duration_us: int) -> list[bytes]:
+                return [pcm]
+
+            def flush(self) -> list[bytes]:
+                return [b"final"]
+
+            def get_header(self) -> bytes | None:
+                return None
+
+            def reset(self) -> None:
+                pass
+
+        transformer: AudioTransformer = TransformerWithFlush()
+        assert transformer.flush() == [b"final"]
 
 
 class TestPcmPassthrough:
