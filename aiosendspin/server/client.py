@@ -23,7 +23,7 @@ from aiosendspin.server.events import ClientEvent, ClientGroupChangedEvent
 from .controller import ControllerClient
 from .metadata import MetadataClient
 from .player import PlayerClient
-from .roles import PlayerRole
+from .roles import PlayerRole, Role
 from .visualizer import VisualizerClient
 
 if TYPE_CHECKING:
@@ -253,6 +253,7 @@ class SendspinClient:
 
             self._player_role = PlayerRole(_client=self)
             self._player_role.on_connect()
+            self._player_role.on_transport_attach()
         else:
             self._player_role = None
 
@@ -272,6 +273,7 @@ class SendspinClient:
         self._connected = False
 
         if self._player_role is not None:
+            self._player_role.on_transport_detach()
             self._player_role.on_disconnect()
             self._player_role = None
 
@@ -356,6 +358,15 @@ class SendspinClient:
     def player_role(self) -> PlayerRole | None:
         """Return the active PlayerRole instance for this connection, if any."""
         return self._player_role
+
+    @property
+    def active_roles(self) -> list[Role]:
+        """Return all active Role instances for this client."""
+        result: list[Role] = []
+        if self._player_role is not None:
+            result.append(self._player_role)
+        # Future: add other roles here (artwork, visualizer, etc.)
+        return result
 
     @property
     def buffer_tracker(self) -> BufferTracker | None:

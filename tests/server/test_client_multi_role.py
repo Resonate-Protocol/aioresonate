@@ -124,3 +124,27 @@ class TestClientRoles:
 
         assert client.player_role is not None
         assert client.player_role.role_family == "player"
+
+    def test_active_roles_includes_player_role(self, mock_loop: Any) -> None:
+        """active_roles includes PlayerRole when player role is active."""
+        server = _DummyServer(loop=mock_loop, clock=LoopClock(mock_loop))
+        group = _DummyGroup(clients=[])
+        client = SendspinClient(server, client_id="test")
+        client._group = group  # noqa: SLF001
+        group.clients.append(client)
+
+        conn = _FakeConnection()
+        hello = _make_client_hello()
+
+        client.attach_connection(conn, client_info=hello, active_roles=["player@v1"])
+
+        roles = client.active_roles
+        assert len(roles) == 1
+        assert roles[0] is client.player_role
+
+    def test_active_roles_empty_when_no_roles(self, mock_loop: Any) -> None:
+        """active_roles returns empty list when no roles active."""
+        server = _DummyServer(loop=mock_loop, clock=LoopClock(mock_loop))
+        client = SendspinClient(server, client_id="test")
+
+        assert client.active_roles == []
