@@ -10,7 +10,13 @@ import pytest
 
 from aiosendspin.models import AudioCodec
 from aiosendspin.server.audio import AudioFormat
-from aiosendspin.server.roles import AudioRequirements, PlayerRole, Role, StreamRequirements
+from aiosendspin.server.roles import (
+    AudioChunk,
+    AudioRequirements,
+    PlayerRole,
+    Role,
+    StreamRequirements,
+)
 
 
 class TestStreamRequirements:
@@ -215,3 +221,26 @@ class TestRoleBaseClass:
         msg = {"type": "test"}
         role.send_message(msg)
         mock_client.send_message.assert_called_once_with(msg)
+
+
+class TestAudioChunk:
+    """Tests for AudioChunk dataclass."""
+
+    def test_audio_chunk_has_required_fields(self) -> None:
+        """AudioChunk captures all required metadata."""
+        chunk = AudioChunk(
+            data=b"\x00\x01\x02",
+            timestamp_us=1_000_000,
+            duration_us=25_000,
+            byte_count=3,
+        )
+        assert chunk.data == b"\x00\x01\x02"
+        assert chunk.timestamp_us == 1_000_000
+        assert chunk.duration_us == 25_000
+        assert chunk.byte_count == 3
+
+    def test_audio_chunk_is_frozen(self) -> None:
+        """AudioChunk is immutable."""
+        chunk = AudioChunk(data=b"x", timestamp_us=0, duration_us=0, byte_count=1)
+        with pytest.raises(AttributeError):
+            chunk.data = b"y"  # type: ignore[misc]

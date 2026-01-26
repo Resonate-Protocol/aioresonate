@@ -41,6 +41,23 @@ class StreamRequirements:
 
 
 @dataclass(frozen=True)
+class AudioChunk:
+    """Audio chunk delivered to roles."""
+
+    data: bytes
+    """Transformed audio bytes (PCM or encoded, depending on transformer)."""
+
+    timestamp_us: int
+    """Playback timestamp in microseconds."""
+
+    duration_us: int
+    """Duration of this chunk in microseconds."""
+
+    byte_count: int
+    """Size of data (for buffer tracking)."""
+
+
+@dataclass(frozen=True)
 class AudioRequirements:
     """Declaration that a role needs audio chunks.
 
