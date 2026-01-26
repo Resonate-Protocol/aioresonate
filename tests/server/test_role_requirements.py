@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from unittest.mock import MagicMock
 from uuid import UUID
 
 import pytest
 
-from aiosendspin.server.roles import (
+from aiosendspin.server.roles_v2 import (
     AudioChunk,
     AudioRequirements,
     PlayerRole,
@@ -113,7 +112,15 @@ class TestRoleBaseClass:
         """Role requires role_family property."""
 
         class IncompleteRole(Role):
-            pass
+            @property
+            def role_id(self) -> str:
+                return "test@v1"
+
+            def on_connect(self) -> None:
+                pass
+
+            def on_disconnect(self) -> None:
+                pass
 
         with pytest.raises(TypeError, match="role_family"):
             IncompleteRole()  # type: ignore[abstract]
@@ -121,9 +128,14 @@ class TestRoleBaseClass:
     def test_get_stream_requirements_defaults_to_none(self) -> None:
         """Roles that don't stream return None from get_stream_requirements()."""
 
-        @dataclass
         class NonStreamingRole(Role):
-            role_family: str = "test"
+            @property
+            def role_id(self) -> str:
+                return "test@v1"
+
+            @property
+            def role_family(self) -> str:
+                return "test"
 
             def on_connect(self) -> None:
                 pass
@@ -137,9 +149,14 @@ class TestRoleBaseClass:
     def test_get_audio_requirements_defaults_to_none(self) -> None:
         """Roles that don't need audio return None from get_audio_requirements()."""
 
-        @dataclass
         class NonAudioRole(Role):
-            role_family: str = "test"
+            @property
+            def role_id(self) -> str:
+                return "test@v1"
+
+            @property
+            def role_family(self) -> str:
+                return "test"
 
             def on_connect(self) -> None:
                 pass
@@ -153,9 +170,14 @@ class TestRoleBaseClass:
     def test_on_stream_start_is_noop_by_default(self) -> None:
         """Roles that don't override on_stream_start() don't crash."""
 
-        @dataclass
         class TestRole(Role):
-            role_family: str = "test"
+            @property
+            def role_id(self) -> str:
+                return "test@v1"
+
+            @property
+            def role_family(self) -> str:
+                return "test"
 
             def on_connect(self) -> None:
                 pass
@@ -169,9 +191,14 @@ class TestRoleBaseClass:
     def test_on_stream_clear_is_noop_by_default(self) -> None:
         """Roles that don't override on_stream_clear() don't crash."""
 
-        @dataclass
         class TestRole(Role):
-            role_family: str = "test"
+            @property
+            def role_id(self) -> str:
+                return "test@v1"
+
+            @property
+            def role_family(self) -> str:
+                return "test"
 
             def on_connect(self) -> None:
                 pass
@@ -185,9 +212,14 @@ class TestRoleBaseClass:
     def test_on_stream_end_is_noop_by_default(self) -> None:
         """Roles that don't override on_stream_end() don't crash."""
 
-        @dataclass
         class TestRole(Role):
-            role_family: str = "test"
+            @property
+            def role_id(self) -> str:
+                return "test@v1"
+
+            @property
+            def role_family(self) -> str:
+                return "test"
 
             def on_connect(self) -> None:
                 pass
@@ -201,9 +233,14 @@ class TestRoleBaseClass:
     def test_on_audio_chunk_returns_true_by_default(self) -> None:
         """Roles that don't override on_audio_chunk() return True."""
 
-        @dataclass
         class TestRole(Role):
-            role_family: str = "test"
+            @property
+            def role_id(self) -> str:
+                return "test@v1"
+
+            @property
+            def role_family(self) -> str:
+                return "test"
 
             def on_connect(self) -> None:
                 pass
@@ -219,9 +256,14 @@ class TestRoleBaseClass:
     def test_on_transport_attach_sets_has_transport(self) -> None:
         """on_transport_attach() sets _has_transport to True."""
 
-        @dataclass
         class TestRole(Role):
-            role_family: str = "test"
+            @property
+            def role_id(self) -> str:
+                return "test@v1"
+
+            @property
+            def role_family(self) -> str:
+                return "test"
 
             def on_connect(self) -> None:
                 pass
@@ -237,9 +279,14 @@ class TestRoleBaseClass:
     def test_on_transport_detach_clears_has_transport(self) -> None:
         """on_transport_detach() sets _has_transport to False."""
 
-        @dataclass
         class TestRole(Role):
-            role_family: str = "test"
+            @property
+            def role_id(self) -> str:
+                return "test@v1"
+
+            @property
+            def role_family(self) -> str:
+                return "test"
 
             def on_connect(self) -> None:
                 pass
@@ -255,10 +302,18 @@ class TestRoleBaseClass:
     def test_send_message_drops_silently_without_transport(self) -> None:
         """send_message() is a no-op when no transport attached."""
 
-        @dataclass
         class TestRole(Role):
-            _client: MagicMock
-            role_family: str = "test"
+            def __init__(self, client: MagicMock) -> None:
+                self._client = client
+                self._has_transport = False
+
+            @property
+            def role_id(self) -> str:
+                return "test@v1"
+
+            @property
+            def role_family(self) -> str:
+                return "test"
 
             def on_connect(self) -> None:
                 pass
@@ -267,8 +322,7 @@ class TestRoleBaseClass:
                 pass
 
         mock_client = MagicMock()
-        role = TestRole(_client=mock_client)
-        role._has_transport = False  # noqa: SLF001
+        role = TestRole(mock_client)
 
         role.send_message({"type": "test"})
         mock_client.send_message.assert_not_called()
@@ -276,10 +330,18 @@ class TestRoleBaseClass:
     def test_send_message_forwards_to_client_with_transport(self) -> None:
         """send_message() forwards to client when transport attached."""
 
-        @dataclass
         class TestRole(Role):
-            _client: MagicMock
-            role_family: str = "test"
+            def __init__(self, client: MagicMock) -> None:
+                self._client = client
+                self._has_transport = True
+
+            @property
+            def role_id(self) -> str:
+                return "test@v1"
+
+            @property
+            def role_family(self) -> str:
+                return "test"
 
             def on_connect(self) -> None:
                 pass
@@ -288,8 +350,7 @@ class TestRoleBaseClass:
                 pass
 
         mock_client = MagicMock()
-        role = TestRole(_client=mock_client)
-        role._has_transport = True  # noqa: SLF001
+        role = TestRole(mock_client)
 
         msg = {"type": "test"}
         role.send_message(msg)

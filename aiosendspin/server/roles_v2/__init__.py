@@ -1,10 +1,9 @@
 """Role implementations for connection-specific behavior (v2).
 
-This package contains the new simplified role implementations:
+This package contains the role implementations:
 - Base role classes (Role ABC, dataclasses)
 - Specific role implementations (PlayerRole, etc.)
 
-This is the v2 implementation that will replace the legacy roles.py in Phase 5.
 Roles encapsulate per-connection behavior for different client capabilities.
 """
 
@@ -14,12 +13,13 @@ from aiosendspin.server.roles_v2.base import (
     Role,
     StreamRequirements,
 )
-from aiosendspin.server.roles_v2.player_v1 import PlayerRole
+from aiosendspin.server.roles_v2.player_v1 import PlayerRole, PlayerSendState
 
 __all__ = [
     "AudioChunk",
     "AudioRequirements",
     "PlayerRole",
+    "PlayerSendState",
     "Role",
     "StreamRequirements",
 ]

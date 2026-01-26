@@ -23,7 +23,7 @@ from aiosendspin.server.events import ClientEvent, ClientGroupChangedEvent
 from .controller import ControllerClient
 from .metadata import MetadataClient
 from .player import PlayerClient
-from .roles import PlayerRole, Role
+from .roles_v2 import PlayerRole, Role
 from .visualizer import VisualizerClient
 
 if TYPE_CHECKING:
@@ -62,7 +62,8 @@ class SendspinClient:
         self._client_id = client_id
         self._name = client_id
         self._info: ClientHelloPayload | None = None
-        self._roles: list[str] = []
+        self._negotiated_roles: list[str] = []
+        self._roles: dict[str, Role] = {}
         self._group: SendspinGroup | None = None
 
         self._connection: SendspinConnection | None = None
@@ -87,7 +88,6 @@ class SendspinClient:
         self._visualizer: VisualizerClient | None = None
 
         # Player role persistent state
-        self._player_role: PlayerRole | None = None
         self._buffer_tracker: BufferTracker | None = None
         self._preferred_format: AudioFormat | None = None
         self._preferred_codec: AudioCodec | None = None
@@ -114,9 +114,13 @@ class SendspinClient:
         return self._info
 
     @property
-    def roles(self) -> list[str]:
+    def negotiated_roles(self) -> list[str]:
         """Return the negotiated active roles for this connection (versioned role IDs)."""
-        return self._roles
+        return self._negotiated_roles
+
+    def role(self, role_id: str) -> Role | None:
+        """Get active role by versioned ID (e.g., 'player@v1')."""
+        return self._roles.get(role_id)
 
     @property
     def group(self) -> SendspinGroup:
@@ -176,7 +180,7 @@ class SendspinClient:
 
     def check_role(self, role: Roles) -> bool:
         """Check if the client has a role active (by role family)."""
-        return has_role(role.value, self._roles)
+        return has_role(role.value, self._negotiated_roles)
 
     def attach_connection(
         self,
@@ -205,20 +209,29 @@ class SendspinClient:
 
         self._info = client_info
         self._name = client_info.name
-        self._roles = active_roles
+        self._negotiated_roles = active_roles
         self._logger = logger.getChild(self._client_id)
 
         # Initialize role helpers based on negotiated active roles.
-        self._player = PlayerClient(self) if has_role(Roles.PLAYER.value, self._roles) else None
+        self._player = (
+            PlayerClient(self) if has_role(Roles.PLAYER.value, self._negotiated_roles) else None
+        )
         self._controller = (
-            ControllerClient(self) if has_role(Roles.CONTROLLER.value, self._roles) else None
+            ControllerClient(self)
+            if has_role(Roles.CONTROLLER.value, self._negotiated_roles)
+            else None
         )
         self._metadata_client = (
-            MetadataClient(self) if has_role(Roles.METADATA.value, self._roles) else None
+            MetadataClient(self) if has_role(Roles.METADATA.value, self._negotiated_roles) else None
         )
         self._visualizer = (
-            VisualizerClient(self) if has_role(Roles.VISUALIZER.value, self._roles) else None
+            VisualizerClient(self)
+            if has_role(Roles.VISUALIZER.value, self._negotiated_roles)
+            else None
         )
+
+        # Clear previous roles
+        self._roles.clear()
 
         # Player persistent state.
         if self._player is not None and self.info.player_support is not None:
@@ -255,11 +268,12 @@ class SendspinClient:
                 self._preferred_format = default_format
                 self._preferred_codec = default_codec
 
-            self._player_role = PlayerRole(_client=self)
-            self._player_role.on_connect()
-            self._player_role.on_transport_attach()
-        else:
-            self._player_role = None
+            # Create and register player role
+            player_role = PlayerRole(_client=self)
+            player_role._buffer_tracker = self._buffer_tracker  # noqa: SLF001
+            player_role.on_connect()
+            player_role.on_transport_attach()
+            self._roles["player@v1"] = player_role
 
         # Ensure group exists (server creates it on first sight).
         if self._group is None:
@@ -276,10 +290,11 @@ class SendspinClient:
         """Detach the current connection and apply BufferTracker reset policy."""
         self._connected = False
 
-        if self._player_role is not None:
-            self._player_role.on_transport_detach()
-            self._player_role.on_disconnect()
-            self._player_role = None
+        # Notify all roles about detachment
+        for role in self._roles.values():
+            role.on_transport_detach()
+            role.on_disconnect()
+        self._roles.clear()
 
         self._connection = None
         self._disconnect_time_us = self._server.clock.now_us()
@@ -361,16 +376,15 @@ class SendspinClient:
     @property
     def player_role(self) -> PlayerRole | None:
         """Return the active PlayerRole instance for this connection, if any."""
-        return self._player_role
+        role = self._roles.get("player@v1")
+        if role is not None and isinstance(role, PlayerRole):
+            return role
+        return None
 
     @property
     def active_roles(self) -> list[Role]:
-        """Return all active Role instances for this client."""
-        result: list[Role] = []
-        if self._player_role is not None:
-            result.append(self._player_role)
-        # Future: add other roles here (artwork, visualizer, etc.)
-        return result
+        """All active roles for iteration."""
+        return list(self._roles.values())
 
     @property
     def buffer_tracker(self) -> BufferTracker | None:
