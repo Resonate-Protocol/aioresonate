@@ -120,42 +120,123 @@ class TransformerPool:
 
 
 class PcmPassthrough:
-    """Passthrough transformer that returns PCM unchanged.
+    """Passthrough transformer that chunks PCM into fixed-size frames.
 
-    Use when a role wants raw PCM audio without encoding.
+    Use when a role wants raw PCM audio in consistent frame sizes.
     """
 
-    def __init__(self, **kwargs: object) -> None:
-        """Accept and ignore PCM format parameters."""
+    def __init__(
+        self,
+        *,
+        sample_rate: int,
+        bit_depth: int,
+        channels: int,
+        chunk_duration_us: int = 25_000,
+    ) -> None:
+        """Initialize with audio format parameters.
 
-    def process(self, pcm: bytes, timestamp_us: int, duration_us: int) -> bytes:  # noqa: ARG002
-        """Return PCM data unchanged."""
-        return pcm
+        Args:
+            sample_rate: Sample rate in Hz (e.g., 48000).
+            bit_depth: Bits per sample (e.g., 16).
+            channels: Number of channels (e.g., 2 for stereo).
+            chunk_duration_us: Duration of each output frame in microseconds.
+        """
+        self._chunk_duration_us = chunk_duration_us
+        self._frame_stride = (bit_depth // 8) * channels
+        # Calculate frame size: samples = sample_rate * duration_s
+        # For 48kHz, 25ms: 48000 * 0.025 = 1200 samples
+        # Frame size = samples * frame_stride = 1200 * 4 = 4800 bytes
+        chunk_samples = int(sample_rate * chunk_duration_us / 1_000_000)
+        self._frame_size = chunk_samples * self._frame_stride
+        self._buffer = bytearray()
+
+    @property
+    def frame_duration_us(self) -> int:
+        """Duration of each output frame in microseconds."""
+        return self._chunk_duration_us
+
+    def process(self, pcm: bytes, timestamp_us: int, duration_us: int) -> list[bytes]:  # noqa: ARG002
+        """Chunk PCM into fixed-size frames.
+
+        Args:
+            pcm: Raw PCM audio data.
+            timestamp_us: Playback timestamp in microseconds (unused).
+            duration_us: Duration of this chunk in microseconds (unused).
+
+        Returns:
+            List of fixed-size PCM frames. May be empty if buffering.
+        """
+        self._buffer.extend(pcm)
+        frames: list[bytes] = []
+
+        while len(self._buffer) >= self._frame_size:
+            frame = bytes(self._buffer[: self._frame_size])
+            del self._buffer[: self._frame_size]
+            frames.append(frame)
+
+        return frames
+
+    def flush(self) -> list[bytes]:
+        """Flush remaining buffered audio, padded with silence.
+
+        Returns:
+            Final frame padded with silence, or empty list if buffer is empty.
+        """
+        if not self._buffer:
+            return []
+
+        # Pad with silence (zeros) to fill the frame
+        padding_needed = self._frame_size - len(self._buffer)
+        self._buffer.extend(bytes(padding_needed))
+        frame = bytes(self._buffer)
+        self._buffer.clear()
+        return [frame]
 
     def get_header(self) -> bytes | None:
         """No codec header for raw PCM."""
         return None
 
     def reset(self) -> None:
-        """No state to reset."""
+        """Reset internal buffer."""
+        self._buffer.clear()
 
 
 class FlacEncoder:
     """FLAC audio encoder transformer."""
 
-    def __init__(self, *, sample_rate: int, bit_depth: int, channels: int) -> None:
-        """Initialize FLAC encoder with audio format parameters."""
+    def __init__(
+        self,
+        *,
+        sample_rate: int,
+        bit_depth: int,
+        channels: int,
+        chunk_duration_us: int = 25_000,
+    ) -> None:
+        """Initialize FLAC encoder with audio format parameters.
+
+        Args:
+            sample_rate: Sample rate in Hz (e.g., 48000).
+            bit_depth: Bits per sample (e.g., 16).
+            channels: Number of channels (e.g., 2 for stereo).
+            chunk_duration_us: Duration of each output frame in microseconds.
+        """
         self._sample_rate = sample_rate
         self._bit_depth = bit_depth
         self._channels = channels
+        self._chunk_duration_us = chunk_duration_us
         self._encoder: av.AudioCodecContext | None = None
         self._codec_header: bytes | None = None
         self._av_format: str | None = None
         self._av_layout: str | None = None
         self._frame_stride: int = (bit_depth // 8) * channels
-        self._chunk_samples = int(sample_rate * 0.025)  # 25ms chunks
+        self._chunk_samples = int(sample_rate * chunk_duration_us / 1_000_000)
         self._buffer = bytearray()
         self._initialized = False
+
+    @property
+    def frame_duration_us(self) -> int:
+        """Duration of each output frame in microseconds."""
+        return self._chunk_duration_us
 
     def _ensure_initialized(self) -> None:
         """Lazily initialize encoder on first use."""
@@ -187,33 +268,71 @@ class FlacEncoder:
 
         self._initialized = True
 
-    def process(self, pcm: bytes, timestamp_us: int, duration_us: int) -> bytes:  # noqa: ARG002
-        """Encode PCM to FLAC."""
-        self._ensure_initialized()
+    def _encode_chunk(self, chunk_pcm: bytes) -> bytes:
+        """Encode a single chunk of PCM to FLAC."""
         assert self._encoder is not None
         av = _get_av()
 
-        self._buffer.extend(pcm)
-        output = bytearray()
+        frame = av.AudioFrame(
+            format=self._av_format,
+            layout=self._av_layout,
+            samples=self._chunk_samples,
+        )
+        frame.sample_rate = self._sample_rate
+        frame.planes[0].update(chunk_pcm)
 
-        while len(self._buffer) >= self._frame_stride * self._chunk_samples:
-            chunk_size = self._chunk_samples * self._frame_stride
+        output = bytearray()
+        packets = self._encoder.encode(frame)
+        for packet in packets:
+            output.extend(bytes(packet))
+        return bytes(output)
+
+    def process(self, pcm: bytes, timestamp_us: int, duration_us: int) -> list[bytes]:  # noqa: ARG002
+        """Encode PCM to FLAC frames.
+
+        Args:
+            pcm: Raw PCM audio data.
+            timestamp_us: Playback timestamp in microseconds (unused).
+            duration_us: Duration of this chunk in microseconds (unused).
+
+        Returns:
+            List of encoded FLAC frames. May be empty if buffering.
+        """
+        self._ensure_initialized()
+
+        self._buffer.extend(pcm)
+        frames: list[bytes] = []
+        chunk_size = self._chunk_samples * self._frame_stride
+
+        while len(self._buffer) >= chunk_size:
             chunk_pcm = bytes(self._buffer[:chunk_size])
             del self._buffer[:chunk_size]
+            encoded = self._encode_chunk(chunk_pcm)
+            if encoded:
+                frames.append(encoded)
 
-            frame = av.AudioFrame(
-                format=self._av_format,
-                layout=self._av_layout,
-                samples=self._chunk_samples,
-            )
-            frame.sample_rate = self._sample_rate
-            frame.planes[0].update(chunk_pcm)
+        return frames
 
-            packets = self._encoder.encode(frame)
-            for packet in packets:
-                output.extend(bytes(packet))
+    def flush(self) -> list[bytes]:
+        """Flush remaining buffered audio, padded with silence.
 
-        return bytes(output)
+        Returns:
+            Final encoded frame, or empty list if buffer is empty.
+        """
+        if not self._buffer:
+            return []
+
+        self._ensure_initialized()
+        chunk_size = self._chunk_samples * self._frame_stride
+
+        # Pad with silence (zeros) to fill the frame
+        padding_needed = chunk_size - len(self._buffer)
+        self._buffer.extend(bytes(padding_needed))
+        chunk_pcm = bytes(self._buffer)
+        self._buffer.clear()
+
+        encoded = self._encode_chunk(chunk_pcm)
+        return [encoded] if encoded else []
 
     def get_header(self) -> bytes | None:
         """Return FLAC streaminfo header."""

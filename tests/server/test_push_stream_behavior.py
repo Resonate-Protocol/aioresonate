@@ -20,7 +20,7 @@ from aiosendspin.server.roles import AudioRequirements
 from aiosendspin.server.transformers import PcmPassthrough
 
 # Shared transformer for tests that need consistent cache keys
-_SHARED_PCM_PASSTHROUGH = PcmPassthrough()
+_SHARED_PCM_PASSTHROUGH = PcmPassthrough(sample_rate=48000, bit_depth=16, channels=2)
 
 
 @dataclass(slots=True)

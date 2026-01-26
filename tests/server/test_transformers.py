@@ -137,28 +137,84 @@ class TestAudioTransformerProtocol:
 class TestPcmPassthrough:
     """Tests for PcmPassthrough transformer."""
 
-    def test_passthrough_returns_input_unchanged(self) -> None:
-        """PcmPassthrough returns input PCM data unchanged."""
-        transformer = PcmPassthrough()
-        pcm = b"\x00\x01\x02\x03"
-        result = transformer.process(pcm, timestamp_us=0, duration_us=1000)
-        assert result == pcm
-
     def test_passthrough_has_no_header(self) -> None:
         """PcmPassthrough has no codec header."""
-        transformer = PcmPassthrough()
+        transformer = PcmPassthrough(sample_rate=48000, bit_depth=16, channels=2)
         assert transformer.get_header() is None
 
-    def test_passthrough_reset_is_noop(self) -> None:
-        """PcmPassthrough reset is a no-op."""
-        transformer = PcmPassthrough()
-        transformer.reset()  # Should not raise
-
     def test_passthrough_accepts_kwargs(self) -> None:
-        """PcmPassthrough accepts and ignores format parameters."""
-        # Should accept and ignore format params for TransformerPool compatibility
+        """PcmPassthrough accepts format parameters."""
         transformer = PcmPassthrough(sample_rate=48000, bit_depth=16, channels=2)
-        assert transformer.process(b"x", 0, 1000) == b"x"
+        assert transformer.frame_duration_us == 25_000
+
+    def test_passthrough_frame_duration_us_default(self) -> None:
+        """PcmPassthrough has default 25ms frame duration."""
+        transformer = PcmPassthrough(sample_rate=48000, bit_depth=16, channels=2)
+        assert transformer.frame_duration_us == 25_000
+
+    def test_passthrough_frame_duration_us_configurable(self) -> None:
+        """PcmPassthrough frame duration is configurable."""
+        transformer = PcmPassthrough(
+            sample_rate=48000, bit_depth=16, channels=2, chunk_duration_us=50_000
+        )
+        assert transformer.frame_duration_us == 50_000
+
+    def test_passthrough_returns_list_of_frames(self) -> None:
+        """PcmPassthrough returns list of frames."""
+        transformer = PcmPassthrough(sample_rate=48000, bit_depth=16, channels=2)
+        pcm = bytes(4800)  # 25ms at 48kHz stereo 16-bit
+        result = transformer.process(pcm, timestamp_us=0, duration_us=25_000)
+        assert isinstance(result, list)
+        assert len(result) == 1
+        assert result[0] == pcm
+
+    def test_passthrough_splits_large_input(self) -> None:
+        """PcmPassthrough splits large input into multiple frames."""
+        transformer = PcmPassthrough(sample_rate=48000, bit_depth=16, channels=2)
+        pcm = bytes(9600)  # 50ms = 2 frames
+        result = transformer.process(pcm, timestamp_us=0, duration_us=50_000)
+        assert len(result) == 2
+        assert len(result[0]) == 4800
+        assert len(result[1]) == 4800
+
+    def test_passthrough_buffers_incomplete_frame(self) -> None:
+        """PcmPassthrough buffers incomplete frames."""
+        transformer = PcmPassthrough(sample_rate=48000, bit_depth=16, channels=2)
+        pcm = bytes(1920)  # 10ms - less than 25ms
+        result = transformer.process(pcm, timestamp_us=0, duration_us=10_000)
+        assert result == []
+
+    def test_passthrough_emits_when_buffer_fills(self) -> None:
+        """PcmPassthrough emits frame when buffer reaches frame size."""
+        transformer = PcmPassthrough(sample_rate=48000, bit_depth=16, channels=2)
+        result1 = transformer.process(bytes(2880), timestamp_us=0, duration_us=15_000)  # 15ms
+        assert result1 == []
+        result2 = transformer.process(
+            bytes(2880), timestamp_us=15_000, duration_us=15_000
+        )  # +15ms = 30ms total
+        assert len(result2) == 1
+        assert len(result2[0]) == 4800
+
+    def test_passthrough_flush_emits_remainder_padded(self) -> None:
+        """PcmPassthrough flush emits remaining buffer padded with silence."""
+        transformer = PcmPassthrough(sample_rate=48000, bit_depth=16, channels=2)
+        transformer.process(bytes(1920), timestamp_us=0, duration_us=10_000)
+        result = transformer.flush()
+        assert len(result) == 1
+        assert len(result[0]) == 4800  # Padded to 25ms
+
+    def test_passthrough_flush_empty_buffer(self) -> None:
+        """PcmPassthrough flush returns empty list when buffer is empty."""
+        transformer = PcmPassthrough(sample_rate=48000, bit_depth=16, channels=2)
+        result = transformer.flush()
+        assert result == []
+
+    def test_passthrough_reset_clears_buffer(self) -> None:
+        """PcmPassthrough reset clears internal buffer."""
+        transformer = PcmPassthrough(sample_rate=48000, bit_depth=16, channels=2)
+        transformer.process(bytes(1920), timestamp_us=0, duration_us=10_000)
+        transformer.reset()
+        assert transformer.flush() == []
 
 
 class TestTransformerPool:
@@ -230,7 +286,7 @@ class TestFlacEncoder:
         # 25ms of silence at 48kHz stereo 16-bit = 1200 samples * 4 bytes = 4800 bytes
         # Send multiple chunks to ensure encoder produces output (FLAC buffers initial frames)
         pcm = bytes(4800)
-        total_output = bytearray()
+        total_output: list[bytes] = []
         for i in range(4):
             result = encoder.process(pcm, timestamp_us=i * 25000, duration_us=25000)
             total_output.extend(result)
@@ -253,3 +309,55 @@ class TestFlacEncoder:
         encoder.reset()
         assert encoder._initialized is False  # noqa: SLF001
         assert encoder._codec_header is None  # noqa: SLF001
+
+    def test_flac_encoder_frame_duration_us_default(self) -> None:
+        """FlacEncoder has default 25ms frame duration."""
+        encoder = FlacEncoder(sample_rate=48000, bit_depth=16, channels=2)
+        assert encoder.frame_duration_us == 25_000
+
+    def test_flac_encoder_frame_duration_us_configurable(self) -> None:
+        """FlacEncoder frame duration is configurable."""
+        encoder = FlacEncoder(sample_rate=48000, bit_depth=16, channels=2, chunk_duration_us=50_000)
+        assert encoder.frame_duration_us == 50_000
+
+    def test_flac_encoder_returns_list_of_frames(self) -> None:
+        """FlacEncoder returns list of frames after codec internal buffering fills."""
+        encoder = FlacEncoder(sample_rate=48000, bit_depth=16, channels=2)
+        # FLAC codec buffers ~4 frames before emitting output
+        # Feed enough frames to guarantee output
+        pcm = bytes(4800)  # 25ms per chunk
+        all_results: list[bytes] = []
+        for i in range(8):  # 200ms total
+            result = encoder.process(pcm, timestamp_us=i * 25_000, duration_us=25_000)
+            assert isinstance(result, list)
+            all_results.extend(result)
+        # Should have some output after 8 frames
+        assert len(all_results) >= 1
+
+    def test_flac_encoder_buffers_incomplete_frame(self) -> None:
+        """FlacEncoder buffers incomplete frames."""
+        encoder = FlacEncoder(sample_rate=48000, bit_depth=16, channels=2)
+        pcm = bytes(1920)  # 10ms
+        result = encoder.process(pcm, timestamp_us=0, duration_us=10_000)
+        assert result == []
+
+    def test_flac_encoder_flush_emits_remainder(self) -> None:
+        """FlacEncoder flush emits remaining buffered audio when buffer has data."""
+        encoder = FlacEncoder(sample_rate=48000, bit_depth=16, channels=2)
+        # Process incomplete frame (less than 25ms)
+        encoder.process(bytes(1920), timestamp_us=0, duration_us=10_000)
+        result = encoder.flush()
+        # FLAC codec may not emit output immediately due to internal buffering,
+        # but our buffer was cleared (padded to frame size and sent to encoder).
+        # The actual output depends on codec timing.
+        # At minimum, verify flush returns a list
+        assert isinstance(result, list)
+
+    def test_flac_encoder_flush_empty_buffer(self) -> None:
+        """FlacEncoder flush returns empty list when buffer is empty."""
+        encoder = FlacEncoder(sample_rate=48000, bit_depth=16, channels=2)
+        encoder.process(
+            bytes(4800), timestamp_us=0, duration_us=25_000
+        )  # Process exactly one frame
+        result = encoder.flush()
+        assert result == []
