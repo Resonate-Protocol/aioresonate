@@ -150,11 +150,11 @@ class TestRoleBaseClass:
         role = NonAudioRole()
         assert role.get_audio_requirements() is None
 
-    def test_on_audio_chunk_is_noop_by_default(self) -> None:
-        """Roles that don't override on_audio_chunk() don't crash."""
+    def test_on_stream_start_is_noop_by_default(self) -> None:
+        """Roles that don't override on_stream_start() don't crash."""
 
         @dataclass
-        class NonAudioRole(Role):
+        class TestRole(Role):
             role_family: str = "test"
 
             def on_connect(self) -> None:
@@ -163,9 +163,58 @@ class TestRoleBaseClass:
             def on_disconnect(self) -> None:
                 pass
 
-        role = NonAudioRole()
-        # Should not raise
-        role.on_audio_chunk(b"audio_data", 123_000)
+        role = TestRole()
+        role.on_stream_start()  # Should not raise
+
+    def test_on_stream_clear_is_noop_by_default(self) -> None:
+        """Roles that don't override on_stream_clear() don't crash."""
+
+        @dataclass
+        class TestRole(Role):
+            role_family: str = "test"
+
+            def on_connect(self) -> None:
+                pass
+
+            def on_disconnect(self) -> None:
+                pass
+
+        role = TestRole()
+        role.on_stream_clear()  # Should not raise
+
+    def test_on_stream_end_is_noop_by_default(self) -> None:
+        """Roles that don't override on_stream_end() don't crash."""
+
+        @dataclass
+        class TestRole(Role):
+            role_family: str = "test"
+
+            def on_connect(self) -> None:
+                pass
+
+            def on_disconnect(self) -> None:
+                pass
+
+        role = TestRole()
+        role.on_stream_end()  # Should not raise
+
+    def test_on_audio_chunk_returns_true_by_default(self) -> None:
+        """Roles that don't override on_audio_chunk() return True."""
+
+        @dataclass
+        class TestRole(Role):
+            role_family: str = "test"
+
+            def on_connect(self) -> None:
+                pass
+
+            def on_disconnect(self) -> None:
+                pass
+
+        role = TestRole()
+        chunk = AudioChunk(data=b"test", timestamp_us=0, duration_us=1000, byte_count=4)
+        result = role.on_audio_chunk(chunk)
+        assert result is True
 
     def test_on_transport_attach_sets_has_transport(self) -> None:
         """on_transport_attach() sets _has_transport to True."""

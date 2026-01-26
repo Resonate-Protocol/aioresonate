@@ -134,10 +134,20 @@ class Role(ABC):
             return
         self._client.send_message(message)
 
-    # --- Audio hook (optional) ---
+    # --- Stream lifecycle hooks (optional) ---
 
-    def on_audio_chunk(self, chunk: bytes, timestamp_us: int) -> None:  # noqa: B027
-        """Receive audio chunk. Override in audio-receiving roles."""
+    def on_stream_start(self) -> None:  # noqa: B027
+        """Handle stream start before first audio chunk."""
+
+    def on_audio_chunk(self, chunk: AudioChunk) -> bool:  # noqa: ARG002
+        """Receive audio chunk. Return True if accepted, False for backpressure."""
+        return True
+
+    def on_stream_clear(self) -> None:  # noqa: B027
+        """Handle seek/clear by discarding buffered audio."""
+
+    def on_stream_end(self) -> None:  # noqa: B027
+        """Handle stream stop."""
 
     # --- Lifecycle hooks ---
 
