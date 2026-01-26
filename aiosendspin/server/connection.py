@@ -373,8 +373,8 @@ class SendspinConnection:
             if new_state is not None and new_state != self._client.client_state:
                 await self._client.handle_state_transition(new_state)
 
-            if payload.player is not None and self._client.player is not None:
-                self._client.player.handle_player_update(payload.player)
+            if payload.player is not None and self._client.check_role(Roles.PLAYER):
+                self._client.handle_player_state_update(payload.player)
             return
 
         if isinstance(message, StreamRequestFormatMessage):
@@ -386,8 +386,8 @@ class SendspinConnection:
         if isinstance(message, ClientCommandMessage):
             if self._client is None:
                 return
-            if message.payload.controller is not None and self._client.controller is not None:
-                await self._client.controller.handle_command(message.payload.controller)
+            if message.payload.controller is not None and self._client.check_role(Roles.CONTROLLER):
+                await self._client.handle_controller_command(message.payload.controller)
             return
 
         if isinstance(message, ClientGoodbyeMessage):

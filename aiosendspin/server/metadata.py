@@ -1,15 +1,11 @@
-"""Helpers for clients supporting the metadata role."""
+"""Metadata handling for the Sendspin protocol."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
 
 from aiosendspin.models.metadata import Progress, SessionUpdateMetadata
 from aiosendspin.models.types import RepeatMode
-
-if TYPE_CHECKING:
-    from .client import SendspinClient
 
 
 @dataclass
@@ -192,12 +188,3 @@ class Metadata:
                 playback_speed=self.playback_speed,
             )
         return metadata_update
-
-
-class MetadataClient:
-    """Expose metadata capabilities reported by the client."""
-
-    def __init__(self, client: SendspinClient) -> None:
-        """Attach to a client that exposes metadata capabilities."""
-        self.client = client
-        self._logger = client._logger.getChild("metadata")  # noqa: SLF001

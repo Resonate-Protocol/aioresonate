@@ -52,10 +52,9 @@ from aiosendspin.models.types import (
 from aiosendspin.models.visualizer import StreamStartVisualizer
 
 from .audio import AudioFormat
-from .channels import MAIN_CHANNEL, ChannelRouter
+from .channels import ChannelRouter
 from .events import ClientEvent, VolumeChangedEvent
 from .metadata import Metadata
-from .pipeline import PipelineManager
 from .push_stream import PushStream
 from .transformers import TransformerPool
 
@@ -63,7 +62,6 @@ from .transformers import TransformerPool
 # pyright: reportImportCycles=none
 if TYPE_CHECKING:
     from .client import SendspinClient
-    from .player import PlayerClient
     from .server import SendspinServer
 
 logger = logging.getLogger(__name__)
@@ -264,27 +262,6 @@ class SendspinGroup:
         if self._push_stream is not None:
             self._push_stream.stop()
 
-    def _get_codec_header_b64(self, fmt: AudioFormat, codec: AudioCodec) -> str | None:
-        """Generate codec header (base64) for a target format if applicable."""
-        try:
-            pipeline_manager = PipelineManager()
-            # Source format is only used for resampling; header depends on target.
-            source_format = AudioFormat(
-                sample_rate=fmt.sample_rate,
-                bit_depth=fmt.bit_depth,
-                channels=fmt.channels,
-            )
-            key = pipeline_manager.add_pipeline(
-                channel_id=MAIN_CHANNEL,
-                source_format=source_format,
-                target_format=fmt,
-                codec=codec,
-            )
-            return pipeline_manager.get_codec_header_b64(key)
-        except Exception:
-            logger.exception("Failed to generate codec header for %s", fmt)
-            return None
-
     def _send_group_update_to_clients(self) -> None:
         """Send group/update and server/state messages to all clients."""
         group_message = GroupUpdateServerMessage(
@@ -374,12 +351,7 @@ class SendspinGroup:
         self._send_group_update_to_client(client, group_message, controller_state)
 
         if self._push_stream is not None and not self._push_stream.is_stopped:
-            # Call on_player_join for backward compatibility (old flow)
-            if client.check_role(Roles.PLAYER):
-                logger.debug("Player %s joining active push stream", client.client_id)
-                self._push_stream.on_player_join(client.client_id)
-
-            # NEW: Call on_role_join for all roles with audio requirements (hook-based flow)
+            # Call on_role_join for all roles with audio requirements (hook-based flow)
             for role in client.active_roles:
                 if role.get_audio_requirements() is not None:
                     self._push_stream.on_role_join(role)
@@ -894,9 +866,9 @@ class SendspinGroup:
         """Return the transformer pool for encoder deduplication."""
         return self._transformer_pool
 
-    def players(self) -> list[PlayerClient]:
-        """Return player helpers for all members that support the role."""
-        return [client.player for client in self._clients if client.player is not None]
+    def player_clients(self) -> list[SendspinClient]:
+        """Return all clients in this group that have the player role."""
+        return [client for client in self._clients if client.check_role(Roles.PLAYER)]
 
     def _get_supported_commands(self) -> list[MediaCommand]:
         """Get list of commands supported based on application capabilities."""
@@ -996,31 +968,31 @@ class SendspinGroup:
     @property
     def volume(self) -> int:
         """Current group volume (0-100), calculated as average of player volumes."""
-        players = self.players()
+        players = self.player_clients()
         if not players:
             return 100
         # Calculate average volume from all players
-        total_volume = sum(player.volume for player in players)
+        total_volume = sum(client.player_volume for client in players)
         return round(total_volume / len(players))
 
     @property
     def muted(self) -> bool:
         """Current group mute state - true only when ALL players are muted."""
-        players = self.players()
+        players = self.player_clients()
         if not players:
             return False
-        return all(player.muted for player in players)
+        return all(client.player_muted for client in players)
 
     def set_volume(self, volume_level: int) -> None:
         """Set group volume using redistribution algorithm from spec."""
         volume_level = max(0, min(100, volume_level))
-        players = self.players()
+        players = self.player_clients()
         if not players:
             return
 
         # Initialize working state with current volumes
         # We work entirely on this dict until the end
-        player_volumes = {p: float(p.volume) for p in players}
+        player_volumes = {p: float(p.player_volume) for p in players}
 
         # Calculate initial target delta
         current_avg = sum(player_volumes.values()) / len(player_volumes)
@@ -1062,8 +1034,8 @@ class SendspinGroup:
             active_players = next_active_players
 
         # Apply final calculated volumes to the actual players
-        for player, volume in player_volumes.items():
-            player.set_volume(round(volume))
+        for client, volume in player_volumes.items():
+            client.set_player_volume(round(volume))
 
         # Send state update to controller clients
         self._send_controller_state_to_clients()
@@ -1071,11 +1043,8 @@ class SendspinGroup:
     def set_mute(self, muted: bool) -> None:  # noqa: FBT001
         """Set group mute state and propagate to all players."""
         # Propagate to all player clients
-        for player in self.players():
-            if muted:
-                player.mute()
-            else:
-                player.unmute()
+        for client in self.player_clients():
+            client.set_player_mute(muted)
         # Send state update to controller clients
         self._send_controller_state_to_clients()
 
@@ -1111,24 +1080,13 @@ class SendspinGroup:
             self._clients = []
         else:
             self._clients.remove(client)
-            # End the stream for the removed client. Use PlayerRole so role-local
-            # stream state and BufferTracker stay consistent (critical for regrouping).
+            # End the stream for the removed client via role hooks
             if client.player_role is not None:
-                client.player_role.end_stream()
+                client.player_role.on_stream_end()
                 # Artwork state lifetime is bound to the stream.
                 self._client_artwork_state.pop(client.client_id, None)
             else:
                 self._send_stream_end_msg(client)
-            if (
-                self._push_stream is not None
-                and not self._push_stream.is_stopped
-                and client.check_role(Roles.PLAYER)
-            ):
-                self._push_stream.on_player_leave(
-                    client.client_id,
-                    target_format=client.preferred_format,
-                    target_codec=client.preferred_codec,
-                )
         if not self._clients:
             # Emit event for group deletion, no clients left
             self._signal_event(GroupDeletedEvent())
@@ -1198,12 +1156,7 @@ class SendspinGroup:
 
         # Handle player joining/reconnecting with active PushStream
         if self._push_stream is not None and not self._push_stream.is_stopped:
-            # Call on_player_join for backward compatibility (old flow)
-            if client.check_role(Roles.PLAYER):
-                logger.debug("Player %s joining active push stream", client.client_id)
-                self._push_stream.on_player_join(client.client_id)
-
-            # NEW: Call on_role_join for all roles with audio requirements (hook-based flow)
+            # Call on_role_join for all roles with audio requirements (hook-based flow)
             for role in client.active_roles:
                 if role.get_audio_requirements() is not None:
                     self._push_stream.on_role_join(role)
@@ -1342,23 +1295,17 @@ class SendspinGroup:
             client.preferred_format = requested_format
             client.preferred_codec = requested_codec
 
-            # If a push stream is active, delegate the format switch to the stream/role layer.
-            # Sending stream/start immediately is unsafe: old-format audio may still be in flight
-            # and would then be interpreted as the new format.
-            if self._push_stream is not None and not self._push_stream.is_stopped:
-                self._push_stream.on_format_request(
-                    client.client_id, requested_format, requested_codec
-                )
-            else:
+            # Note: Format changes for active streams are handled via role audio requirements.
+            # The client will receive a new stream/start when the role is next set up.
+            if self._push_stream is None or self._push_stream.is_stopped:
                 # No active stream: ack immediately with stream/start for the selected format.
-                codec_header_b64 = self._get_codec_header_b64(requested_format, requested_codec)
                 stream_start = StreamStartPayload(
                     player=StreamStartPlayer(
                         codec=requested_codec,
                         sample_rate=requested_format.sample_rate,
                         channels=requested_format.channels,
                         bit_depth=requested_format.bit_depth,
-                        codec_header=codec_header_b64,
+                        codec_header=None,
                     )
                 )
                 logger.debug(

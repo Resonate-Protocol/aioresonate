@@ -11,11 +11,10 @@ import pytest
 
 from aiosendspin.models.player import ClientHelloPlayerSupport, SupportedAudioFormat
 from aiosendspin.models.types import AudioCodec, PlayerCommand, Roles
-from aiosendspin.server.audio import AudioFormat
 from aiosendspin.server.client import SendspinClient
 from aiosendspin.server.clock import LoopClock
 from aiosendspin.server.connection import SendspinConnection
-from aiosendspin.server.pipeline import EncodedChunk
+from aiosendspin.server.roles.base import AudioChunk
 
 
 @dataclass(slots=True)
@@ -94,25 +93,16 @@ async def test_buffer_tracker_does_not_backpressure_until_send() -> None:
     assert client.buffer_tracker is not None
 
     now_us = clock.now_us()
-    chunk = EncodedChunk(
+    chunk = AudioChunk(
         timestamp_us=now_us + 100_000,
         data=b"x" * 100,
         byte_count=100,
-        sample_count=1,
         duration_us=100_000,
     )
 
     try:
-        sent = client.player_role.send_audio(
-            chunk=chunk,
-            timestamp_us=chunk.timestamp_us,
-            audio_format=AudioFormat(
-                sample_rate=48000,
-                bit_depth=16,
-                channels=2,
-            ),
-            codec=AudioCodec.PCM,
-        )
+        # Use the hook-based on_audio_chunk method
+        sent = client.player_role.on_audio_chunk(chunk)
         assert sent is True
 
         # Regression assertion: queued-but-not-sent data must not cause backpressure.

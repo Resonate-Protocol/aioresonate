@@ -7,43 +7,44 @@ from unittest.mock import MagicMock
 from aiosendspin.models import AudioCodec, unpack_binary_header
 from aiosendspin.models.core import StreamClearMessage, StreamEndMessage, StreamStartMessage
 from aiosendspin.models.types import BinaryMessageType
-from aiosendspin.server.audio import AudioFormat
 from aiosendspin.server.roles import AudioChunk, AudioRequirements, PlayerRole
 from aiosendspin.server.transformers import PcmPassthrough
 
 
-def test_player_role_stream_clear_uses_role_family() -> None:
-    """PlayerRole.stream/clear uses unversioned role family."""
+def test_player_role_on_stream_clear_uses_role_family() -> None:
+    """PlayerRole.on_stream_clear() sends stream/clear with unversioned role family."""
     client = MagicMock()
     client.send_message = MagicMock()
     client.buffer_tracker = None
 
-    role = PlayerRole(_client=client)
+    role = PlayerRole(client=client)
     role._has_transport = True  # noqa: SLF001
-    role.clear_stream()
+    role._buffer_tracker = None  # noqa: SLF001
+    role.on_stream_clear()
 
     msg = client.send_message.call_args.args[0]
     assert isinstance(msg, StreamClearMessage)
     assert msg.payload.roles == ["player"]
 
 
-def test_player_role_stream_end_uses_role_family() -> None:
-    """PlayerRole.stream/end omits roles (end all streams)."""
+def test_player_role_on_stream_end_uses_role_family() -> None:
+    """PlayerRole.on_stream_end() omits roles (end all streams)."""
     client = MagicMock()
     client.send_message = MagicMock()
     client.buffer_tracker = None
 
-    role = PlayerRole(_client=client)
+    role = PlayerRole(client=client)
     role._has_transport = True  # noqa: SLF001
-    role.end_stream()
+    role._buffer_tracker = None  # noqa: SLF001
+    role.on_stream_end()
 
     msg = client.send_message.call_args.args[0]
     assert isinstance(msg, StreamEndMessage)
     assert msg.payload.roles is None
 
 
-def test_player_role_send_cached_chunk_packs_header_and_tracks_duration() -> None:
-    """Catch-up uses role-controlled header packing and accurate duration tracking."""
+def test_player_role_on_audio_chunk_packs_header_and_tracks_duration() -> None:
+    """on_audio_chunk uses role-controlled header packing and accurate duration tracking."""
 
     class _Tracker:
         def __init__(self) -> None:
@@ -77,13 +78,16 @@ def test_player_role_send_cached_chunk_packs_header_and_tracks_duration() -> Non
     client.try_send_binary = MagicMock(side_effect=_try_send_binary)
     client.send_message = MagicMock()
 
-    role = PlayerRole(_client=client)
+    role = PlayerRole(client=client)
     payload = b"\x01\x02\x03"
     timestamp_us = 123_000
     duration_us = 40_000
     byte_count = len(payload)
 
-    assert role.send_cached_chunk(payload, timestamp_us, duration_us, byte_count)
+    chunk = AudioChunk(
+        data=payload, timestamp_us=timestamp_us, duration_us=duration_us, byte_count=byte_count
+    )
+    assert role.on_audio_chunk(chunk)
     assert sent, "Expected a binary send"
 
     header = unpack_binary_header(sent[0])
@@ -94,44 +98,49 @@ def test_player_role_send_cached_chunk_packs_header_and_tracks_duration() -> Non
     assert tracker.calls == [(timestamp_us + duration_us, byte_count)]
 
 
-def test_player_role_send_stream_start_drops_without_transport() -> None:
-    """send_stream_start() is a no-op when no transport attached."""
+def test_player_role_on_stream_start_drops_without_transport() -> None:
+    """on_stream_start() is a no-op when no transport attached."""
     client = MagicMock()
     client.send_message = MagicMock()
 
-    role = PlayerRole(_client=client)
+    role = PlayerRole(client=client)
     role._has_transport = False  # noqa: SLF001
+    role._audio_requirements = AudioRequirements(  # noqa: SLF001
+        sample_rate=48000,
+        bit_depth=16,
+        channels=2,
+        transformer=PcmPassthrough(),
+    )
 
-    audio_format = AudioFormat(sample_rate=48000, bit_depth=16, channels=2)
-    role.send_stream_start(audio_format, AudioCodec.PCM)
+    role.on_stream_start()
 
     client.send_message.assert_not_called()
 
 
-def test_player_role_clear_stream_drops_without_transport() -> None:
-    """clear_stream() is a no-op for JSON message when no transport attached."""
+def test_player_role_on_stream_clear_drops_without_transport() -> None:
+    """on_stream_clear() is a no-op for JSON message when no transport attached."""
     client = MagicMock()
     client.send_message = MagicMock()
     client.buffer_tracker = None
 
-    role = PlayerRole(_client=client)
+    role = PlayerRole(client=client)
     role._has_transport = False  # noqa: SLF001
 
-    role.clear_stream()
+    role.on_stream_clear()
 
     client.send_message.assert_not_called()
 
 
-def test_player_role_end_stream_drops_without_transport() -> None:
-    """end_stream() is a no-op for JSON message when no transport attached."""
+def test_player_role_on_stream_end_drops_without_transport() -> None:
+    """on_stream_end() is a no-op for JSON message when no transport attached."""
     client = MagicMock()
     client.send_message = MagicMock()
     client.buffer_tracker = None
 
-    role = PlayerRole(_client=client)
+    role = PlayerRole(client=client)
     role._has_transport = False  # noqa: SLF001
 
-    role.end_stream()
+    role.on_stream_end()
 
     client.send_message.assert_not_called()
 
@@ -144,7 +153,7 @@ def test_player_role_on_stream_start_sends_message() -> None:
     client = MagicMock()
     client.send_message = MagicMock()
 
-    role = PlayerRole(_client=client)
+    role = PlayerRole(client=client)
     role._has_transport = True  # noqa: SLF001
     role._audio_requirements = AudioRequirements(  # noqa: SLF001
         sample_rate=48000,
@@ -168,7 +177,7 @@ def test_player_role_on_audio_chunk_returns_true() -> None:
     client.queue_high_water.return_value = False
     client.try_send_binary.return_value = True
 
-    role = PlayerRole(_client=client)
+    role = PlayerRole(client=client)
     role._has_transport = True  # noqa: SLF001
 
     chunk = AudioChunk(data=b"audio", timestamp_us=1000, duration_us=25000, byte_count=5)
@@ -183,7 +192,7 @@ def test_player_role_on_audio_chunk_returns_false_on_backpressure() -> None:
     client = MagicMock()
     client.queue_high_water.return_value = True  # Queue full
 
-    role = PlayerRole(_client=client)
+    role = PlayerRole(client=client)
     role._has_transport = True  # noqa: SLF001
 
     chunk = AudioChunk(data=b"audio", timestamp_us=1000, duration_us=25000, byte_count=5)

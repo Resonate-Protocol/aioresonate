@@ -13,13 +13,12 @@ from aiosendspin.server.roles.base import (
     Role,
     StreamRequirements,
 )
-from aiosendspin.server.roles.player_v1 import PlayerRole, PlayerSendState
+from aiosendspin.server.roles.player_v1 import PlayerRole
 
 __all__ = [
     "AudioChunk",
     "AudioRequirements",
     "PlayerRole",
-    "PlayerSendState",
     "Role",
     "StreamRequirements",
 ]

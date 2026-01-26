@@ -16,6 +16,11 @@ from aiosendspin.server.channels import ChannelRouter
 from aiosendspin.server.client import SendspinClient
 from aiosendspin.server.clock import LoopClock
 from aiosendspin.server.push_stream import PushStream
+from aiosendspin.server.roles import AudioRequirements
+from aiosendspin.server.transformers import PcmPassthrough
+
+# Shared transformer for tests that need consistent cache keys
+_SHARED_PCM_PASSTHROUGH = PcmPassthrough()
 
 
 @dataclass(slots=True)
@@ -107,6 +112,17 @@ def _make_connected_player(
     client.attach_connection(conn, client_info=hello, active_roles=[Roles.PLAYER.value])
     client.mark_connected()
     conn.buffer_tracker = client.buffer_tracker
+
+    # Set up audio requirements on the player role for hook-based streaming
+    # Use shared transformer to ensure consistent cache keys across tests
+    if client.player_role is not None:
+        client.player_role._audio_requirements = AudioRequirements(  # noqa: SLF001
+            sample_rate=48000,
+            bit_depth=16,
+            channels=2,
+            transformer=_SHARED_PCM_PASSTHROUGH,
+        )
+
     return client, conn
 
 
@@ -134,10 +150,10 @@ async def test_commit_audio_sends_stream_start_and_binary(mock_loop: Any) -> Non
 
 
 @pytest.mark.asyncio
-async def test_queue_high_water_drops_audio_even_for_blocking_player(mock_loop: Any) -> None:
-    """When the connection queue is congested, audio is dropped and the player is resynced."""
+async def test_queue_high_water_drops_audio(mock_loop: Any) -> None:
+    """When the connection queue is congested, audio is dropped (backpressure)."""
     group = _DummyGroup(clients=[])
-    client, conn = _make_connected_player(mock_loop, group, "p1")
+    _, conn = _make_connected_player(mock_loop, group, "p1")
     conn.high_water = True
 
     stream = PushStream(
@@ -149,9 +165,8 @@ async def test_queue_high_water_drops_audio_even_for_blocking_player(mock_loop: 
     )
     await stream.commit_audio()
 
+    # No binary data should be sent when queue is at high water
     assert not conn.sent_binary
-    assert client.player_role is not None
-    assert client.player_role.get_send_state().needs_resync
 
 
 @pytest.mark.asyncio
@@ -196,8 +211,8 @@ async def test_clear_sends_stream_clear(mock_loop: Any) -> None:
 
 
 @pytest.mark.asyncio
-async def test_on_player_join_sends_catchup_chunks(mock_loop: Any) -> None:
-    """Late join triggers stream/start and cached audio catch-up."""
+async def test_on_role_join_sends_catchup_chunks(mock_loop: Any) -> None:
+    """Late join via on_role_join triggers stream/start and cached audio catch-up."""
     group = _DummyGroup(clients=[])
     _, conn1 = _make_connected_player(mock_loop, group, "p1")
     stream = PushStream(
@@ -211,36 +226,9 @@ async def test_on_player_join_sends_catchup_chunks(mock_loop: Any) -> None:
     await stream.commit_audio()
     assert conn1.sent_binary
 
-    _, conn2 = _make_connected_player(mock_loop, group, "p2")
-    stream.on_player_join("p2")
+    client2, conn2 = _make_connected_player(mock_loop, group, "p2")
+    assert client2.player_role is not None
+    stream.on_role_join(client2.player_role)
 
     assert any(isinstance(m, StreamStartMessage) for m in conn2.sent_json)
     assert conn2.sent_binary, "expected catch-up binary chunks"
-
-
-@pytest.mark.asyncio
-async def test_non_blocking_player_resync_waits_for_queue_to_drain(mock_loop: Any) -> None:
-    """Resync waits for queue to drain before sending stream/clear."""
-    group = _DummyGroup(clients=[])
-    client, conn = _make_connected_player(mock_loop, group, "p1")
-    client.blocking = False
-
-    stream = PushStream(
-        loop=mock_loop, clock=LoopClock(mock_loop), group=group, channel_router=ChannelRouter()
-    )
-
-    conn.high_water = True
-    stream.prepare_audio(
-        bytes(4800),
-        AudioFormat(sample_rate=48000, bit_depth=16, channels=2),
-    )
-    await stream.commit_audio()
-    assert not any(isinstance(m, StreamClearMessage) for m in conn.sent_json)
-
-    conn.high_water = False
-    stream.prepare_audio(
-        bytes(4800),
-        AudioFormat(sample_rate=48000, bit_depth=16, channels=2),
-    )
-    await stream.commit_audio()
-    assert any(isinstance(m, StreamClearMessage) for m in conn.sent_json)

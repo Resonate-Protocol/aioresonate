@@ -93,7 +93,7 @@ class TestPlayerRoleRequirements:
     def test_player_role_declares_stream_requirements(self) -> None:
         """PlayerRole returns StreamRequirements."""
         client = MagicMock()
-        role = PlayerRole(_client=client)
+        role = PlayerRole(client=client)
         req = role.get_stream_requirements()
         assert req is not None
         assert isinstance(req, StreamRequirements)
@@ -101,7 +101,7 @@ class TestPlayerRoleRequirements:
     def test_player_role_family_is_player(self) -> None:
         """PlayerRole.role_family is 'player'."""
         client = MagicMock()
-        role = PlayerRole(_client=client)
+        role = PlayerRole(client=client)
         assert role.role_family == "player"
 
 

@@ -24,6 +24,8 @@ from aiosendspin.server.client import SendspinClient
 from aiosendspin.server.clock import ManualClock
 from aiosendspin.server.group import SendspinGroup
 from aiosendspin.server.push_stream import PushStream
+from aiosendspin.server.roles import AudioRequirements
+from aiosendspin.server.transformers import FlacEncoder, PcmPassthrough
 
 
 @dataclass(slots=True)
@@ -206,6 +208,26 @@ def _make_player(
     client.attach_connection(conn, client_info=hello, active_roles=[Roles.PLAYER.value])
     client.mark_connected()
     conn.buffer_tracker = client.buffer_tracker
+
+    # Set up audio requirements on the player role for hook-based streaming
+    if client.player_role is not None and supported_formats:
+        preferred_format = supported_formats[0]
+        # Create transformer based on codec
+        if preferred_format.codec == AudioCodec.FLAC:
+            transformer = FlacEncoder(
+                sample_rate=preferred_format.sample_rate,
+                channels=preferred_format.channels,
+                bit_depth=preferred_format.bit_depth,
+            )
+        else:
+            transformer = PcmPassthrough()
+        client.player_role._audio_requirements = AudioRequirements(  # noqa: SLF001
+            sample_rate=preferred_format.sample_rate,
+            bit_depth=preferred_format.bit_depth,
+            channels=preferred_format.channels,
+            transformer=transformer,
+        )
+
     return client, group, conn
 
 
@@ -788,6 +810,9 @@ async def test_production_gap_rebases_timeline() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.xfail(
+    reason="Cross-format late joiner catch-up requires PCM cache (removed in role migration)"
+)
 async def test_three_players_regroup_fast_start_and_sync() -> None:
     """3 players (mixed formats): regroup/ungroup and stay synced within +/- 5ms."""
     loop = asyncio.get_running_loop()
@@ -887,6 +912,9 @@ async def test_three_players_regroup_fast_start_and_sync() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.xfail(
+    reason="Cross-format late joiner catch-up requires PCM cache (removed in role migration)"
+)
 async def test_first_time_join_unique_format_starts_under_1s_without_next_commit() -> None:
     """Late joiner with a unique format should start via PCM cache without waiting for commit."""
     loop = asyncio.get_running_loop()

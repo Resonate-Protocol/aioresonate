@@ -37,9 +37,8 @@ class TestGroupStartStream:
         """Create a mock client for the group."""
         client = MagicMock()
         client.client_id = "test-client"
-        client.check_role.return_value = True
-        # Explicitly set player to None to prevent auto-mock creating player.volume
-        client.player = None
+        # This mock client doesn't have the player role
+        client.check_role.return_value = False
         return client
 
     def test_start_stream_returns_push_stream(
@@ -116,8 +115,8 @@ class TestGroupStartStream:
         assert stream._channel_router is custom_router  # noqa: SLF001
 
 
-class TestPlayerJoinWithActiveStream:
-    """Tests for player joining a group with an active PushStream."""
+class TestRoleJoinWithActiveStream:
+    """Tests for roles joining a group with an active PushStream."""
 
     @pytest.fixture
     def mock_loop(self) -> MagicMock:
@@ -139,11 +138,10 @@ class TestPlayerJoinWithActiveStream:
         """Create a mock owner client for the group."""
         client = MagicMock()
         client.client_id = "owner-client"
-        client.check_role.return_value = True
+        # Owner client doesn't have player role
+        client.check_role.return_value = False
         client.group = MagicMock()
         client.group.stop = AsyncMock()
-        # Explicitly set player to None to prevent auto-mock creating player.volume
-        client.player = None
         return client
 
     @pytest.fixture
@@ -158,63 +156,69 @@ class TestPlayerJoinWithActiveStream:
         client.group.stop = AsyncMock()
         client.group._clients = []  # noqa: SLF001
         client.ungroup = AsyncMock()
-        # Set player to a mock with proper int values for volume calculation
-        player_mock = MagicMock()
-        player_mock.volume = 100
-        player_mock.muted = False
-        client.player = player_mock
+        # Set player volume/muted state for volume calculation
+        client.player_volume = 100
+        client.player_muted = False
+        # Set up a mock role with audio requirements for role-based join
+        mock_role = MagicMock()
+        mock_role.get_audio_requirements.return_value = MagicMock()  # Has audio requirements
+        client.active_roles = [mock_role]
         return client
 
     @pytest.mark.asyncio
-    async def test_player_join_triggers_on_player_join(
+    async def test_role_join_triggers_on_role_join(
         self,
         mock_server: MagicMock,
         mock_owner_client: MagicMock,
         mock_player_client: MagicMock,
     ) -> None:
-        """Adding a player to a group with active stream calls on_player_join."""
+        """Adding a client with roles to a group with active stream calls on_role_join."""
         group = SendspinGroup(mock_server, mock_owner_client)
         stream = group.start_stream()
 
-        # Mock on_player_join to track calls
-        with patch.object(stream, "on_player_join") as mock_on_player_join:
+        # Mock on_role_join to track calls
+        with patch.object(stream, "on_role_join") as mock_on_role_join:
             await group.add_client(mock_player_client)
 
-            mock_on_player_join.assert_called_once_with(mock_player_client.client_id)
+            # Should be called once for each role with audio requirements
+            mock_on_role_join.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_non_player_join_does_not_trigger_on_player_join(
+    async def test_client_without_audio_roles_does_not_trigger_on_role_join(
         self,
         mock_server: MagicMock,
         mock_owner_client: MagicMock,
     ) -> None:
-        """Adding a non-player client does not call on_player_join."""
+        """Adding a client without audio roles does not call on_role_join."""
         group = SendspinGroup(mock_server, mock_owner_client)
         stream = group.start_stream()
 
-        # Create a non-player client (visualizer only, no special handling)
+        # Create a client with no audio-capable roles
         visualizer_client = MagicMock()
         visualizer_client.client_id = "visualizer-client"
-        # Returns False for all roles to avoid special handling code paths
         visualizer_client.check_role.return_value = False
         visualizer_client.group = MagicMock()
         visualizer_client.group.stop = AsyncMock()
         visualizer_client.group._clients = []  # noqa: SLF001
         visualizer_client.ungroup = AsyncMock()
+        # No roles with audio requirements
+        mock_role = MagicMock()
+        mock_role.get_audio_requirements.return_value = None
+        visualizer_client.active_roles = [mock_role]
 
-        with patch.object(stream, "on_player_join") as mock_on_player_join:
+        with patch.object(stream, "on_role_join") as mock_on_role_join:
             await group.add_client(visualizer_client)
 
-            mock_on_player_join.assert_not_called()
+            mock_on_role_join.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_player_join_without_active_stream(
+    async def test_client_join_without_active_stream(
         self,
         mock_server: MagicMock,
         mock_owner_client: MagicMock,
         mock_player_client: MagicMock,
     ) -> None:
-        """Adding a player without an active stream does not crash."""
+        """Adding a client without an active stream does not crash."""
         group = SendspinGroup(mock_server, mock_owner_client)
         # No stream started
 
@@ -222,21 +226,21 @@ class TestPlayerJoinWithActiveStream:
         await group.add_client(mock_player_client)
 
     @pytest.mark.asyncio
-    async def test_player_join_with_stopped_stream(
+    async def test_client_join_with_stopped_stream(
         self,
         mock_server: MagicMock,
         mock_owner_client: MagicMock,
         mock_player_client: MagicMock,
     ) -> None:
-        """Adding a player to a stopped stream does not call on_player_join."""
+        """Adding a client to a stopped stream does not call on_role_join."""
         group = SendspinGroup(mock_server, mock_owner_client)
         stream = group.start_stream()
         stream.stop()  # Stop the stream
 
-        with patch.object(stream, "on_player_join") as mock_on_player_join:
+        with patch.object(stream, "on_role_join") as mock_on_role_join:
             await group.add_client(mock_player_client)
 
-            mock_on_player_join.assert_not_called()
+            mock_on_role_join.assert_not_called()
 
 
 class TestGroupTransformerPool:
@@ -262,8 +266,8 @@ class TestGroupTransformerPool:
         """Create a mock client for the group."""
         client = MagicMock()
         client.client_id = "test-client"
-        client.check_role.return_value = True
-        client.player = None
+        # This mock client doesn't have the player role
+        client.check_role.return_value = False
         return client
 
     def test_group_has_transformer_pool(

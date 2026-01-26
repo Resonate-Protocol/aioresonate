@@ -106,7 +106,6 @@ async def test_player_format_request_does_not_send_stream_start_when_stream_acti
     owner.check_role.return_value = False
     owner.group = MagicMock()
     owner.group.stop = AsyncMock()
-    owner.player = None
 
     group = SendspinGroup(mock_server, owner)
     group.start_stream()
@@ -135,7 +134,6 @@ async def test_player_format_request_sends_stream_start_when_no_stream_active(
     owner.check_role.return_value = False
     owner.group = MagicMock()
     owner.group.stop = AsyncMock()
-    owner.player = None
 
     group = SendspinGroup(mock_server, owner)
 

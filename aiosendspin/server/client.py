@@ -15,16 +15,30 @@ from enum import Enum
 from typing import TYPE_CHECKING, cast
 
 from aiosendspin.models import AudioCodec
-from aiosendspin.models.core import ClientHelloPayload, StreamStartMessage
-from aiosendspin.models.types import ClientStateType, Roles, has_role
+from aiosendspin.models.controller import ControllerCommandPayload
+from aiosendspin.models.core import (
+    ClientHelloPayload,
+    ServerCommandMessage,
+    ServerCommandPayload,
+    StreamStartMessage,
+)
+from aiosendspin.models.player import (
+    ClientHelloPlayerSupport,
+    PlayerCommandPayload,
+    PlayerStatePayload,
+)
+from aiosendspin.models.types import (
+    ClientStateType,
+    MediaCommand,
+    PlaybackStateType,
+    PlayerCommand,
+    Roles,
+    has_role,
+)
 from aiosendspin.server.audio import AudioFormat, BufferTracker
-from aiosendspin.server.events import ClientEvent, ClientGroupChangedEvent
+from aiosendspin.server.events import ClientEvent, ClientGroupChangedEvent, VolumeChangedEvent
 
-from .controller import ControllerClient
-from .metadata import MetadataClient
-from .player import PlayerClient
 from .roles import PlayerRole, Role
-from .visualizer import VisualizerClient
 
 if TYPE_CHECKING:
     from aiosendspin.models.types import GoodbyeReason, ServerMessage
@@ -81,11 +95,9 @@ class SendspinClient:
         self._previous_group_id: str | None = None
         self._external_source_solo_group_id: str | None = None
 
-        # Role helpers (persistent)
-        self._player: PlayerClient | None = None
-        self._controller: ControllerClient | None = None
-        self._metadata_client: MetadataClient | None = None
-        self._visualizer: VisualizerClient | None = None
+        # Player volume/mute state (persistent across reconnects)
+        self._player_volume: int = 100
+        self._player_muted: bool = False
 
         # Player role persistent state
         self._buffer_tracker: BufferTracker | None = None
@@ -212,29 +224,12 @@ class SendspinClient:
         self._negotiated_roles = active_roles
         self._logger = logger.getChild(self._client_id)
 
-        # Initialize role helpers based on negotiated active roles.
-        self._player = (
-            PlayerClient(self) if has_role(Roles.PLAYER.value, self._negotiated_roles) else None
-        )
-        self._controller = (
-            ControllerClient(self)
-            if has_role(Roles.CONTROLLER.value, self._negotiated_roles)
-            else None
-        )
-        self._metadata_client = (
-            MetadataClient(self) if has_role(Roles.METADATA.value, self._negotiated_roles) else None
-        )
-        self._visualizer = (
-            VisualizerClient(self)
-            if has_role(Roles.VISUALIZER.value, self._negotiated_roles)
-            else None
-        )
-
         # Clear previous roles
         self._roles.clear()
 
         # Player persistent state.
-        if self._player is not None and self.info.player_support is not None:
+        has_player_role = has_role(Roles.PLAYER.value, self._negotiated_roles)
+        if has_player_role and self.info.player_support is not None:
             capacity = self.info.player_support.buffer_capacity
             if self._buffer_tracker is None:
                 self._buffer_tracker = BufferTracker(
@@ -269,7 +264,7 @@ class SendspinClient:
                 self._preferred_codec = default_codec
 
             # Create and register player role
-            player_role = PlayerRole(_client=self)
+            player_role = PlayerRole(client=self)
             player_role._buffer_tracker = self._buffer_tracker  # noqa: SLF001
             player_role.on_connect()
             player_role.on_transport_attach()
@@ -418,27 +413,277 @@ class SendspinClient:
     def blocking(self, value: bool) -> None:
         self._blocking = value
 
-    # ---- Role helpers ----
+    # ---- Player volume/mute state and commands ----
 
     @property
-    def player(self) -> PlayerClient | None:
-        """Return the PlayerClient helper if this client has the player role."""
-        return self._player
+    def player_support(self) -> ClientHelloPlayerSupport | None:
+        """Return player capabilities advertised in the hello payload."""
+        return self.info.player_support
 
     @property
-    def controller(self) -> ControllerClient | None:
-        """Return the ControllerClient helper if this client has the controller role."""
-        return self._controller
+    def player_volume(self) -> int:
+        """Current volume of this player (0-100)."""
+        return self._player_volume
 
     @property
-    def metadata(self) -> MetadataClient | None:
-        """Return the MetadataClient helper if this client has the metadata role."""
-        return self._metadata_client
+    def player_muted(self) -> bool:
+        """Current mute state of this player."""
+        return self._player_muted
 
-    @property
-    def visualizer(self) -> VisualizerClient | None:
-        """Return the VisualizerClient helper if this client has the visualizer role."""
-        return self._visualizer
+    def set_player_volume(self, volume: int) -> None:
+        """Set the volume of this player."""
+        support = self.player_support
+        if not support or PlayerCommand.VOLUME not in support.supported_commands:
+            self._logger.warning("Player does not support the 'volume' command")
+            return
+
+        self._logger.debug("Setting volume from %d to %d", self._player_volume, volume)
+        self.send_message(
+            ServerCommandMessage(
+                payload=ServerCommandPayload(
+                    player=PlayerCommandPayload(
+                        command=PlayerCommand.VOLUME,
+                        volume=volume,
+                    )
+                )
+            )
+        )
+
+    def set_player_mute(self, muted: bool) -> None:  # noqa: FBT001
+        """Set the mute state of this player."""
+        support = self.player_support
+        if not support or PlayerCommand.MUTE not in support.supported_commands:
+            self._logger.warning("Player does not support the 'mute' command")
+            return
+
+        self._logger.debug("Setting mute to %s", muted)
+        self.send_message(
+            ServerCommandMessage(
+                payload=ServerCommandPayload(
+                    player=PlayerCommandPayload(
+                        command=PlayerCommand.MUTE,
+                        mute=muted,
+                    )
+                )
+            )
+        )
+
+    def handle_player_state_update(self, state: PlayerStatePayload) -> None:
+        """Update internal mute/volume state from client report and emit event."""
+        support = self.player_support
+        changed = False
+
+        if state.volume is not None:
+            if not support or PlayerCommand.VOLUME not in support.supported_commands:
+                self._logger.warning(
+                    "Client sent volume field without declaring 'volume' in supported_commands"
+                )
+            elif self._player_volume != state.volume:
+                self._player_volume = state.volume
+                changed = True
+
+        if state.muted is not None:
+            if not support or PlayerCommand.MUTE not in support.supported_commands:
+                self._logger.warning(
+                    "Client sent muted field without declaring 'mute' in supported_commands"
+                )
+            elif self._player_muted != state.muted:
+                self._player_muted = state.muted
+                changed = True
+
+        if changed:
+            self._signal_event(
+                VolumeChangedEvent(volume=self._player_volume, muted=self._player_muted)
+            )
+
+    # ---- Controller command handling ----
+
+    async def handle_controller_command(self, payload: ControllerCommandPayload) -> None:
+        """Handle controller commands from this client."""
+        # Get supported commands from the group
+        supported_commands = self.group._get_supported_commands()  # noqa: SLF001
+
+        # Validate command is supported
+        if payload.command not in supported_commands:
+            self._logger.warning(
+                "Client %s sent unsupported command '%s'. Supported commands: %s",
+                self._client_id,
+                payload.command.value,
+                [cmd.value for cmd in supported_commands],
+            )
+            # Silently ignore unsupported commands (spec doesn't define error responses)
+            return
+
+        if payload.command == MediaCommand.SWITCH:
+            await self._handle_switch_command()
+        else:
+            # Forward other commands to the group
+            self.group._handle_group_command(payload)  # noqa: SLF001
+
+    async def _handle_switch_command(self) -> None:
+        """Handle the switch command to cycle through groups."""
+        # Clients in external_source can't participate in playback; don't allow switching groups
+        # until they report a normal operational state again.
+        if self._client_state == ClientStateType.EXTERNAL_SOURCE:
+            self._logger.warning("Ignoring switch command while client is in external_source state")
+            return
+
+        # Check if client should rejoin previous group (external_source recovery priority)
+        if await self._try_rejoin_previous_group():
+            return
+
+        current_group = self.group
+
+        # Get all unique groups from all connected clients
+        all_groups = self._get_all_groups()
+
+        # Build the cycle list based on client's player role
+        has_player_role = self.check_role(Roles.PLAYER)
+        cycle_groups = self._build_group_cycle(all_groups, current_group, has_player_role)
+
+        if not cycle_groups:
+            self._logger.debug("No groups available to switch to")
+            return
+
+        # Find current position in cycle and move to next
+        try:
+            current_index = cycle_groups.index(current_group)
+            next_index = (current_index + 1) % len(cycle_groups)
+        except ValueError:
+            # Current group not in cycle, start from beginning
+            next_index = 0
+
+        next_group = cycle_groups[next_index]
+
+        # Move client to the next group
+        if next_group is None:
+            # The group.remove_client will create a new solo group for the client
+            self._logger.info(
+                "Switching client %s to solo group",
+                self._client_id,
+            )
+            await current_group.remove_client(self)
+        elif next_group != current_group:
+            self._logger.info(
+                "Switching client %s to group %s",
+                self._client_id,
+                next_group.group_id,
+            )
+            await current_group.remove_client(self)
+            await next_group.add_client(self)
+
+    def _get_all_groups(self) -> list[SendspinGroup]:
+        """Get all unique groups from all connected clients."""
+        groups_seen: set[str] = set()
+        unique_groups: list[SendspinGroup] = []
+
+        for client in self._server.connected_clients:
+            group = client.group
+            group_id = group.group_id
+            if group_id not in groups_seen:
+                groups_seen.add(group_id)
+                unique_groups.append(group)
+
+        return unique_groups
+
+    def _build_group_cycle(
+        self,
+        all_groups: list[SendspinGroup],
+        current_group: SendspinGroup,
+        has_player_role: bool,  # noqa: FBT001
+    ) -> list[SendspinGroup | None]:
+        """
+        Build the cycle of groups based on the spec.
+
+        Returns a list of groups to cycle through. For player clients, the list
+        may contain None indicating to "go to a new solo group".
+        """
+        # Separate groups into categories
+        multi_client_playing: list[SendspinGroup] = []
+        single_client: list[SendspinGroup] = []
+
+        for group in all_groups:
+            client_count = len(group.clients)
+            is_playing = group.state == PlaybackStateType.PLAYING
+
+            if client_count > 1 and is_playing:
+                # Verify the group has at least one player
+                # (groups with only controllers/metadata can't actually be "playing")
+                has_player = any(c.check_role(Roles.PLAYER) for c in group.clients)
+                if has_player:
+                    multi_client_playing.append(group)
+            elif client_count == 1 and is_playing:
+                # Get the single client in this group
+                single_client_obj = group.clients[0]
+                # Skip current group, it will be handled as solo option for player clients
+                if group != current_group and single_client_obj.check_role(Roles.PLAYER):
+                    # Only include single-client groups where the client has player role
+                    single_client.append(group)
+
+        # Sort for stable ordering (by group ID)
+        multi_client_playing.sort(key=lambda g: g.group_id)
+        single_client.sort(key=lambda g: g.group_id)
+
+        # Build cycle based on client's player role
+        if has_player_role:
+            # With player role: multi-client playing -> single-client -> own solo
+            current_is_solo = len(current_group.clients) == 1
+            # Use current group if solo, otherwise switch to new solo group (None)
+            solo_option: list[SendspinGroup | None] = [current_group] if current_is_solo else [None]
+            return multi_client_playing + single_client + solo_option
+        # Without player role: multi-client playing -> single-client (no own solo)
+        return [*multi_client_playing, *single_client]
+
+    def _should_rejoin_previous_group(self) -> bool:
+        """
+        Check if client should rejoin previous group (external_source recovery).
+
+        Per spec: "If the client is still in the solo group from its 'external_source'
+        transition, the switch command prioritizes rejoining the previous group."
+        """
+        return (
+            self._previous_group_id is not None
+            and self._client_state != ClientStateType.EXTERNAL_SOURCE
+            and self._external_source_solo_group_id == self.group.group_id
+            and len(self.group.clients) == 1  # Still in the solo group
+        )
+
+    async def _try_rejoin_previous_group(self) -> bool:
+        """Try to rejoin the previous group after external_source ended."""
+        if not self._should_rejoin_previous_group():
+            return False
+
+        previous_group_id = self._previous_group_id
+        # Clear external_source tracking after attempt (regardless of success)
+        self._previous_group_id = None
+        self._external_source_solo_group_id = None
+
+        previous_group = self._find_group_by_id(previous_group_id)
+
+        if previous_group is not None and previous_group != self.group:
+            self._logger.info(
+                "Rejoining previous group %s after external_source",
+                previous_group_id,
+            )
+            await self.group.remove_client(self)
+            await previous_group.add_client(self)
+            return True
+        self._logger.debug(
+            "Previous group %s no longer exists or is current group, "
+            "falling back to normal switch cycle",
+            previous_group_id,
+        )
+        return False
+
+    def _find_group_by_id(self, group_id: str | None) -> SendspinGroup | None:
+        """Find a group by its ID from all connected clients."""
+        if group_id is None:
+            return None
+
+        for client in self._server.connected_clients:
+            if client.group.group_id == group_id:
+                return client.group
+        return None
 
     # ---- Events + grouping ----
 
