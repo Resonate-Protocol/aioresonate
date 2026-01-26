@@ -57,6 +57,7 @@ from .events import ClientEvent, VolumeChangedEvent
 from .metadata import Metadata
 from .pipeline import PipelineManager
 from .push_stream import PushStream
+from .transformers import TransformerPool
 
 # The cyclic import is not an issue during runtime, so hide it
 # pyright: reportImportCycles=none
@@ -177,6 +178,8 @@ class SendspinGroup:
     """Lock to serialize play_media() and stop() operations, preventing race conditions."""
     _push_stream: PushStream | None
     """Current PushStream for push-based streaming, None when not active."""
+    _transformer_pool: TransformerPool
+    """Pool for shared transformer instances (encoders, etc.) across roles."""
 
     def __init__(self, server: SendspinServer, *args: SendspinClient) -> None:
         """
@@ -209,6 +212,7 @@ class SendspinGroup:
         self._client_event_unsubs: dict[SendspinClient, Callable[[], None]] = {}
         self._playback_lock = asyncio.Lock()
         self._push_stream: PushStream | None = None
+        self._transformer_pool = TransformerPool()
 
         # Set group reference for initial clients
         for client in self._clients:
@@ -881,6 +885,11 @@ class SendspinGroup:
     def has_active_stream(self) -> bool:
         """Check if there is an active stream running."""
         return self._push_stream is not None and not self._push_stream.is_stopped
+
+    @property
+    def transformer_pool(self) -> TransformerPool:
+        """Return the transformer pool for encoder deduplication."""
+        return self._transformer_pool
 
     def players(self) -> list[PlayerClient]:
         """Return player helpers for all members that support the role."""

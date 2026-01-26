@@ -11,6 +11,7 @@ from aiosendspin.server.channels import ChannelRouter
 from aiosendspin.server.clock import LoopClock
 from aiosendspin.server.group import SendspinGroup
 from aiosendspin.server.push_stream import PushStream
+from aiosendspin.server.transformers import TransformerPool
 
 
 class TestGroupStartStream:
@@ -236,3 +237,54 @@ class TestPlayerJoinWithActiveStream:
             await group.add_client(mock_player_client)
 
             mock_on_player_join.assert_not_called()
+
+
+class TestGroupTransformerPool:
+    """Tests for SendspinGroup.transformer_pool property."""
+
+    @pytest.fixture
+    def mock_loop(self) -> MagicMock:
+        """Create a mock event loop."""
+        loop = MagicMock()
+        loop.time.return_value = 1000.0
+        return loop
+
+    @pytest.fixture
+    def mock_server(self, mock_loop: MagicMock) -> MagicMock:
+        """Create a mock server."""
+        server = MagicMock()
+        server.loop = mock_loop
+        server.clock = LoopClock(mock_loop)
+        return server
+
+    @pytest.fixture
+    def mock_client(self) -> MagicMock:
+        """Create a mock client for the group."""
+        client = MagicMock()
+        client.client_id = "test-client"
+        client.check_role.return_value = True
+        client.player = None
+        return client
+
+    def test_group_has_transformer_pool(
+        self,
+        mock_server: MagicMock,
+        mock_client: MagicMock,
+    ) -> None:
+        """SendspinGroup exposes a transformer_pool."""
+        group = SendspinGroup(mock_server, mock_client)
+
+        assert isinstance(group.transformer_pool, TransformerPool)
+
+    def test_transformer_pool_is_same_instance(
+        self,
+        mock_server: MagicMock,
+        mock_client: MagicMock,
+    ) -> None:
+        """transformer_pool returns the same instance on multiple accesses."""
+        group = SendspinGroup(mock_server, mock_client)
+
+        pool1 = group.transformer_pool
+        pool2 = group.transformer_pool
+
+        assert pool1 is pool2
