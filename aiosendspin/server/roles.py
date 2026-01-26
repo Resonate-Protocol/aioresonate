@@ -11,6 +11,7 @@ import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
+from uuid import UUID
 
 from aiosendspin.models import BinaryMessageType, pack_binary_header_raw
 from aiosendspin.models.core import (
@@ -24,13 +25,102 @@ from aiosendspin.models.core import (
 from aiosendspin.models.player import StreamStartPlayer
 
 if TYPE_CHECKING:
-    from aiosendspin.server.audio import AudioFormat
+    from aiosendspin.models.types import ServerMessage
+    from aiosendspin.server.audio import AudioFormat, BufferTracker
     from aiosendspin.server.client import SendspinClient
     from aiosendspin.server.pipeline import EncodedChunk
 
 
+@dataclass(frozen=True)
+class StreamRequirements:
+    """Declaration that a role sends binary streams.
+
+    Roles that return this from get_stream_requirements() will have a
+    BufferTracker injected by the framework.
+    """
+
+
+@dataclass(frozen=True)
+class AudioRequirements:
+    """Declaration that a role needs audio chunks.
+
+    Roles that return this from get_audio_requirements() will receive
+    audio via on_audio_chunk() calls.
+    """
+
+    target_format: AudioFormat
+    """The audio format this role needs."""
+
+    channel_id: UUID | None = None
+    """Channel to receive audio from. None means main channel."""
+
+
 class Role(ABC):
-    """Base class for connection-specific role behavior."""
+    """Base class for all roles.
+
+    Roles encapsulate per-connection behavior for different client capabilities.
+    Each role can declare its streaming requirements and receive framework-injected
+    resources like BufferTracker.
+    """
+
+    _client: SendspinClient
+    """Reference to the owning client."""
+
+    _buffer_tracker: BufferTracker | None = None
+    """Framework-injected buffer tracker for roles that stream binary data."""
+
+    _stream_started: bool = False
+    """Whether stream/start has been sent for this role."""
+
+    _has_transport: bool = False
+    """Whether this role has an active WebSocket transport."""
+
+    @property
+    @abstractmethod
+    def role_family(self) -> str:
+        """Role family name for protocol messages (e.g., 'player', 'artwork')."""
+        ...
+
+    # --- Declarations ---
+
+    def get_stream_requirements(self) -> StreamRequirements | None:
+        """Return StreamRequirements if role sends binary streams, else None.
+
+        Roles that return StreamRequirements will have a BufferTracker injected
+        by the framework.
+        """
+        return None
+
+    def get_audio_requirements(self) -> AudioRequirements | None:
+        """Return AudioRequirements if role needs audio, else None.
+
+        Roles that return AudioRequirements will receive audio chunks via
+        on_audio_chunk() calls from PushStream.
+        """
+        return None
+
+    # --- Framework-provided send methods ---
+
+    def send_message(self, message: ServerMessage) -> None:
+        """Send JSON message to the client. Drop silently if no transport."""
+        if not self._has_transport:
+            return
+        self._client.send_message(message)
+
+    # --- Audio hook (optional) ---
+
+    def on_audio_chunk(self, chunk: bytes, timestamp_us: int) -> None:  # noqa: B027
+        """Receive audio chunk. Override in audio-receiving roles."""
+
+    # --- Lifecycle hooks ---
+
+    def on_transport_attach(self) -> None:
+        """Handle WebSocket connect/reconnect."""
+        self._has_transport = True
+
+    def on_transport_detach(self) -> None:
+        """Handle WebSocket disconnect."""
+        self._has_transport = False
 
     @abstractmethod
     def on_connect(self) -> None:
@@ -69,6 +159,10 @@ class PlayerRole(Role):
 
     _client: SendspinClient
     """Persistent client/device state."""
+
+    role_family: str = field(default="player", init=False)
+    """Role family name for protocol messages."""
+
     _stream_started: bool = field(default=False, init=False)
     """Whether stream/start has been sent for the current format."""
     _current_format: AudioFormat | None = field(default=None, init=False)
@@ -80,6 +174,10 @@ class PlayerRole(Role):
     _last_drop_log_s: float = field(default=0.0, init=False)
     _drops_since_log: int = field(default=0, init=False)
     """Rate-limited drop logging for diagnosing stutter."""
+
+    def get_stream_requirements(self) -> StreamRequirements:
+        """Player role sends binary audio streams."""
+        return StreamRequirements()
 
     def on_connect(self) -> None:
         """Reset stream state on new connection."""

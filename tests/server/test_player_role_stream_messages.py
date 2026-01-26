@@ -63,6 +63,7 @@ def test_player_role_send_cached_chunk_packs_header_and_tracks_duration() -> Non
         *,
         buffer_end_time_us: int | None = None,
         buffer_byte_count: int | None = None,
+        duration_us: int | None = None,  # noqa: ARG001
     ) -> bool:
         sent.append(data)
         if buffer_end_time_us is not None and buffer_byte_count is not None:
