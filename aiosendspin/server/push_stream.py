@@ -537,24 +537,21 @@ class PushStream:
                         # No transformer - passthrough as single frame
                         transformed[tkey] = [(pcm_data, output_ts, duration_us)]
                     else:
-                        # Get base timestamp for output frames:
-                        # If transformer has pending buffered data, use its timestamp
-                        # Otherwise use the input timestamp
-                        # Reset if there's a large timing discontinuity (> 100ms)
-                        base_ts = output_ts
-                        if hasattr(transformer, "pending_timestamp_us"):
-                            pending_ts = transformer.pending_timestamp_us
-                            if pending_ts is not None:
-                                drift_us = abs(pending_ts - output_ts)
-                                if drift_us <= 100_000:
-                                    base_ts = pending_ts
-                                elif hasattr(transformer, "reset"):
-                                    # Large discontinuity - reset transformer
-                                    transformer.reset()
-
                         # Transformer returns list[bytes] - one tuple per frame
+                        # Call process() first - it handles gap detection internally
                         frames = transformer.process(pcm_data, output_ts, duration_us)
                         frame_duration_us = transformer.frame_duration_us
+
+                        # Get base timestamp for output frames:
+                        # pending_timestamp_us after process() is the timestamp for the NEXT frame,
+                        # so the first frame's timestamp = pending - (num_frames * frame_duration)
+                        # This correctly handles gap detection done inside process().
+                        base_ts = output_ts
+                        if hasattr(transformer, "pending_timestamp_us") and frames:
+                            pending_ts = transformer.pending_timestamp_us
+                            if pending_ts is not None:
+                                base_ts = pending_ts - (len(frames) * frame_duration_us)
+
                         frame_list: list[tuple[bytes, int, int]] = []
                         for i, frame_data in enumerate(frames):
                             frame_ts = base_ts + (i * frame_duration_us)

@@ -152,6 +152,8 @@ class PcmPassthrough:
         self._buffer = bytearray()
         # Track timestamp of the first sample in the buffer
         self._pending_timestamp_us: int | None = None
+        # Track last input timestamp to detect production gaps
+        self._last_input_timestamp_us: int | None = None
 
     @property
     def frame_duration_us(self) -> int:
@@ -174,8 +176,17 @@ class PcmPassthrough:
         Returns:
             List of fixed-size PCM frames. May be empty if buffering.
         """
-        # Track timestamp of first buffered sample
-        if not self._buffer:
+        # Detect production gaps: if input timestamp jumped by >1.5s, reset timeline
+        # This handles cases where audio production stopped and resumed
+        if self._last_input_timestamp_us is not None:
+            input_gap = timestamp_us - self._last_input_timestamp_us
+            if input_gap > 1_500_000:  # 1.5s threshold
+                # Production gap detected - reset timestamp tracking
+                self._pending_timestamp_us = timestamp_us
+        self._last_input_timestamp_us = timestamp_us
+
+        # Track timestamp of first buffered sample (only if not already set)
+        if self._pending_timestamp_us is None:
             self._pending_timestamp_us = timestamp_us
 
         self._buffer.extend(pcm)
@@ -216,6 +227,7 @@ class PcmPassthrough:
         """Reset internal buffer."""
         self._buffer.clear()
         self._pending_timestamp_us = None
+        self._last_input_timestamp_us = None
 
 
 class FlacEncoder:
@@ -249,11 +261,24 @@ class FlacEncoder:
         self._chunk_samples = int(sample_rate * chunk_duration_us / 1_000_000)
         self._buffer = bytearray()
         self._initialized = False
+        # Track stream start and output count for timestamp calculation
+        # FLAC codec has internal buffering, so we can't track based on input
+        self._stream_start_timestamp_us: int | None = None
+        self._output_frame_count: int = 0
+        # Track last input timestamp to detect production gaps
+        self._last_input_timestamp_us: int | None = None
 
     @property
     def frame_duration_us(self) -> int:
         """Duration of each output frame in microseconds."""
         return self._chunk_duration_us
+
+    @property
+    def pending_timestamp_us(self) -> int | None:
+        """Timestamp of the next output frame, or None if stream not started."""
+        if self._stream_start_timestamp_us is None:
+            return None
+        return self._stream_start_timestamp_us + self._output_frame_count * self._chunk_duration_us
 
     def _ensure_initialized(self) -> None:
         """Lazily initialize encoder on first use."""
@@ -309,13 +334,27 @@ class FlacEncoder:
 
         Args:
             pcm: Raw PCM audio data.
-            timestamp_us: Playback timestamp in microseconds (unused).
+            timestamp_us: Playback timestamp in microseconds.
             duration_us: Duration of this chunk in microseconds (unused).
 
         Returns:
             List of encoded FLAC frames. May be empty if buffering.
         """
         self._ensure_initialized()
+
+        # Detect production gaps: if input timestamp jumped by >1.5s, reset timeline
+        # This handles cases where audio production stopped and resumed
+        if self._last_input_timestamp_us is not None:
+            input_gap = timestamp_us - self._last_input_timestamp_us
+            if input_gap > 1_500_000:  # 1.5s threshold
+                # Production gap detected - reset timestamp tracking
+                self._stream_start_timestamp_us = timestamp_us
+                self._output_frame_count = 0
+        self._last_input_timestamp_us = timestamp_us
+
+        # Track stream start timestamp (set once on first call)
+        if self._stream_start_timestamp_us is None:
+            self._stream_start_timestamp_us = timestamp_us
 
         self._buffer.extend(pcm)
         frames: list[bytes] = []
@@ -327,6 +366,8 @@ class FlacEncoder:
             encoded = self._encode_chunk(chunk_pcm)
             if encoded:
                 frames.append(encoded)
+                # Count output frames for timestamp calculation
+                self._output_frame_count += 1
 
         return frames
 
@@ -349,7 +390,10 @@ class FlacEncoder:
         self._buffer.clear()
 
         encoded = self._encode_chunk(chunk_pcm)
-        return [encoded] if encoded else []
+        if encoded:
+            self._output_frame_count += 1
+            return [encoded]
+        return []
 
     def get_header(self) -> bytes | None:
         """Return FLAC streaminfo header."""
@@ -361,3 +405,6 @@ class FlacEncoder:
         self._codec_header = None
         self._buffer.clear()
         self._initialized = False
+        self._stream_start_timestamp_us = None
+        self._output_frame_count = 0
+        self._last_input_timestamp_us = None

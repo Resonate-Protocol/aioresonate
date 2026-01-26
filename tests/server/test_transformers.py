@@ -368,3 +368,41 @@ class TestFlacEncoder:
         )  # Process exactly one frame
         result = encoder.flush()
         assert result == []
+
+    def test_flac_encoder_pending_timestamp_continuous(self) -> None:
+        """FlacEncoder pending_timestamp_us produces continuous frame timestamps.
+
+        FLAC codec has ~750ms internal buffering delay, so pending_timestamp_us
+        tracks output frame count rather than input timestamps. This ensures
+        that frame timestamps are continuous regardless of input chunk sizes.
+        """
+        encoder = FlacEncoder(sample_rate=48000, bit_depth=16, channels=2)
+
+        # Simulate source sending 1005ms chunks (doesn't align with 25ms frames)
+        chunk_bytes = int(48000 * 1.005) * 4  # ~1005ms of audio
+
+        timestamps: list[int] = []
+        for call_num in range(5):
+            input_ts = call_num * 1_005_000  # Input timestamps advance by 1005ms
+
+            # Get base timestamp for output frames (mimics PushStream logic)
+            pending_before = encoder.pending_timestamp_us
+            base_ts = pending_before if pending_before is not None else input_ts
+
+            frames = encoder.process(bytes(chunk_bytes), input_ts, 1_005_000)
+
+            # Calculate frame timestamps
+            for i in range(len(frames)):
+                frame_ts = base_ts + i * 25_000
+                timestamps.append(frame_ts)
+
+        # Verify we got output
+        assert len(timestamps) > 20, f"Expected >20 frames, got {len(timestamps)}"
+
+        # Verify timestamps are continuous (each frame is 25ms after previous)
+        for i in range(1, len(timestamps)):
+            gap = timestamps[i] - timestamps[i - 1]
+            assert gap == 25_000, (
+                f"Frame {i}: gap={gap}us, expected 25000us. "
+                f"Timestamps around gap: {timestamps[max(0, i - 2) : i + 2]}"
+            )
