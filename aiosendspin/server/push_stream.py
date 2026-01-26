@@ -5,15 +5,17 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NamedTuple
 from uuid import UUID
 
 from aiosendspin.models.types import AudioCodec, Roles
+from aiosendspin.server.audio import AudioFormat, _get_av, _resolve_audio_format
 from aiosendspin.server.channels import MAIN_CHANNEL
 from aiosendspin.server.pipeline import EncodedChunk, PipelineKey, PipelineManager
 
 if TYPE_CHECKING:
-    from aiosendspin.server.audio import AudioFormat
+    import av
+
     from aiosendspin.server.channels import ChannelRouter
     from aiosendspin.server.client import SendspinClient
     from aiosendspin.server.clock import Clock
@@ -24,6 +26,44 @@ _LOGGER = logging.getLogger(__name__)
 
 # Default initial delay before first audio plays (microseconds)
 DEFAULT_INITIAL_DELAY_US = 250_000  # 250ms
+
+
+class _ResamplerKey(NamedTuple):
+    """Key for sharing resamplers: (channel_id, source_format, target PCM params).
+
+    Resamplers convert PCM from source format to target sample rate/channels/bit_depth.
+    The codec is irrelevant for resampling, so multiple target formats with different
+    codecs but the same PCM parameters can share a resampler.
+    """
+
+    channel_id: UUID
+    source_format: AudioFormat
+    target_sample_rate: int
+    target_channels: int
+    target_bit_depth: int
+
+
+@dataclass
+class _ResamplerState:
+    """Shared resampler state keyed by _ResamplerKey."""
+
+    key: _ResamplerKey
+    """Resampler key for identification."""
+    resampler: av.AudioResampler
+    """PyAV audio resampler."""
+    source_av_format: str
+    """PyAV format string for source."""
+    source_av_layout: str
+    """PyAV channel layout for source."""
+    target_av_format: str
+    """PyAV format string for target (after resampling)."""
+    target_layout: str
+    """PyAV channel layout for target."""
+    target_frame_stride: int
+    """Bytes per frame in target format."""
+    pending_timestamp_us: int | None = None
+    """Timestamp of the earliest audio sample not yet emitted by this resampler."""
+
 
 # Minimum lead time (from now) for sending catch-up audio to late joiners.
 # This must be lower than DEFAULT_INITIAL_DELAY_US, otherwise a steady-state low-latency
@@ -118,6 +158,8 @@ class PushStream:
         # Role-based streaming tracking (for hook-based flow)
         self._started_roles: set[Role] = set()
         self._backpressured_roles: set[Role] = set()
+        # Inline resamplers (replacing PipelineManager resampler logic)
+        self._resamplers: dict[_ResamplerKey, _ResamplerState] = {}
 
     @property
     def is_stopped(self) -> bool:
@@ -144,6 +186,115 @@ class PushStream:
                 if role.get_audio_requirements() is not None
             )
         return result
+
+    def _get_or_create_resampler(
+        self,
+        key: _ResamplerKey,
+        source_format: AudioFormat,
+        target_format: AudioFormat,
+    ) -> _ResamplerState:
+        """Get existing resampler or create a new one."""
+        if key in self._resamplers:
+            return self._resamplers[key]
+
+        av = _get_av()
+
+        # Get source format params
+        _source_bytes_per_sample, source_av_format, source_layout = _resolve_audio_format(
+            source_format
+        )
+
+        # Get target format params
+        target_bytes_per_sample, target_av_format, target_layout = _resolve_audio_format(
+            target_format
+        )
+
+        # Create resampler
+        resampler = av.AudioResampler(
+            format=target_av_format,
+            layout=target_layout,
+            rate=target_format.sample_rate,
+        )
+
+        state = _ResamplerState(
+            key=key,
+            resampler=resampler,
+            source_av_format=source_av_format,
+            source_av_layout=source_layout,
+            target_av_format=target_av_format,
+            target_layout=target_layout,
+            target_frame_stride=target_bytes_per_sample * target_format.channels,
+        )
+        self._resamplers[key] = state
+        return state
+
+    def _resample_pcm(
+        self,
+        resampler_state: _ResamplerState,
+        pcm_data: bytes,
+        source_format: AudioFormat,
+        input_timestamp_us: int,
+    ) -> tuple[bytes, int]:
+        """Resample PCM data to the target format.
+
+        Args:
+            resampler_state: The resampler state to use.
+            pcm_data: Source PCM bytes.
+            source_format: Source audio format.
+            input_timestamp_us: Timestamp for the input audio.
+
+        Returns:
+            Tuple of (resampled_pcm_bytes, output_start_timestamp_us).
+        """
+        av = _get_av()
+
+        # Handle timestamp tracking
+        if resampler_state.pending_timestamp_us is None:
+            resampler_state.pending_timestamp_us = input_timestamp_us
+        else:
+            # Resync if timestamp drifts too far (e.g., resampler was idle)
+            drift_us = abs(resampler_state.pending_timestamp_us - input_timestamp_us)
+            if drift_us > 20_000:
+                resampler_state.pending_timestamp_us = input_timestamp_us
+                resampler_state.resampler = av.AudioResampler(
+                    format=resampler_state.target_av_format,
+                    layout=resampler_state.target_layout,
+                    rate=resampler_state.key.target_sample_rate,
+                )
+
+        # Calculate sample count from input
+        bytes_per_sample = source_format.bit_depth // 8
+        frame_stride = bytes_per_sample * source_format.channels
+        sample_count = len(pcm_data) // frame_stride
+
+        if sample_count == 0:
+            return b"", resampler_state.pending_timestamp_us
+
+        # Create input frame
+        frame = av.AudioFrame(
+            format=resampler_state.source_av_format,
+            layout=resampler_state.source_av_layout,
+            samples=sample_count,
+        )
+        frame.sample_rate = source_format.sample_rate
+        frame.planes[0].update(pcm_data)
+
+        # Resample
+        out_frames = resampler_state.resampler.resample(frame)
+        out_pcm = bytearray()
+        for out_frame in out_frames:
+            expected = resampler_state.target_frame_stride * out_frame.samples
+            pcm_bytes = bytes(out_frame.planes[0])[:expected]
+            out_pcm.extend(pcm_bytes)
+
+        output_start_ts = resampler_state.pending_timestamp_us
+
+        # Update pending timestamp based on output samples
+        output_sample_count = len(out_pcm) // resampler_state.target_frame_stride
+        duration_us = int(output_sample_count * 1_000_000 / resampler_state.key.target_sample_rate)
+        resampler_state.pending_timestamp_us += duration_us
+
+        return bytes(out_pcm), output_start_ts
 
     def has_pending_audio(self) -> bool:
         """Return True if there is pending audio to commit."""
@@ -1012,6 +1163,9 @@ class PushStream:
 
         # Reset encoding pipelines to drop any buffered resampler/encoder state.
         self._pipeline_manager.reset()
+
+        # Reset inline resamplers
+        self._resamplers.clear()
 
         # Clear role tracking state
         self._started_roles.clear()
