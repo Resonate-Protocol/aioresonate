@@ -9,7 +9,7 @@ from uuid import uuid4
 
 import pytest
 
-from aiosendspin.server.roles_v2.base import (
+from aiosendspin.server.roles.base import (
     AudioChunk,
     AudioRequirements,
     Role,

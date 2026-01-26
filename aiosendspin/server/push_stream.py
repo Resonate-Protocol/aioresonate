@@ -12,7 +12,7 @@ from aiosendspin.models.types import AudioCodec, Roles
 from aiosendspin.server.audio import AudioFormat, _get_av, _resolve_audio_format
 from aiosendspin.server.channels import MAIN_CHANNEL
 from aiosendspin.server.pipeline import EncodedChunk, PipelineKey, PipelineManager
-from aiosendspin.server.roles_v2 import AudioChunk
+from aiosendspin.server.roles import AudioChunk
 
 if TYPE_CHECKING:
     import av
@@ -21,7 +21,7 @@ if TYPE_CHECKING:
     from aiosendspin.server.client import SendspinClient
     from aiosendspin.server.clock import Clock
     from aiosendspin.server.group import SendspinGroup
-    from aiosendspin.server.roles_v2 import AudioRequirements, Role
+    from aiosendspin.server.roles import AudioRequirements, Role
 
 _LOGGER = logging.getLogger(__name__)
 

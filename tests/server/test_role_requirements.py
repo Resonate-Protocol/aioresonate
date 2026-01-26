@@ -7,7 +7,7 @@ from uuid import UUID
 
 import pytest
 
-from aiosendspin.server.roles_v2 import (
+from aiosendspin.server.roles import (
     AudioChunk,
     AudioRequirements,
     PlayerRole,

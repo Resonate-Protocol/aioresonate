@@ -10,7 +10,7 @@ from aiosendspin.models.player import ClientHelloPlayerSupport, SupportedAudioFo
 from aiosendspin.models.types import AudioCodec, PlayerCommand
 from aiosendspin.server.client import SendspinClient
 from aiosendspin.server.clock import LoopClock
-from aiosendspin.server.roles_v2 import PlayerRole
+from aiosendspin.server.roles import PlayerRole
 
 
 @dataclass(slots=True)

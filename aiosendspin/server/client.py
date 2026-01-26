@@ -23,7 +23,7 @@ from aiosendspin.server.events import ClientEvent, ClientGroupChangedEvent
 from .controller import ControllerClient
 from .metadata import MetadataClient
 from .player import PlayerClient
-from .roles_v2 import PlayerRole, Role
+from .roles import PlayerRole, Role
 from .visualizer import VisualizerClient
 
 if TYPE_CHECKING:
