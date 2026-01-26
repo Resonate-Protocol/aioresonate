@@ -220,7 +220,11 @@ def _make_player(
                 bit_depth=preferred_format.bit_depth,
             )
         else:
-            transformer = PcmPassthrough()
+            transformer = PcmPassthrough(
+                sample_rate=preferred_format.sample_rate,
+                bit_depth=preferred_format.bit_depth,
+                channels=preferred_format.channels,
+            )
         client.player_role._audio_requirements = AudioRequirements(  # noqa: SLF001
             sample_rate=preferred_format.sample_rate,
             bit_depth=preferred_format.bit_depth,

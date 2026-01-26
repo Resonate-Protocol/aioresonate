@@ -109,7 +109,7 @@ def test_player_role_on_stream_start_drops_without_transport() -> None:
         sample_rate=48000,
         bit_depth=16,
         channels=2,
-        transformer=PcmPassthrough(),
+        transformer=PcmPassthrough(sample_rate=48000, bit_depth=16, channels=2),
     )
 
     role.on_stream_start()
@@ -159,7 +159,7 @@ def test_player_role_on_stream_start_sends_message() -> None:
         sample_rate=48000,
         bit_depth=16,
         channels=2,
-        transformer=PcmPassthrough(),
+        transformer=PcmPassthrough(sample_rate=48000, bit_depth=16, channels=2),
     )
 
     role.on_stream_start()

@@ -251,8 +251,15 @@ class TestTransformerPool:
                 self.index = len(reset_counts)
                 reset_counts.append(0)
 
-            def process(self, pcm: bytes, _ts: int, _dur: int) -> bytes:
-                return pcm
+            @property
+            def frame_duration_us(self) -> int:
+                return 25_000
+
+            def process(self, pcm: bytes, _ts: int, _dur: int) -> list[bytes]:
+                return [pcm]
+
+            def flush(self) -> list[bytes]:
+                return []
 
             def get_header(self) -> bytes | None:
                 return None

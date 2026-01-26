@@ -505,8 +505,8 @@ class PushStream:
         resampled_pcm: dict[tuple[UUID, int, int, int], tuple[bytes, int]],
     ) -> dict[tuple[UUID, int], list[CachedChunk]]:
         """Transform PCM and deliver to roles. Returns cache results."""
-        # (channel_id, transformer_id) -> (data, timestamp_us, duration_us)
-        transformed: dict[tuple[UUID, int], tuple[bytes, int, int]] = {}
+        # (channel_id, transformer_id) -> list of (data, timestamp_us, duration_us)
+        transformed: dict[tuple[UUID, int], list[tuple[bytes, int, int]]] = {}
         # Track roles per transform key
         roles_by_transform: dict[
             tuple[UUID, int], list[tuple[SendspinClient, Role, AudioRequirements]]
@@ -516,7 +516,7 @@ class PushStream:
             channel_id, rate, depth, channels = pcm_key
             pcm_data, output_ts = resampled_pcm[pcm_key]
 
-            # Calculate duration
+            # Calculate duration for passthrough (no transformer)
             frame_stride = (depth // 8) * channels
             sample_count = len(pcm_data) // frame_stride if frame_stride > 0 else 0
             duration_us = int(sample_count * 1_000_000 / rate) if rate > 0 else 0
@@ -534,33 +534,56 @@ class PushStream:
                 if tkey not in transformed:
                     transformer = grouped[0][2].transformer
                     if transformer is None:
-                        transformed[tkey] = (pcm_data, output_ts, duration_us)
+                        # No transformer - passthrough as single frame
+                        transformed[tkey] = [(pcm_data, output_ts, duration_us)]
                     else:
-                        # TODO: Update to handle list[bytes] when transformers are updated
-                        data = transformer.process(pcm_data, output_ts, duration_us)
-                        transformed[tkey] = (data, output_ts, duration_us)  # type: ignore[assignment]
+                        # Get base timestamp for output frames:
+                        # If transformer has pending buffered data, use its timestamp
+                        # Otherwise use the input timestamp
+                        # Reset if there's a large timing discontinuity (> 100ms)
+                        base_ts = output_ts
+                        if hasattr(transformer, "pending_timestamp_us"):
+                            pending_ts = transformer.pending_timestamp_us
+                            if pending_ts is not None:
+                                drift_us = abs(pending_ts - output_ts)
+                                if drift_us <= 100_000:
+                                    base_ts = pending_ts
+                                elif hasattr(transformer, "reset"):
+                                    # Large discontinuity - reset transformer
+                                    transformer.reset()
+
+                        # Transformer returns list[bytes] - one tuple per frame
+                        frames = transformer.process(pcm_data, output_ts, duration_us)
+                        frame_duration_us = transformer.frame_duration_us
+                        frame_list: list[tuple[bytes, int, int]] = []
+                        for i, frame_data in enumerate(frames):
+                            frame_ts = base_ts + (i * frame_duration_us)
+                            frame_list.append((frame_data, frame_ts, frame_duration_us))
+                        transformed[tkey] = frame_list
 
         # Deliver and cache
         cache_results: dict[tuple[UUID, int], list[CachedChunk]] = {}
 
-        for tkey, (data, ts, dur) in transformed.items():  # type: ignore[assignment]
-            # TODO: Update to handle list[bytes] when transformers are updated
-            chunk = AudioChunk(data=data, timestamp_us=ts, duration_us=dur, byte_count=len(data))  # type: ignore[arg-type]
-            cached = CachedChunk(
-                timestamp_us=ts,
-                duration_us=dur,
-                payload=data,  # type: ignore[arg-type]
-                byte_count=len(data),
-            )
-            cache_results.setdefault(tkey, []).append(cached)
+        for tkey, frame_list in transformed.items():
+            for data, ts, dur in frame_list:
+                chunk = AudioChunk(
+                    data=data, timestamp_us=ts, duration_us=dur, byte_count=len(data)
+                )
+                cached = CachedChunk(
+                    timestamp_us=ts,
+                    duration_us=dur,
+                    payload=data,
+                    byte_count=len(data),
+                )
+                cache_results.setdefault(tkey, []).append(cached)
 
-            for _client, role, _req in roles_by_transform.get(tkey, []):
-                if role not in self._started_roles:
-                    role.on_stream_start()
-                    self._started_roles.add(role)
+                for _client, role, _req in roles_by_transform.get(tkey, []):
+                    if role not in self._started_roles:
+                        role.on_stream_start()
+                        self._started_roles.add(role)
 
-                if not role.on_audio_chunk(chunk):
-                    self._backpressured_roles.add(role)
+                    if not role.on_audio_chunk(chunk):
+                        self._backpressured_roles.add(role)
 
         return cache_results
 
@@ -695,9 +718,30 @@ class PushStream:
         Stop the stream.
 
         After calling stop(), commit_audio() will raise StreamStoppedError.
-        Sends stream/end message to all roles via hooks.
+        Flushes remaining audio from transformers, then sends stream/end message
+        to all roles via hooks.
         """
         self._is_stopped = True
+
+        # Flush remaining audio from transformers
+        flushed_transformers: set[int] = set()
+        for _client, role in self._get_audio_roles():
+            req = role.get_audio_requirements()
+            if req and req.transformer:
+                tid = id(req.transformer)
+                if tid not in flushed_transformers:
+                    flushed_transformers.add(tid)
+                    final_frames = req.transformer.flush()
+                    if final_frames:
+                        frame_duration_us = req.transformer.frame_duration_us
+                        for frame_data in final_frames:
+                            chunk = AudioChunk(
+                                data=frame_data,
+                                timestamp_us=0,  # Timestamp doesn't matter at stream end
+                                duration_us=frame_duration_us,
+                                byte_count=len(frame_data),
+                            )
+                            role.on_audio_chunk(chunk)
 
         # Send stream/end to all roles with audio requirements via hooks
         for _client, role in self._get_audio_roles():

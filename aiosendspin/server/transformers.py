@@ -141,6 +141,7 @@ class PcmPassthrough:
             channels: Number of channels (e.g., 2 for stereo).
             chunk_duration_us: Duration of each output frame in microseconds.
         """
+        self._sample_rate = sample_rate
         self._chunk_duration_us = chunk_duration_us
         self._frame_stride = (bit_depth // 8) * channels
         # Calculate frame size: samples = sample_rate * duration_s
@@ -149,23 +150,34 @@ class PcmPassthrough:
         chunk_samples = int(sample_rate * chunk_duration_us / 1_000_000)
         self._frame_size = chunk_samples * self._frame_stride
         self._buffer = bytearray()
+        # Track timestamp of the first sample in the buffer
+        self._pending_timestamp_us: int | None = None
 
     @property
     def frame_duration_us(self) -> int:
         """Duration of each output frame in microseconds."""
         return self._chunk_duration_us
 
+    @property
+    def pending_timestamp_us(self) -> int | None:
+        """Timestamp of the first buffered sample, or None if buffer is empty."""
+        return self._pending_timestamp_us
+
     def process(self, pcm: bytes, timestamp_us: int, duration_us: int) -> list[bytes]:  # noqa: ARG002
         """Chunk PCM into fixed-size frames.
 
         Args:
             pcm: Raw PCM audio data.
-            timestamp_us: Playback timestamp in microseconds (unused).
+            timestamp_us: Playback timestamp in microseconds.
             duration_us: Duration of this chunk in microseconds (unused).
 
         Returns:
             List of fixed-size PCM frames. May be empty if buffering.
         """
+        # Track timestamp of first buffered sample
+        if not self._buffer:
+            self._pending_timestamp_us = timestamp_us
+
         self._buffer.extend(pcm)
         frames: list[bytes] = []
 
@@ -173,6 +185,9 @@ class PcmPassthrough:
             frame = bytes(self._buffer[: self._frame_size])
             del self._buffer[: self._frame_size]
             frames.append(frame)
+            # Advance pending timestamp by one frame duration
+            if self._pending_timestamp_us is not None:
+                self._pending_timestamp_us += self._chunk_duration_us
 
         return frames
 
@@ -190,6 +205,7 @@ class PcmPassthrough:
         self._buffer.extend(bytes(padding_needed))
         frame = bytes(self._buffer)
         self._buffer.clear()
+        self._pending_timestamp_us = None
         return [frame]
 
     def get_header(self) -> bytes | None:
@@ -199,6 +215,7 @@ class PcmPassthrough:
     def reset(self) -> None:
         """Reset internal buffer."""
         self._buffer.clear()
+        self._pending_timestamp_us = None
 
 
 class FlacEncoder:

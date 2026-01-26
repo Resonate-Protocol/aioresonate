@@ -113,7 +113,10 @@ def test_player_role_on_stream_start_sends_message_with_pcm() -> None:
     client.send_message = MagicMock()
 
     audio_req = AudioRequirements(
-        sample_rate=48000, bit_depth=16, channels=2, transformer=PcmPassthrough()
+        sample_rate=48000,
+        bit_depth=16,
+        channels=2,
+        transformer=PcmPassthrough(sample_rate=48000, bit_depth=16, channels=2),
     )
     role = PlayerRole(client=client, audio_requirements=audio_req)
     role._has_transport = True  # noqa: SLF001
@@ -158,7 +161,10 @@ def test_player_role_on_stream_start_sets_stream_started_flag() -> None:
     client.send_message = MagicMock()
 
     audio_req = AudioRequirements(
-        sample_rate=48000, bit_depth=16, channels=2, transformer=PcmPassthrough()
+        sample_rate=48000,
+        bit_depth=16,
+        channels=2,
+        transformer=PcmPassthrough(sample_rate=48000, bit_depth=16, channels=2),
     )
     role = PlayerRole(client=client, audio_requirements=audio_req)
     role._has_transport = True  # noqa: SLF001
@@ -188,7 +194,10 @@ def test_player_role_on_stream_start_noop_without_transport() -> None:
     client.send_message = MagicMock()
 
     audio_req = AudioRequirements(
-        sample_rate=48000, bit_depth=16, channels=2, transformer=PcmPassthrough()
+        sample_rate=48000,
+        bit_depth=16,
+        channels=2,
+        transformer=PcmPassthrough(sample_rate=48000, bit_depth=16, channels=2),
     )
     role = PlayerRole(client=client, audio_requirements=audio_req)
     role._has_transport = False  # noqa: SLF001
