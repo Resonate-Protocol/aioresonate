@@ -373,13 +373,16 @@ class SendspinGroup:
 
         self._send_group_update_to_client(client, group_message, controller_state)
 
-        if (
-            self._push_stream is not None
-            and not self._push_stream.is_stopped
-            and client.check_role(Roles.PLAYER)
-        ):
-            logger.debug("Player %s joining active push stream", client.client_id)
-            self._push_stream.on_player_join(client.client_id)
+        if self._push_stream is not None and not self._push_stream.is_stopped:
+            # Call on_player_join for backward compatibility (old flow)
+            if client.check_role(Roles.PLAYER):
+                logger.debug("Player %s joining active push stream", client.client_id)
+                self._push_stream.on_player_join(client.client_id)
+
+            # NEW: Call on_role_join for all roles with audio requirements (hook-based flow)
+            for role in client.active_roles:
+                if role.get_audio_requirements() is not None:
+                    self._push_stream.on_role_join(role)
 
     def _send_controller_state_to_clients(self) -> None:
         """Send server/state with controller payload to all controller clients."""
@@ -1194,13 +1197,16 @@ class SendspinGroup:
         client._set_group(self)  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
 
         # Handle player joining/reconnecting with active PushStream
-        if (
-            self._push_stream is not None
-            and not self._push_stream.is_stopped
-            and client.check_role(Roles.PLAYER)
-        ):
-            logger.debug("Player %s joining active push stream", client.client_id)
-            self._push_stream.on_player_join(client.client_id)
+        if self._push_stream is not None and not self._push_stream.is_stopped:
+            # Call on_player_join for backward compatibility (old flow)
+            if client.check_role(Roles.PLAYER):
+                logger.debug("Player %s joining active push stream", client.client_id)
+                self._push_stream.on_player_join(client.client_id)
+
+            # NEW: Call on_role_join for all roles with audio requirements (hook-based flow)
+            for role in client.active_roles:
+                if role.get_audio_requirements() is not None:
+                    self._push_stream.on_role_join(role)
 
         # Send current state to the new client
         group_message = GroupUpdateServerMessage(

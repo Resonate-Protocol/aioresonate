@@ -1145,6 +1145,66 @@ class PushStream:
                 byte_count=chunk.byte_count,
             )
 
+    def on_role_join(self, role: Role) -> None:
+        """
+        Handle late joiner catch-up via hooks.
+
+        Uses the new role-based chunk cache to deliver cached audio to a role
+        that just joined.
+
+        Args:
+            role: The role that joined.
+        """
+        req = role.get_audio_requirements()
+        if req is None:
+            return
+
+        transformer = req.transformer
+        channel_id = req.channel_id or MAIN_CHANNEL
+
+        # Get cached chunks for this transformer from the role-based cache
+        transformer_id = id(transformer) if transformer else 0
+        cache_key = (channel_id, transformer_id)
+        cached = self._role_chunk_cache.get(cache_key, [])
+
+        if not cached:
+            return
+
+        # Filter to chunks in the future (late joiner timing)
+        now_us = self._clock.now_us()
+        min_timestamp_us = now_us + LATE_JOINER_MIN_LEAD_US
+        future_chunks = [c for c in cached if c.timestamp_us >= min_timestamp_us]
+
+        if not future_chunks:
+            return
+
+        if _LOGGER.isEnabledFor(logging.DEBUG):
+            first_ts = future_chunks[0].timestamp_us
+            last_ts = future_chunks[-1].timestamp_us
+            _LOGGER.debug(
+                "Late join catch-up via role hook: chunks=%s ts_range=%s..%s",
+                len(future_chunks),
+                first_ts,
+                last_ts,
+            )
+
+        # Send stream/start via hook
+        role.on_stream_start()
+        self._started_roles.add(role)
+
+        # Send cached chunks via hooks
+        for cached_chunk in future_chunks:
+            chunk = AudioChunk(
+                data=cached_chunk.payload,
+                timestamp_us=cached_chunk.timestamp_us,
+                duration_us=cached_chunk.duration_us,
+                byte_count=cached_chunk.byte_count,
+            )
+            if not role.on_audio_chunk(chunk):
+                # Backpressure - stop sending
+                self._backpressured_roles.add(role)
+                break
+
     def _limit_catchup_chunks(
         self,
         player: SendspinClient,
