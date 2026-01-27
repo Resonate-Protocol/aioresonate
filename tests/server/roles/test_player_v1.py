@@ -213,7 +213,6 @@ def test_player_role_on_stream_start_noop_without_transport() -> None:
 def test_player_role_on_audio_chunk_returns_true_on_success() -> None:
     """on_audio_chunk() returns True when chunk sent successfully."""
     client = MagicMock()
-    client.queue_high_water.return_value = False
     client.try_send_binary.return_value = True
 
     role = PlayerRole(client=client)
@@ -230,7 +229,6 @@ def test_player_role_on_audio_chunk_packs_binary_header() -> None:
     """on_audio_chunk() packs binary header with timestamp."""
     sent_data: list[bytes] = []
     client = MagicMock()
-    client.queue_high_water.return_value = False
 
     def capture_send(data: bytes, **kwargs: object) -> bool:  # noqa: ARG001
         sent_data.append(data)
@@ -254,7 +252,6 @@ def test_player_role_on_audio_chunk_packs_binary_header() -> None:
 def test_player_role_on_audio_chunk_passes_buffer_metadata() -> None:
     """on_audio_chunk() passes buffer tracking metadata to try_send_binary."""
     client = MagicMock()
-    client.queue_high_water.return_value = False
     client.try_send_binary.return_value = True
 
     role = PlayerRole(client=client)
@@ -269,25 +266,9 @@ def test_player_role_on_audio_chunk_passes_buffer_metadata() -> None:
     assert call_kwargs["duration_us"] == 25000
 
 
-def test_player_role_on_audio_chunk_returns_false_on_queue_high_water() -> None:
-    """on_audio_chunk() returns False when queue is full."""
-    client = MagicMock()
-    client.queue_high_water.return_value = True  # Queue full
-
-    role = PlayerRole(client=client)
-    role._has_transport = True  # noqa: SLF001
-
-    chunk = AudioChunk(data=b"audio", timestamp_us=1000, duration_us=25000, byte_count=5)
-    result = role.on_audio_chunk(chunk)
-
-    assert result is False
-    client.try_send_binary.assert_not_called()
-
-
 def test_player_role_on_audio_chunk_returns_false_on_send_failure() -> None:
     """on_audio_chunk() returns False when try_send_binary fails."""
     client = MagicMock()
-    client.queue_high_water.return_value = False
     client.try_send_binary.return_value = False  # Send failed
 
     role = PlayerRole(client=client)

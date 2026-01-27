@@ -37,9 +37,6 @@ class _FakeConnection:
     ) -> bool:
         return True
 
-    def queue_high_water(self, threshold: float = 0.8) -> bool:  # noqa: ARG002
-        return False
-
 
 @pytest.fixture
 def mock_loop() -> MagicMock:

@@ -39,7 +39,6 @@ class _FakeConnection:
     def __init__(self) -> None:
         self.sent_json: list[object] = []
         self.sent_binary: list[bytes] = []
-        self.high_water = False
         self.buffer_tracker = None
 
     async def disconnect(self, *, retry_connection: bool = True) -> None:  # noqa: ARG002
@@ -64,9 +63,6 @@ class _FakeConnection:
         ):
             self.buffer_tracker.register(buffer_end_time_us, buffer_byte_count)
         return True
-
-    def queue_high_water(self, threshold: float = 0.8) -> bool:  # noqa: ARG002
-        return self.high_water
 
 
 def _make_client_hello() -> MagicMock:

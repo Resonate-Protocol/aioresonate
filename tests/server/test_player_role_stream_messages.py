@@ -61,7 +61,6 @@ def test_player_role_on_audio_chunk_packs_header_and_tracks_duration() -> None:
     sent: list[bytes] = []
     client = MagicMock()
     client.buffer_tracker = tracker
-    client.queue_high_water = MagicMock(return_value=False)
 
     def _try_send_binary(
         data: bytes,
@@ -174,7 +173,6 @@ def test_player_role_on_stream_start_sends_message() -> None:
 def test_player_role_on_audio_chunk_returns_true() -> None:
     """on_audio_chunk() returns True when chunk sent successfully."""
     client = MagicMock()
-    client.queue_high_water.return_value = False
     client.try_send_binary.return_value = True
 
     role = PlayerRole(client=client)
@@ -185,17 +183,3 @@ def test_player_role_on_audio_chunk_returns_true() -> None:
 
     assert result is True
     client.try_send_binary.assert_called_once()
-
-
-def test_player_role_on_audio_chunk_returns_false_on_backpressure() -> None:
-    """on_audio_chunk() returns False when queue is full."""
-    client = MagicMock()
-    client.queue_high_water.return_value = True  # Queue full
-
-    role = PlayerRole(client=client)
-    role._has_transport = True  # noqa: SLF001
-
-    chunk = AudioChunk(data=b"audio", timestamp_us=1000, duration_us=25000, byte_count=5)
-    result = role.on_audio_chunk(chunk)
-
-    assert result is False

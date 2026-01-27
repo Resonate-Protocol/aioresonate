@@ -39,9 +39,6 @@ class _DummyConnection:
     ) -> bool:
         return True
 
-    def queue_high_water(self, threshold: float = 0.8) -> bool:  # noqa: ARG002
-        return False
-
 
 def _player_hello(client_id: str) -> ClientHelloPayload:
     return ClientHelloPayload(

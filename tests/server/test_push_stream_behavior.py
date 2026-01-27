@@ -43,7 +43,6 @@ class _FakeConnection:
     def __init__(self) -> None:
         self.sent_json: list[object] = []
         self.sent_binary: list[bytes] = []
-        self.high_water = False
         self.buffer_tracker = None
 
     async def disconnect(self, *, retry_connection: bool = True) -> None:  # noqa: ARG002
@@ -68,9 +67,6 @@ class _FakeConnection:
         ):
             self.buffer_tracker.register(buffer_end_time_us, buffer_byte_count)
         return True
-
-    def queue_high_water(self, threshold: float = 0.8) -> bool:  # noqa: ARG002
-        return self.high_water
 
 
 def _make_connected_player(
@@ -147,26 +143,6 @@ async def test_commit_audio_sends_stream_start_and_binary(mock_loop: Any) -> Non
     assert header.message_type == 4  # BinaryMessageType.AUDIO_CHUNK
     assert client.buffer_tracker is not None
     assert client.buffer_tracker.buffered_bytes > 0
-
-
-@pytest.mark.asyncio
-async def test_queue_high_water_drops_audio(mock_loop: Any) -> None:
-    """When the connection queue is congested, audio is dropped (backpressure)."""
-    group = _DummyGroup(clients=[])
-    _, conn = _make_connected_player(mock_loop, group, "p1")
-    conn.high_water = True
-
-    stream = PushStream(
-        loop=mock_loop, clock=LoopClock(mock_loop), group=group, channel_router=ChannelRouter()
-    )
-    stream.prepare_audio(
-        bytes(4800),
-        AudioFormat(sample_rate=48000, bit_depth=16, channels=2),
-    )
-    await stream.commit_audio()
-
-    # No binary data should be sent when queue is at high water
-    assert not conn.sent_binary
 
 
 @pytest.mark.asyncio

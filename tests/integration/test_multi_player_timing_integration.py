@@ -75,9 +75,6 @@ class _CaptureConnection:
             self.buffer_tracker.register(buffer_end_time_us, buffer_byte_count)
         return True
 
-    def queue_high_water(self, threshold: float = 0.8) -> bool:  # noqa: ARG002
-        return False
-
 
 @dataclass(slots=True)
 class _DecodedSegment:
