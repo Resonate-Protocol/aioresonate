@@ -34,7 +34,6 @@ from aiosendspin.models.types import (
     GoodbyeReason,
     Roles,
     ServerMessage,
-    has_role,
     negotiate_active_roles,
 )
 
@@ -129,11 +128,9 @@ class SendspinConnection:
 
     def requires_initial_state(self) -> bool:
         """Whether this connection must receive initial client/state before being 'connected'."""
-        # FB: make this role independent, expand the role ABC so this can check if any role needs it
-        # FB: also, look if we got the state of all roles that need the initial state, not just if
-        # we got the message, but if it had the subobject for all needed roles.
-        # (can be sent in multiple messages or combined)
-        return has_role(Roles.PLAYER.value, self._active_roles)
+        if self._client is None:
+            return False
+        return any(role.requires_initial_state() for role in self._client.active_roles)
 
     def drop_pending_binary(self) -> None:
         """Drop any queued (not-yet-sent) binary payloads for this connection."""
