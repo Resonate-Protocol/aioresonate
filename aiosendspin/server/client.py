@@ -352,14 +352,6 @@ class SendspinClient:
             duration_us=duration_us,
         )
 
-    # FB: remove client side backpressure, assume that clients have enough throughput,
-    # just discard outdated binary chunks in case of overload.
-    def queue_high_water(self, threshold: float = 0.8) -> bool:
-        """Return True if the outgoing queue is above a high-water mark."""
-        if self._connection is None:
-            return False
-        return self._connection.queue_high_water(threshold=threshold)
-
     # ---- Player streaming state ----
     # FB: remove player related methods from here,
     # they belong in player_v1.py

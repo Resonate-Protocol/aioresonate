@@ -149,11 +149,7 @@ class PlayerRole(Role):
         self._stream_started = True
 
     def on_audio_chunk(self, chunk: AudioChunk) -> bool:
-        """Pack and send binary audio. Return False for backpressure."""
-        # Check backpressure
-        if self._client.queue_high_water(threshold=0.5):
-            return False
-
+        """Pack and send binary audio. Late audio is discarded by connection."""
         # Pack binary header and send
         header = pack_binary_header_raw(BinaryMessageType.AUDIO_CHUNK.value, chunk.timestamp_us)
         packed_data = header + chunk.data

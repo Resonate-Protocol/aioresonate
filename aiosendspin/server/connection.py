@@ -159,14 +159,6 @@ class SendspinConnection:
             return False
         return True
 
-    # FB: remove client side backpressure, assume that clients have enough throughput
-    def queue_high_water(self, threshold: float = 0.8) -> bool:
-        """Return True if the outgoing queue is at/above a high water mark."""
-        max_size = self._to_write.maxsize
-        if max_size <= 0:
-            return False
-        return self._to_write.qsize() >= max_size * threshold
-
     def queue_status(self) -> tuple[int, int]:
         """Return (qsize, maxsize) for the outgoing queue."""
         return self._to_write.qsize(), self._to_write.maxsize
