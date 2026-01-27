@@ -112,6 +112,10 @@ class PlayerRole(Role):
         """Clean up on disconnect."""
         self._stream_started = False
 
+    def requires_initial_state(self) -> bool:
+        """Player role requires initial state with volume/mute info."""
+        return True
+
     # --- Stream lifecycle hooks ---
 
     def on_stream_start(self) -> None:
