@@ -161,3 +161,11 @@ class Role(ABC):
     @abstractmethod
     def on_disconnect(self) -> None:
         """Handle connection close."""
+
+    def requires_initial_state(self) -> bool:
+        """Whether this role requires initial client/state before being 'connected'.
+
+        Roles that return True will block the connection's "connected" status
+        until their initial state subobject is received in client/state.
+        """
+        return False
