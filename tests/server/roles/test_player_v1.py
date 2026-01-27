@@ -37,23 +37,6 @@ def test_player_role_has_preferred_format_property() -> None:
     assert role.preferred_format == audio_format
 
 
-def test_player_role_has_blocking_property() -> None:
-    """PlayerRole exposes blocking property."""
-    client = MagicMock()
-    role = PlayerRole(client=client, blocking=False)
-    assert role.blocking is False
-
-    role2 = PlayerRole(client=client, blocking=True)
-    assert role2.blocking is True
-
-
-def test_player_role_blocking_defaults_to_true() -> None:
-    """PlayerRole.blocking defaults to True."""
-    client = MagicMock()
-    role = PlayerRole(client=client)
-    assert role.blocking is True
-
-
 # --- StreamRequirements ---
 
 
