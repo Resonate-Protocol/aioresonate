@@ -363,22 +363,25 @@ class TestFlacEncoder:
     def test_flac_encoder_flush_empty_buffer(self) -> None:
         """FlacEncoder flush returns empty list when buffer is empty."""
         encoder = FlacEncoder(sample_rate=48000, bit_depth=16, channels=2)
+        # FLAC frame size is 4608 samples = 18432 bytes at 48kHz stereo 16-bit.
+        # Process exactly one FLAC frame worth of data.
+        flac_frame_bytes = 4608 * 4  # 4608 samples * 4 bytes per sample
         encoder.process(
-            bytes(4800), timestamp_us=0, duration_us=25_000
-        )  # Process exactly one frame
+            bytes(flac_frame_bytes), timestamp_us=0, duration_us=96_000
+        )  # Process exactly one FLAC frame
         result = encoder.flush()
         assert result == []
 
     def test_flac_encoder_pending_timestamp_continuous(self) -> None:
         """FlacEncoder pending_timestamp_us produces continuous frame timestamps.
 
-        FLAC codec has ~750ms internal buffering delay, so pending_timestamp_us
-        tracks output frame count rather than input timestamps. This ensures
-        that frame timestamps are continuous regardless of input chunk sizes.
+        FLAC uses a block size of 4608 samples (~96ms at 48kHz). pending_timestamp_us
+        tracks output frame count to ensure timestamps are continuous regardless
+        of input chunk sizes.
         """
         encoder = FlacEncoder(sample_rate=48000, bit_depth=16, channels=2)
 
-        # Simulate source sending 1005ms chunks (doesn't align with 25ms frames)
+        # Simulate source sending 1005ms chunks (doesn't align with FLAC frames)
         chunk_bytes = int(48000 * 1.005) * 4  # ~1005ms of audio
 
         timestamps: list[int] = []
@@ -390,19 +393,21 @@ class TestFlacEncoder:
             base_ts = pending_before if pending_before is not None else input_ts
 
             frames = encoder.process(bytes(chunk_bytes), input_ts, 1_005_000)
+            frame_dur = encoder.frame_duration_us  # ~96ms for FLAC
 
             # Calculate frame timestamps
             for i in range(len(frames)):
-                frame_ts = base_ts + i * 25_000
+                frame_ts = base_ts + i * frame_dur
                 timestamps.append(frame_ts)
 
-        # Verify we got output
-        assert len(timestamps) > 20, f"Expected >20 frames, got {len(timestamps)}"
+        # Verify we got output (1005ms * 5 = 5025ms, at ~96ms/frame = ~52 frames)
+        assert len(timestamps) > 40, f"Expected >40 frames, got {len(timestamps)}"
 
-        # Verify timestamps are continuous (each frame is 25ms after previous)
+        # Verify timestamps are continuous (each frame is frame_dur after previous)
+        frame_dur = encoder.frame_duration_us
         for i in range(1, len(timestamps)):
             gap = timestamps[i] - timestamps[i - 1]
-            assert gap == 25_000, (
-                f"Frame {i}: gap={gap}us, expected 25000us. "
+            assert gap == frame_dur, (
+                f"Frame {i}: gap={gap}us, expected {frame_dur}us. "
                 f"Timestamps around gap: {timestamps[max(0, i - 2) : i + 2]}"
             )

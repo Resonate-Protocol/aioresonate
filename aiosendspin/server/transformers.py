@@ -302,6 +302,12 @@ class FlacEncoder:
         with av.logging.Capture():
             self._encoder.open()
 
+        # Update chunk duration to match FLAC's actual block size.
+        # FLAC determines its own block size (e.g., 4608 samples = 96ms at 48kHz),
+        # regardless of what input frame sizes we use.
+        self._chunk_samples = self._encoder.frame_size
+        self._chunk_duration_us = int(self._chunk_samples / self._sample_rate * 1_000_000)
+
         header = bytes(self._encoder.extradata) if self._encoder.extradata else b""
         if header:
             self._codec_header = b"fLaC\x80" + len(header).to_bytes(3, "big") + header

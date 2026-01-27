@@ -540,16 +540,22 @@ class PushStream:
                         # Transformer returns list[bytes] - one tuple per frame
                         frames = transformer.process(pcm_data, output_ts, duration_us)
 
-                        # Spread frames across the input duration. Codecs like FLAC have
-                        # internal buffering, so output frame count may not match input
-                        # duration. Spreading ensures timestamps cover the full input.
+                        # Get base timestamp AFTER processing. Transformers track output
+                        # timeline via pending_timestamp_us. Getting it after process()
+                        # ensures gap detection (which resets the timeline) is applied.
+                        # pending_timestamp_us points to the NEXT frame's timestamp,
+                        # so base_ts = pending - (num_frames * frame_dur).
                         frame_list: list[tuple[bytes, int, int]] = []
                         if frames:
-                            # Calculate timestamp increment to spread across input duration
-                            ts_increment = duration_us // len(frames)
+                            frame_dur = transformer.frame_duration_us
+                            base_ts = output_ts
+                            if hasattr(transformer, "pending_timestamp_us"):
+                                pending = transformer.pending_timestamp_us
+                                if pending is not None:
+                                    base_ts = pending - (len(frames) * frame_dur)
                             for i, frame_data in enumerate(frames):
-                                frame_ts = output_ts + (i * ts_increment)
-                                frame_list.append((frame_data, frame_ts, ts_increment))
+                                frame_ts = base_ts + (i * frame_dur)
+                                frame_list.append((frame_data, frame_ts, frame_dur))
                         transformed[tkey] = frame_list
 
         # Deliver and cache
