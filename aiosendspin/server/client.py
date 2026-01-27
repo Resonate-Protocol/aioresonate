@@ -226,7 +226,8 @@ class SendspinClient:
         # Player persistent state (survives reconnects, role gets a reference).
         has_player_role = has_role(Roles.PLAYER.value, self._negotiated_roles)
         if has_player_role and self.info.player_support is not None:
-            capacity = self.info.player_support.buffer_capacity
+            # TODO: Remove this mock - hardcoded to ~5s of FLAC for testing
+            capacity = 500_000  # self.info.player_support.buffer_capacity
             if self._buffer_tracker is None:
                 self._buffer_tracker = BufferTracker(
                     clock=self._server.clock,

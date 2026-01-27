@@ -80,7 +80,7 @@ def test_player_role_get_binary_handling_returns_handling_for_audio_chunk() -> N
     assert handling.drop_late is True
     assert handling.grace_period_us == 2_000_000
     assert handling.rate_limit is True
-    assert handling.rate_limit_factor == 1.1
+    assert handling.rate_limit_factor == 2.0
     assert handling.buffer_track is True
 
 

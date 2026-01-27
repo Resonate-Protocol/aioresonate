@@ -54,6 +54,7 @@ class _BinaryFrame:
 
     epoch: int
     data: bytes
+    queued_at_us: int
     buffer_end_time_us: int | None = None
     buffer_byte_count: int | None = None
     duration_us: int | None = None
@@ -146,6 +147,7 @@ class SendspinConnection:
                 _BinaryFrame(
                     epoch=self._binary_epoch,
                     data=data,
+                    queued_at_us=self._server.clock.now_us(),
                     buffer_end_time_us=buffer_end_time_us,
                     buffer_byte_count=buffer_byte_count,
                     duration_us=duration_us,
@@ -407,6 +409,11 @@ class SendspinConnection:
 
         if late_by_us > 0 and not in_grace_period:
             role._late_skips_since_log += 1  # noqa: SLF001
+            self._logger.debug(
+                "Discarding late chunk: late_by=%.1fms, plays_in=%.1fms",
+                late_by_us / 1000,
+                -late_by_us / 1000,
+            )
             now_s = time.monotonic()
             if now_s - role._last_late_log_s >= 1.0:  # noqa: SLF001
                 qsize, qmax = self.queue_status()
@@ -425,6 +432,18 @@ class SendspinConnection:
             return True
         return False
 
+    def _log_queue_stall(self, queued_at_us: int, timestamp_us: int, now: int, qsize: int) -> None:
+        """Log if a chunk waited too long in the queue (stall detection)."""
+        queue_wait_ms = (now - queued_at_us) / 1000
+        plays_in_ms = (timestamp_us - now) / 1000
+        if queue_wait_ms > 100:  # Chunk waited >100ms in queue
+            self._logger.debug(
+                "Queue stall: waited=%.0fms queue=%d plays_in=%.0fms",
+                queue_wait_ms,
+                qsize,
+                plays_in_ms,
+            )
+
     async def _writer(self) -> None:
         wsock = self._wsock_server or self._wsock_client
         assert wsock is not None
@@ -437,6 +456,12 @@ class SendspinConnection:
                         continue
                     data = item.data
                     header = unpack_binary_header(data)
+                    now = self._server.clock.now_us()
+
+                    # Detect queue stalls
+                    self._log_queue_stall(
+                        item.queued_at_us, header.timestamp_us, now, self._to_write.qsize()
+                    )
 
                     # Find the role that handles this message type
                     handling = None
@@ -467,7 +492,7 @@ class SendspinConnection:
                             item.buffer_end_time_us, item.buffer_byte_count
                         )
 
-                    # Rate limiting (skip during grace period to allow initial burst)
+                    # Rate limiting with timestamp-based pacing
                     if (
                         handling is not None
                         and handling.rate_limit
@@ -476,11 +501,33 @@ class SendspinConnection:
                     ):
                         now = self._server.clock.now_us()
                         start_time = handling_role._stream_start_time_us  # noqa: SLF001
-                        if start_time is not None:
-                            elapsed = now - start_time
-                            if elapsed >= handling.grace_period_us:
-                                delay_s = item.duration_us / handling.rate_limit_factor / 1_000_000
-                                await asyncio.sleep(delay_s)
+                        plays_in_us = header.timestamp_us - now
+                        qsize = self._to_write.qsize()
+
+                        if start_time is None or (now - start_time) < handling.grace_period_us:
+                            # Grace period: send at rate_limit_factor (fast but not unlimited)
+                            delay_s = item.duration_us / handling.rate_limit_factor / 1_000_000
+                        elif qsize > 20:
+                            # Queue building up - send faster to drain it
+                            delay_s = item.duration_us / handling.rate_limit_factor / 1_000_000
+                        elif plays_in_us > 5_000_000:  # >5s buffer = healthy
+                            # Buffer healthy and queue low - send at ~1.1x realtime
+                            delay_s = item.duration_us / 1.1 / 1_000_000
+                        else:
+                            # Buffer low - send faster to catch up
+                            delay_s = item.duration_us / handling.rate_limit_factor / 1_000_000
+                        sleep_start = self._server.clock.now_us()
+                        await asyncio.sleep(delay_s)
+                        sleep_actual_ms = (self._server.clock.now_us() - sleep_start) / 1000
+                        sleep_expected_ms = delay_s * 1000
+                        if (
+                            sleep_actual_ms > sleep_expected_ms + 50
+                        ):  # Slept >50ms longer than expected
+                            self._logger.debug(
+                                "Slow sleep: expected=%.0fms actual=%.0fms (event loop blocked?)",
+                                sleep_expected_ms,
+                                sleep_actual_ms,
+                            )
                     continue
 
                 await wsock.send_str(item.to_json())

@@ -33,13 +33,14 @@ class _DummyServer:
 
 def test_binary_frame_supports_buffer_registration_metadata() -> None:
     """_BinaryFrame should optionally carry buffer registration info."""
-    frame_simple = _BinaryFrame(epoch=1, data=b"test")
+    frame_simple = _BinaryFrame(epoch=1, data=b"test", queued_at_us=0)
     assert frame_simple.buffer_end_time_us is None
     assert frame_simple.buffer_byte_count is None
 
     frame_with_meta = _BinaryFrame(
         epoch=1,
         data=b"test",
+        queued_at_us=0,
         buffer_end_time_us=1_000_000,
         buffer_byte_count=1234,
     )
