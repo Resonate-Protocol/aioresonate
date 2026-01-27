@@ -56,7 +56,7 @@ from .channels import ChannelRouter
 from .events import ClientEvent, VolumeChangedEvent
 from .metadata import Metadata
 from .push_stream import PushStream
-from .transformers import TransformerPool
+from .transformers import FlacEncoder, PcmPassthrough, TransformerPool
 
 # The cyclic import is not an issue during runtime, so hide it
 # pyright: reportImportCycles=none
@@ -1172,6 +1172,21 @@ class SendspinGroup:
 
         # Then set the group (which will emit ClientGroupChangedEvent)
         client._set_group(self)  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+
+        # Update role transformers to use this group's pool (for cache key matching)
+        for role in client.active_roles:
+            req = role.get_audio_requirements()
+            if req is not None and req.transformer is not None:
+                # Get equivalent transformer from this group's pool
+                transformer_type = type(req.transformer)
+                if transformer_type in (FlacEncoder, PcmPassthrough):
+                    new_transformer = self._transformer_pool.get_or_create(
+                        transformer_type,
+                        sample_rate=req.sample_rate,
+                        bit_depth=req.bit_depth,
+                        channels=req.channels,
+                    )
+                    role._audio_requirements = replace(req, transformer=new_transformer)  # type: ignore[attr-defined]  # noqa: SLF001
 
         # Handle player joining/reconnecting with active PushStream
         if self._push_stream is not None and not self._push_stream.is_stopped:

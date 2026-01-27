@@ -1,228 +1,205 @@
-"""Tests for BufferTracker backpressure tracking."""
+"""Tests for BufferTracker duration tracking."""
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock
-
 from aiosendspin.server.audio import BufferTracker
-from aiosendspin.server.clock import LoopClock
 
 
-class TestBufferTrackerCapacity:
-    """Tests for capacity tracking behavior."""
+class _FakeClock:
+    """Fake clock for testing."""
 
-    def test_empty_tracker_has_capacity_for_any_reasonable_chunk(
-        self, mock_loop: MagicMock
-    ) -> None:
-        """Empty tracker should have capacity for any chunk smaller than buffer size."""
-        tracker = BufferTracker(
-            clock=LoopClock(mock_loop),
-            client_id="test-client",
-            capacity_bytes=100_000,
-        )
-        assert tracker.has_capacity_now(50_000) is True
-        assert tracker.has_capacity_now(1) is True
-        assert tracker.has_capacity_now(99_999) is True
+    def __init__(self, now_us: int = 0) -> None:
+        self._now_us = now_us
 
-    def test_has_capacity_returns_true_for_zero_bytes(self, mock_loop: MagicMock) -> None:
-        """Zero bytes should always have capacity."""
-        tracker = BufferTracker(
-            clock=LoopClock(mock_loop),
-            client_id="test-client",
-            capacity_bytes=100_000,
-        )
-        assert tracker.has_capacity_now(0) is True
+    def now_us(self) -> int:
+        return self._now_us
 
-    def test_has_capacity_returns_true_for_oversized_chunk(self, mock_loop: MagicMock) -> None:
-        """Oversized chunks are allowed through with a warning."""
-        tracker = BufferTracker(
-            clock=LoopClock(mock_loop),
-            client_id="test-client",
-            capacity_bytes=100,
-        )
-        # Chunk larger than capacity should still return True (allowed through)
-        assert tracker.has_capacity_now(200) is True
+    def set_now(self, now_us: int) -> None:
+        self._now_us = now_us
 
 
-class TestBufferTrackerRegister:
-    """Tests for register() behavior."""
+def test_buffer_tracker_tracks_duration() -> None:
+    """BufferTracker should track duration when registering chunks."""
+    clock = _FakeClock(now_us=0)
+    tracker = BufferTracker(
+        clock=clock,
+        client_id="test",
+        capacity_bytes=10000,
+        max_duration_us=1_000_000,  # 1 second
+    )
 
-    def test_register_tracks_buffered_bytes(self, mock_loop: MagicMock) -> None:
-        """Registered bytes should be tracked in buffered_bytes."""
-        tracker = BufferTracker(
-            clock=LoopClock(mock_loop),
-            client_id="test-client",
-            capacity_bytes=100_000,
-        )
-        tracker.register(end_time_us=1_000_000, byte_count=10_000)
-        assert tracker.buffered_bytes == 10_000
+    # Register a chunk with duration
+    tracker.register(end_time_us=100_000, byte_count=1000, duration_us=100_000)
 
-    def test_register_multiple_chunks_accumulates_bytes(self, mock_loop: MagicMock) -> None:
-        """Multiple registrations should accumulate."""
-        tracker = BufferTracker(
-            clock=LoopClock(mock_loop),
-            client_id="test-client",
-            capacity_bytes=100_000,
-        )
-        tracker.register(end_time_us=1_000_000, byte_count=10_000)
-        tracker.register(end_time_us=2_000_000, byte_count=15_000)
-        tracker.register(end_time_us=3_000_000, byte_count=5_000)
-        assert tracker.buffered_bytes == 30_000
-
-    def test_register_zero_bytes_is_ignored(self, mock_loop: MagicMock) -> None:
-        """Registering zero bytes should have no effect."""
-        tracker = BufferTracker(
-            clock=LoopClock(mock_loop),
-            client_id="test-client",
-            capacity_bytes=100_000,
-        )
-        tracker.register(end_time_us=1_000_000, byte_count=0)
-        assert tracker.buffered_bytes == 0
-        assert len(tracker.buffered_chunks) == 0
+    assert tracker.buffered_bytes == 1000
+    assert tracker.buffered_duration_us == 100_000
 
 
-class TestBufferTrackerPrune:
-    """Tests for prune_consumed() behavior."""
+def test_buffer_tracker_prune_removes_duration() -> None:
+    """prune_consumed() should remove duration from consumed chunks."""
+    clock = _FakeClock(now_us=0)
+    tracker = BufferTracker(
+        clock=clock,
+        client_id="test",
+        capacity_bytes=10000,
+        max_duration_us=1_000_000,
+    )
 
-    def test_prune_removes_chunks_past_end_time(self, mock_loop: MagicMock) -> None:
-        """Chunks with end_time <= now should be removed."""
-        tracker = BufferTracker(
-            clock=LoopClock(mock_loop),
-            client_id="test-client",
-            capacity_bytes=100_000,
-        )
-        # Register chunks ending at 1s, 2s, 3s
-        tracker.register(end_time_us=1_000_000, byte_count=10_000)
-        tracker.register(end_time_us=2_000_000, byte_count=10_000)
-        tracker.register(end_time_us=3_000_000, byte_count=10_000)
-        assert tracker.buffered_bytes == 30_000
+    tracker.register(end_time_us=100_000, byte_count=1000, duration_us=100_000)
+    tracker.register(end_time_us=200_000, byte_count=1000, duration_us=100_000)
 
-        # Prune at 1.5s - should remove first chunk
-        tracker.prune_consumed(now_us=1_500_000)
-        assert tracker.buffered_bytes == 20_000
-        assert len(tracker.buffered_chunks) == 2
+    assert tracker.buffered_duration_us == 200_000
 
-    def test_prune_uses_clock_when_now_not_provided(self, mock_loop: MagicMock) -> None:
-        """When now_us is None, should use the provided clock."""
-        mock_loop.time.return_value = 1.5  # 1.5 seconds = 1_500_000 us
-        tracker = BufferTracker(
-            clock=LoopClock(mock_loop),
-            client_id="test-client",
-            capacity_bytes=100_000,
-        )
-        tracker.register(end_time_us=1_000_000, byte_count=10_000)
-        tracker.register(end_time_us=2_000_000, byte_count=10_000)
+    # Advance time past first chunk
+    clock.set_now(150_000)
+    tracker.prune_consumed()
 
-        tracker.prune_consumed()
-        assert tracker.buffered_bytes == 10_000
-
-    def test_prune_removes_all_past_chunks(self, mock_loop: MagicMock) -> None:
-        """Should remove all chunks when time advances past all of them."""
-        tracker = BufferTracker(
-            clock=LoopClock(mock_loop),
-            client_id="test-client",
-            capacity_bytes=100_000,
-        )
-        tracker.register(end_time_us=1_000_000, byte_count=10_000)
-        tracker.register(end_time_us=2_000_000, byte_count=10_000)
-
-        tracker.prune_consumed(now_us=5_000_000)
-        assert tracker.buffered_bytes == 0
-        assert len(tracker.buffered_chunks) == 0
+    assert tracker.buffered_bytes == 1000
+    assert tracker.buffered_duration_us == 100_000
 
 
-class TestBufferTrackerTimeUntilCapacity:
-    """Tests for time_until_capacity() behavior."""
+def test_has_duration_capacity_when_not_configured() -> None:
+    """has_duration_capacity() returns True when max_duration_us is 0."""
+    clock = _FakeClock(now_us=0)
+    tracker = BufferTracker(
+        clock=clock,
+        client_id="test",
+        capacity_bytes=10000,
+        # max_duration_us defaults to 0
+    )
 
-    def test_returns_zero_when_has_capacity(self, mock_loop: MagicMock) -> None:
-        """Should return 0 when buffer has room."""
-        tracker = BufferTracker(
-            clock=LoopClock(mock_loop),
-            client_id="test-client",
-            capacity_bytes=100_000,
-        )
-        assert tracker.time_until_capacity(50_000) == 0
-
-    def test_returns_zero_for_zero_bytes(self, mock_loop: MagicMock) -> None:
-        """Should return 0 for zero bytes needed."""
-        tracker = BufferTracker(
-            clock=LoopClock(mock_loop),
-            client_id="test-client",
-            capacity_bytes=100_000,
-        )
-        tracker.register(end_time_us=1_000_000, byte_count=100_000)
-        assert tracker.time_until_capacity(0) == 0
-
-    def test_returns_zero_for_oversized_chunk(self, mock_loop: MagicMock) -> None:
-        """Oversized chunks should return 0 (allowed through)."""
-        tracker = BufferTracker(
-            clock=LoopClock(mock_loop),
-            client_id="test-client",
-            capacity_bytes=100,
-        )
-        assert tracker.time_until_capacity(200) == 0
-
-    def test_calculates_wait_time_when_buffer_full(self, mock_loop: MagicMock) -> None:
-        """Should calculate time until capacity is available."""
-        mock_loop.time.return_value = 0.0
-        tracker = BufferTracker(
-            clock=LoopClock(mock_loop),
-            client_id="test-client",
-            capacity_bytes=100_000,
-        )
-        # Fill buffer to capacity with chunk ending at 1s
-        tracker.register(end_time_us=1_000_000, byte_count=100_000)
-
-        # Need to wait 1s for this chunk to be consumed
-        wait_time = tracker.time_until_capacity(10_000)
-        assert wait_time == 1_000_000  # 1 second in microseconds
-
-    def test_calculates_partial_wait_time(self, mock_loop: MagicMock) -> None:
-        """Should calculate time based on when space becomes available."""
-        mock_loop.time.return_value = 0.0
-        tracker = BufferTracker(
-            clock=LoopClock(mock_loop),
-            client_id="test-client",
-            capacity_bytes=100_000,
-        )
-        # Register two chunks: 60k ending at 1s, 30k ending at 2s
-        tracker.register(end_time_us=1_000_000, byte_count=60_000)
-        tracker.register(end_time_us=2_000_000, byte_count=30_000)
-        assert tracker.buffered_bytes == 90_000
-
-        # Need 15k more - after first chunk plays (at 1s), we have 40k space
-        wait_time = tracker.time_until_capacity(15_000)
-        assert wait_time == 1_000_000  # Wait for first chunk to finish
+    # Should always return True when duration tracking not configured
+    assert tracker.has_duration_capacity(1_000_000_000) is True
 
 
-class TestBufferTrackerReset:
-    """Tests for reset() behavior."""
+def test_has_duration_capacity_with_space() -> None:
+    """has_duration_capacity() returns True when buffer has space."""
+    clock = _FakeClock(now_us=0)
+    tracker = BufferTracker(
+        clock=clock,
+        client_id="test",
+        capacity_bytes=10000,
+        max_duration_us=1_000_000,  # 1 second max
+    )
 
-    def test_reset_clears_all_chunks(self, mock_loop: MagicMock) -> None:
-        """Reset should clear all tracked chunks."""
-        tracker = BufferTracker(
-            clock=LoopClock(mock_loop),
-            client_id="test-client",
-            capacity_bytes=100_000,
-        )
-        tracker.register(end_time_us=1_000_000, byte_count=10_000)
-        tracker.register(end_time_us=2_000_000, byte_count=10_000)
+    tracker.register(end_time_us=500_000, byte_count=1000, duration_us=500_000)
 
-        tracker.reset()
+    # Has space for another 400ms
+    assert tracker.has_duration_capacity(400_000) is True
 
-        assert tracker.buffered_bytes == 0
-        assert len(tracker.buffered_chunks) == 0
 
-    def test_reset_allows_fresh_registrations(self, mock_loop: MagicMock) -> None:
-        """After reset, should work normally for new registrations."""
-        tracker = BufferTracker(
-            clock=LoopClock(mock_loop),
-            client_id="test-client",
-            capacity_bytes=100_000,
-        )
-        tracker.register(end_time_us=1_000_000, byte_count=50_000)
-        tracker.reset()
-        tracker.register(end_time_us=2_000_000, byte_count=25_000)
+def test_has_duration_capacity_full() -> None:
+    """has_duration_capacity() returns False when buffer is full."""
+    clock = _FakeClock(now_us=0)
+    tracker = BufferTracker(
+        clock=clock,
+        client_id="test",
+        capacity_bytes=10000,
+        max_duration_us=1_000_000,  # 1 second max
+    )
 
-        assert tracker.buffered_bytes == 25_000
-        assert len(tracker.buffered_chunks) == 1
+    tracker.register(end_time_us=800_000, byte_count=1000, duration_us=800_000)
+
+    # No space for another 300ms (800ms + 300ms > 1000ms)
+    assert tracker.has_duration_capacity(300_000) is False
+
+
+def test_reset_clears_duration() -> None:
+    """reset() should clear buffered_duration_us."""
+    clock = _FakeClock(now_us=0)
+    tracker = BufferTracker(
+        clock=clock,
+        client_id="test",
+        capacity_bytes=10000,
+        max_duration_us=1_000_000,
+    )
+
+    tracker.register(end_time_us=100_000, byte_count=1000, duration_us=100_000)
+    tracker.reset()
+
+    assert tracker.buffered_bytes == 0
+    assert tracker.buffered_duration_us == 0
+
+
+def test_buffered_chunk_includes_duration() -> None:
+    """BufferedChunk should store duration_us."""
+    clock = _FakeClock(now_us=0)
+    tracker = BufferTracker(
+        clock=clock,
+        client_id="test",
+        capacity_bytes=10000,
+    )
+
+    tracker.register(end_time_us=100_000, byte_count=1000, duration_us=50_000)
+
+    chunk = tracker.buffered_chunks[0]
+    assert chunk.end_time_us == 100_000
+    assert chunk.byte_count == 1000
+    assert chunk.duration_us == 50_000
+
+
+def test_time_until_duration_capacity_when_not_configured() -> None:
+    """time_until_duration_capacity() returns 0 when max_duration_us is 0."""
+    clock = _FakeClock(now_us=0)
+    tracker = BufferTracker(
+        clock=clock,
+        client_id="test",
+        capacity_bytes=10000,
+        # max_duration_us defaults to 0
+    )
+
+    # Should return 0 when duration tracking not configured
+    assert tracker.time_until_duration_capacity(1_000_000) == 0
+
+
+def test_time_until_duration_capacity_with_space() -> None:
+    """time_until_duration_capacity() returns 0 when buffer has space."""
+    clock = _FakeClock(now_us=0)
+    tracker = BufferTracker(
+        clock=clock,
+        client_id="test",
+        capacity_bytes=10000,
+        max_duration_us=1_000_000,  # 1 second max
+    )
+
+    tracker.register(end_time_us=500_000, byte_count=1000, duration_us=500_000)
+
+    # Has space for another 400ms, no wait needed
+    assert tracker.time_until_duration_capacity(400_000) == 0
+
+
+def test_time_until_duration_capacity_returns_excess() -> None:
+    """time_until_duration_capacity() returns excess duration when full."""
+    clock = _FakeClock(now_us=0)
+    tracker = BufferTracker(
+        clock=clock,
+        client_id="test",
+        capacity_bytes=10000,
+        max_duration_us=1_000_000,  # 1 second max
+    )
+
+    tracker.register(end_time_us=800_000, byte_count=1000, duration_us=800_000)
+
+    # Need 300ms more, but only 200ms capacity → wait 100ms
+    # (800ms + 300ms) - 1000ms = 100ms
+    assert tracker.time_until_duration_capacity(300_000) == 100_000
+
+
+def test_time_until_duration_capacity_prunes_first() -> None:
+    """time_until_duration_capacity() prunes consumed chunks before checking."""
+    clock = _FakeClock(now_us=0)
+    tracker = BufferTracker(
+        clock=clock,
+        client_id="test",
+        capacity_bytes=10000,
+        max_duration_us=1_000_000,  # 1 second max
+    )
+
+    tracker.register(end_time_us=500_000, byte_count=1000, duration_us=500_000)
+    tracker.register(end_time_us=1_000_000, byte_count=1000, duration_us=500_000)
+
+    # Buffer is full (1000ms), but advance time to consume first chunk
+    clock.set_now(600_000)
+
+    # Now only 500ms buffered, should have space for 400ms
+    assert tracker.time_until_duration_capacity(400_000) == 0

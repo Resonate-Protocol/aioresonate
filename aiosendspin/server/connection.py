@@ -477,7 +477,29 @@ class SendspinConnection:
                     if self._check_late_binary(handling, handling_role, header.timestamp_us):
                         continue
 
+                    # Rate limiting: wait for buffer capacity before sending
+                    if (
+                        handling is not None
+                        and handling.rate_limit
+                        and handling_role is not None
+                        and handling_role._buffer_tracker is not None  # noqa: SLF001
+                        and item.buffer_byte_count is not None
+                    ):
+                        wait_us = handling_role._buffer_tracker.time_until_capacity(  # noqa: SLF001
+                            item.buffer_byte_count
+                        )
+                        if wait_us > 0:
+                            await asyncio.sleep(wait_us / 1_000_000)
+
                     await wsock.send_bytes(data)
+
+                    now = self._server.clock.now_us()
+                    plays_in_ms = (header.timestamp_us - now) / 1000
+                    self._logger.debug(
+                        "Sent binary: %d bytes, plays_in=%.0fms",
+                        len(data),
+                        plays_in_ms,
+                    )
 
                     # Buffer tracking via role's tracker (framework-managed)
                     if (
@@ -489,45 +511,19 @@ class SendspinConnection:
                         and handling_role._buffer_tracker is not None  # noqa: SLF001
                     ):
                         handling_role._buffer_tracker.register(  # noqa: SLF001
-                            item.buffer_end_time_us, item.buffer_byte_count
+                            item.buffer_end_time_us,
+                            item.buffer_byte_count,
+                            item.duration_us or 0,
                         )
 
-                    # Rate limiting with timestamp-based pacing
+                    # Rate limiting: also limit send rate to Nx realtime
                     if (
                         handling is not None
                         and handling.rate_limit
-                        and handling_role is not None
                         and item.duration_us is not None
                     ):
-                        now = self._server.clock.now_us()
-                        start_time = handling_role._stream_start_time_us  # noqa: SLF001
-                        plays_in_us = header.timestamp_us - now
-                        qsize = self._to_write.qsize()
-
-                        if start_time is None or (now - start_time) < handling.grace_period_us:
-                            # Grace period: send at rate_limit_factor (fast but not unlimited)
-                            delay_s = item.duration_us / handling.rate_limit_factor / 1_000_000
-                        elif qsize > 20:
-                            # Queue building up - send faster to drain it
-                            delay_s = item.duration_us / handling.rate_limit_factor / 1_000_000
-                        elif plays_in_us > 5_000_000:  # >5s buffer = healthy
-                            # Buffer healthy and queue low - send at ~1.1x realtime
-                            delay_s = item.duration_us / 1.1 / 1_000_000
-                        else:
-                            # Buffer low - send faster to catch up
-                            delay_s = item.duration_us / handling.rate_limit_factor / 1_000_000
-                        sleep_start = self._server.clock.now_us()
+                        delay_s = item.duration_us / handling.rate_limit_factor / 1_000_000
                         await asyncio.sleep(delay_s)
-                        sleep_actual_ms = (self._server.clock.now_us() - sleep_start) / 1000
-                        sleep_expected_ms = delay_s * 1000
-                        if (
-                            sleep_actual_ms > sleep_expected_ms + 50
-                        ):  # Slept >50ms longer than expected
-                            self._logger.debug(
-                                "Slow sleep: expected=%.0fms actual=%.0fms (event loop blocked?)",
-                                sleep_expected_ms,
-                                sleep_actual_ms,
-                            )
                     continue
 
                 await wsock.send_str(item.to_json())

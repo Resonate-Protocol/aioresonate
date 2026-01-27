@@ -15,6 +15,7 @@ from aiosendspin.server.client import SendspinClient
 from aiosendspin.server.clock import LoopClock
 from aiosendspin.server.connection import SendspinConnection
 from aiosendspin.server.roles.base import AudioChunk
+from aiosendspin.server.transformers import TransformerPool
 
 
 @dataclass(slots=True)
@@ -28,10 +29,11 @@ class _DummyServer:
         raise AssertionError("unexpected get_or_create_client() in this test")
 
 
-@dataclass(slots=True)
 class _DummyGroup:
-    clients: list[Any]
-    group_id: str = "g1"
+    def __init__(self, clients: list[Any], group_id: str = "g1") -> None:
+        self.clients = clients
+        self.group_id = group_id
+        self.transformer_pool = TransformerPool()
 
     def on_client_connected(self, client: Any) -> None:  # noqa: ARG002
         return

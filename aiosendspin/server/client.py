@@ -35,7 +35,8 @@ from aiosendspin.models.types import (
 from aiosendspin.server.audio import AudioFormat, BufferTracker
 from aiosendspin.server.events import ClientEvent, ClientGroupChangedEvent, VolumeChangedEvent
 
-from .roles import PlayerRole, Role
+from .roles import AudioRequirements, PlayerRole, Role
+from .transformers import FlacEncoder, PcmPassthrough
 
 if TYPE_CHECKING:
     from aiosendspin.models.types import GoodbyeReason, ServerMessage
@@ -226,8 +227,8 @@ class SendspinClient:
         # Player persistent state (survives reconnects, role gets a reference).
         has_player_role = has_role(Roles.PLAYER.value, self._negotiated_roles)
         if has_player_role and self.info.player_support is not None:
-            # TODO: Remove this mock - hardcoded to ~5s of FLAC for testing
-            capacity = 500_000  # self.info.player_support.buffer_capacity
+            # TODO: Remove mock - using 1/3 of reported capacity for testing
+            capacity = self.info.player_support.buffer_capacity // 3
             if self._buffer_tracker is None:
                 self._buffer_tracker = BufferTracker(
                     clock=self._server.clock,
@@ -266,6 +267,34 @@ class SendspinClient:
             player_role.on_connect()
             player_role.on_transport_attach()
             self._roles["player@v1"] = player_role
+
+            # Set audio requirements for hook-based streaming
+            audio_format = self._preferred_format or default_format
+            audio_codec = self._preferred_codec or default_codec
+            assert self._group is not None  # Server sets group before attach_connection
+
+            transformer: FlacEncoder | PcmPassthrough
+            if audio_codec == AudioCodec.FLAC:
+                transformer = self._group.transformer_pool.get_or_create(
+                    FlacEncoder,
+                    sample_rate=audio_format.sample_rate,
+                    bit_depth=audio_format.bit_depth,
+                    channels=audio_format.channels,
+                )
+            else:  # PCM or unsupported codec fallback
+                transformer = self._group.transformer_pool.get_or_create(
+                    PcmPassthrough,
+                    sample_rate=audio_format.sample_rate,
+                    bit_depth=audio_format.bit_depth,
+                    channels=audio_format.channels,
+                )
+
+            player_role._audio_requirements = AudioRequirements(  # noqa: SLF001
+                sample_rate=audio_format.sample_rate,
+                bit_depth=audio_format.bit_depth,
+                channels=audio_format.channels,
+                transformer=transformer,
+            )
 
         # Ensure group exists (server creates it on first sight).
         if self._group is None:

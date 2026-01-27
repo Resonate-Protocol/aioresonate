@@ -64,7 +64,7 @@ class _CaptureConnection:
         *,
         buffer_end_time_us: int | None = None,
         buffer_byte_count: int | None = None,
-        duration_us: int | None = None,  # noqa: ARG002
+        duration_us: int | None = None,
     ) -> bool:
         self.events.append(_Event(kind="bin", payload=data))
         if (
@@ -72,7 +72,7 @@ class _CaptureConnection:
             and buffer_end_time_us is not None
             and buffer_byte_count is not None
         ):
-            self.buffer_tracker.register(buffer_end_time_us, buffer_byte_count)
+            self.buffer_tracker.register(buffer_end_time_us, buffer_byte_count, duration_us or 0)
         return True
 
 

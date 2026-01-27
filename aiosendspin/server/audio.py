@@ -45,6 +45,8 @@ class BufferedChunk(NamedTuple):
     """Absolute timestamp when these bytes should be fully consumed."""
     byte_count: int
     """Compressed byte count occupying the device buffer."""
+    duration_us: int
+    """Duration of audio in microseconds (independent of compression)."""
 
 
 class BufferTracker:
@@ -62,6 +64,7 @@ class BufferTracker:
         clock: Clock,
         client_id: str,
         capacity_bytes: int,
+        max_duration_us: int = 0,
     ) -> None:
         """
         Initialize the buffer tracker for a client.
@@ -70,20 +73,27 @@ class BufferTracker:
             clock: Time source used for timing calculations.
             client_id: Identifier for the client being tracked.
             capacity_bytes: Maximum buffer capacity in bytes reported by the client.
+            max_duration_us: Maximum buffer duration in microseconds. If 0, duration
+                is not tracked and has_duration_capacity() always returns True.
         """
         self._clock = clock
         self.client_id = client_id
         self.capacity_bytes = capacity_bytes
+        self.max_duration_us = max_duration_us
         self.buffered_chunks: deque[BufferedChunk] = deque()
         self.buffered_bytes = 0
+        self.buffered_duration_us = 0
 
     def prune_consumed(self, now_us: int | None = None) -> int:
         """Drop finished chunks and return the timestamp used for the calculation."""
         if now_us is None:
             now_us = self._clock.now_us()
         while self.buffered_chunks and self.buffered_chunks[0].end_time_us <= now_us:
-            self.buffered_bytes -= self.buffered_chunks.popleft().byte_count
+            chunk = self.buffered_chunks.popleft()
+            self.buffered_bytes -= chunk.byte_count
+            self.buffered_duration_us -= chunk.duration_us
         self.buffered_bytes = max(self.buffered_bytes, 0)
+        self.buffered_duration_us = max(self.buffered_duration_us, 0)
         return now_us
 
     def has_capacity_now(self, bytes_needed: int) -> bool:
@@ -113,6 +123,55 @@ class BufferTracker:
         self.prune_consumed()
         projected_usage = self.buffered_bytes + bytes_needed
         return projected_usage <= self.capacity_bytes
+
+    def has_duration_capacity(self, duration_needed_us: int = 0) -> bool:
+        """
+        Check if buffer can accept duration_needed_us without exceeding max_duration_us.
+
+        This is independent of byte-based capacity. If max_duration_us is 0 (not configured),
+        this always returns True.
+
+        Args:
+            duration_needed_us: Duration in microseconds to check capacity for.
+
+        Returns:
+            True if the buffer has capacity for duration_needed_us, False otherwise.
+        """
+        if self.max_duration_us == 0:
+            # Duration tracking not configured
+            return True
+        if duration_needed_us <= 0:
+            return True
+
+        self.prune_consumed()
+        projected_duration = self.buffered_duration_us + duration_needed_us
+        return projected_duration <= self.max_duration_us
+
+    def time_until_duration_capacity(self, duration_needed_us: int = 0) -> int:
+        """
+        Calculate time in microseconds until the buffer can accept duration_needed_us more.
+
+        Since audio drains at 1x real time, the wait time equals the excess duration.
+        Returns 0 if max_duration_us is 0 (not configured) or if there's already capacity.
+
+        Args:
+            duration_needed_us: Duration in microseconds to check capacity for.
+
+        Returns:
+            Time in microseconds to wait, or 0 if capacity is immediately available.
+        """
+        if self.max_duration_us == 0:
+            return 0
+        if duration_needed_us <= 0:
+            return 0
+
+        self.prune_consumed()
+        projected_duration = self.buffered_duration_us + duration_needed_us
+        if projected_duration <= self.max_duration_us:
+            return 0
+
+        # Wait for the excess duration to drain (audio plays at 1x real time)
+        return projected_duration - self.max_duration_us
 
     def time_until_capacity(self, bytes_needed: int) -> int:
         """
@@ -162,17 +221,25 @@ class BufferTracker:
         if sleep_time_us := self.time_until_capacity(bytes_needed):
             await asyncio.sleep(sleep_time_us / 1_000_000)
 
-    def register(self, end_time_us: int, byte_count: int) -> None:
-        """Record bytes added to the buffer finishing at end_time_us."""
+    def register(self, end_time_us: int, byte_count: int, duration_us: int = 0) -> None:
+        """Record bytes added to the buffer finishing at end_time_us.
+
+        Args:
+            end_time_us: Absolute timestamp when these bytes should be fully consumed.
+            byte_count: Compressed byte count occupying the device buffer.
+            duration_us: Duration of audio in microseconds (for duration-based tracking).
+        """
         if byte_count <= 0:
             return
-        self.buffered_chunks.append(BufferedChunk(end_time_us, byte_count))
+        self.buffered_chunks.append(BufferedChunk(end_time_us, byte_count, duration_us))
         self.buffered_bytes += byte_count
+        self.buffered_duration_us += duration_us
 
     def reset(self) -> None:
-        """Clear all tracked chunks and reset buffered bytes to zero."""
+        """Clear all tracked chunks and reset counters to zero."""
         self.buffered_chunks.clear()
         self.buffered_bytes = 0
+        self.buffered_duration_us = 0
 
 
 def _resolve_audio_format(audio_format: AudioFormat) -> tuple[int, str, str]:

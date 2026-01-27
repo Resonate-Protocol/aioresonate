@@ -115,7 +115,7 @@ async def test_writer_registers_buffer_after_send() -> None:
         await asyncio.sleep(0)
 
     assert wsock.send_bytes.call_count == 1
-    mock_buffer_tracker.register.assert_called_once_with(1_000_000, 100)
+    mock_buffer_tracker.register.assert_called_once_with(1_000_000, 100, 0)
 
     await conn.disconnect(retry_connection=False)
 

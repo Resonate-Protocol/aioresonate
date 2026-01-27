@@ -11,6 +11,7 @@ from aiosendspin.models.types import AudioCodec, PlayerCommand
 from aiosendspin.server.client import SendspinClient
 from aiosendspin.server.clock import LoopClock
 from aiosendspin.server.roles import PlayerRole
+from aiosendspin.server.transformers import TransformerPool
 
 
 @dataclass(slots=True)
@@ -21,9 +22,10 @@ class _DummyServer:
     name: str = "server"
 
 
-@dataclass(slots=True)
 class _DummyGroup:
-    clients: list[SendspinClient]
+    def __init__(self, clients: list[SendspinClient]) -> None:
+        self.clients = clients
+        self.transformer_pool = TransformerPool()
 
     def on_client_connected(self, client: SendspinClient) -> None:  # noqa: ARG002
         return
@@ -53,7 +55,7 @@ class _FakeConnection:
         *,
         buffer_end_time_us: int | None = None,
         buffer_byte_count: int | None = None,
-        duration_us: int | None = None,  # noqa: ARG002
+        duration_us: int | None = None,
     ) -> bool:
         self.sent_binary.append(data)
         if (
@@ -61,7 +63,7 @@ class _FakeConnection:
             and buffer_end_time_us is not None
             and buffer_byte_count is not None
         ):
-            self.buffer_tracker.register(buffer_end_time_us, buffer_byte_count)
+            self.buffer_tracker.register(buffer_end_time_us, buffer_byte_count, duration_us or 0)
         return True
 
 

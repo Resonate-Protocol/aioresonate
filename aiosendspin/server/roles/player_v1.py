@@ -109,7 +109,7 @@ class PlayerRole(Role):
                 drop_late=True,
                 grace_period_us=2_000_000,  # 2 seconds grace for initial buffering
                 rate_limit=True,
-                rate_limit_factor=2.0,  # Send at 2x real-time to recover from bursts
+                rate_limit_factor=1.1,  # Send at 1.1x real-time
                 buffer_track=True,
             )
         return None
