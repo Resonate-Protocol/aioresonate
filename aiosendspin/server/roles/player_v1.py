@@ -14,6 +14,8 @@ from typing import TYPE_CHECKING
 
 from aiosendspin.models import AudioCodec, BinaryMessageType, pack_binary_header_raw
 from aiosendspin.models.core import (
+    ServerCommandMessage,
+    ServerCommandPayload,
     StreamClearMessage,
     StreamClearPayload,
     StreamEndMessage,
@@ -21,7 +23,8 @@ from aiosendspin.models.core import (
     StreamStartMessage,
     StreamStartPayload,
 )
-from aiosendspin.models.player import StreamStartPlayer
+from aiosendspin.models.player import PlayerCommandPayload, StreamStartPlayer
+from aiosendspin.models.types import PlayerCommand
 from aiosendspin.server.roles.base import (
     AudioChunk,
     AudioRequirements,
@@ -183,3 +186,57 @@ class PlayerRole(Role):
     def stream_started(self) -> bool:
         """Whether stream/start has been sent."""
         return self._stream_started
+
+    # ---- Volume/mute state and commands ----
+
+    @property
+    def volume(self) -> int:
+        """Current volume of this player (0-100)."""
+        return self._client._player_volume  # noqa: SLF001
+
+    @volume.setter
+    def volume(self, value: int) -> None:
+        self._client._player_volume = value  # noqa: SLF001
+
+    @property
+    def muted(self) -> bool:
+        """Current mute state of this player."""
+        return self._client._player_muted  # noqa: SLF001
+
+    @muted.setter
+    def muted(self, value: bool) -> None:
+        self._client._player_muted = value  # noqa: SLF001
+
+    def set_volume(self, volume: int) -> None:
+        """Set the volume of this player."""
+        support = self._client.player_support
+        if not support or PlayerCommand.VOLUME not in support.supported_commands:
+            return
+
+        self._client.send_message(
+            ServerCommandMessage(
+                payload=ServerCommandPayload(
+                    player=PlayerCommandPayload(
+                        command=PlayerCommand.VOLUME,
+                        volume=volume,
+                    )
+                )
+            )
+        )
+
+    def set_mute(self, muted: bool) -> None:  # noqa: FBT001
+        """Set the mute state of this player."""
+        support = self._client.player_support
+        if not support or PlayerCommand.MUTE not in support.supported_commands:
+            return
+
+        self._client.send_message(
+            ServerCommandMessage(
+                payload=ServerCommandPayload(
+                    player=PlayerCommandPayload(
+                        command=PlayerCommand.MUTE,
+                        mute=muted,
+                    )
+                )
+            )
+        )

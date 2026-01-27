@@ -18,13 +18,10 @@ from aiosendspin.models import AudioCodec
 from aiosendspin.models.controller import ControllerCommandPayload
 from aiosendspin.models.core import (
     ClientHelloPayload,
-    ServerCommandMessage,
-    ServerCommandPayload,
     StreamStartMessage,
 )
 from aiosendspin.models.player import (
     ClientHelloPlayerSupport,
-    PlayerCommandPayload,
     PlayerStatePayload,
 )
 from aiosendspin.models.types import (
@@ -407,44 +404,23 @@ class SendspinClient:
         """Current mute state of this player."""
         return self._player_muted
 
-    # FB: these belong in player_v1.py as well, to be accessed via client.role('player@v1')
     def set_player_volume(self, volume: int) -> None:
-        """Set the volume of this player."""
-        support = self.player_support
-        if not support or PlayerCommand.VOLUME not in support.supported_commands:
-            self._logger.warning("Player does not support the 'volume' command")
-            return
+        """Set the volume of this player.
 
-        self._logger.debug("Setting volume from %d to %d", self._player_volume, volume)
-        self.send_message(
-            ServerCommandMessage(
-                payload=ServerCommandPayload(
-                    player=PlayerCommandPayload(
-                        command=PlayerCommand.VOLUME,
-                        volume=volume,
-                    )
-                )
-            )
-        )
+        DEPRECATED: Use client.role('player@v1').set_volume() instead.
+        """
+        player = self.role("player@v1")
+        if player is not None and isinstance(player, PlayerRole):
+            player.set_volume(volume)
 
     def set_player_mute(self, muted: bool) -> None:  # noqa: FBT001
-        """Set the mute state of this player."""
-        support = self.player_support
-        if not support or PlayerCommand.MUTE not in support.supported_commands:
-            self._logger.warning("Player does not support the 'mute' command")
-            return
+        """Set the mute state of this player.
 
-        self._logger.debug("Setting mute to %s", muted)
-        self.send_message(
-            ServerCommandMessage(
-                payload=ServerCommandPayload(
-                    player=PlayerCommandPayload(
-                        command=PlayerCommand.MUTE,
-                        mute=muted,
-                    )
-                )
-            )
-        )
+        DEPRECATED: Use client.role('player@v1').set_mute() instead.
+        """
+        player = self.role("player@v1")
+        if player is not None and isinstance(player, PlayerRole):
+            player.set_mute(muted)
 
     def handle_player_state_update(self, state: PlayerStatePayload) -> None:
         """Update internal mute/volume state from client report and emit event."""

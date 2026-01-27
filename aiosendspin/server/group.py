@@ -62,6 +62,7 @@ from .transformers import TransformerPool
 # pyright: reportImportCycles=none
 if TYPE_CHECKING:
     from .client import SendspinClient
+    from .roles.player_v1 import PlayerRole
     from .server import SendspinServer
 
 logger = logging.getLogger(__name__)
@@ -971,8 +972,12 @@ class SendspinGroup:
         players = self.player_clients()
         if not players:
             return 100
-        # Calculate average volume from all players
-        total_volume = sum(client.player_volume for client in players)
+        # Calculate average volume from all players via PlayerRole
+        total_volume = 0
+        for client in players:
+            role: PlayerRole | None = client.role("player@v1")  # type: ignore[assignment]
+            if role is not None:
+                total_volume += role.volume
         return round(total_volume / len(players))
 
     @property
@@ -981,7 +986,11 @@ class SendspinGroup:
         players = self.player_clients()
         if not players:
             return False
-        return all(client.player_muted for client in players)
+        for client in players:
+            role: PlayerRole | None = client.role("player@v1")  # type: ignore[assignment]
+            if role is None or not role.muted:
+                return False
+        return True
 
     def set_volume(self, volume_level: int) -> None:
         """Set group volume using redistribution algorithm from spec."""
@@ -990,24 +999,33 @@ class SendspinGroup:
         if not players:
             return
 
-        # Initialize working state with current volumes
-        # We work entirely on this dict until the end
-        player_volumes = {p: float(p.player_volume) for p in players}
+        # Build mapping of client -> PlayerRole (only clients with valid role)
+        client_roles: dict[SendspinClient, PlayerRole] = {}
+        for client in players:
+            role: PlayerRole | None = client.role("player@v1")  # type: ignore[assignment]
+            if role is not None:
+                client_roles[client] = role
+
+        if not client_roles:
+            return
+
+        # Initialize working state with current volumes via PlayerRole
+        player_volumes = {c: float(r.volume) for c, r in client_roles.items()}
 
         # Calculate initial target delta
         current_avg = sum(player_volumes.values()) / len(player_volumes)
         delta = volume_level - current_avg
 
         # Track who is still participating in redistribution
-        active_players = list(players)
+        active_clients = list(client_roles.keys())
 
         for _ in range(5):
             # Apply delta to all active players and calculate lost delta (overflow)
             lost_delta_sum = 0.0
-            next_active_players = []
+            next_active_clients: list[SendspinClient] = []
 
-            for player in active_players:
-                current_vol = player_volumes[player]
+            for client in active_clients:
+                current_vol = player_volumes[client]
                 proposed = current_vol + delta
 
                 # Clamp and calculate loss
@@ -1019,32 +1037,33 @@ class SendspinGroup:
                     lost_delta_sum += proposed - clamped
                 else:
                     clamped = proposed
-                    next_active_players.append(player)
+                    next_active_clients.append(client)
 
                 # Update our working state
-                player_volumes[player] = clamped
+                player_volumes[client] = clamped
 
             # If everyone is clamped or no delta lost, we are done
-            if not next_active_players or abs(lost_delta_sum) < 0.01:
+            if not next_active_clients or abs(lost_delta_sum) < 0.01:
                 break
 
             # Prepare for next iteration
             # Redistribute the lost delta among the remaining active players
-            delta = lost_delta_sum / len(next_active_players)
-            active_players = next_active_players
+            delta = lost_delta_sum / len(next_active_clients)
+            active_clients = next_active_clients
 
-        # Apply final calculated volumes to the actual players
+        # Apply final calculated volumes via PlayerRole
         for client, volume in player_volumes.items():
-            client.set_player_volume(round(volume))
+            client_roles[client].set_volume(round(volume))
 
         # Send state update to controller clients
         self._send_controller_state_to_clients()
 
     def set_mute(self, muted: bool) -> None:  # noqa: FBT001
-        """Set group mute state and propagate to all players."""
-        # Propagate to all player clients
+        """Set group mute state and propagate to all players via PlayerRole."""
         for client in self.player_clients():
-            client.set_player_mute(muted)
+            role: PlayerRole | None = client.role("player@v1")  # type: ignore[assignment]
+            if role is not None:
+                role.set_mute(muted)
         # Send state update to controller clients
         self._send_controller_state_to_clients()
 
