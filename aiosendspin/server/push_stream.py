@@ -94,7 +94,7 @@ class PushStream:
 
     This class provides a push-based interface for streaming audio to players.
     Audio is prepared via prepare_audio(), then committed and sent via commit_audio().
-    Backpressure is handled via wait_for_buffer_space() and timeline shifting.
+    Late audio is handled by the connection layer (dropped if past playback time).
     """
 
     def __init__(
@@ -329,16 +329,6 @@ class PushStream:
             if channel_id not in self._channel_timing:
                 self._channel_timing[channel_id] = now_us + DEFAULT_INITIAL_DELAY_US
 
-        # Calculate approximate byte count for backpressure (use total of all channels)
-        total_bytes = sum(len(pcm) for pcm, _ in prepared.values())
-
-        # Apply backpressure: query roles with buffer tracking
-        max_wait_us = self._calculate_backpressure(total_bytes)
-        if max_wait_us > 0:
-            # Shift all channel timings equally for group synchronization
-            for channel_id in self._channel_timing:
-                self._channel_timing[channel_id] += max_wait_us
-
         # If audio production stalls (e.g., the upstream source blocks), the scheduled
         # play timeline can drift into the past. Rebase the timeline so new audio is
         # always scheduled with at least the default initial delay from "now".
@@ -369,31 +359,6 @@ class PushStream:
 
         # Return earliest play_start_us
         return min(channel_play_start.values())
-
-    def _calculate_backpressure(self, byte_count: int) -> int:
-        """
-        Calculate backpressure delay based on client buffer capacity.
-
-        Args:
-            byte_count: Approximate bytes being sent to players.
-
-        Returns:
-            Maximum wait time in microseconds across all clients.
-        """
-        max_wait_us = 0
-        for client, _role in self._get_audio_roles():
-            if client.buffer_tracker is not None:
-                wait_us = client.buffer_tracker.time_until_capacity(byte_count)
-                if wait_us > 0 and _LOGGER.isEnabledFor(logging.DEBUG):
-                    _LOGGER.debug(
-                        "Backpressure from %s: wait_us=%s buffered=%s capacity=%s",
-                        client.client_id,
-                        wait_us,
-                        client.buffer_tracker.buffered_bytes,
-                        client.buffer_tracker.capacity_bytes,
-                    )
-                max_wait_us = max(max_wait_us, wait_us)
-        return max_wait_us
 
     def _calculate_channel_durations(
         self,

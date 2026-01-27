@@ -28,7 +28,6 @@ from aiosendspin.models.core import (
     StreamRequestFormatMessage,
 )
 from aiosendspin.models.types import (
-    BinaryMessageType,
     ClientMessage,
     ConnectionReason,
     GoodbyeReason,
@@ -40,6 +39,7 @@ from aiosendspin.models.types import (
 from .client import SendspinClient
 
 if TYPE_CHECKING:
+    from .roles.base import BinaryHandling, Role
     from .server import SendspinServer
 
 
@@ -109,10 +109,6 @@ class SendspinConnection:
 
         self._last_goodbye_reason: GoodbyeReason | None = None
         self._binary_epoch = 0
-        # FB: remove player role specific things from here
-        self._stream_start_time_us: int | None = None
-        self._last_late_audio_log_s: float = 0.0
-        self._late_audio_skips_since_log: int = 0
 
     @property
     def websocket_connection(self) -> web.WebSocketResponse | ClientWebSocketResponse:
@@ -176,8 +172,8 @@ class SendspinConnection:
                 task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
             return
 
-        # FB: only drop from the role that is addressed by end/clear messages
-        # we dont want to drop artwork when playback stops
+        # TODO: Only drop binary from the role addressed by end/clear messages
+        # (currently drops all binary, which is fine while only player sends binary)
         if isinstance(message, StreamClearMessage | StreamEndMessage):
             self.drop_pending_binary()
 
@@ -190,9 +186,7 @@ class SendspinConnection:
                 task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
             return
 
-        if isinstance(message, StreamClearMessage | StreamEndMessage):
-            self._stream_start_time_us = None
-        elif not isinstance(message, ServerTimeMessage):
+        if not isinstance(message, ServerTimeMessage):
             self._logger.debug("Enqueueing message: %s", type(message).__name__)
 
     async def disconnect(self, *, retry_connection: bool = True) -> None:
@@ -397,6 +391,40 @@ class SendspinConnection:
             await self.disconnect(retry_connection=retry)
             return
 
+    def _check_late_binary(
+        self, handling: BinaryHandling | None, role: Role | None, timestamp_us: int
+    ) -> bool:
+        """Check if binary message is late and should be dropped. Returns True to drop."""
+        if handling is None or role is None or not handling.drop_late:
+            return False
+
+        now = self._server.clock.now_us()
+        if role._stream_start_time_us is None:  # noqa: SLF001
+            role._stream_start_time_us = now  # noqa: SLF001
+        elapsed = now - role._stream_start_time_us  # noqa: SLF001
+        in_grace_period = elapsed < handling.grace_period_us
+        late_by_us = now - timestamp_us
+
+        if late_by_us > 0 and not in_grace_period:
+            role._late_skips_since_log += 1  # noqa: SLF001
+            now_s = time.monotonic()
+            if now_s - role._last_late_log_s >= 1.0:  # noqa: SLF001
+                qsize, qmax = self.queue_status()
+                self._logger.warning(
+                    "Late binary: skipping %s chunk(s); "
+                    "late_by_us=%s ts_us=%s now_us=%s queue=%s/%s",
+                    role._late_skips_since_log,  # noqa: SLF001
+                    late_by_us,
+                    timestamp_us,
+                    now,
+                    qsize,
+                    qmax,
+                )
+                role._late_skips_since_log = 0  # noqa: SLF001
+                role._last_late_log_s = now_s  # noqa: SLF001
+            return True
+        return False
+
     async def _writer(self) -> None:
         wsock = self._wsock_server or self._wsock_client
         assert wsock is not None
@@ -410,51 +438,49 @@ class SendspinConnection:
                     data = item.data
                     header = unpack_binary_header(data)
 
-                    # FB: the connection.py should be role independent, remove player specific logic
-                    # or make this more general
-                    if header.message_type == BinaryMessageType.AUDIO_CHUNK.value:
-                        now = self._server.clock.now_us()
-                        if self._stream_start_time_us is None:
-                            self._stream_start_time_us = now
-                        in_grace_period = (now - self._stream_start_time_us) < 2_000_000
-                        late_by_us = now - header.timestamp_us
-                        if late_by_us > 0 and not in_grace_period:
-                            self._late_audio_skips_since_log += 1
-                            now_s = time.monotonic()
-                            if now_s - self._last_late_audio_log_s >= 1.0:
-                                qsize, qmax = self.queue_status()
-                                self._logger.warning(
-                                    "Late audio: skipping %s chunk(s); "
-                                    "late_by_us=%s ts_us=%s now_us=%s "
-                                    "queue=%s/%s",
-                                    self._late_audio_skips_since_log,
-                                    late_by_us,
-                                    header.timestamp_us,
-                                    now,
-                                    qsize,
-                                    qmax,
-                                )
-                                self._late_audio_skips_since_log = 0
-                                self._last_late_audio_log_s = now_s
-                            continue
+                    # Find the role that handles this message type
+                    handling = None
+                    handling_role = None
+                    if self._client is not None:
+                        for role in self._client.active_roles:
+                            handling = role.get_binary_handling(header.message_type)
+                            if handling is not None:
+                                handling_role = role
+                                break
+
+                    # Drop late messages if role requests it
+                    if self._check_late_binary(handling, handling_role, header.timestamp_us):
+                        continue
 
                     await wsock.send_bytes(data)
-                    if (
-                        item.buffer_end_time_us is not None
-                        and item.buffer_byte_count is not None
-                        and self._client is not None
-                        and (buffer_tracker := self._client.buffer_tracker) is not None
-                    ):
-                        buffer_tracker.register(item.buffer_end_time_us, item.buffer_byte_count)
 
-                    # FB: same here
-                    # Rate limit audio to ~110% of real-time to avoid bursty delivery
+                    # Buffer tracking via role's tracker (framework-managed)
                     if (
-                        header.message_type == BinaryMessageType.AUDIO_CHUNK.value
+                        handling is not None
+                        and handling.buffer_track
+                        and handling_role is not None
+                        and item.buffer_end_time_us is not None
+                        and item.buffer_byte_count is not None
+                        and handling_role._buffer_tracker is not None  # noqa: SLF001
+                    ):
+                        handling_role._buffer_tracker.register(  # noqa: SLF001
+                            item.buffer_end_time_us, item.buffer_byte_count
+                        )
+
+                    # Rate limiting (skip during grace period to allow initial burst)
+                    if (
+                        handling is not None
+                        and handling.rate_limit
+                        and handling_role is not None
                         and item.duration_us is not None
                     ):
-                        delay_s = item.duration_us / 1.1 / 1_000_000
-                        await asyncio.sleep(delay_s)
+                        now = self._server.clock.now_us()
+                        start_time = handling_role._stream_start_time_us  # noqa: SLF001
+                        if start_time is not None:
+                            elapsed = now - start_time
+                            if elapsed >= handling.grace_period_us:
+                                delay_s = item.duration_us / handling.rate_limit_factor / 1_000_000
+                                await asyncio.sleep(delay_s)
                     continue
 
                 await wsock.send_str(item.to_json())

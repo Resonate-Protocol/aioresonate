@@ -28,6 +28,7 @@ from aiosendspin.models.types import PlayerCommand
 from aiosendspin.server.roles.base import (
     AudioChunk,
     AudioRequirements,
+    BinaryHandling,
     Role,
     StreamRequirements,
 )
@@ -71,6 +72,10 @@ class PlayerRole(Role):
         self._has_transport = False
         self._stream_started = False
         self._buffer_tracker = None
+        # Initialize timing state for binary handling
+        self._stream_start_time_us = None
+        self._last_late_log_s = 0.0
+        self._late_skips_since_log = 0
 
     @property
     def role_id(self) -> str:
@@ -96,6 +101,18 @@ class PlayerRole(Role):
     def get_audio_requirements(self) -> AudioRequirements | None:
         """Return audio requirements for hook-based streaming."""
         return self._audio_requirements
+
+    def get_binary_handling(self, message_type: int) -> BinaryHandling | None:
+        """Return handling policy for AUDIO_CHUNK messages."""
+        if message_type == BinaryMessageType.AUDIO_CHUNK.value:
+            return BinaryHandling(
+                drop_late=True,
+                grace_period_us=2_000_000,  # 2 seconds grace for initial buffering
+                rate_limit=True,
+                rate_limit_factor=1.1,  # Send at 110% real-time
+                buffer_track=True,
+            )
+        return None
 
     # --- Lifecycle hooks ---
 
@@ -165,6 +182,7 @@ class PlayerRole(Role):
         stream_clear = StreamClearMessage(payload=StreamClearPayload(roles=["player"]))
         self.send_message(stream_clear)
         self._stream_started = False
+        self.reset_binary_timing()
 
         if self._buffer_tracker is not None:
             self._buffer_tracker.reset()
@@ -178,6 +196,7 @@ class PlayerRole(Role):
         stream_end = StreamEndMessage(payload=StreamEndPayload(roles=None))
         self.send_message(stream_end)
         self._stream_started = False
+        self.reset_binary_timing()
 
         if self._buffer_tracker is not None:
             self._buffer_tracker.reset()

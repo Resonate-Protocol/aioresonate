@@ -22,6 +22,30 @@ if TYPE_CHECKING:
 
 
 @dataclass(frozen=True)
+class BinaryHandling:
+    """Policy for how binary messages should be handled by connection.
+
+    Roles return this from get_binary_handling() to declare how the connection
+    should handle their binary messages (late detection, rate limiting, etc).
+    """
+
+    drop_late: bool = False
+    """Drop binary messages whose timestamp is in the past."""
+
+    grace_period_us: int = 0
+    """Grace period after stream start before dropping late messages."""
+
+    rate_limit: bool = False
+    """Rate-limit delivery based on duration_us to avoid bursty sends."""
+
+    rate_limit_factor: float = 1.1
+    """Send at this multiple of real-time (1.1 = 110% speed)."""
+
+    buffer_track: bool = False
+    """Track sent bytes in the role's buffer tracker."""
+
+
+@dataclass(frozen=True)
 class StreamRequirements:
     """Declaration that a role sends binary streams.
 
@@ -91,6 +115,16 @@ class Role(ABC):
     _has_transport: bool = False
     """Whether this role has an active WebSocket transport."""
 
+    # Timing state for binary handling (used by connection)
+    _stream_start_time_us: int | None = None
+    """Timestamp when stream started, for grace period calculation."""
+
+    _last_late_log_s: float = 0.0
+    """Monotonic time of last late-message log (for rate limiting logs)."""
+
+    _late_skips_since_log: int = 0
+    """Count of skipped late messages since last log."""
+
     @property
     @abstractmethod
     def role_id(self) -> str:
@@ -120,6 +154,20 @@ class Role(ABC):
         on_audio_chunk() calls from PushStream.
         """
         return None
+
+    def get_binary_handling(self, message_type: int) -> BinaryHandling | None:  # noqa: ARG002
+        """Return handling policy for a binary message type, or None if not handled.
+
+        The connection calls this to determine how to handle binary messages:
+        - Whether to drop late messages
+        - Whether to rate-limit delivery
+        - Whether to track in buffer tracker
+        """
+        return None
+
+    def reset_binary_timing(self) -> None:
+        """Reset timing state for binary handling (called on stream clear/end)."""
+        self._stream_start_time_us = None
 
     # --- Framework-provided send methods ---
 

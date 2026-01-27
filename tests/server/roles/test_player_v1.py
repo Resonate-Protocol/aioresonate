@@ -66,6 +66,34 @@ def test_player_role_get_audio_requirements_returns_none_when_not_set() -> None:
     assert role.get_audio_requirements() is None
 
 
+# --- BinaryHandling ---
+
+
+def test_player_role_get_binary_handling_returns_handling_for_audio_chunk() -> None:
+    """PlayerRole returns BinaryHandling for AUDIO_CHUNK message type."""
+    client = MagicMock()
+    role = PlayerRole(client=client)
+
+    handling = role.get_binary_handling(BinaryMessageType.AUDIO_CHUNK.value)
+
+    assert handling is not None
+    assert handling.drop_late is True
+    assert handling.grace_period_us == 2_000_000
+    assert handling.rate_limit is True
+    assert handling.rate_limit_factor == 1.1
+    assert handling.buffer_track is True
+
+
+def test_player_role_get_binary_handling_returns_none_for_unknown_type() -> None:
+    """PlayerRole returns None for unknown message types."""
+    client = MagicMock()
+    role = PlayerRole(client=client)
+
+    handling = role.get_binary_handling(999)  # Unknown type
+
+    assert handling is None
+
+
 # --- on_connect / on_disconnect ---
 
 

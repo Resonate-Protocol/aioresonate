@@ -223,9 +223,7 @@ class SendspinClient:
         # Clear previous roles
         self._roles.clear()
 
-        # Player persistent state.
-        # FB: here to, no player specific logic in client.py
-        # move the buffer tracker so the player role owns it
+        # Player persistent state (survives reconnects, role gets a reference).
         has_player_role = has_role(Roles.PLAYER.value, self._negotiated_roles)
         if has_player_role and self.info.player_support is not None:
             capacity = self.info.player_support.buffer_capacity
@@ -347,10 +345,8 @@ class SendspinClient:
             duration_us=duration_us,
         )
 
-    # ---- Player streaming state ----
-    # FB: remove player related methods from here,
-    # they belong in player_v1.py
-    # users need to access it with client.role('player@v1')
+    # ---- Player streaming state (convenience accessors) ----
+
     @property
     def player_role(self) -> PlayerRole | None:
         """Return the active PlayerRole instance for this connection, if any."""
@@ -451,7 +447,6 @@ class SendspinClient:
             )
 
     # ---- Controller command handling ----
-    # FB: FYI: other roles then player can still stay here until we refactor other roles analogously
 
     async def handle_controller_command(self, payload: ControllerCommandPayload) -> None:
         """Handle controller commands from this client."""

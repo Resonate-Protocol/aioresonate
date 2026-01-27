@@ -12,12 +12,49 @@ import pytest
 from aiosendspin.server.roles.base import (
     AudioChunk,
     AudioRequirements,
+    BinaryHandling,
     Role,
     StreamRequirements,
 )
 
 if TYPE_CHECKING:
     from aiosendspin.models.types import ServerMessage
+
+
+# --- BinaryHandling tests ---
+
+
+def test_binary_handling_is_frozen_dataclass() -> None:
+    """BinaryHandling should be an immutable dataclass."""
+    handling = BinaryHandling()
+    with pytest.raises(FrozenInstanceError):
+        handling.drop_late = True  # type: ignore[misc]
+
+
+def test_binary_handling_has_sensible_defaults() -> None:
+    """BinaryHandling should have safe defaults (no dropping, no rate limiting)."""
+    handling = BinaryHandling()
+    assert handling.drop_late is False
+    assert handling.grace_period_us == 0
+    assert handling.rate_limit is False
+    assert handling.rate_limit_factor == 1.1
+    assert handling.buffer_track is False
+
+
+def test_binary_handling_stores_all_fields() -> None:
+    """BinaryHandling should store all provided fields."""
+    handling = BinaryHandling(
+        drop_late=True,
+        grace_period_us=2_000_000,
+        rate_limit=True,
+        rate_limit_factor=1.5,
+        buffer_track=True,
+    )
+    assert handling.drop_late is True
+    assert handling.grace_period_us == 2_000_000
+    assert handling.rate_limit is True
+    assert handling.rate_limit_factor == 1.5
+    assert handling.buffer_track is True
 
 
 # --- StreamRequirements tests ---
@@ -195,6 +232,24 @@ def test_role_get_audio_requirements_returns_none_by_default() -> None:
     role = ConcreteRole()
     role._client = client  # noqa: SLF001
     assert role.get_audio_requirements() is None
+
+
+def test_role_get_binary_handling_returns_none_by_default() -> None:
+    """Role.get_binary_handling() returns None by default."""
+    client = MagicMock()
+    role = ConcreteRole()
+    role._client = client  # noqa: SLF001
+    assert role.get_binary_handling(0) is None
+
+
+def test_role_reset_binary_timing_clears_stream_start() -> None:
+    """Role.reset_binary_timing() clears _stream_start_time_us."""
+    client = MagicMock()
+    role = ConcreteRole()
+    role._client = client  # noqa: SLF001
+    role._stream_start_time_us = 12345  # noqa: SLF001
+    role.reset_binary_timing()
+    assert role._stream_start_time_us is None  # noqa: SLF001
 
 
 def test_role_send_message_drops_without_transport() -> None:
