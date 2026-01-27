@@ -176,8 +176,20 @@ class BufferTracker:
 
 
 def _resolve_audio_format(audio_format: AudioFormat) -> tuple[int, str, str]:
-    """Resolve helper data for an audio format."""
-    # FB: explain what this returns
+    """Resolve helper data for an audio format.
+
+    Args:
+        audio_format: The audio format to resolve.
+
+    Returns:
+        A tuple of (bytes_per_sample, av_format, layout) where:
+        - bytes_per_sample: Number of bytes per audio sample (2 for 16-bit, 3 for 24-bit)
+        - av_format: PyAV sample format string ("s16" or "s24")
+        - layout: Channel layout string ("mono" or "stereo")
+
+    Raises:
+        ValueError: If bit_depth is not 16 or 24, or channels is not 1 or 2.
+    """
     if audio_format.bit_depth == 16:
         bytes_per_sample = 2
         av_format = "s16"
