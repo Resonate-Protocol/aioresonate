@@ -177,6 +177,7 @@ class BufferTracker:
 
 def _resolve_audio_format(audio_format: AudioFormat) -> tuple[int, str, str]:
     """Resolve helper data for an audio format."""
+    # FB: explain what this returns
     if audio_format.bit_depth == 16:
         bytes_per_sample = 2
         av_format = "s16"

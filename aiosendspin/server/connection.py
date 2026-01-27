@@ -110,6 +110,7 @@ class SendspinConnection:
 
         self._last_goodbye_reason: GoodbyeReason | None = None
         self._binary_epoch = 0
+        # FB: remove player role specific things from here
         self._stream_start_time_us: int | None = None
         self._last_late_audio_log_s: float = 0.0
         self._late_audio_skips_since_log: int = 0
@@ -128,6 +129,10 @@ class SendspinConnection:
 
     def requires_initial_state(self) -> bool:
         """Whether this connection must receive initial client/state before being 'connected'."""
+        # FB: make this role independent, expand the role ABC so this can check if any role needs it
+        # FB: also, look if we got the state of all roles that need the initial state, not just if
+        # we got the message, but if it had the subobject for all needed roles.
+        # (can be sent in multiple messages or combined)
         return has_role(Roles.PLAYER.value, self._active_roles)
 
     def drop_pending_binary(self) -> None:
@@ -157,6 +162,7 @@ class SendspinConnection:
             return False
         return True
 
+    # FB: remove client side backpressure, assume that clients have enough throughput
     def queue_high_water(self, threshold: float = 0.8) -> bool:
         """Return True if the outgoing queue is at/above a high water mark."""
         max_size = self._to_write.maxsize
@@ -181,6 +187,8 @@ class SendspinConnection:
                 task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
             return
 
+        # FB: only drop from the role that is addressed by end/clear messages
+        # we dont want to drop artwork when playback stops
         if isinstance(message, StreamClearMessage | StreamEndMessage):
             self.drop_pending_binary()
 
@@ -413,6 +421,8 @@ class SendspinConnection:
                     data = item.data
                     header = unpack_binary_header(data)
 
+                    # FB: the connection.py should be role independent, remove player specific logic
+                    # or make this more general
                     if header.message_type == BinaryMessageType.AUDIO_CHUNK.value:
                         now = self._server.clock.now_us()
                         if self._stream_start_time_us is None:
@@ -448,6 +458,7 @@ class SendspinConnection:
                     ):
                         buffer_tracker.register(item.buffer_end_time_us, item.buffer_byte_count)
 
+                    # FB: same here
                     # Rate limit audio to ~110% of real-time to avoid bursty delivery
                     if (
                         header.message_type == BinaryMessageType.AUDIO_CHUNK.value

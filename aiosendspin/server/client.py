@@ -103,6 +103,7 @@ class SendspinClient:
         self._buffer_tracker: BufferTracker | None = None
         self._preferred_format: AudioFormat | None = None
         self._preferred_codec: AudioCodec | None = None
+        # FB: remove the blocking concept, simpllify so just non blocking exists
         self._blocking: bool = True
 
         # Disconnect bookkeeping for delayed BufferTracker reset policy.
@@ -228,6 +229,8 @@ class SendspinClient:
         self._roles.clear()
 
         # Player persistent state.
+        # FB: here to, no player specific logic in client.py
+        # move the buffer tracker so the player role owns it
         has_player_role = has_role(Roles.PLAYER.value, self._negotiated_roles)
         if has_player_role and self.info.player_support is not None:
             capacity = self.info.player_support.buffer_capacity
@@ -349,12 +352,15 @@ class SendspinClient:
             duration_us=duration_us,
         )
 
+    # FB: remove client side backpressure, assume that clients have enough throughput,
+    # just discard outdated binary chunks in case of overload.
     def queue_high_water(self, threshold: float = 0.8) -> bool:
         """Return True if the outgoing queue is above a high-water mark."""
         if self._connection is None:
             return False
         return self._connection.queue_high_water(threshold=threshold)
 
+    # FB: i think this is unused, remove?
     def queue_status(self) -> tuple[int, int]:
         """Return (qsize, maxsize) for the outgoing queue (0,0 if disconnected)."""
         if self._connection is None:
@@ -367,7 +373,9 @@ class SendspinClient:
         return int(qsize), int(qmax)
 
     # ---- Player streaming state ----
-
+    # FB: remove player related methods from here,
+    # they belong in player_v1.py
+    # users need to access it with client.role('player@v1')
     @property
     def player_role(self) -> PlayerRole | None:
         """Return the active PlayerRole instance for this connection, if any."""
@@ -430,6 +438,7 @@ class SendspinClient:
         """Current mute state of this player."""
         return self._player_muted
 
+    # FB: these belong in player_v1.py as well, to be accessed via client.role('player@v1')
     def set_player_volume(self, volume: int) -> None:
         """Set the volume of this player."""
         support = self.player_support
@@ -497,6 +506,7 @@ class SendspinClient:
             )
 
     # ---- Controller command handling ----
+    # FB: FYI: other roles then player can still stay here until we refactor other roles analogously
 
     async def handle_controller_command(self, payload: ControllerCommandPayload) -> None:
         """Handle controller commands from this client."""
