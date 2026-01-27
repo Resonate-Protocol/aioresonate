@@ -374,20 +374,14 @@ class PushStream:
         """
         Calculate backpressure delay based on client buffer capacity.
 
-        Only blocking clients contribute to backpressure. Non-blocking clients
-        are skipped and will be dropped/resynced if they fall behind.
-
         Args:
             byte_count: Approximate bytes being sent to players.
 
         Returns:
-            Maximum wait time in microseconds across all blocking clients.
+            Maximum wait time in microseconds across all clients.
         """
         max_wait_us = 0
         for client, _role in self._get_audio_roles():
-            # Skip non-blocking clients - they don't affect group timing
-            if not client.blocking:
-                continue
             if client.buffer_tracker is not None:
                 wait_us = client.buffer_tracker.time_until_capacity(byte_count)
                 if wait_us > 0 and _LOGGER.isEnabledFor(logging.DEBUG):
@@ -622,12 +616,11 @@ class PushStream:
 
     async def wait_for_buffer_space(self) -> None:
         """
-        Wait until there is buffer space available on blocking clients.
+        Wait until there is buffer space available on clients.
 
         This is useful for throttling audio production to match
         player consumption rates. Uses an estimated chunk size
-        to determine buffer capacity needs. Non-blocking clients
-        are skipped (they don't affect group timing).
+        to determine buffer capacity needs.
         """
         # Estimate chunk size: 25ms of 48kHz stereo 16-bit PCM = 4800 bytes
         # This is a reasonable default for typical audio streaming
@@ -635,9 +628,6 @@ class PushStream:
 
         max_wait_us = 0
         for client, _role in self._get_audio_roles():
-            # Skip non-blocking clients
-            if not client.blocking:
-                continue
             if client.buffer_tracker is not None:
                 wait_us = client.buffer_tracker.time_until_capacity(estimated_chunk_bytes)
                 max_wait_us = max(max_wait_us, wait_us)

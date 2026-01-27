@@ -50,7 +50,6 @@ class PlayerRole(Role):
         client: SendspinClient | None = None,
         *,
         preferred_format: AudioFormat | None = None,
-        blocking: bool = True,
         audio_requirements: AudioRequirements | None = None,
     ) -> None:
         """Initialize PlayerRole.
@@ -58,7 +57,6 @@ class PlayerRole(Role):
         Args:
             client: The owning SendspinClient.
             preferred_format: Preferred audio format for this player.
-            blocking: Whether this player participates in backpressure timing.
             audio_requirements: Audio requirements for hook-based streaming.
         """
         if client is None:
@@ -66,7 +64,6 @@ class PlayerRole(Role):
             raise ValueError(msg)
         self._client = client
         self._preferred_format = preferred_format
-        self._blocking = blocking
         self._audio_requirements = audio_requirements
         self._has_transport = False
         self._stream_started = False
@@ -86,11 +83,6 @@ class PlayerRole(Role):
     def preferred_format(self) -> AudioFormat | None:
         """Return the preferred audio format for this player."""
         return self._preferred_format
-
-    @property
-    def blocking(self) -> bool:
-        """Return whether this player participates in backpressure timing."""
-        return self._blocking
 
     # --- Declarations ---
 

@@ -103,8 +103,6 @@ class SendspinClient:
         self._buffer_tracker: BufferTracker | None = None
         self._preferred_format: AudioFormat | None = None
         self._preferred_codec: AudioCodec | None = None
-        # FB: remove the blocking concept, simpllify so just non blocking exists
-        self._blocking: bool = True
 
         # Disconnect bookkeeping for delayed BufferTracker reset policy.
         self._disconnect_time_us: int | None = None
@@ -391,15 +389,6 @@ class SendspinClient:
     @preferred_codec.setter
     def preferred_codec(self, value: AudioCodec | None) -> None:
         self._preferred_codec = value
-
-    @property
-    def blocking(self) -> bool:
-        """Return whether this player participates in backpressure timing."""
-        return False
-
-    @blocking.setter
-    def blocking(self, value: bool) -> None:
-        self._blocking = value
 
     # ---- Player volume/mute state and commands ----
 
