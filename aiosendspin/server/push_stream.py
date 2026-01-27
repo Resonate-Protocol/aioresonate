@@ -538,24 +538,18 @@ class PushStream:
                         transformed[tkey] = [(pcm_data, output_ts, duration_us)]
                     else:
                         # Transformer returns list[bytes] - one tuple per frame
-                        # Call process() first - it handles gap detection internally
                         frames = transformer.process(pcm_data, output_ts, duration_us)
-                        frame_duration_us = transformer.frame_duration_us
 
-                        # Get base timestamp for output frames:
-                        # pending_timestamp_us after process() is the timestamp for the NEXT frame,
-                        # so the first frame's timestamp = pending - (num_frames * frame_duration)
-                        # This correctly handles gap detection done inside process().
-                        base_ts = output_ts
-                        if hasattr(transformer, "pending_timestamp_us") and frames:
-                            pending_ts = transformer.pending_timestamp_us
-                            if pending_ts is not None:
-                                base_ts = pending_ts - (len(frames) * frame_duration_us)
-
+                        # Spread frames across the input duration. Codecs like FLAC have
+                        # internal buffering, so output frame count may not match input
+                        # duration. Spreading ensures timestamps cover the full input.
                         frame_list: list[tuple[bytes, int, int]] = []
-                        for i, frame_data in enumerate(frames):
-                            frame_ts = base_ts + (i * frame_duration_us)
-                            frame_list.append((frame_data, frame_ts, frame_duration_us))
+                        if frames:
+                            # Calculate timestamp increment to spread across input duration
+                            ts_increment = duration_us // len(frames)
+                            for i, frame_data in enumerate(frames):
+                                frame_ts = output_ts + (i * ts_increment)
+                                frame_list.append((frame_data, frame_ts, ts_increment))
                         transformed[tkey] = frame_list
 
         # Deliver and cache
@@ -720,7 +714,7 @@ class PushStream:
         """
         self._is_stopped = True
 
-        # Flush remaining audio from transformers
+        # Flush remaining audio from transformers and reset them
         flushed_transformers: set[int] = set()
         for _client, role in self._get_audio_roles():
             req = role.get_audio_requirements()
@@ -739,6 +733,8 @@ class PushStream:
                                 byte_count=len(frame_data),
                             )
                             role.on_audio_chunk(chunk)
+                    # Reset transformer for next stream
+                    req.transformer.reset()
 
         # Send stream/end to all roles with audio requirements via hooks
         for _client, role in self._get_audio_roles():
@@ -766,6 +762,16 @@ class PushStream:
 
         # Reset inline resamplers
         self._resamplers.clear()
+
+        # Reset transformers so they don't carry stale timestamp state
+        reset_transformers: set[int] = set()
+        for _client, role in self._get_audio_roles():
+            req = role.get_audio_requirements()
+            if req and req.transformer:
+                tid = id(req.transformer)
+                if tid not in reset_transformers:
+                    reset_transformers.add(tid)
+                    req.transformer.reset()
 
         # Clear role tracking state
         self._started_roles.clear()
