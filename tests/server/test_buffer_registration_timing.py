@@ -91,8 +91,10 @@ async def test_buffer_tracker_does_not_backpressure_until_send() -> None:
     client.mark_connected()
     conn._client = client  # noqa: SLF001
 
-    assert client.player_role is not None
-    assert client.buffer_tracker is not None
+    role = client.role("player@v1")
+    assert role is not None
+    buffer_tracker = role.get_buffer_tracker()
+    assert buffer_tracker is not None
 
     now_us = clock.now_us()
     chunk = AudioChunk(
@@ -104,12 +106,12 @@ async def test_buffer_tracker_does_not_backpressure_until_send() -> None:
 
     try:
         # Use the hook-based on_audio_chunk method
-        sent = client.player_role.on_audio_chunk(chunk)
+        sent = role.on_audio_chunk(chunk)
         assert sent is True
 
         # Regression assertion: queued-but-not-sent data must not cause backpressure.
-        assert client.buffer_tracker.buffered_bytes == 0
-        assert client.buffer_tracker.time_until_capacity(1) == 0
+        assert buffer_tracker.buffered_bytes == 0
+        assert buffer_tracker.time_until_capacity(1) == 0
 
         send_event.set()
         for _ in range(50):
@@ -118,7 +120,7 @@ async def test_buffer_tracker_does_not_backpressure_until_send() -> None:
             await asyncio.sleep(0)
 
         assert wsock.send_bytes.call_count == 1
-        assert client.buffer_tracker.buffered_bytes == 100
+        assert buffer_tracker.buffered_bytes == 100
     finally:
         send_event.set()
         await conn.disconnect(retry_connection=False)

@@ -7,36 +7,28 @@ its identity, group membership, and per-role persistent state (e.g. BufferTracke
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from collections.abc import Callable
 from contextlib import suppress
 from enum import Enum
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TypeVar
 
-from aiosendspin.models import AudioCodec
 from aiosendspin.models.controller import ControllerCommandPayload
 from aiosendspin.models.core import (
     ClientHelloPayload,
     StreamStartMessage,
 )
-from aiosendspin.models.player import (
-    ClientHelloPlayerSupport,
-    PlayerStatePayload,
-)
 from aiosendspin.models.types import (
     ClientStateType,
     MediaCommand,
     PlaybackStateType,
-    PlayerCommand,
     Roles,
     has_role,
 )
-from aiosendspin.server.audio import AudioFormat, BufferTracker
-from aiosendspin.server.events import ClientEvent, ClientGroupChangedEvent, VolumeChangedEvent
+from aiosendspin.server.events import ClientEvent, ClientGroupChangedEvent
 
-from .roles import AudioRequirements, PlayerRole, Role
-from .transformers import FlacEncoder, PcmPassthrough
+from .roles import Role
+from .roles.registry import create_role
 
 if TYPE_CHECKING:
     from aiosendspin.models.types import GoodbyeReason, ServerMessage
@@ -47,6 +39,8 @@ if TYPE_CHECKING:
 
 
 logger = logging.getLogger(__name__)
+
+_T = TypeVar("_T")
 
 
 class DisconnectBehaviour(Enum):
@@ -93,18 +87,8 @@ class SendspinClient:
         self._previous_group_id: str | None = None
         self._external_source_solo_group_id: str | None = None
 
-        # Player volume/mute state (persistent across reconnects)
-        self._player_volume: int = 100
-        self._player_muted: bool = False
-
-        # Player role persistent state
-        self._buffer_tracker: BufferTracker | None = None
-        self._preferred_format: AudioFormat | None = None
-        self._preferred_codec: AudioCodec | None = None
-
-        # Disconnect bookkeeping for delayed BufferTracker reset policy.
-        self._disconnect_time_us: int | None = None
-        self._buffer_reset_handle: asyncio.TimerHandle | None = None
+        # Role-owned persistent state (per role family).
+        self._role_state: dict[str, object] = {}
 
     @property
     def client_id(self) -> str:
@@ -130,6 +114,34 @@ class SendspinClient:
     def role(self, role_id: str) -> Role | None:
         """Get active role by versioned ID (e.g., 'player@v1')."""
         return self._roles.get(role_id)
+
+    def roles_by_family(self, family: str) -> list[Role]:
+        """Return all active roles for a role family."""
+        return [role for role in self._roles.values() if role.role_family == family]
+
+    def get_role_state(self, family: str, cls: type[_T]) -> _T | None:
+        """Return persistent role state for a family, or None if unset."""
+        state = self._role_state.get(family)
+        if state is None:
+            return None
+        if not isinstance(state, cls):
+            raise TypeError(
+                f"Role state for {family} is {type(state).__name__}, expected {cls.__name__}"
+            )
+        return state
+
+    def set_role_state(self, family: str, state: object) -> None:
+        """Store persistent role state for a family."""
+        self._role_state[family] = state
+
+    def ensure_role_state(self, family: str, cls: type[_T]) -> _T:
+        """Return persistent role state, creating a default if missing."""
+        existing = self.get_role_state(family, cls)
+        if existing is not None:
+            return existing
+        created = cls()
+        self._role_state[family] = created
+        return created
 
     @property
     def group(self) -> SendspinGroup:
@@ -207,14 +219,8 @@ class SendspinClient:
             )
             task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
 
-        # Cancel any pending delayed BufferTracker reset from a previous disconnect.
-        if self._buffer_reset_handle is not None:
-            self._buffer_reset_handle.cancel()
-            self._buffer_reset_handle = None
-
         self._connection = connection
         self._connected = False  # set True once initial state is received (spec)
-        self._disconnect_time_us = None
 
         self._info = client_info
         self._name = client_info.name
@@ -224,81 +230,14 @@ class SendspinClient:
         # Clear previous roles
         self._roles.clear()
 
-        # Player persistent state (survives reconnects, role gets a reference).
-        has_player_role = has_role(Roles.PLAYER.value, self._negotiated_roles)
-        if has_player_role and self.info.player_support is not None:
-            # TODO: Remove mock - using 1/3 of reported capacity for testing
-            capacity = self.info.player_support.buffer_capacity // 3
-            # Limit buffered duration to 2 seconds for rate limiting
-            max_duration_us = 2_000_000
-            if self._buffer_tracker is None:
-                self._buffer_tracker = BufferTracker(
-                    clock=self._server.clock,
-                    client_id=self._client_id,
-                    capacity_bytes=capacity,
-                    max_duration_us=max_duration_us,
-                )
-            else:
-                self._buffer_tracker.capacity_bytes = capacity
-                self._buffer_tracker.max_duration_us = max_duration_us
-
-            supported = self.info.player_support.supported_formats
-            preferred = next(
-                (fmt for fmt in supported if fmt.codec == AudioCodec.OPUS),
-                supported[0],
-            )
-            default_format = AudioFormat(
-                sample_rate=preferred.sample_rate,
-                bit_depth=preferred.bit_depth,
-                channels=preferred.channels,
-            )
-            default_codec = preferred.codec
-            # Check if current preferred format+codec is still supported
-            current_codec = self._preferred_codec or default_codec
-            if self._preferred_format is None or not any(
-                fmt.codec == current_codec
-                and fmt.sample_rate == self._preferred_format.sample_rate
-                and fmt.bit_depth == self._preferred_format.bit_depth
-                and fmt.channels == self._preferred_format.channels
-                for fmt in supported
-            ):
-                self._preferred_format = default_format
-                self._preferred_codec = default_codec
-
-            # Create and register player role
-            player_role = PlayerRole(client=self)
-            player_role._buffer_tracker = self._buffer_tracker  # noqa: SLF001
-            player_role.on_connect()
-            player_role.on_transport_attach()
-            self._roles["player@v1"] = player_role
-
-            # Set audio requirements for hook-based streaming
-            audio_format = self._preferred_format or default_format
-            audio_codec = self._preferred_codec or default_codec
-            assert self._group is not None  # Server sets group before attach_connection
-
-            transformer: FlacEncoder | PcmPassthrough
-            if audio_codec == AudioCodec.FLAC:
-                transformer = self._group.transformer_pool.get_or_create(
-                    FlacEncoder,
-                    sample_rate=audio_format.sample_rate,
-                    bit_depth=audio_format.bit_depth,
-                    channels=audio_format.channels,
-                )
-            else:  # PCM or unsupported codec fallback
-                transformer = self._group.transformer_pool.get_or_create(
-                    PcmPassthrough,
-                    sample_rate=audio_format.sample_rate,
-                    bit_depth=audio_format.bit_depth,
-                    channels=audio_format.channels,
-                )
-
-            player_role._audio_requirements = AudioRequirements(  # noqa: SLF001
-                sample_rate=audio_format.sample_rate,
-                bit_depth=audio_format.bit_depth,
-                channels=audio_format.channels,
-                transformer=transformer,
-            )
+        # Create and register active roles via registry.
+        for role_id in self._negotiated_roles:
+            role = create_role(role_id, self)
+            if role is None:
+                continue
+            role.on_connect()
+            role.on_transport_attach()
+            self._roles[role.role_id] = role
 
         # Ensure group exists (server creates it on first sight).
         if self._group is None:
@@ -317,39 +256,11 @@ class SendspinClient:
 
         # Notify all roles about detachment
         for role in self._roles.values():
-            role.on_transport_detach()
+            role.on_transport_detach(goodbye_reason)
             role.on_disconnect()
         self._roles.clear()
 
         self._connection = None
-        self._disconnect_time_us = self._server.clock.now_us()
-
-        if self._buffer_tracker is None:
-            return
-
-        # Policy:
-        # - client/goodbye => reset immediately
-        # - ungraceful disconnect => delayed reset to tolerate brief blips
-        if goodbye_reason is not None:
-            self._buffer_tracker.reset()
-            return
-
-        disconnect_time_us = self._disconnect_time_us
-
-        def _maybe_reset() -> None:
-            self._buffer_reset_handle = None
-            if self._connection is not None:
-                return
-            if disconnect_time_us != self._disconnect_time_us:
-                return
-            assert self._buffer_tracker is not None
-            self._buffer_tracker.reset()
-
-        # Duration threshold (seconds)
-        reset_after_s = 2.0
-        if self._buffer_reset_handle is not None:
-            self._buffer_reset_handle.cancel()
-        self._buffer_reset_handle = self._server.loop.call_later(reset_after_s, _maybe_reset)
 
     # ---- Messaging (delegates to connection) ----
 
@@ -365,6 +276,7 @@ class SendspinClient:
         self,
         data: bytes,
         *,
+        role_family: str,
         buffer_end_time_us: int | None = None,
         buffer_byte_count: int | None = None,
         duration_us: int | None = None,
@@ -374,111 +286,16 @@ class SendspinClient:
             return False
         return self._connection.try_send_binary(
             data,
+            role_family=role_family,
             buffer_end_time_us=buffer_end_time_us,
             buffer_byte_count=buffer_byte_count,
             duration_us=duration_us,
         )
 
-    # ---- Player streaming state (convenience accessors) ----
-
-    @property
-    def player_role(self) -> PlayerRole | None:
-        """Return the active PlayerRole instance for this connection, if any."""
-        role = self._roles.get("player@v1")
-        if role is not None and isinstance(role, PlayerRole):
-            return role
-        return None
-
     @property
     def active_roles(self) -> list[Role]:
         """All active roles for iteration."""
         return list(self._roles.values())
-
-    @property
-    def buffer_tracker(self) -> BufferTracker | None:
-        """Return the persistent buffer tracker for the player role, if any."""
-        return self._buffer_tracker
-
-    @property
-    def preferred_format(self) -> AudioFormat | None:
-        """Return the preferred audio format for the player role, if set."""
-        return self._preferred_format
-
-    @preferred_format.setter
-    def preferred_format(self, value: AudioFormat | None) -> None:
-        self._preferred_format = value
-
-    @property
-    def preferred_codec(self) -> AudioCodec | None:
-        """Return the preferred audio codec for the player role, if set."""
-        return self._preferred_codec
-
-    @preferred_codec.setter
-    def preferred_codec(self, value: AudioCodec | None) -> None:
-        self._preferred_codec = value
-
-    # ---- Player volume/mute state and commands ----
-
-    @property
-    def player_support(self) -> ClientHelloPlayerSupport | None:
-        """Return player capabilities advertised in the hello payload."""
-        return self.info.player_support
-
-    @property
-    def player_volume(self) -> int:
-        """Current volume of this player (0-100)."""
-        return self._player_volume
-
-    @property
-    def player_muted(self) -> bool:
-        """Current mute state of this player."""
-        return self._player_muted
-
-    def set_player_volume(self, volume: int) -> None:
-        """Set the volume of this player.
-
-        DEPRECATED: Use client.role('player@v1').set_volume() instead.
-        """
-        player = self.role("player@v1")
-        if player is not None and isinstance(player, PlayerRole):
-            player.set_volume(volume)
-
-    def set_player_mute(self, muted: bool) -> None:  # noqa: FBT001
-        """Set the mute state of this player.
-
-        DEPRECATED: Use client.role('player@v1').set_mute() instead.
-        """
-        player = self.role("player@v1")
-        if player is not None and isinstance(player, PlayerRole):
-            player.set_mute(muted)
-
-    def handle_player_state_update(self, state: PlayerStatePayload) -> None:
-        """Update internal mute/volume state from client report and emit event."""
-        support = self.player_support
-        changed = False
-
-        if state.volume is not None:
-            if not support or PlayerCommand.VOLUME not in support.supported_commands:
-                self._logger.warning(
-                    "Client sent volume field without declaring 'volume' in supported_commands"
-                )
-            elif self._player_volume != state.volume:
-                self._player_volume = state.volume
-                changed = True
-
-        if state.muted is not None:
-            if not support or PlayerCommand.MUTE not in support.supported_commands:
-                self._logger.warning(
-                    "Client sent muted field without declaring 'mute' in supported_commands"
-                )
-            elif self._player_muted != state.muted:
-                self._player_muted = state.muted
-                changed = True
-
-        if changed:
-            self._signal_event(
-                VolumeChangedEvent(volume=self._player_volume, muted=self._player_muted)
-            )
 
     # ---- Controller command handling ----
 
@@ -522,7 +339,7 @@ class SendspinClient:
         all_groups = self._get_all_groups()
 
         # Build the cycle list based on client's player role
-        has_player_role = self.check_role(Roles.PLAYER)
+        has_player_role = has_role("player@v1", self._negotiated_roles)
         cycle_groups = self._build_group_cycle(all_groups, current_group, has_player_role)
 
         if not cycle_groups:
@@ -593,14 +410,16 @@ class SendspinClient:
             if client_count > 1 and is_playing:
                 # Verify the group has at least one player
                 # (groups with only controllers/metadata can't actually be "playing")
-                has_player = any(c.check_role(Roles.PLAYER) for c in group.clients)
+                has_player = any(has_role("player@v1", c.negotiated_roles) for c in group.clients)
                 if has_player:
                     multi_client_playing.append(group)
             elif client_count == 1 and is_playing:
                 # Get the single client in this group
                 single_client_obj = group.clients[0]
                 # Skip current group, it will be handled as solo option for player clients
-                if group != current_group and single_client_obj.check_role(Roles.PLAYER):
+                if group != current_group and has_role(
+                    "player@v1", single_client_obj.negotiated_roles
+                ):
                     # Only include single-client groups where the client has player role
                     single_client.append(group)
 
@@ -697,6 +516,8 @@ class SendspinClient:
         self._group = group
         self._group._register_client_events(self)  # noqa: SLF001
         self._signal_event(ClientGroupChangedEvent(group))
+        for role in self._roles.values():
+            role.on_group_changed(group)
 
     async def ungroup(self) -> None:
         """Remove the client from the group (no-op if already solo)."""

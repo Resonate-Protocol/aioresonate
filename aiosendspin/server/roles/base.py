@@ -15,7 +15,8 @@ from typing import TYPE_CHECKING
 from uuid import UUID
 
 if TYPE_CHECKING:
-    from aiosendspin.models.types import ServerMessage
+    from aiosendspin.models.core import ClientStatePayload, StreamRequestFormatPayload
+    from aiosendspin.models.types import GoodbyeReason, ServerMessage
     from aiosendspin.server.audio import BufferTracker
     from aiosendspin.server.client import SendspinClient
     from aiosendspin.server.transformers import AudioTransformer
@@ -165,6 +166,34 @@ class Role(ABC):
         """
         return None
 
+    def get_buffer_tracker(self) -> BufferTracker | None:
+        """Return the role-owned buffer tracker, if any."""
+        return self._buffer_tracker
+
+    def get_join_delay_s(self) -> float:
+        """Return the join delay in seconds for reconnects (default: 0)."""
+        return 0.0
+
+    def get_player_volume(self) -> int | None:
+        """Return player volume if supported by this role."""
+        return None
+
+    def get_player_muted(self) -> bool | None:
+        """Return player mute state if supported by this role."""
+        return None
+
+    def set_player_volume(self, volume: int) -> None:  # noqa: ARG002
+        """Set player volume if supported by this role."""
+        return
+
+    def set_player_mute(self, muted: bool) -> None:  # noqa: ARG002, FBT001
+        """Set player mute if supported by this role."""
+        return
+
+    def get_player_supported_sample_rates(self) -> set[int] | None:
+        """Return supported sample rates if this role represents a player."""
+        return None
+
     def reset_binary_timing(self) -> None:
         """Reset timing state for binary handling (called on stream clear/end)."""
         self._stream_start_time_us = None
@@ -198,7 +227,7 @@ class Role(ABC):
         """Handle WebSocket connect/reconnect."""
         self._has_transport = True
 
-    def on_transport_detach(self) -> None:
+    def on_transport_detach(self, _goodbye_reason: GoodbyeReason | None = None) -> None:
         """Handle WebSocket disconnect."""
         self._has_transport = False
 
@@ -217,3 +246,19 @@ class Role(ABC):
         until their initial state subobject is received in client/state.
         """
         return False
+
+    def on_group_changed(self, group: object) -> None:  # noqa: B027
+        """Handle group changes (e.g., for transformer pool updates)."""
+
+    # --- Message hooks ---
+
+    def on_client_state(self, payload: ClientStatePayload) -> None:  # noqa: B027
+        """Handle client/state payload."""
+
+    def on_stream_request_format(  # noqa: B027
+        self,
+        payload: StreamRequestFormatPayload,
+        *,
+        stream_active: bool | None = None,
+    ) -> None:
+        """Handle stream/request-format payload."""

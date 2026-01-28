@@ -10,21 +10,26 @@ This PlayerRole implementation uses hook-based streaming:
 from __future__ import annotations
 
 import base64
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from aiosendspin.models import AudioCodec, BinaryMessageType, pack_binary_header_raw
 from aiosendspin.models.core import (
+    ClientStatePayload,
     ServerCommandMessage,
     ServerCommandPayload,
     StreamClearMessage,
     StreamClearPayload,
     StreamEndMessage,
     StreamEndPayload,
+    StreamRequestFormatPayload,
     StreamStartMessage,
     StreamStartPayload,
 )
 from aiosendspin.models.player import PlayerCommandPayload, StreamStartPlayer
-from aiosendspin.models.types import PlayerCommand
+from aiosendspin.models.types import GoodbyeReason, PlayerCommand
+from aiosendspin.server.audio import AudioFormat, BufferTracker
+from aiosendspin.server.events import VolumeChangedEvent
 from aiosendspin.server.roles.base import (
     AudioChunk,
     AudioRequirements,
@@ -32,11 +37,25 @@ from aiosendspin.server.roles.base import (
     Role,
     StreamRequirements,
 )
-from aiosendspin.server.transformers import FlacEncoder
+from aiosendspin.server.transformers import FlacEncoder, PcmPassthrough
 
 if TYPE_CHECKING:
-    from aiosendspin.server.audio import AudioFormat
     from aiosendspin.server.client import SendspinClient
+
+
+@dataclass
+class PlayerPersistentState:
+    """Persistent player state stored on the SendspinClient."""
+
+    volume: int = 100
+    muted: bool = False
+    preferred_format: AudioFormat | None = None
+    preferred_codec: AudioCodec | None = None
+    buffer_tracker: BufferTracker | None = None
+    buffer_capacity_scale: float = 1 / 3
+    max_duration_us: int = 2_000_000
+    disconnect_time_us: int | None = None
+    buffer_reset_handle: object | None = None
 
 
 class PlayerRole(Role):
@@ -67,7 +86,7 @@ class PlayerRole(Role):
             msg = "PlayerRole requires a client"
             raise ValueError(msg)
         self._client = client
-        self._preferred_format = preferred_format
+        self._preferred_format_override = preferred_format
         self._audio_requirements = audio_requirements
         self._has_transport = False
         self._stream_started = False
@@ -90,7 +109,21 @@ class PlayerRole(Role):
     @property
     def preferred_format(self) -> AudioFormat | None:
         """Return the preferred audio format for this player."""
-        return self._preferred_format
+        state = self._state()
+        return state.preferred_format or self._preferred_format_override
+
+    @preferred_format.setter
+    def preferred_format(self, value: AudioFormat | None) -> None:
+        self._state().preferred_format = value
+
+    @property
+    def preferred_codec(self) -> AudioCodec | None:
+        """Return the preferred audio codec for this player."""
+        return self._state().preferred_codec
+
+    @preferred_codec.setter
+    def preferred_codec(self, value: AudioCodec | None) -> None:
+        self._state().preferred_codec = value
 
     # --- Declarations ---
 
@@ -114,11 +147,29 @@ class PlayerRole(Role):
             )
         return None
 
+    def get_buffer_tracker(self) -> BufferTracker | None:
+        """Return the role-owned buffer tracker."""
+        return self._state().buffer_tracker
+
+    def get_join_delay_s(self) -> float:
+        """Delay joins briefly to allow time sync to stabilize."""
+        return 1.0
+
     # --- Lifecycle hooks ---
 
     def on_connect(self) -> None:
         """Reset stream state on new connection."""
         self._stream_started = False
+        state = self._state()
+        if state.buffer_reset_handle is not None:
+            handle = state.buffer_reset_handle
+            state.buffer_reset_handle = None
+            if hasattr(handle, "cancel"):
+                handle.cancel()
+        state.disconnect_time_us = None
+        self._ensure_buffer_tracker(state)
+        self._ensure_preferred_format(state)
+        self._ensure_audio_requirements(state)
 
     def on_disconnect(self) -> None:
         """Clean up on disconnect."""
@@ -128,11 +179,55 @@ class PlayerRole(Role):
         """Player role requires initial state with volume/mute info."""
         return True
 
+    def on_transport_detach(self, goodbye_reason: GoodbyeReason | None = None) -> None:
+        """Handle transport detach with buffer reset policy."""
+        super().on_transport_detach(goodbye_reason)
+
+        state = self._state()
+        state.disconnect_time_us = self._client._server.clock.now_us()  # noqa: SLF001
+        if state.buffer_tracker is None:
+            return
+
+        # Policy:
+        # - client/goodbye => reset immediately
+        # - ungraceful disconnect => delayed reset to tolerate brief blips
+        if goodbye_reason is not None:
+            state.buffer_tracker.reset()
+            return
+
+        disconnect_time_us = state.disconnect_time_us
+
+        def _maybe_reset() -> None:
+            state.buffer_reset_handle = None
+            if self._client.connection is not None:
+                return
+            if disconnect_time_us != state.disconnect_time_us:
+                return
+            if state.buffer_tracker is None:
+                return
+            state.buffer_tracker.reset()
+
+        reset_after_s = 2.0
+        if state.buffer_reset_handle is not None:
+            handle = state.buffer_reset_handle
+            if hasattr(handle, "cancel"):
+                handle.cancel()
+        state.buffer_reset_handle = self._client._server.loop.call_later(  # noqa: SLF001
+            reset_after_s, _maybe_reset
+        )
+
+    def on_group_changed(self, group: object) -> None:  # noqa: ARG002
+        """Refresh transformer selection when group changes."""
+        self._ensure_audio_requirements(self._state(), force=True)
+
     # --- Stream lifecycle hooks ---
 
     def on_stream_start(self) -> None:
         """Send stream/start message using transformer header."""
         req = self.get_audio_requirements()
+        if req is None:
+            self._ensure_audio_requirements(self._state())
+            req = self.get_audio_requirements()
         if req is None:
             return
 
@@ -169,6 +264,7 @@ class PlayerRole(Role):
 
         return self._client.try_send_binary(
             packed_data,
+            role_family=self.role_family,
             buffer_end_time_us=chunk_end_us,
             buffer_byte_count=chunk.byte_count,
             duration_us=chunk.duration_us,
@@ -211,24 +307,47 @@ class PlayerRole(Role):
     @property
     def volume(self) -> int:
         """Current volume of this player (0-100)."""
-        return self._client._player_volume  # noqa: SLF001
+        return self._state().volume
 
     @volume.setter
     def volume(self, value: int) -> None:
-        self._client._player_volume = value  # noqa: SLF001
+        self._state().volume = value
 
     @property
     def muted(self) -> bool:
         """Current mute state of this player."""
-        return self._client._player_muted  # noqa: SLF001
+        return self._state().muted
 
     @muted.setter
     def muted(self, value: bool) -> None:
-        self._client._player_muted = value  # noqa: SLF001
+        self._state().muted = value
+
+    def get_player_volume(self) -> int | None:
+        """Return current volume for group aggregation."""
+        return self.volume
+
+    def get_player_muted(self) -> bool | None:
+        """Return current mute state for group aggregation."""
+        return self.muted
+
+    def set_player_volume(self, volume: int) -> None:
+        """Set player volume via role API."""
+        self.set_volume(volume)
+
+    def set_player_mute(self, muted: bool) -> None:  # noqa: FBT001
+        """Set player mute via role API."""
+        self.set_mute(muted)
+
+    def get_player_supported_sample_rates(self) -> set[int] | None:
+        """Return supported sample rates for this player."""
+        support = self._client.info.player_support
+        if support is None:
+            return None
+        return {fmt.sample_rate for fmt in support.supported_formats}
 
     def set_volume(self, volume: int) -> None:
         """Set the volume of this player."""
-        support = self._client.player_support
+        support = self._client.info.player_support
         if not support or PlayerCommand.VOLUME not in support.supported_commands:
             return
 
@@ -245,7 +364,7 @@ class PlayerRole(Role):
 
     def set_mute(self, muted: bool) -> None:  # noqa: FBT001
         """Set the mute state of this player."""
-        support = self._client.player_support
+        support = self._client.info.player_support
         if not support or PlayerCommand.MUTE not in support.supported_commands:
             return
 
@@ -258,4 +377,218 @@ class PlayerRole(Role):
                     )
                 )
             )
+        )
+
+    # ---- Client message handling ----
+
+    def on_client_state(self, payload: ClientStatePayload) -> None:
+        """Handle player-specific fields in client/state."""
+        state = payload.player
+        if state is None:
+            return
+
+        # DEPRECATED(before-spec-pr-50): fall back to player.state for older clients.
+        if payload.state is None and state.state is not None:
+            task = self._client._server.loop.create_task(  # noqa: SLF001
+                self._client.handle_state_transition(state.state)
+            )
+            task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
+
+        support = self._client.info.player_support
+        changed = False
+
+        if state.volume is not None:
+            if not support or PlayerCommand.VOLUME not in support.supported_commands:
+                self._client._logger.warning(  # noqa: SLF001
+                    "Client sent volume field without declaring 'volume' in supported_commands"
+                )
+            elif self.volume != state.volume:
+                self.volume = state.volume
+                changed = True
+
+        if state.muted is not None:
+            if not support or PlayerCommand.MUTE not in support.supported_commands:
+                self._client._logger.warning(  # noqa: SLF001
+                    "Client sent muted field without declaring 'mute' in supported_commands"
+                )
+            elif self.muted != state.muted:
+                self.muted = state.muted
+                changed = True
+
+        if changed:
+            self._client._signal_event(  # noqa: SLF001
+                VolumeChangedEvent(volume=self.volume, muted=self.muted)
+            )
+
+    def on_stream_request_format(
+        self, payload: StreamRequestFormatPayload, *, stream_active: bool | None = None
+    ) -> None:
+        """Handle stream/request-format for player role."""
+        player_req = payload.player
+        if player_req is None:
+            return
+
+        support = self._client.info.player_support
+        if support is None:
+            raise ValueError(
+                f"Client {self._client.client_id} sent player format request "
+                "but has no player support"
+            )
+
+        supported = support.supported_formats
+        preferred_supported = next(
+            (fmt for fmt in supported if fmt.codec == AudioCodec.OPUS),
+            supported[0],
+        )
+        base_format = self.preferred_format or AudioFormat(
+            sample_rate=preferred_supported.sample_rate,
+            bit_depth=preferred_supported.bit_depth,
+            channels=preferred_supported.channels,
+        )
+        base_codec = self.preferred_codec or preferred_supported.codec
+
+        requested_codec = player_req.codec or base_codec
+        requested_format = AudioFormat(
+            sample_rate=player_req.sample_rate or base_format.sample_rate,
+            bit_depth=player_req.bit_depth or base_format.bit_depth,
+            channels=player_req.channels or base_format.channels,
+        )
+
+        if not any(
+            fmt.codec == requested_codec
+            and fmt.sample_rate == requested_format.sample_rate
+            and fmt.bit_depth == requested_format.bit_depth
+            and fmt.channels == requested_format.channels
+            for fmt in supported
+        ):
+            self._client._logger.warning(  # noqa: SLF001
+                "Client %s requested unsupported format %s codec=%s, falling back to %s",
+                self._client.client_id,
+                requested_format,
+                requested_codec,
+                base_format,
+            )
+            requested_format = base_format
+            requested_codec = base_codec
+
+        self.preferred_format = requested_format
+        self.preferred_codec = requested_codec
+
+        if stream_active is None:
+            stream_active = self._client.group.has_active_stream
+        if not stream_active:
+            stream_start = StreamStartPayload(
+                player=StreamStartPlayer(
+                    codec=requested_codec,
+                    sample_rate=requested_format.sample_rate,
+                    channels=requested_format.channels,
+                    bit_depth=requested_format.bit_depth,
+                    codec_header=None,
+                )
+            )
+            self._client._logger.debug(  # noqa: SLF001
+                "Sending stream/start to client %s for player format change",
+                self._client.client_id,
+            )
+            self.send_message(StreamStartMessage(stream_start))
+
+    # ---- Internal helpers ----
+
+    def _state(self) -> PlayerPersistentState:
+        return self._client.ensure_role_state("player", PlayerPersistentState)
+
+    def _ensure_buffer_tracker(self, state: PlayerPersistentState) -> None:
+        support = self._client.info.player_support
+        if support is None:
+            self._buffer_tracker = None
+            return
+
+        capacity = int(support.buffer_capacity * state.buffer_capacity_scale)
+        capacity = max(1, capacity)
+        max_duration_us = state.max_duration_us
+
+        if state.buffer_tracker is None:
+            state.buffer_tracker = BufferTracker(
+                clock=self._client._server.clock,  # noqa: SLF001
+                client_id=self._client.client_id,
+                capacity_bytes=capacity,
+                max_duration_us=max_duration_us,
+            )
+        else:
+            state.buffer_tracker.capacity_bytes = capacity
+            state.buffer_tracker.max_duration_us = max_duration_us
+        self._buffer_tracker = state.buffer_tracker
+
+    def _ensure_preferred_format(self, state: PlayerPersistentState) -> None:
+        support = self._client.info.player_support
+        if support is None:
+            return
+
+        if state.preferred_format is None and self._preferred_format_override is not None:
+            state.preferred_format = self._preferred_format_override
+
+        supported = support.supported_formats
+        preferred_supported = next(
+            (fmt for fmt in supported if fmt.codec == AudioCodec.OPUS),
+            supported[0],
+        )
+        default_format = AudioFormat(
+            sample_rate=preferred_supported.sample_rate,
+            bit_depth=preferred_supported.bit_depth,
+            channels=preferred_supported.channels,
+        )
+        default_codec = preferred_supported.codec
+
+        current_codec = state.preferred_codec or default_codec
+        current_format = state.preferred_format
+        is_supported = current_format is not None and any(
+            fmt.codec == current_codec
+            and fmt.sample_rate == current_format.sample_rate
+            and fmt.bit_depth == current_format.bit_depth
+            and fmt.channels == current_format.channels
+            for fmt in supported
+        )
+        if not is_supported:
+            state.preferred_format = default_format
+            state.preferred_codec = default_codec
+
+    def _ensure_audio_requirements(
+        self, state: PlayerPersistentState, *, force: bool = False
+    ) -> None:
+        if self._audio_requirements is not None and not force:
+            return
+
+        support = self._client.info.player_support
+        if support is None:
+            self._audio_requirements = None
+            return
+
+        audio_format = state.preferred_format
+        audio_codec = state.preferred_codec
+        if audio_format is None or audio_codec is None:
+            self._audio_requirements = None
+            return
+
+        group = self._client.group
+        transformer: FlacEncoder | PcmPassthrough
+        if audio_codec == AudioCodec.FLAC:
+            transformer = group.transformer_pool.get_or_create(
+                FlacEncoder,
+                sample_rate=audio_format.sample_rate,
+                bit_depth=audio_format.bit_depth,
+                channels=audio_format.channels,
+            )
+        else:
+            transformer = group.transformer_pool.get_or_create(
+                PcmPassthrough,
+                sample_rate=audio_format.sample_rate,
+                bit_depth=audio_format.bit_depth,
+                channels=audio_format.channels,
+            )
+
+        self._audio_requirements = AudioRequirements(
+            sample_rate=audio_format.sample_rate,
+            bit_depth=audio_format.bit_depth,
+            channels=audio_format.channels,
+            transformer=transformer,
         )

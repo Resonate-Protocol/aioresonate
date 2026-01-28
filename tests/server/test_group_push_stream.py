@@ -156,12 +156,14 @@ class TestRoleJoinWithActiveStream:
         client.group.stop = AsyncMock()
         client.group._clients = []  # noqa: SLF001
         client.ungroup = AsyncMock()
-        # Set player volume/muted state for volume calculation
-        client.player_volume = 100
-        client.player_muted = False
         # Set up a mock role with audio requirements for role-based join
         mock_role = MagicMock()
+        mock_role.role_family = "player"
         mock_role.get_audio_requirements.return_value = MagicMock()  # Has audio requirements
+        mock_role.get_player_volume.return_value = 100
+        mock_role.get_player_muted.return_value = False
+        mock_role.set_player_volume = MagicMock()
+        mock_role.set_player_mute = MagicMock()
         client.active_roles = [mock_role]
         return client
 

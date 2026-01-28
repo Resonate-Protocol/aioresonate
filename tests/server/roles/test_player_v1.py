@@ -15,23 +15,42 @@ from aiosendspin.server.transformers import FlacEncoder, PcmPassthrough
 # --- Basic properties ---
 
 
+def _make_client_stub() -> MagicMock:
+    client = MagicMock()
+    state_store: dict[str, object] = {}
+
+    def ensure_role_state(family: str, cls: type[object]) -> object:
+        state_store.setdefault(family, cls())
+        return state_store[family]
+
+    client.ensure_role_state.side_effect = ensure_role_state
+    client.info = MagicMock()
+    client.info.player_support = None
+    client.group = MagicMock()
+    client._server = MagicMock()  # noqa: SLF001
+    client._logger = MagicMock()  # noqa: SLF001
+    client.client_id = "test-client"
+    client.connection = None
+    return client
+
+
 def test_player_role_has_role_id() -> None:
     """PlayerRole has role_id of 'player@v1'."""
-    client = MagicMock()
+    client = _make_client_stub()
     role = PlayerRole(client=client)
     assert role.role_id == "player@v1"
 
 
 def test_player_role_has_role_family() -> None:
     """PlayerRole has role_family of 'player'."""
-    client = MagicMock()
+    client = _make_client_stub()
     role = PlayerRole(client=client)
     assert role.role_family == "player"
 
 
 def test_player_role_has_preferred_format_property() -> None:
     """PlayerRole exposes preferred_format property."""
-    client = MagicMock()
+    client = _make_client_stub()
     audio_format = AudioFormat(sample_rate=48000, bit_depth=16, channels=2)
     role = PlayerRole(client=client, preferred_format=audio_format)
     assert role.preferred_format == audio_format
@@ -42,7 +61,7 @@ def test_player_role_has_preferred_format_property() -> None:
 
 def test_player_role_get_stream_requirements_returns_stream_requirements() -> None:
     """PlayerRole.get_stream_requirements() returns StreamRequirements."""
-    client = MagicMock()
+    client = _make_client_stub()
     role = PlayerRole(client=client)
     req = role.get_stream_requirements()
     assert isinstance(req, StreamRequirements)
@@ -53,7 +72,7 @@ def test_player_role_get_stream_requirements_returns_stream_requirements() -> No
 
 def test_player_role_get_audio_requirements_returns_stored_requirements() -> None:
     """PlayerRole.get_audio_requirements() returns stored requirements."""
-    client = MagicMock()
+    client = _make_client_stub()
     audio_req = AudioRequirements(sample_rate=48000, bit_depth=16, channels=2)
     role = PlayerRole(client=client, audio_requirements=audio_req)
     assert role.get_audio_requirements() is audio_req
@@ -61,7 +80,7 @@ def test_player_role_get_audio_requirements_returns_stored_requirements() -> Non
 
 def test_player_role_get_audio_requirements_returns_none_when_not_set() -> None:
     """PlayerRole.get_audio_requirements() returns None when not set."""
-    client = MagicMock()
+    client = _make_client_stub()
     role = PlayerRole(client=client)
     assert role.get_audio_requirements() is None
 
@@ -71,7 +90,7 @@ def test_player_role_get_audio_requirements_returns_none_when_not_set() -> None:
 
 def test_player_role_get_binary_handling_returns_handling_for_audio_chunk() -> None:
     """PlayerRole returns BinaryHandling for AUDIO_CHUNK message type."""
-    client = MagicMock()
+    client = _make_client_stub()
     role = PlayerRole(client=client)
 
     handling = role.get_binary_handling(BinaryMessageType.AUDIO_CHUNK.value)
@@ -80,13 +99,13 @@ def test_player_role_get_binary_handling_returns_handling_for_audio_chunk() -> N
     assert handling.drop_late is True
     assert handling.grace_period_us == 2_000_000
     assert handling.rate_limit is True
-    assert handling.rate_limit_factor == 2.0
+    assert handling.rate_limit_factor == 1.1
     assert handling.buffer_track is True
 
 
 def test_player_role_get_binary_handling_returns_none_for_unknown_type() -> None:
     """PlayerRole returns None for unknown message types."""
-    client = MagicMock()
+    client = _make_client_stub()
     role = PlayerRole(client=client)
 
     handling = role.get_binary_handling(999)  # Unknown type
@@ -99,7 +118,7 @@ def test_player_role_get_binary_handling_returns_none_for_unknown_type() -> None
 
 def test_player_role_on_connect_resets_stream_state() -> None:
     """on_connect() resets stream started flag."""
-    client = MagicMock()
+    client = _make_client_stub()
     role = PlayerRole(client=client)
     role._stream_started = True  # noqa: SLF001
     role.on_connect()
@@ -108,7 +127,7 @@ def test_player_role_on_connect_resets_stream_state() -> None:
 
 def test_player_role_on_disconnect_resets_stream_state() -> None:
     """on_disconnect() resets stream started flag."""
-    client = MagicMock()
+    client = _make_client_stub()
     role = PlayerRole(client=client)
     role._stream_started = True  # noqa: SLF001
     role.on_disconnect()
@@ -120,7 +139,7 @@ def test_player_role_on_disconnect_resets_stream_state() -> None:
 
 def test_player_role_on_stream_start_sends_message_with_pcm() -> None:
     """on_stream_start() sends stream/start with PCM codec when using PcmPassthrough."""
-    client = MagicMock()
+    client = _make_client_stub()
     client.send_message = MagicMock()
 
     audio_req = AudioRequirements(
@@ -146,7 +165,7 @@ def test_player_role_on_stream_start_sends_message_with_pcm() -> None:
 
 def test_player_role_on_stream_start_sends_message_with_flac() -> None:
     """on_stream_start() sends stream/start with FLAC codec when using FlacEncoder."""
-    client = MagicMock()
+    client = _make_client_stub()
     client.send_message = MagicMock()
 
     encoder = FlacEncoder(sample_rate=48000, bit_depth=16, channels=2)
@@ -168,7 +187,7 @@ def test_player_role_on_stream_start_sends_message_with_flac() -> None:
 
 def test_player_role_on_stream_start_sets_stream_started_flag() -> None:
     """on_stream_start() sets _stream_started to True."""
-    client = MagicMock()
+    client = _make_client_stub()
     client.send_message = MagicMock()
 
     audio_req = AudioRequirements(
@@ -188,7 +207,7 @@ def test_player_role_on_stream_start_sets_stream_started_flag() -> None:
 
 def test_player_role_on_stream_start_noop_without_audio_requirements() -> None:
     """on_stream_start() is no-op when no audio requirements."""
-    client = MagicMock()
+    client = _make_client_stub()
     client.send_message = MagicMock()
 
     role = PlayerRole(client=client)
@@ -201,7 +220,7 @@ def test_player_role_on_stream_start_noop_without_audio_requirements() -> None:
 
 def test_player_role_on_stream_start_noop_without_transport() -> None:
     """on_stream_start() is no-op when no transport."""
-    client = MagicMock()
+    client = _make_client_stub()
     client.send_message = MagicMock()
 
     audio_req = AudioRequirements(

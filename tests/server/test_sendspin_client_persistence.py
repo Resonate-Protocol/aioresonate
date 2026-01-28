@@ -13,6 +13,7 @@ from aiosendspin.models.types import AudioCodec, GoodbyeReason, PlayerCommand, R
 from aiosendspin.server.client import SendspinClient
 from aiosendspin.server.clock import LoopClock
 from aiosendspin.server.group import SendspinGroup
+from aiosendspin.server.roles.player_v1 import PlayerPersistentState
 
 
 @dataclass(slots=True)
@@ -34,6 +35,7 @@ class _DummyConnection:
         self,
         data: bytes,  # noqa: ARG002
         *,
+        role_family: str,  # noqa: ARG002
         buffer_end_time_us: int | None = None,  # noqa: ARG002
         buffer_byte_count: int | None = None,  # noqa: ARG002
     ) -> bool:
@@ -76,12 +78,14 @@ async def test_goodbye_disconnect_resets_buffer_tracker() -> None:
     )
     client.mark_connected()
 
-    assert client.buffer_tracker is not None
-    client.buffer_tracker.register(end_time_us=1_000_000, byte_count=1234)
-    assert client.buffer_tracker.buffered_bytes == 1234
+    state = client.get_role_state("player", PlayerPersistentState)
+    assert state is not None
+    assert state.buffer_tracker is not None
+    state.buffer_tracker.register(end_time_us=1_000_000, byte_count=1234)
+    assert state.buffer_tracker.buffered_bytes == 1234
 
     client.detach_connection(GoodbyeReason.USER_REQUEST)
-    assert client.buffer_tracker.buffered_bytes == 0
+    assert state.buffer_tracker.buffered_bytes == 0
 
 
 @pytest.mark.asyncio
@@ -99,13 +103,15 @@ async def test_ungraceful_disconnect_delays_buffer_tracker_reset() -> None:
     )
     client.mark_connected()
 
-    assert client.buffer_tracker is not None
-    client.buffer_tracker.register(end_time_us=1_000_000, byte_count=1234)
+    state = client.get_role_state("player", PlayerPersistentState)
+    assert state is not None
+    assert state.buffer_tracker is not None
+    state.buffer_tracker.register(end_time_us=1_000_000, byte_count=1234)
     client.detach_connection(None)
 
-    assert client.buffer_tracker.buffered_bytes == 1234
+    assert state.buffer_tracker.buffered_bytes == 1234
     await asyncio.sleep(2.2)
-    assert client.buffer_tracker.buffered_bytes == 0
+    assert state.buffer_tracker.buffered_bytes == 0
 
 
 @pytest.mark.asyncio
@@ -123,8 +129,10 @@ async def test_reconnect_cancels_scheduled_buffer_tracker_reset() -> None:
     )
     client.mark_connected()
 
-    assert client.buffer_tracker is not None
-    client.buffer_tracker.register(end_time_us=1_000_000, byte_count=1234)
+    state = client.get_role_state("player", PlayerPersistentState)
+    assert state is not None
+    assert state.buffer_tracker is not None
+    state.buffer_tracker.register(end_time_us=1_000_000, byte_count=1234)
     client.detach_connection(None)
 
     await asyncio.sleep(1.0)
@@ -136,4 +144,4 @@ async def test_reconnect_cancels_scheduled_buffer_tracker_reset() -> None:
     client.mark_connected()
 
     await asyncio.sleep(1.5)
-    assert client.buffer_tracker.buffered_bytes == 1234
+    assert state.buffer_tracker.buffered_bytes == 1234

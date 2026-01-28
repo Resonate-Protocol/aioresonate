@@ -15,7 +15,6 @@ def test_player_role_on_stream_clear_uses_role_family() -> None:
     """PlayerRole.on_stream_clear() sends stream/clear with unversioned role family."""
     client = MagicMock()
     client.send_message = MagicMock()
-    client.buffer_tracker = None
 
     role = PlayerRole(client=client)
     role._has_transport = True  # noqa: SLF001
@@ -31,7 +30,6 @@ def test_player_role_on_stream_end_uses_role_family() -> None:
     """PlayerRole.on_stream_end() omits roles (end all streams)."""
     client = MagicMock()
     client.send_message = MagicMock()
-    client.buffer_tracker = None
 
     role = PlayerRole(client=client)
     role._has_transport = True  # noqa: SLF001
@@ -60,11 +58,11 @@ def test_player_role_on_audio_chunk_packs_header_and_tracks_duration() -> None:
 
     sent: list[bytes] = []
     client = MagicMock()
-    client.buffer_tracker = tracker
 
     def _try_send_binary(
         data: bytes,
         *,
+        role_family: str,  # noqa: ARG001
         buffer_end_time_us: int | None = None,
         buffer_byte_count: int | None = None,
         duration_us: int | None = None,  # noqa: ARG001
@@ -120,7 +118,6 @@ def test_player_role_on_stream_clear_drops_without_transport() -> None:
     """on_stream_clear() is a no-op for JSON message when no transport attached."""
     client = MagicMock()
     client.send_message = MagicMock()
-    client.buffer_tracker = None
 
     role = PlayerRole(client=client)
     role._has_transport = False  # noqa: SLF001
@@ -134,7 +131,6 @@ def test_player_role_on_stream_end_drops_without_transport() -> None:
     """on_stream_end() is a no-op for JSON message when no transport attached."""
     client = MagicMock()
     client.send_message = MagicMock()
-    client.buffer_tracker = None
 
     role = PlayerRole(client=client)
     role._has_transport = False  # noqa: SLF001

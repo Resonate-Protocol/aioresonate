@@ -53,6 +53,7 @@ class _FakeConnection:
         self,
         data: bytes,
         *,
+        role_family: str,  # noqa: ARG002
         buffer_end_time_us: int | None = None,
         buffer_byte_count: int | None = None,
         duration_us: int | None = None,
@@ -91,7 +92,7 @@ class TestClientRoles:
     """Tests for client role management."""
 
     def test_player_role_accessor_returns_player_role(self, mock_loop: Any) -> None:
-        """player_role property returns the player role instance."""
+        """client.role('player@v1') returns the player role instance."""
         server = _DummyServer(loop=mock_loop, clock=LoopClock(mock_loop))
         group = _DummyGroup(clients=[])
         client = SendspinClient(server, client_id="test")
@@ -104,8 +105,9 @@ class TestClientRoles:
         client.attach_connection(conn, client_info=hello, active_roles=["player@v1"])
         client.mark_connected()
 
-        assert client.player_role is not None
-        assert isinstance(client.player_role, PlayerRole)
+        role = client.role("player@v1")
+        assert role is not None
+        assert isinstance(role, PlayerRole)
 
     def test_player_role_has_role_family(self, mock_loop: Any) -> None:
         """PlayerRole has role_family='player'."""
@@ -120,8 +122,9 @@ class TestClientRoles:
 
         client.attach_connection(conn, client_info=hello, active_roles=["player@v1"])
 
-        assert client.player_role is not None
-        assert client.player_role.role_family == "player"
+        role = client.role("player@v1")
+        assert role is not None
+        assert role.role_family == "player"
 
     def test_active_roles_includes_player_role(self, mock_loop: Any) -> None:
         """active_roles includes PlayerRole when player role is active."""
@@ -138,7 +141,7 @@ class TestClientRoles:
 
         roles = client.active_roles
         assert len(roles) == 1
-        assert roles[0] is client.player_role
+        assert roles[0] is client.role("player@v1")
 
     def test_active_roles_empty_when_no_roles(self, mock_loop: Any) -> None:
         """active_roles returns empty list when no roles active."""

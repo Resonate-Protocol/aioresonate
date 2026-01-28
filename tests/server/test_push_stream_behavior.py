@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -56,6 +57,7 @@ class _FakeConnection:
         self,
         data: bytes,
         *,
+        role_family: str,  # noqa: ARG002
         buffer_end_time_us: int | None = None,
         buffer_byte_count: int | None = None,
         duration_us: int | None = None,
@@ -108,12 +110,14 @@ def _make_connected_player(
 
     client.attach_connection(conn, client_info=hello, active_roles=[Roles.PLAYER.value])
     client.mark_connected()
-    conn.buffer_tracker = client.buffer_tracker
+    role = client.role("player@v1")
+    if role is not None:
+        conn.buffer_tracker = role.get_buffer_tracker()
 
     # Set up audio requirements on the player role for hook-based streaming
     # Use shared transformer to ensure consistent cache keys across tests
-    if client.player_role is not None:
-        client.player_role._audio_requirements = AudioRequirements(  # noqa: SLF001
+    if role is not None:
+        role._audio_requirements = AudioRequirements(  # noqa: SLF001
             sample_rate=48000,
             bit_depth=16,
             channels=2,
@@ -142,8 +146,11 @@ async def test_commit_audio_sends_stream_start_and_binary(mock_loop: Any) -> Non
     assert conn.sent_binary, "expected at least one binary chunk"
     header = unpack_binary_header(conn.sent_binary[0])
     assert header.message_type == 4  # BinaryMessageType.AUDIO_CHUNK
-    assert client.buffer_tracker is not None
-    assert client.buffer_tracker.buffered_bytes > 0
+    role = client.role("player@v1")
+    assert role is not None
+    buffer_tracker = role.get_buffer_tracker()
+    assert buffer_tracker is not None
+    assert buffer_tracker.buffered_bytes > 0
 
 
 @pytest.mark.asyncio
@@ -160,12 +167,15 @@ async def test_stop_sends_stream_end_and_resets_buffer_tracker(mock_loop: Any) -
         AudioFormat(sample_rate=48000, bit_depth=16, channels=2),
     )
     await stream.commit_audio()
-    assert client.buffer_tracker is not None
-    assert client.buffer_tracker.buffered_bytes > 0
+    role = client.role("player@v1")
+    assert role is not None
+    buffer_tracker = role.get_buffer_tracker()
+    assert buffer_tracker is not None
+    assert buffer_tracker.buffered_bytes > 0
 
     stream.stop()
     assert any(isinstance(m, StreamEndMessage) for m in conn.sent_json)
-    assert client.buffer_tracker.buffered_bytes == 0
+    assert buffer_tracker.buffered_bytes == 0
 
 
 @pytest.mark.asyncio
@@ -204,8 +214,10 @@ async def test_on_role_join_sends_catchup_chunks(mock_loop: Any) -> None:
     assert conn1.sent_binary
 
     client2, conn2 = _make_connected_player(mock_loop, group, "p2")
-    assert client2.player_role is not None
-    stream.on_role_join(client2.player_role)
+    role2 = client2.role("player@v1")
+    assert role2 is not None
+    role2.get_join_delay_s = MagicMock(return_value=0.0)
+    stream.on_role_join(role2)
 
     assert any(isinstance(m, StreamStartMessage) for m in conn2.sent_json)
     assert conn2.sent_binary, "expected catch-up binary chunks"

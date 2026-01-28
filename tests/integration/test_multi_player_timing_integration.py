@@ -62,6 +62,7 @@ class _CaptureConnection:
         self,
         data: bytes,
         *,
+        role_family: str,  # noqa: ARG002
         buffer_end_time_us: int | None = None,
         buffer_byte_count: int | None = None,
         duration_us: int | None = None,
@@ -204,10 +205,12 @@ def _make_player(
 
     client.attach_connection(conn, client_info=hello, active_roles=[Roles.PLAYER.value])
     client.mark_connected()
-    conn.buffer_tracker = client.buffer_tracker
+    role = client.role("player@v1")
+    if role is not None:
+        conn.buffer_tracker = role.get_buffer_tracker()
 
     # Set up audio requirements on the player role for hook-based streaming
-    if client.player_role is not None and supported_formats:
+    if role is not None and supported_formats:
         preferred_format = supported_formats[0]
         # Create transformer based on codec
         if preferred_format.codec == AudioCodec.FLAC:
@@ -222,7 +225,7 @@ def _make_player(
                 bit_depth=preferred_format.bit_depth,
                 channels=preferred_format.channels,
             )
-        client.player_role._audio_requirements = AudioRequirements(  # noqa: SLF001
+        role._audio_requirements = AudioRequirements(  # noqa: SLF001
             sample_rate=preferred_format.sample_rate,
             bit_depth=preferred_format.bit_depth,
             channels=preferred_format.channels,

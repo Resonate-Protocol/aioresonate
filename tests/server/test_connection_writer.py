@@ -33,12 +33,20 @@ class _DummyServer:
 
 def test_binary_frame_supports_buffer_registration_metadata() -> None:
     """_BinaryFrame should optionally carry buffer registration info."""
-    frame_simple = _BinaryFrame(epoch=1, data=b"test", queued_at_us=0)
+    frame_simple = _BinaryFrame(
+        epoch_all=1,
+        epoch_family=1,
+        role_family="player",
+        data=b"test",
+        queued_at_us=0,
+    )
     assert frame_simple.buffer_end_time_us is None
     assert frame_simple.buffer_byte_count is None
 
     frame_with_meta = _BinaryFrame(
-        epoch=1,
+        epoch_all=1,
+        epoch_family=1,
+        role_family="player",
         data=b"test",
         queued_at_us=0,
         buffer_end_time_us=1_000_000,
@@ -61,6 +69,7 @@ async def test_try_send_binary_accepts_buffer_metadata() -> None:
 
     result = conn.try_send_binary(
         b"audio_data",
+        role_family="player",
         buffer_end_time_us=1_000_000,
         buffer_byte_count=100,
     )
@@ -89,7 +98,7 @@ async def test_writer_registers_buffer_after_send() -> None:
     mock_role = MagicMock()
     mock_buffer_tracker = MagicMock()
     mock_buffer_tracker.time_until_duration_capacity.return_value = 0
-    mock_role._buffer_tracker = mock_buffer_tracker  # noqa: SLF001
+    mock_role.get_buffer_tracker.return_value = mock_buffer_tracker
     mock_role._stream_start_time_us = None  # noqa: SLF001
     mock_role._last_late_log_s = 0.0  # noqa: SLF001
     mock_role._late_skips_since_log = 0  # noqa: SLF001
@@ -106,6 +115,7 @@ async def test_writer_registers_buffer_after_send() -> None:
     packed = pack_binary_header_raw(BinaryMessageType.AUDIO_CHUNK.value, 0) + payload
     conn.try_send_binary(
         packed,
+        role_family="player",
         buffer_end_time_us=1_000_000,
         buffer_byte_count=100,
         duration_us=50_000,
@@ -140,7 +150,7 @@ async def test_writer_does_not_register_without_metadata() -> None:
     mock_role = MagicMock()
     mock_buffer_tracker = MagicMock()
     mock_buffer_tracker.time_until_duration_capacity.return_value = 0
-    mock_role._buffer_tracker = mock_buffer_tracker  # noqa: SLF001
+    mock_role.get_buffer_tracker.return_value = mock_buffer_tracker
     mock_role._stream_start_time_us = None  # noqa: SLF001
     mock_role._last_late_log_s = 0.0  # noqa: SLF001
     mock_role._late_skips_since_log = 0  # noqa: SLF001
@@ -155,7 +165,7 @@ async def test_writer_does_not_register_without_metadata() -> None:
 
     payload = b"audio_data"
     packed = pack_binary_header_raw(BinaryMessageType.AUDIO_CHUNK.value, 0) + payload
-    conn.try_send_binary(packed)  # No buffer metadata
+    conn.try_send_binary(packed, role_family="player")  # No buffer metadata
 
     for _ in range(50):
         if wsock.send_bytes.called:

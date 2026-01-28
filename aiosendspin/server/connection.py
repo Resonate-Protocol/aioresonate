@@ -52,7 +52,9 @@ MAX_PENDING_MSG = 4096
 class _BinaryFrame:
     """Binary payload with an epoch for droppable queue semantics."""
 
-    epoch: int
+    epoch_all: int
+    epoch_family: int
+    role_family: str
     data: bytes
     queued_at_us: int
     buffer_end_time_us: int | None = None
@@ -111,7 +113,8 @@ class SendspinConnection:
         self._initial_state_timeout_handle: asyncio.TimerHandle | None = None
 
         self._last_goodbye_reason: GoodbyeReason | None = None
-        self._binary_epoch = 0
+        self._binary_epoch_all = 0
+        self._binary_epoch_by_family: dict[str, int] = {}
 
     @property
     def websocket_connection(self) -> web.WebSocketResponse | ClientWebSocketResponse:
@@ -131,23 +134,31 @@ class SendspinConnection:
             return False
         return any(role.requires_initial_state() for role in self._client.active_roles)
 
-    def drop_pending_binary(self) -> None:
-        """Drop any queued (not-yet-sent) binary payloads for this connection."""
-        self._binary_epoch += 1
+    def drop_pending_binary(self, roles: list[str] | None) -> None:
+        """Drop queued binary payloads for the specified role families."""
+        if roles is None:
+            self._binary_epoch_all += 1
+            return
+        for family in roles:
+            self._binary_epoch_by_family[family] = self._binary_epoch_by_family.get(family, 0) + 1
 
     def try_send_binary(
         self,
         data: bytes,
         *,
+        role_family: str,
         buffer_end_time_us: int | None = None,
         buffer_byte_count: int | None = None,
         duration_us: int | None = None,
     ) -> bool:
         """Try to enqueue a binary message without disconnecting on queue overflow."""
+        epoch_family = self._binary_epoch_by_family.get(role_family, 0)
         try:
             self._to_write.put_nowait(
                 _BinaryFrame(
-                    epoch=self._binary_epoch,
+                    epoch_all=self._binary_epoch_all,
+                    epoch_family=epoch_family,
+                    role_family=role_family,
                     data=data,
                     queued_at_us=self._server.clock.now_us(),
                     buffer_end_time_us=buffer_end_time_us,
@@ -170,16 +181,16 @@ class SendspinConnection:
         Binary payloads are considered droppable. Prefer try_send_binary for audio/art/vis.
         """
         if isinstance(message, bytes):
-            if (not self.try_send_binary(message)) and (not self._disconnecting):
+            if (not self.try_send_binary(message, role_family="unknown")) and (
+                not self._disconnecting
+            ):
                 self._logger.error("Message queue full, client too slow - disconnecting")
                 task = self._server.loop.create_task(self.disconnect(retry_connection=True))
                 task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
             return
 
-        # TODO: Only drop binary from the role addressed by end/clear messages
-        # (currently drops all binary, which is fine while only player sends binary)
         if isinstance(message, StreamClearMessage | StreamEndMessage):
-            self.drop_pending_binary()
+            self.drop_pending_binary(message.payload.roles)
 
         try:
             self._to_write.put_nowait(message)
@@ -366,15 +377,10 @@ class SendspinConnection:
                 self._client.mark_connected()
 
             new_state = payload.state
-            # DEPRECATED(before-spec-pr-50): fall back to player.state for older clients.
-            if new_state is None and payload.player is not None:
-                new_state = payload.player.state
-
             if new_state is not None and new_state != self._client.client_state:
                 await self._client.handle_state_transition(new_state)
-
-            if payload.player is not None and self._client.check_role(Roles.PLAYER):
-                self._client.handle_player_state_update(payload.player)
+            for role in self._client.active_roles:
+                role.on_client_state(payload)
             return
 
         if isinstance(message, StreamRequestFormatMessage):
@@ -496,17 +502,14 @@ class SendspinConnection:
             return
 
         # Rate limit: wait if we're too far ahead of playback (duration-based only)
-        if (
-            handling is not None
-            and handling.buffer_track
-            and handling_role is not None
-            and handling_role._buffer_tracker is not None  # noqa: SLF001
-        ):
-            wait_us = handling_role._buffer_tracker.time_until_duration_capacity(  # noqa: SLF001
-                item.duration_us or 0,
-            )
-            if wait_us > 0:
-                await asyncio.sleep(wait_us / 1_000_000)
+        if handling is not None and handling.buffer_track and handling_role is not None:
+            buffer_tracker = handling_role.get_buffer_tracker()
+            if buffer_tracker is not None:
+                wait_us = buffer_tracker.time_until_duration_capacity(
+                    item.duration_us or 0,
+                )
+                if wait_us > 0:
+                    await asyncio.sleep(wait_us / 1_000_000)
 
         await wsock.send_bytes(data)
 
@@ -525,13 +528,14 @@ class SendspinConnection:
             and handling_role is not None
             and item.buffer_end_time_us is not None
             and item.buffer_byte_count is not None
-            and handling_role._buffer_tracker is not None  # noqa: SLF001
         ):
-            handling_role._buffer_tracker.register(  # noqa: SLF001
-                item.buffer_end_time_us,
-                item.buffer_byte_count,
-                item.duration_us or 0,
-            )
+            buffer_tracker = handling_role.get_buffer_tracker()
+            if buffer_tracker is not None:
+                buffer_tracker.register(
+                    item.buffer_end_time_us,
+                    item.buffer_byte_count,
+                    item.duration_us or 0,
+                )
 
     async def _writer(self) -> None:
         wsock = self._wsock_server or self._wsock_client
@@ -566,7 +570,9 @@ class SendspinConnection:
                 item = get_task.result()
 
                 if isinstance(item, _BinaryFrame):
-                    if item.epoch != self._binary_epoch:
+                    if item.epoch_all != self._binary_epoch_all:
+                        continue
+                    if item.epoch_family != self._binary_epoch_by_family.get(item.role_family, 0):
                         continue
                     await self._send_binary_frame(wsock, item)
                     continue

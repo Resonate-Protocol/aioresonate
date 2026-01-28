@@ -38,31 +38,24 @@ from aiosendspin.models.core import (
     StreamStartPayload,
 )
 from aiosendspin.models.metadata import Progress
-from aiosendspin.models.player import (
-    StreamStartPlayer,
-)
 from aiosendspin.models.types import (
     ArtworkSource,
-    AudioCodec,
     MediaCommand,
     PictureFormat,
     PlaybackStateType,
     Roles,
+    has_role,
 )
-from aiosendspin.models.visualizer import StreamStartVisualizer
+from aiosendspin.server.roles import Role
 
-from .audio import AudioFormat
 from .channels import ChannelRouter
 from .events import ClientEvent, VolumeChangedEvent
 from .metadata import Metadata
 from .push_stream import PushStream
-from .transformers import FlacEncoder, PcmPassthrough, TransformerPool
+from .transformers import TransformerPool
 
-# The cyclic import is not an issue during runtime, so hide it
-# pyright: reportImportCycles=none
 if TYPE_CHECKING:
     from .client import SendspinClient
-    from .roles.player_v1 import PlayerRole
     from .server import SendspinServer
 
 logger = logging.getLogger(__name__)
@@ -179,8 +172,6 @@ class SendspinGroup:
     """Current PushStream for push-based streaming, None when not active."""
     _transformer_pool: TransformerPool
     """Pool for shared transformer instances (encoders, etc.) across roles."""
-    _delayed_join_handles: dict[str, asyncio.TimerHandle]
-    """Pending delayed role joins per client ID, cancelled on disconnect."""
 
     def __init__(self, server: SendspinServer, *args: SendspinClient) -> None:
         """
@@ -214,7 +205,6 @@ class SendspinGroup:
         self._playback_lock = asyncio.Lock()
         self._push_stream: PushStream | None = None
         self._transformer_pool = TransformerPool()
-        self._delayed_join_handles: dict[str, asyncio.TimerHandle] = {}
 
         # Set group reference for initial clients
         for client in self._clients:
@@ -335,11 +325,6 @@ class SendspinGroup:
         if client not in self._clients:
             return
 
-        # Cancel any pending delayed join for this client
-        handle = self._delayed_join_handles.pop(client.client_id, None)
-        if handle is not None:
-            handle.cancel()
-
         group_message = GroupUpdateServerMessage(
             GroupUpdateServerPayload(
                 playback_state=self._current_state,
@@ -360,21 +345,9 @@ class SendspinGroup:
         self._send_group_update_to_client(client, group_message, controller_state)
 
         if self._push_stream is not None and not self._push_stream.is_stopped:
-            # Delay role joins by 1s to allow time sync to stabilize after reconnect
-            self._delayed_join_handles[client.client_id] = self._server.loop.call_later(
-                1.0, self._do_role_joins, client
-            )
-
-    def _do_role_joins(self, client: SendspinClient) -> None:
-        """Execute delayed role joins for a reconnected client."""
-        self._delayed_join_handles.pop(client.client_id, None)
-        if client not in self._clients:
-            return
-        if self._push_stream is None or self._push_stream.is_stopped:
-            return
-        for role in client.active_roles:
-            if role.get_audio_requirements() is not None:
-                self._push_stream.on_role_join(role)
+            for role in client.active_roles:
+                if role.get_audio_requirements() is not None:
+                    self._push_stream.on_role_join(role)
 
     def _send_controller_state_to_clients(self) -> None:
         """Send server/state with controller payload to all controller clients."""
@@ -420,11 +393,14 @@ class SendspinGroup:
         Returns:
             The recommended sample rate in Hz.
         """
-        supported_sets: list[set[int]] = [
-            {fmt.sample_rate for fmt in client.info.player_support.supported_formats}
-            for client in self._clients
-            if client.check_role(Roles.PLAYER) and client.info.player_support
-        ]
+        supported_sets: list[set[int]] = []
+        for client in self._clients:
+            role = self._get_player_role(client)
+            if role is None:
+                continue
+            rates = role.get_player_supported_sample_rates()
+            if rates:
+                supported_sets.append(rates)
 
         if not supported_sets:
             return source_sample_rate
@@ -449,38 +425,6 @@ class SendspinGroup:
         max_count = max(counts.values())
         top_rates = {r for r, c in counts.items() if c == max_count}
         return choose(top_rates)
-
-    def _send_stream_start_msg(
-        self,
-        client: SendspinClient,
-        player_stream_info: StreamStartPlayer | None = None,
-    ) -> None:
-        """Send a stream start message to a client with the specified audio format for players."""
-        assert client.check_role(Roles.PLAYER) == (player_stream_info is not None)
-        artwork_stream_info: StreamStartArtwork | None = None
-        if client.check_role(Roles.ARTWORK) and client.info.artwork_support:
-            # Initialize artwork state for all channels
-            channels = client.info.artwork_support.channels
-            if channels:
-                client_channel_state = dict(enumerate(channels))
-                self._client_artwork_state[client.client_id] = client_channel_state
-                artwork_stream_info = _build_artwork_stream_info(client_channel_state)
-
-        # TODO: finish once spec is finalized
-        visualizer_stream_info = (
-            StreamStartVisualizer() if client.check_role(Roles.VISUALIZER) else None
-        )
-
-        stream_info = StreamStartPayload(
-            player=player_stream_info,
-            artwork=artwork_stream_info,
-            visualizer=visualizer_stream_info,
-        )
-        logger.debug(
-            "Sending stream start message to client %s",
-            client.client_id,
-        )
-        client.send_message(StreamStartMessage(stream_info))
 
     def _send_stream_end_msg(self, client: SendspinClient, roles: list[str] | None = None) -> None:
         """Send a stream end message to a client.
@@ -609,11 +553,6 @@ class SendspinGroup:
             # Stop the push stream if active
             if self._push_stream is not None:
                 self._push_stream.stop()
-
-            # Cancel all pending delayed joins
-            for handle in self._delayed_join_handles.values():
-                handle.cancel()
-            self._delayed_join_handles.clear()
 
             if self._current_state != PlaybackStateType.STOPPED:
                 self._signal_event(GroupStateChangedEvent(PlaybackStateType.STOPPED))
@@ -836,7 +775,7 @@ class SendspinGroup:
         header = pack_binary_header_raw(message_type, self._server.clock.now_us())
 
         if image is None:
-            client.try_send_binary(header)
+            client.try_send_binary(header, role_family="artwork")
         else:
             channel_state = client_state[channel]
             # Process and encode image in thread to avoid blocking event loop
@@ -847,7 +786,7 @@ class SendspinGroup:
                 channel_state.media_height,
                 channel_state.format,
             )
-            client.try_send_binary(header + img_data)
+            client.try_send_binary(header + img_data, role_family="artwork")
 
     def _process_and_encode_image(
         self,
@@ -893,7 +832,9 @@ class SendspinGroup:
 
     def player_clients(self) -> list[SendspinClient]:
         """Return all clients in this group that have the player role."""
-        return [client for client in self._clients if client.check_role(Roles.PLAYER)]
+        return [
+            client for client in self._clients if has_role("player@v1", client.negotiated_roles)
+        ]
 
     def _get_supported_commands(self) -> list[MediaCommand]:
         """Get list of commands supported based on application capabilities."""
@@ -996,13 +937,18 @@ class SendspinGroup:
         players = self.player_clients()
         if not players:
             return 100
-        # Calculate average volume from all players via PlayerRole
         total_volume = 0
+        count = 0
         for client in players:
-            role: PlayerRole | None = client.role("player@v1")  # type: ignore[assignment]
-            if role is not None:
-                total_volume += role.volume
-        return round(total_volume / len(players))
+            role = self._get_player_role(client)
+            if role is None:
+                continue
+            volume = role.get_player_volume()
+            if volume is None:
+                continue
+            total_volume += volume
+            count += 1
+        return round(total_volume / count) if count else 100
 
     @property
     def muted(self) -> bool:
@@ -1011,8 +957,11 @@ class SendspinGroup:
         if not players:
             return False
         for client in players:
-            role: PlayerRole | None = client.role("player@v1")  # type: ignore[assignment]
-            if role is None or not role.muted:
+            role = self._get_player_role(client)
+            if role is None:
+                return False
+            muted = role.get_player_muted()
+            if muted is None or not muted:
                 return False
         return True
 
@@ -1023,18 +972,20 @@ class SendspinGroup:
         if not players:
             return
 
-        # Build mapping of client -> PlayerRole (only clients with valid role)
-        client_roles: dict[SendspinClient, PlayerRole] = {}
+        # Build mapping of client -> role (only clients with valid role)
+        client_roles: dict[SendspinClient, Role] = {}
         for client in players:
-            role: PlayerRole | None = client.role("player@v1")  # type: ignore[assignment]
-            if role is not None:
+            role = self._get_player_role(client)
+            if role is not None and role.get_player_volume() is not None:
                 client_roles[client] = role
 
         if not client_roles:
             return
 
         # Initialize working state with current volumes via PlayerRole
-        player_volumes = {c: float(r.volume) for c, r in client_roles.items()}
+        player_volumes = {
+            c: float(role.get_player_volume() or 0) for c, role in client_roles.items()
+        }
 
         # Calculate initial target delta
         current_avg = sum(player_volumes.values()) / len(player_volumes)
@@ -1077,7 +1028,7 @@ class SendspinGroup:
 
         # Apply final calculated volumes via PlayerRole
         for client, volume in player_volumes.items():
-            client_roles[client].set_volume(round(volume))
+            client_roles[client].set_player_volume(round(volume))
 
         # Send state update to controller clients
         self._send_controller_state_to_clients()
@@ -1085,9 +1036,9 @@ class SendspinGroup:
     def set_mute(self, muted: bool) -> None:  # noqa: FBT001
         """Set group mute state and propagate to all players via PlayerRole."""
         for client in self.player_clients():
-            role: PlayerRole | None = client.role("player@v1")  # type: ignore[assignment]
+            role = self._get_player_role(client)
             if role is not None:
-                role.set_mute(muted)
+                role.set_player_mute(muted)
         # Send state update to controller clients
         self._send_controller_state_to_clients()
 
@@ -1118,10 +1069,6 @@ class SendspinGroup:
             return
 
         # Cancel any pending delayed join for this client
-        handle = self._delayed_join_handles.pop(client.client_id, None)
-        if handle is not None:
-            handle.cancel()
-
         logger.debug("removing %s from group with members: %s", client.client_id, self._clients)
         if len(self._clients) == 1:
             # Delete this group if that was the last client
@@ -1130,8 +1077,11 @@ class SendspinGroup:
         else:
             self._clients.remove(client)
             # End the stream for the removed client via role hooks
-            if client.player_role is not None:
-                client.player_role.on_stream_end()
+            handled = False
+            for role in client.active_roles:
+                role.on_stream_end()
+                handled = True
+            if handled:
                 # Artwork state lifetime is bound to the stream.
                 self._client_artwork_state.pop(client.client_id, None)
             else:
@@ -1202,21 +1152,6 @@ class SendspinGroup:
 
         # Then set the group (which will emit ClientGroupChangedEvent)
         client._set_group(self)  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
-
-        # Update role transformers to use this group's pool (for cache key matching)
-        for role in client.active_roles:
-            req = role.get_audio_requirements()
-            if req is not None and req.transformer is not None:
-                # Get equivalent transformer from this group's pool
-                transformer_type = type(req.transformer)
-                if transformer_type in (FlacEncoder, PcmPassthrough):
-                    new_transformer = self._transformer_pool.get_or_create(
-                        transformer_type,
-                        sample_rate=req.sample_rate,
-                        bit_depth=req.bit_depth,
-                        channels=req.channels,
-                    )
-                    role._audio_requirements = replace(req, transformer=new_transformer)  # type: ignore[attr-defined]  # noqa: SLF001
 
         # Handle player joining/reconnecting with active PushStream
         if self._push_stream is not None and not self._push_stream.is_stopped:
@@ -1301,82 +1236,14 @@ class SendspinGroup:
         layer so stream/start(new) is emitted at a safe boundary.
         """
         if request.player:
-            if not client.check_role(Roles.PLAYER):
+            player_roles = client.roles_by_family("player")
+            if not player_roles:
                 raise ValueError(
                     f"Client {client.client_id} sent player format request "
-                    "but does not have player role"
+                    "but has no active player role"
                 )
-            if client.info.player_support is None:
-                raise ValueError(
-                    f"Client {client.client_id} sent player format request "
-                    "but has no player support"
-                )
-
-            supported = client.info.player_support.supported_formats
-
-            # Start with current preferred format (if any), otherwise the client's top preference.
-            # Prefer OPUS codec when available.
-            preferred_supported = next(
-                (fmt for fmt in supported if fmt.codec == AudioCodec.OPUS),
-                supported[0],
-            )
-            base_format = client.preferred_format or AudioFormat(
-                sample_rate=preferred_supported.sample_rate,
-                bit_depth=preferred_supported.bit_depth,
-                channels=preferred_supported.channels,
-            )
-            # Codec preference: use client's preferred codec, otherwise use from supported format.
-            # Note: We track codec separately from AudioFormat now.
-            base_codec = client.preferred_codec or preferred_supported.codec
-
-            player_req = request.player
-            requested_codec = player_req.codec or base_codec
-            requested_format = AudioFormat(
-                sample_rate=player_req.sample_rate or base_format.sample_rate,
-                bit_depth=player_req.bit_depth or base_format.bit_depth,
-                channels=player_req.channels or base_format.channels,
-            )
-
-            # Validate requested format is supported; fall back to client's top preference.
-            if not any(
-                fmt.codec == requested_codec
-                and fmt.sample_rate == requested_format.sample_rate
-                and fmt.bit_depth == requested_format.bit_depth
-                and fmt.channels == requested_format.channels
-                for fmt in supported
-            ):
-                logger.warning(
-                    "Client %s requested unsupported format %s codec=%s, falling back to %s",
-                    client.client_id,
-                    requested_format,
-                    requested_codec,
-                    base_format,
-                )
-                requested_format = base_format
-                requested_codec = base_codec
-
-            # Persist preference (also used when no stream is active).
-            client.preferred_format = requested_format
-            client.preferred_codec = requested_codec
-
-            # Note: Format changes for active streams are handled via role audio requirements.
-            # The client will receive a new stream/start when the role is next set up.
-            if self._push_stream is None or self._push_stream.is_stopped:
-                # No active stream: ack immediately with stream/start for the selected format.
-                stream_start = StreamStartPayload(
-                    player=StreamStartPlayer(
-                        codec=requested_codec,
-                        sample_rate=requested_format.sample_rate,
-                        channels=requested_format.channels,
-                        bit_depth=requested_format.bit_depth,
-                        codec_header=None,
-                    )
-                )
-                logger.debug(
-                    "Sending stream/start to client %s for player format change",
-                    client.client_id,
-                )
-                client.send_message(StreamStartMessage(stream_start))
+            for role in player_roles:
+                role.on_stream_request_format(request, stream_active=self.has_active_stream)
 
         if request.artwork:
             if not client.check_role(Roles.ARTWORK):
@@ -1439,3 +1306,10 @@ class SendspinGroup:
                     await self._send_media_art_to_client(client, artwork, artwork_request.channel)
 
         # Player format changes are handled above.
+
+    def _get_player_role(self, client: SendspinClient) -> Role | None:
+        """Return the first active player role for a client."""
+        for role in client.active_roles:
+            if role.role_family == "player":
+                return role
+        return None

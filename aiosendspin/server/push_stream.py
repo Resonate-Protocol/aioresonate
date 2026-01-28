@@ -592,9 +592,10 @@ class PushStream:
         estimated_chunk_bytes = 4800
 
         max_wait_us = 0
-        for client, _role in self._get_audio_roles():
-            if client.buffer_tracker is not None:
-                wait_us = client.buffer_tracker.time_until_capacity(estimated_chunk_bytes)
+        for _client, role in self._get_audio_roles():
+            buffer_tracker = role.get_buffer_tracker()
+            if buffer_tracker is not None:
+                wait_us = buffer_tracker.time_until_capacity(estimated_chunk_bytes)
                 max_wait_us = max(max_wait_us, wait_us)
 
         if max_wait_us > 0:
@@ -615,6 +616,16 @@ class PushStream:
         Args:
             role: The role that joined.
         """
+        delay_s = role.get_join_delay_s()
+        if delay_s > 0:
+            self._loop.call_later(delay_s, self._do_role_join, role)
+            return
+        self._do_role_join(role)
+
+    def _do_role_join(self, role: Role) -> None:
+        """Execute role join with cached chunk replay."""
+        if self._is_stopped:
+            return
         req = role.get_audio_requirements()
         if req is None:
             return
