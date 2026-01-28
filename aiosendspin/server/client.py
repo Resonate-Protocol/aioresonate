@@ -229,14 +229,18 @@ class SendspinClient:
         if has_player_role and self.info.player_support is not None:
             # TODO: Remove mock - using 1/3 of reported capacity for testing
             capacity = self.info.player_support.buffer_capacity // 3
+            # Limit buffered duration to 2 seconds for rate limiting
+            max_duration_us = 2_000_000
             if self._buffer_tracker is None:
                 self._buffer_tracker = BufferTracker(
                     clock=self._server.clock,
                     client_id=self._client_id,
                     capacity_bytes=capacity,
+                    max_duration_us=max_duration_us,
                 )
             else:
                 self._buffer_tracker.capacity_bytes = capacity
+                self._buffer_tracker.max_duration_us = max_duration_us
 
             supported = self.info.player_support.supported_formats
             preferred = next(

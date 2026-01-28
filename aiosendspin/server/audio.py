@@ -216,6 +216,24 @@ class BufferTracker:
             virtual_buffered_bytes -= chunk.byte_count
         return time_needed_us
 
+    def time_until_ready(self, bytes_needed: int, duration_needed_us: int) -> int:
+        """
+        Calculate time until buffer can accept both bytes and duration.
+
+        Combines byte-based and duration-based backpressure into a single wait time.
+        Returns the maximum of both wait times.
+
+        Args:
+            bytes_needed: Number of bytes to check capacity for.
+            duration_needed_us: Duration in microseconds to check capacity for.
+
+        Returns:
+            Time in microseconds to wait, or 0 if ready immediately.
+        """
+        byte_wait = self.time_until_capacity(bytes_needed)
+        duration_wait = self.time_until_duration_capacity(duration_needed_us)
+        return max(byte_wait, duration_wait)
+
     async def wait_for_capacity(self, bytes_needed: int) -> None:
         """Block until the device buffer can accept bytes_needed more bytes."""
         if sleep_time_us := self.time_until_capacity(bytes_needed):

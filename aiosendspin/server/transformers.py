@@ -265,6 +265,8 @@ class FlacEncoder:
         # FLAC codec has internal buffering, so we can't track based on input
         self._stream_start_timestamp_us: int | None = None
         self._output_frame_count: int = 0
+        self._first_input_timestamp_us: int | None = None
+        self._chunks_encoded_total: int = 0
         # Track last input timestamp to detect production gaps
         self._last_input_timestamp_us: int | None = None
 
@@ -305,8 +307,9 @@ class FlacEncoder:
         # Update chunk duration to match FLAC's actual block size.
         # FLAC determines its own block size (e.g., 4608 samples = 96ms at 48kHz),
         # regardless of what input frame sizes we use.
-        self._chunk_samples = self._encoder.frame_size
-        self._chunk_duration_us = int(self._chunk_samples / self._sample_rate * 1_000_000)
+        if self._encoder.frame_size:
+            self._chunk_samples = self._encoder.frame_size
+            self._chunk_duration_us = int(self._chunk_samples / self._sample_rate * 1_000_000)
 
         header = bytes(self._encoder.extradata) if self._encoder.extradata else b""
         if header:
@@ -354,13 +357,15 @@ class FlacEncoder:
             input_gap = timestamp_us - self._last_input_timestamp_us
             if input_gap > 1_500_000:  # 1.5s threshold
                 # Production gap detected - reset timestamp tracking
-                self._stream_start_timestamp_us = timestamp_us
+                self._stream_start_timestamp_us = None
                 self._output_frame_count = 0
+                self._first_input_timestamp_us = timestamp_us
+                self._chunks_encoded_total = 0
         self._last_input_timestamp_us = timestamp_us
 
-        # Track stream start timestamp (set once on first call)
-        if self._stream_start_timestamp_us is None:
-            self._stream_start_timestamp_us = timestamp_us
+        # Track first input timestamp for encoder-delay compensation
+        if self._first_input_timestamp_us is None:
+            self._first_input_timestamp_us = timestamp_us
 
         self._buffer.extend(pcm)
         frames: list[bytes] = []
@@ -370,7 +375,15 @@ class FlacEncoder:
             chunk_pcm = bytes(self._buffer[:chunk_size])
             del self._buffer[:chunk_size]
             encoded = self._encode_chunk(chunk_pcm)
+            self._chunks_encoded_total += 1
             if encoded:
+                if self._stream_start_timestamp_us is None:
+                    assert self._first_input_timestamp_us is not None
+                    encoder_delay_chunks = max(self._chunks_encoded_total - 1, 0)
+                    self._stream_start_timestamp_us = (
+                        self._first_input_timestamp_us
+                        + encoder_delay_chunks * self._chunk_duration_us
+                    )
                 frames.append(encoded)
                 # Count output frames for timestamp calculation
                 self._output_frame_count += 1
@@ -413,4 +426,6 @@ class FlacEncoder:
         self._initialized = False
         self._stream_start_timestamp_us = None
         self._output_frame_count = 0
+        self._first_input_timestamp_us = None
+        self._chunks_encoded_total = 0
         self._last_input_timestamp_us = None

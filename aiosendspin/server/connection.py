@@ -93,6 +93,8 @@ class SendspinConnection:
         self._to_write: asyncio.Queue[ServerMessage | _BinaryFrame] = asyncio.Queue(
             maxsize=MAX_PENDING_MSG
         )
+        self._priority_queue: asyncio.Queue[ServerMessage] = asyncio.Queue()
+        self._priority_event: asyncio.Event = asyncio.Event()
         self._writer_task: asyncio.Task[None] | None = None
         self._message_loop_task: asyncio.Task[None] | None = None
 
@@ -190,6 +192,11 @@ class SendspinConnection:
 
         if not isinstance(message, ServerTimeMessage):
             self._logger.debug("Enqueueing message: %s", type(message).__name__)
+
+    def send_priority_message(self, message: ServerMessage) -> None:
+        """Enqueue a high-priority message (processed before regular queue)."""
+        self._priority_queue.put_nowait(message)
+        self._priority_event.set()
 
     async def disconnect(self, *, retry_connection: bool = True) -> None:
         """Disconnect this connection and detach from its persistent client."""
@@ -335,12 +342,12 @@ class SendspinConnection:
 
         if isinstance(message, ClientTimeMessage):
             client_time = message.payload
-            self.send_message(
+            self.send_priority_message(
                 ServerTimeMessage(
-                    ServerTimePayload(
+                    payload=ServerTimePayload(
                         client_transmitted=client_time.client_transmitted,
                         server_received=timestamp_us,
-                        server_transmitted=self._server.clock.now_us(),
+                        server_transmitted=0,  # Set at actual send time
                     )
                 )
             )
@@ -432,6 +439,23 @@ class SendspinConnection:
             return True
         return False
 
+    async def _send_message(
+        self,
+        wsock: web.WebSocketResponse | ClientWebSocketResponse,
+        message: ServerMessage,
+    ) -> None:
+        """Send a single message, handling time message timestamps."""
+        if isinstance(message, ServerTimeMessage):
+            # Update timestamp to actual send time
+            message = ServerTimeMessage(
+                payload=ServerTimePayload(
+                    client_transmitted=message.payload.client_transmitted,
+                    server_received=message.payload.server_received,
+                    server_transmitted=self._server.clock.now_us(),
+                )
+            )
+        await wsock.send_str(message.to_json())
+
     def _log_queue_stall(self, queued_at_us: int, timestamp_us: int, now: int, qsize: int) -> None:
         """Log if a chunk waited too long in the queue (stall detection)."""
         queue_wait_ms = (now - queued_at_us) / 1000
@@ -444,89 +468,110 @@ class SendspinConnection:
                 plays_in_ms,
             )
 
+    async def _send_binary_frame(
+        self,
+        wsock: web.WebSocketResponse | ClientWebSocketResponse,
+        item: _BinaryFrame,
+    ) -> None:
+        """Send a binary frame with buffer tracking and late detection."""
+        data = item.data
+        header = unpack_binary_header(data)
+        now = self._server.clock.now_us()
+
+        # Detect queue stalls
+        self._log_queue_stall(item.queued_at_us, header.timestamp_us, now, self._to_write.qsize())
+
+        # Find the role that handles this message type
+        handling = None
+        handling_role = None
+        if self._client is not None:
+            for role in self._client.active_roles:
+                handling = role.get_binary_handling(header.message_type)
+                if handling is not None:
+                    handling_role = role
+                    break
+
+        # Drop late messages if role requests it
+        if self._check_late_binary(handling, handling_role, header.timestamp_us):
+            return
+
+        # Rate limit: wait if we're too far ahead of playback (duration-based only)
+        if (
+            handling is not None
+            and handling.buffer_track
+            and handling_role is not None
+            and handling_role._buffer_tracker is not None  # noqa: SLF001
+        ):
+            wait_us = handling_role._buffer_tracker.time_until_duration_capacity(  # noqa: SLF001
+                item.duration_us or 0,
+            )
+            if wait_us > 0:
+                await asyncio.sleep(wait_us / 1_000_000)
+
+        await wsock.send_bytes(data)
+
+        now = self._server.clock.now_us()
+        plays_in_ms = (header.timestamp_us - now) / 1000
+        self._logger.debug(
+            "Sent binary: %d bytes, plays_in=%.0fms",
+            len(data),
+            plays_in_ms,
+        )
+
+        # Buffer tracking via role's tracker (framework-managed)
+        if (
+            handling is not None
+            and handling.buffer_track
+            and handling_role is not None
+            and item.buffer_end_time_us is not None
+            and item.buffer_byte_count is not None
+            and handling_role._buffer_tracker is not None  # noqa: SLF001
+        ):
+            handling_role._buffer_tracker.register(  # noqa: SLF001
+                item.buffer_end_time_us,
+                item.buffer_byte_count,
+                item.duration_us or 0,
+            )
+
     async def _writer(self) -> None:
         wsock = self._wsock_server or self._wsock_client
         assert wsock is not None
         try:
             while not wsock.closed and not self._closing:
-                item = await self._to_write.get()
+                # Drain priority queue first
+                while True:
+                    try:
+                        priority_msg = self._priority_queue.get_nowait()
+                        await self._send_message(wsock, priority_msg)
+                    except asyncio.QueueEmpty:
+                        break
+                self._priority_event.clear()
+
+                # Wait for either: regular queue item OR priority event
+                get_task = asyncio.create_task(self._to_write.get())
+                event_task = asyncio.create_task(self._priority_event.wait())
+
+                done, pending = await asyncio.wait(
+                    [get_task, event_task],
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+
+                for task in pending:
+                    task.cancel()
+
+                # If priority event fired, loop back to drain priority queue
+                if get_task not in done:
+                    continue
+
+                item = get_task.result()
 
                 if isinstance(item, _BinaryFrame):
                     if item.epoch != self._binary_epoch:
                         continue
-                    data = item.data
-                    header = unpack_binary_header(data)
-                    now = self._server.clock.now_us()
-
-                    # Detect queue stalls
-                    self._log_queue_stall(
-                        item.queued_at_us, header.timestamp_us, now, self._to_write.qsize()
-                    )
-
-                    # Find the role that handles this message type
-                    handling = None
-                    handling_role = None
-                    if self._client is not None:
-                        for role in self._client.active_roles:
-                            handling = role.get_binary_handling(header.message_type)
-                            if handling is not None:
-                                handling_role = role
-                                break
-
-                    # Drop late messages if role requests it
-                    if self._check_late_binary(handling, handling_role, header.timestamp_us):
-                        continue
-
-                    # Rate limiting: wait for buffer capacity before sending
-                    if (
-                        handling is not None
-                        and handling.rate_limit
-                        and handling_role is not None
-                        and handling_role._buffer_tracker is not None  # noqa: SLF001
-                        and item.buffer_byte_count is not None
-                    ):
-                        wait_us = handling_role._buffer_tracker.time_until_capacity(  # noqa: SLF001
-                            item.buffer_byte_count
-                        )
-                        if wait_us > 0:
-                            await asyncio.sleep(wait_us / 1_000_000)
-
-                    await wsock.send_bytes(data)
-
-                    now = self._server.clock.now_us()
-                    plays_in_ms = (header.timestamp_us - now) / 1000
-                    self._logger.debug(
-                        "Sent binary: %d bytes, plays_in=%.0fms",
-                        len(data),
-                        plays_in_ms,
-                    )
-
-                    # Buffer tracking via role's tracker (framework-managed)
-                    if (
-                        handling is not None
-                        and handling.buffer_track
-                        and handling_role is not None
-                        and item.buffer_end_time_us is not None
-                        and item.buffer_byte_count is not None
-                        and handling_role._buffer_tracker is not None  # noqa: SLF001
-                    ):
-                        handling_role._buffer_tracker.register(  # noqa: SLF001
-                            item.buffer_end_time_us,
-                            item.buffer_byte_count,
-                            item.duration_us or 0,
-                        )
-
-                    # Rate limiting: also limit send rate to Nx realtime
-                    if (
-                        handling is not None
-                        and handling.rate_limit
-                        and item.duration_us is not None
-                    ):
-                        delay_s = item.duration_us / handling.rate_limit_factor / 1_000_000
-                        await asyncio.sleep(delay_s)
+                    await self._send_binary_frame(wsock, item)
                     continue
 
-                await wsock.send_str(item.to_json())
+                await self._send_message(wsock, item)
         except asyncio.CancelledError:
             self._logger.debug("Writer cancelled")
         except Exception:

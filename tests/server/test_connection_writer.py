@@ -88,6 +88,7 @@ async def test_writer_registers_buffer_after_send() -> None:
     # Mock a role that handles AUDIO_CHUNK with buffer tracking
     mock_role = MagicMock()
     mock_buffer_tracker = MagicMock()
+    mock_buffer_tracker.time_until_duration_capacity.return_value = 0
     mock_role._buffer_tracker = mock_buffer_tracker  # noqa: SLF001
     mock_role._stream_start_time_us = None  # noqa: SLF001
     mock_role._last_late_log_s = 0.0  # noqa: SLF001
@@ -107,6 +108,7 @@ async def test_writer_registers_buffer_after_send() -> None:
         packed,
         buffer_end_time_us=1_000_000,
         buffer_byte_count=100,
+        duration_us=50_000,
     )
 
     for _ in range(50):
@@ -115,7 +117,7 @@ async def test_writer_registers_buffer_after_send() -> None:
         await asyncio.sleep(0)
 
     assert wsock.send_bytes.call_count == 1
-    mock_buffer_tracker.register.assert_called_once_with(1_000_000, 100, 0)
+    mock_buffer_tracker.register.assert_called_once_with(1_000_000, 100, 50_000)
 
     await conn.disconnect(retry_connection=False)
 
@@ -137,6 +139,7 @@ async def test_writer_does_not_register_without_metadata() -> None:
     # Mock a role that handles AUDIO_CHUNK with buffer tracking
     mock_role = MagicMock()
     mock_buffer_tracker = MagicMock()
+    mock_buffer_tracker.time_until_duration_capacity.return_value = 0
     mock_role._buffer_tracker = mock_buffer_tracker  # noqa: SLF001
     mock_role._stream_start_time_us = None  # noqa: SLF001
     mock_role._last_late_log_s = 0.0  # noqa: SLF001

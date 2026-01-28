@@ -295,7 +295,7 @@ class TestFlacEncoder:
         pcm = bytes(4800)
         total_output: list[bytes] = []
         for i in range(4):
-            result = encoder.process(pcm, timestamp_us=i * 25000, duration_us=25000)
+            result = encoder.process(pcm, timestamp_us=i * 25_000, duration_us=25_000)
             total_output.extend(result)
         assert len(total_output) > 0
 
@@ -303,7 +303,7 @@ class TestFlacEncoder:
         """FlacEncoder produces fLaC header."""
         encoder = FlacEncoder(sample_rate=48000, bit_depth=16, channels=2)
         pcm = bytes(4800)
-        encoder.process(pcm, timestamp_us=0, duration_us=25000)
+        encoder.process(pcm, timestamp_us=0, duration_us=25_000)
         header = encoder.get_header()
         assert header is not None
         assert header.startswith(b"fLaC")
@@ -312,7 +312,7 @@ class TestFlacEncoder:
         """FlacEncoder reset clears internal state."""
         encoder = FlacEncoder(sample_rate=48000, bit_depth=16, channels=2)
         pcm = bytes(4800)
-        encoder.process(pcm, timestamp_us=0, duration_us=25000)
+        encoder.process(pcm, timestamp_us=0, duration_us=25_000)
         encoder.reset()
         assert encoder._initialized is False  # noqa: SLF001
         assert encoder._codec_header is None  # noqa: SLF001
@@ -366,9 +366,7 @@ class TestFlacEncoder:
         # FLAC frame size is 4608 samples = 18432 bytes at 48kHz stereo 16-bit.
         # Process exactly one FLAC frame worth of data.
         flac_frame_bytes = 4608 * 4  # 4608 samples * 4 bytes per sample
-        encoder.process(
-            bytes(flac_frame_bytes), timestamp_us=0, duration_us=96_000
-        )  # Process exactly one FLAC frame
+        encoder.process(bytes(flac_frame_bytes), timestamp_us=0, duration_us=96_000)
         result = encoder.flush()
         assert result == []
 

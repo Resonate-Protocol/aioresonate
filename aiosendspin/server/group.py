@@ -179,6 +179,8 @@ class SendspinGroup:
     """Current PushStream for push-based streaming, None when not active."""
     _transformer_pool: TransformerPool
     """Pool for shared transformer instances (encoders, etc.) across roles."""
+    _delayed_join_handles: dict[str, asyncio.TimerHandle]
+    """Pending delayed role joins per client ID, cancelled on disconnect."""
 
     def __init__(self, server: SendspinServer, *args: SendspinClient) -> None:
         """
@@ -212,6 +214,7 @@ class SendspinGroup:
         self._playback_lock = asyncio.Lock()
         self._push_stream: PushStream | None = None
         self._transformer_pool = TransformerPool()
+        self._delayed_join_handles: dict[str, asyncio.TimerHandle] = {}
 
         # Set group reference for initial clients
         for client in self._clients:
@@ -332,6 +335,11 @@ class SendspinGroup:
         if client not in self._clients:
             return
 
+        # Cancel any pending delayed join for this client
+        handle = self._delayed_join_handles.pop(client.client_id, None)
+        if handle is not None:
+            handle.cancel()
+
         group_message = GroupUpdateServerMessage(
             GroupUpdateServerPayload(
                 playback_state=self._current_state,
@@ -352,10 +360,21 @@ class SendspinGroup:
         self._send_group_update_to_client(client, group_message, controller_state)
 
         if self._push_stream is not None and not self._push_stream.is_stopped:
-            # Call on_role_join for all roles with audio requirements (hook-based flow)
-            for role in client.active_roles:
-                if role.get_audio_requirements() is not None:
-                    self._push_stream.on_role_join(role)
+            # Delay role joins by 1s to allow time sync to stabilize after reconnect
+            self._delayed_join_handles[client.client_id] = self._server.loop.call_later(
+                1.0, self._do_role_joins, client
+            )
+
+    def _do_role_joins(self, client: SendspinClient) -> None:
+        """Execute delayed role joins for a reconnected client."""
+        self._delayed_join_handles.pop(client.client_id, None)
+        if client not in self._clients:
+            return
+        if self._push_stream is None or self._push_stream.is_stopped:
+            return
+        for role in client.active_roles:
+            if role.get_audio_requirements() is not None:
+                self._push_stream.on_role_join(role)
 
     def _send_controller_state_to_clients(self) -> None:
         """Send server/state with controller payload to all controller clients."""
@@ -590,6 +609,11 @@ class SendspinGroup:
             # Stop the push stream if active
             if self._push_stream is not None:
                 self._push_stream.stop()
+
+            # Cancel all pending delayed joins
+            for handle in self._delayed_join_handles.values():
+                handle.cancel()
+            self._delayed_join_handles.clear()
 
             if self._current_state != PlaybackStateType.STOPPED:
                 self._signal_event(GroupStateChangedEvent(PlaybackStateType.STOPPED))
@@ -1092,6 +1116,12 @@ class SendspinGroup:
         """
         if client not in self._clients:
             return
+
+        # Cancel any pending delayed join for this client
+        handle = self._delayed_join_handles.pop(client.client_id, None)
+        if handle is not None:
+            handle.cancel()
+
         logger.debug("removing %s from group with members: %s", client.client_id, self._clients)
         if len(self._clients) == 1:
             # Delete this group if that was the last client
