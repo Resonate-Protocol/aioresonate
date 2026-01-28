@@ -19,6 +19,7 @@ from aiosendspin.models.core import (
     StreamStartMessage,
 )
 from aiosendspin.models.types import (
+    BinaryMessageType,
     ClientStateType,
     MediaCommand,
     PlaybackStateType,
@@ -29,6 +30,7 @@ from aiosendspin.models.types import (
 from aiosendspin.server.events import ClientEvent, ClientGroupChangedEvent
 
 from .roles import Role
+from .roles.base import BinaryHandling
 from .roles.registry import create_role
 
 if TYPE_CHECKING:
@@ -90,6 +92,10 @@ class SendspinClient:
 
         # Role-owned persistent state (per role family).
         self._role_state: dict[str, object] = {}
+
+        # Cache for binary handling lookup: message_type -> (BinaryHandling, Role)
+        # Built when roles are attached for O(1) lookup in _send_binary_frame().
+        self._binary_handling_cache: dict[int, tuple[BinaryHandling, Role]] = {}
 
     @property
     def client_id(self) -> str:
@@ -228,8 +234,9 @@ class SendspinClient:
         self._negotiated_roles = active_roles
         self._logger = logger.getChild(self._client_id)
 
-        # Clear previous roles
+        # Clear previous roles and binary handling cache
         self._roles.clear()
+        self._binary_handling_cache.clear()
 
         # Create and register active roles via registry.
         for role_id in self._negotiated_roles:
@@ -239,6 +246,14 @@ class SendspinClient:
             role.on_connect()
             role.on_transport_attach()
             self._roles[role.role_id] = role
+
+        # Build binary handling cache for O(1) lookup
+        for msg_type in BinaryMessageType:
+            for role in self._roles.values():
+                handling = role.get_binary_handling(msg_type.value)
+                if handling is not None:
+                    self._binary_handling_cache[msg_type.value] = (handling, role)
+                    break  # First role that handles it wins
 
         # Ensure group exists (server creates it on first sight).
         if self._group is None:
@@ -260,6 +275,7 @@ class SendspinClient:
             role.on_transport_detach(goodbye_reason)
             role.on_disconnect()
         self._roles.clear()
+        self._binary_handling_cache.clear()
 
         self._connection = None
 
@@ -278,6 +294,8 @@ class SendspinClient:
         data: bytes,
         *,
         role_family: str,
+        timestamp_us: int,
+        message_type: int,
         buffer_end_time_us: int | None = None,
         buffer_byte_count: int | None = None,
         duration_us: int | None = None,
@@ -288,6 +306,8 @@ class SendspinClient:
         return self._connection.try_send_binary(
             data,
             role_family=role_family,
+            timestamp_us=timestamp_us,
+            message_type=message_type,
             buffer_end_time_us=buffer_end_time_us,
             buffer_byte_count=buffer_byte_count,
             duration_us=duration_us,
@@ -297,6 +317,10 @@ class SendspinClient:
     def active_roles(self) -> list[Role]:
         """All active roles for iteration."""
         return list(self._roles.values())
+
+    def get_binary_handling_cached(self, message_type: int) -> tuple[BinaryHandling, Role] | None:
+        """O(1) lookup for binary handling by message type."""
+        return self._binary_handling_cache.get(message_type)
 
     # ---- Controller command handling ----
 

@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections import defaultdict
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, NamedTuple
 from uuid import UUID
 
+from aiosendspin.models import BinaryMessageType, pack_binary_header_raw
 from aiosendspin.server.audio import AudioFormat, _get_av, _resolve_audio_format
 from aiosendspin.server.channels import MAIN_CHANNEL
 from aiosendspin.server.roles import AudioChunk
@@ -19,6 +21,7 @@ if TYPE_CHECKING:
     from aiosendspin.server.channels import ChannelRouter
     from aiosendspin.server.client import SendspinClient
     from aiosendspin.server.clock import Clock
+    from aiosendspin.server.connection import SendspinConnection
     from aiosendspin.server.group import SendspinGroup
     from aiosendspin.server.roles import AudioRequirements, Role
     from aiosendspin.server.transformers import AudioTransformer
@@ -86,6 +89,99 @@ class CachedChunk:
     """Size of encoded audio data (without header)."""
 
 
+class BroadcastBatch:
+    """Batches binary sends to multiple connections sharing the same audio format.
+
+    All players with the same TransformKey receive identical binary data.
+    This class pre-packs the binary frame once and batch-sends to all connections,
+    avoiding per-role overhead that becomes a bottleneck at scale (10k+ players).
+    """
+
+    __slots__ = (
+        "_buffer_byte_count",
+        "_buffer_end_time_us",
+        "_clock",
+        "_connections",
+        "_duration_us",
+        "_message_type",
+        "_packed_data",
+        "_role_family",
+        "_timestamp_us",
+    )
+
+    def __init__(
+        self,
+        *,
+        packed_data: bytes,
+        role_family: str,
+        timestamp_us: int,
+        message_type: int,
+        buffer_end_time_us: int,
+        buffer_byte_count: int,
+        duration_us: int,
+        clock: Clock,
+    ) -> None:
+        """Create a broadcast batch for a single pre-packed audio frame.
+
+        Args:
+            packed_data: Binary header + audio payload, ready to send.
+            role_family: Role family for epoch tracking (e.g., 'player').
+            timestamp_us: Playback timestamp from binary header.
+            message_type: Binary message type for role lookup.
+            buffer_end_time_us: End timestamp for buffer tracking.
+            buffer_byte_count: Byte count for buffer tracking.
+            duration_us: Duration of this chunk in microseconds.
+            clock: Clock for timestamp generation.
+        """
+        self._packed_data = packed_data
+        self._role_family = role_family
+        self._timestamp_us = timestamp_us
+        self._message_type = message_type
+        self._buffer_end_time_us = buffer_end_time_us
+        self._buffer_byte_count = buffer_byte_count
+        self._duration_us = duration_us
+        self._clock = clock
+        self._connections: list[SendspinConnection] = []
+
+    def add(self, connection: SendspinConnection) -> None:
+        """Add a connection to receive this batch."""
+        self._connections.append(connection)
+
+    def send_all(self) -> set[SendspinConnection]:
+        """Send to all connections. Returns set of backpressured connections.
+
+        Optimized for scale: gets timestamp once and minimizes per-connection overhead.
+        """
+        backpressured: set[SendspinConnection] = set()
+
+        # Get timestamp once for all connections (saves N clock.now_us() calls)
+        queued_at_us = self._clock.now_us()
+
+        # Cache frequently accessed values
+        packed_data = self._packed_data
+        role_family = self._role_family
+        timestamp_us = self._timestamp_us
+        message_type = self._message_type
+        buffer_end_time_us = self._buffer_end_time_us
+        buffer_byte_count = self._buffer_byte_count
+        duration_us = self._duration_us
+
+        for conn in self._connections:
+            if not conn.try_send_binary(
+                packed_data,
+                role_family=role_family,
+                timestamp_us=timestamp_us,
+                message_type=message_type,
+                buffer_end_time_us=buffer_end_time_us,
+                buffer_byte_count=buffer_byte_count,
+                duration_us=duration_us,
+                queued_at_us=queued_at_us,
+            ):
+                backpressured.add(conn)
+
+        return backpressured
+
+
 class StreamStoppedError(Exception):
     """Raised when trying to commit audio on a stopped stream."""
 
@@ -131,7 +227,9 @@ class PushStream:
         # Inline resamplers for role-based audio delivery
         self._resamplers: dict[_ResamplerKey, _ResamplerState] = {}
         # Role-based chunk cache: TransformKey -> list of cached chunks
-        self._role_chunk_cache: dict[TransformKey, list[CachedChunk]] = {}
+        self._role_chunk_cache: defaultdict[TransformKey, list[CachedChunk]] = defaultdict(list)
+        # TransformKey cache by (role_id, channel_id_int) - avoids rebuilding keys each frame
+        self._transform_key_cache: dict[tuple[int, int], TransformKey] = {}
 
     @property
     def is_stopped(self) -> bool:
@@ -354,7 +452,7 @@ class PushStream:
         role_cache_results = self._deliver_audio_to_roles(prepared, channel_play_start)
         # Merge role-based cache results into the cache
         for cache_key, chunks in role_cache_results.items():
-            self._role_chunk_cache.setdefault(cache_key, []).extend(chunks)
+            self._role_chunk_cache[cache_key].extend(chunks)
 
         # Prune old chunks from cache
         self._prune_role_chunk_cache()
@@ -400,9 +498,9 @@ class PushStream:
     ) -> dict[tuple[UUID, int, int, int], list[tuple[SendspinClient, Role, AudioRequirements]]]:
         """Group roles by their PCM requirements (channel_id, sample_rate, bit_depth, channels)."""
         # Key type: (channel_id, sample_rate, bit_depth, channels)
-        roles_by_pcm: dict[
+        roles_by_pcm: defaultdict[
             tuple[UUID, int, int, int], list[tuple[SendspinClient, Role, AudioRequirements]]
-        ] = {}
+        ] = defaultdict(list)
 
         for client, role in self._get_audio_roles():
             req = role.get_audio_requirements()
@@ -414,7 +512,7 @@ class PushStream:
                 continue
 
             pcm_key = (channel_id, req.sample_rate, req.bit_depth, req.channels)
-            roles_by_pcm.setdefault(pcm_key, []).append((client, role, req))
+            roles_by_pcm[pcm_key].append((client, role, req))
 
         return roles_by_pcm
 
@@ -465,10 +563,19 @@ class PushStream:
             return req.transformer.frame_duration_us
         return 25_000
 
-    def _build_transform_key(self, req: AudioRequirements, channel_id: UUID) -> TransformKey:
+    def _build_transform_key(
+        self, req: AudioRequirements, channel_id: UUID, role: Role | None = None
+    ) -> TransformKey:
+        # Cache by (role_id, channel_id_int) since AudioRequirements don't change during streaming
+        if role is not None:
+            cache_key = (id(role), channel_id.int)
+            cached = self._transform_key_cache.get(cache_key)
+            if cached is not None:
+                return cached
+
         transformer_type = type(req.transformer) if req.transformer is not None else type(None)
-        return TransformKey(
-            channel_id=channel_id,
+        tkey = TransformKey(
+            channel_id=channel_id.int,  # Use int for faster hashing
             transformer_type=transformer_type,
             sample_rate=req.sample_rate,
             bit_depth=req.bit_depth,
@@ -477,6 +584,11 @@ class PushStream:
             options=normalize_options(req.transform_options),
         )
 
+        if role is not None:
+            self._transform_key_cache[cache_key] = tkey
+
+        return tkey
+
     def _transform_and_deliver(
         self,
         roles_by_pcm: dict[
@@ -484,13 +596,18 @@ class PushStream:
         ],
         resampled_pcm: dict[tuple[UUID, int, int, int], tuple[bytes, int]],
     ) -> dict[TransformKey, list[CachedChunk]]:
-        """Transform PCM and deliver to roles. Returns cache results."""
+        """Transform PCM and deliver to roles using batched broadcast.
+
+        All players with the same TransformKey receive identical binary data.
+        This method packs the binary header once per format and batch-sends
+        to all connections, avoiding O(N) method calls at scale.
+        """
         # TransformKey -> list of (data, timestamp_us, duration_us)
         transformed: dict[TransformKey, list[tuple[bytes, int, int]]] = {}
         # Track roles per transform key
-        roles_by_transform: dict[
+        roles_by_transform: defaultdict[
             TransformKey, list[tuple[SendspinClient, Role, AudioRequirements]]
-        ] = {}
+        ] = defaultdict(list)
 
         for pcm_key, roles_list in roles_by_pcm.items():
             channel_id, rate, depth, channels = pcm_key
@@ -501,13 +618,13 @@ class PushStream:
             sample_count = len(pcm_data) // frame_stride if frame_stride > 0 else 0
             duration_us = int(sample_count * 1_000_000 / rate) if rate > 0 else 0
 
-            grouped_by_key: dict[
+            grouped_by_key: defaultdict[
                 TransformKey, list[tuple[SendspinClient, Role, AudioRequirements]]
-            ] = {}
+            ] = defaultdict(list)
             for client, role, req in roles_list:
-                tkey = self._build_transform_key(req, channel_id)
-                roles_by_transform.setdefault(tkey, []).append((client, role, req))
-                grouped_by_key.setdefault(tkey, []).append((client, role, req))
+                tkey = self._build_transform_key(req, channel_id, role)
+                roles_by_transform[tkey].append((client, role, req))
+                grouped_by_key[tkey].append((client, role, req))
 
             for tkey, grouped in grouped_by_key.items():
                 if tkey in transformed:
@@ -539,29 +656,69 @@ class PushStream:
                             frame_list.append((frame_data, frame_ts, frame_dur))
                     transformed[tkey] = frame_list
 
-        # Deliver and cache
-        cache_results: dict[TransformKey, list[CachedChunk]] = {}
+        return self._broadcast_frames(transformed, roles_by_transform)
+
+    def _broadcast_frames(
+        self,
+        transformed: dict[TransformKey, list[tuple[bytes, int, int]]],
+        roles_by_transform: dict[
+            TransformKey, list[tuple[SendspinClient, Role, AudioRequirements]]
+        ],
+    ) -> dict[TransformKey, list[CachedChunk]]:
+        """Broadcast transformed frames to connections and build cache."""
+        cache_results: defaultdict[TransformKey, list[CachedChunk]] = defaultdict(list)
+        role_family = "player"  # Currently only player roles receive audio
 
         for tkey, frame_list in transformed.items():
+            roles_for_key = roles_by_transform.get(tkey, [])
+
+            # Pre-collect connections and handle stream starts (once per TransformKey)
+            connections: list[SendspinConnection] = []
+            conn_to_role: dict[SendspinConnection, Role] = {}
+            for client, role, _req in roles_for_key:
+                if role not in self._started_roles:
+                    role.on_stream_start()
+                    self._started_roles.add(role)
+                conn = client.connection
+                if conn is not None:
+                    connections.append(conn)
+                    conn_to_role[conn] = role
+
+            # Process each frame with pre-collected connections
+            message_type = BinaryMessageType.AUDIO_CHUNK.value
             for data, ts, dur in frame_list:
-                chunk = AudioChunk(
-                    data=data, timestamp_us=ts, duration_us=dur, byte_count=len(data)
-                )
+                byte_count = len(data)
+                chunk_end_us = ts + dur
+
+                # Cache the chunk for late joiners
                 cached = CachedChunk(
-                    timestamp_us=ts,
-                    duration_us=dur,
-                    payload=data,
-                    byte_count=len(data),
+                    timestamp_us=ts, duration_us=dur, payload=data, byte_count=byte_count
                 )
-                cache_results.setdefault(tkey, []).append(cached)
+                cache_results[tkey].append(cached)
 
-                for _client, role, _req in roles_by_transform.get(tkey, []):
-                    if role not in self._started_roles:
-                        role.on_stream_start()
-                        self._started_roles.add(role)
+                # Pack binary header ONCE per frame (shared by all connections)
+                header = pack_binary_header_raw(message_type, ts)
+                packed_data = header + data
 
-                    if not role.on_audio_chunk(chunk):
-                        self._backpressured_roles.add(role)
+                # Create batch and send to all connections
+                batch = BroadcastBatch(
+                    packed_data=packed_data,
+                    role_family=role_family,
+                    timestamp_us=ts,
+                    message_type=message_type,
+                    buffer_end_time_us=chunk_end_us,
+                    buffer_byte_count=byte_count,
+                    duration_us=dur,
+                    clock=self._clock,
+                )
+                for conn in connections:
+                    batch.add(conn)
+
+                # Track backpressured roles
+                for conn in batch.send_all():
+                    bp_role = conn_to_role.get(conn)
+                    if bp_role is not None:
+                        self._backpressured_roles.add(bp_role)
 
         return cache_results
 
@@ -655,7 +812,7 @@ class PushStream:
         channel_id = req.channel_id or MAIN_CHANNEL
 
         # Get cached chunks for this transformer from the role-based cache
-        cache_key = self._build_transform_key(req, channel_id)
+        cache_key = self._build_transform_key(req, channel_id, role)
         cached = self._role_chunk_cache.get(cache_key, [])
 
         if not cached:
@@ -707,14 +864,14 @@ class PushStream:
         self._is_stopped = True
 
         # Flush remaining audio from transformers and reset them
-        roles_by_transform: dict[TransformKey, list[Role]] = {}
+        roles_by_transform: defaultdict[TransformKey, list[Role]] = defaultdict(list)
         transformers_by_key: dict[TransformKey, AudioTransformer] = {}
         for _client, role in self._get_audio_roles():
             req = role.get_audio_requirements()
             if req and req.transformer:
                 channel_id = req.channel_id or MAIN_CHANNEL
-                tkey = self._build_transform_key(req, channel_id)
-                roles_by_transform.setdefault(tkey, []).append(role)
+                tkey = self._build_transform_key(req, channel_id, role)
+                roles_by_transform[tkey].append(role)
                 transformers_by_key.setdefault(tkey, req.transformer)
 
         for tkey, transformer in transformers_by_key.items():
@@ -765,7 +922,7 @@ class PushStream:
             req = role.get_audio_requirements()
             if req and req.transformer:
                 channel_id = req.channel_id or MAIN_CHANNEL
-                tkey = self._build_transform_key(req, channel_id)
+                tkey = self._build_transform_key(req, channel_id, role)
                 reset_transformers.setdefault(tkey, req.transformer)
 
         for transformer in reset_transformers.values():

@@ -96,6 +96,8 @@ class PlayerRole(Role):
         self._stream_start_time_us = None
         self._last_late_log_s = 0.0
         self._late_skips_since_log = 0
+        # Cached state reference (avoids repeated dict lookup + isinstance check)
+        self._cached_state: PlayerPersistentState | None = None
 
     @property
     def role_id(self) -> str:
@@ -261,13 +263,16 @@ class PlayerRole(Role):
     def on_audio_chunk(self, chunk: AudioChunk) -> bool:
         """Pack and send binary audio. Late audio is discarded by connection."""
         # Pack binary header and send
-        header = pack_binary_header_raw(BinaryMessageType.AUDIO_CHUNK.value, chunk.timestamp_us)
+        message_type = BinaryMessageType.AUDIO_CHUNK.value
+        header = pack_binary_header_raw(message_type, chunk.timestamp_us)
         packed_data = header + chunk.data
         chunk_end_us = chunk.timestamp_us + chunk.duration_us
 
         return self._client.try_send_binary(
             packed_data,
             role_family=self.role_family,
+            timestamp_us=chunk.timestamp_us,
+            message_type=message_type,
             buffer_end_time_us=chunk_end_us,
             buffer_byte_count=chunk.byte_count,
             duration_us=chunk.duration_us,
@@ -498,7 +503,9 @@ class PlayerRole(Role):
     # ---- Internal helpers ----
 
     def _state(self) -> PlayerPersistentState:
-        return self._client.ensure_role_state("player", PlayerPersistentState)
+        if self._cached_state is None:
+            self._cached_state = self._client.ensure_role_state("player", PlayerPersistentState)
+        return self._cached_state
 
     def _ensure_buffer_tracker(self, state: PlayerPersistentState) -> None:
         support = self._client.info.player_support

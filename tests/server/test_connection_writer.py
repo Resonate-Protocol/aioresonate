@@ -39,6 +39,8 @@ def test_binary_frame_supports_buffer_registration_metadata() -> None:
         role_family="player",
         data=b"test",
         queued_at_us=0,
+        timestamp_us=0,
+        message_type=4,
     )
     assert frame_simple.buffer_end_time_us is None
     assert frame_simple.buffer_byte_count is None
@@ -49,6 +51,8 @@ def test_binary_frame_supports_buffer_registration_metadata() -> None:
         role_family="player",
         data=b"test",
         queued_at_us=0,
+        timestamp_us=0,
+        message_type=4,
         buffer_end_time_us=1_000_000,
         buffer_byte_count=1234,
     )
@@ -70,12 +74,15 @@ async def test_try_send_binary_accepts_buffer_metadata() -> None:
     result = conn.try_send_binary(
         b"audio_data",
         role_family="player",
+        timestamp_us=0,
+        message_type=BinaryMessageType.AUDIO_CHUNK.value,
         buffer_end_time_us=1_000_000,
         buffer_byte_count=100,
     )
     assert result is True
 
-    frame = conn._to_write.get_nowait()  # noqa: SLF001
+    priority_item = conn._to_write.get_nowait()  # noqa: SLF001
+    frame = priority_item.item
     assert frame.buffer_end_time_us == 1_000_000
     assert frame.buffer_byte_count == 100
 
@@ -108,14 +115,18 @@ async def test_writer_registers_buffer_after_send() -> None:
     )
 
     mock_client = MagicMock()
-    mock_client.active_roles = [mock_role]
+    binary_handling = BinaryHandling(drop_late=False, buffer_track=True)
+    mock_client.get_binary_handling_cached.return_value = (binary_handling, mock_role)
     conn._client = mock_client  # noqa: SLF001
 
     payload = b"audio_data"
-    packed = pack_binary_header_raw(BinaryMessageType.AUDIO_CHUNK.value, 0) + payload
+    message_type = BinaryMessageType.AUDIO_CHUNK.value
+    packed = pack_binary_header_raw(message_type, 0) + payload
     conn.try_send_binary(
         packed,
         role_family="player",
+        timestamp_us=0,
+        message_type=message_type,
         buffer_end_time_us=1_000_000,
         buffer_byte_count=100,
         duration_us=50_000,
@@ -154,18 +165,18 @@ async def test_writer_does_not_register_without_metadata() -> None:
     mock_role._stream_start_time_us = None  # noqa: SLF001
     mock_role._last_late_log_s = 0.0  # noqa: SLF001
     mock_role._late_skips_since_log = 0  # noqa: SLF001
-    mock_role.get_binary_handling.return_value = BinaryHandling(
-        drop_late=False,
-        buffer_track=True,
-    )
 
     mock_client = MagicMock()
-    mock_client.active_roles = [mock_role]
+    binary_handling = BinaryHandling(drop_late=False, buffer_track=True)
+    mock_client.get_binary_handling_cached.return_value = (binary_handling, mock_role)
     conn._client = mock_client  # noqa: SLF001
 
     payload = b"audio_data"
-    packed = pack_binary_header_raw(BinaryMessageType.AUDIO_CHUNK.value, 0) + payload
-    conn.try_send_binary(packed, role_family="player")  # No buffer metadata
+    message_type = BinaryMessageType.AUDIO_CHUNK.value
+    packed = pack_binary_header_raw(message_type, 0) + payload
+    conn.try_send_binary(
+        packed, role_family="player", timestamp_us=0, message_type=message_type
+    )  # No buffer metadata
 
     for _ in range(50):
         if wsock.send_bytes.called:

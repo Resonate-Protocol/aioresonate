@@ -63,6 +63,8 @@ def test_player_role_on_audio_chunk_packs_header_and_tracks_duration() -> None:
         data: bytes,
         *,
         role_family: str,  # noqa: ARG001
+        timestamp_us: int,  # noqa: ARG001
+        message_type: int,  # noqa: ARG001
         buffer_end_time_us: int | None = None,
         buffer_byte_count: int | None = None,
         duration_us: int | None = None,  # noqa: ARG001

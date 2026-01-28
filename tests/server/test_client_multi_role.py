@@ -57,9 +57,12 @@ class _FakeConnection:
         data: bytes,
         *,
         role_family: str,  # noqa: ARG002
+        timestamp_us: int,  # noqa: ARG002
+        message_type: int,  # noqa: ARG002
         buffer_end_time_us: int | None = None,
         buffer_byte_count: int | None = None,
         duration_us: int | None = None,
+        queued_at_us: int | None = None,  # noqa: ARG002
     ) -> bool:
         self.sent_binary.append(data)
         if (

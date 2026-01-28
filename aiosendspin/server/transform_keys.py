@@ -4,14 +4,17 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-from uuid import UUID
 
 
 @dataclass(frozen=True, slots=True)
 class TransformKey:
-    """Stable identity for transformed output."""
+    """Stable identity for transformed output.
 
-    channel_id: UUID
+    channel_id is stored as int (UUID.int) for faster hashing - int hash is O(1)
+    vs UUID hash which requires attribute access and method calls.
+    """
+
+    channel_id: int  # UUID.int value for fast hashing
     transformer_type: type
     sample_rate: int
     bit_depth: int

@@ -57,9 +57,27 @@ class _BinaryFrame:
     role_family: str
     data: bytes
     queued_at_us: int
+    timestamp_us: int  # playback timestamp from header (cached to avoid unpacking)
+    message_type: int  # binary message type for role lookup (cached)
     buffer_end_time_us: int | None = None
     buffer_byte_count: int | None = None
     duration_us: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _PriorityItem:
+    """Wrapper for priority queue ordering.
+
+    Priority 0 = high (time sync), 1 = normal.
+    Sequence provides FIFO tie-breaking within the same priority.
+    """
+
+    priority: int
+    sequence: int
+    item: ServerMessage | _BinaryFrame
+
+    def __lt__(self, other: _PriorityItem) -> bool:
+        return (self.priority, self.sequence) < (other.priority, other.sequence)
 
 
 class SendspinConnection:
@@ -92,11 +110,10 @@ class SendspinConnection:
         else:
             raise ValueError("Either request or wsock_client must be provided")
 
-        self._to_write: asyncio.Queue[ServerMessage | _BinaryFrame] = asyncio.Queue(
+        self._to_write: asyncio.PriorityQueue[_PriorityItem] = asyncio.PriorityQueue(
             maxsize=MAX_PENDING_MSG
         )
-        self._priority_queue: asyncio.Queue[ServerMessage] = asyncio.Queue()
-        self._priority_event: asyncio.Event = asyncio.Event()
+        self._queue_sequence: int = 0  # FIFO tie-breaker for priority queue
         self._writer_task: asyncio.Task[None] | None = None
         self._message_loop_task: asyncio.Task[None] | None = None
 
@@ -147,25 +164,44 @@ class SendspinConnection:
         data: bytes,
         *,
         role_family: str,
+        timestamp_us: int,
+        message_type: int,
         buffer_end_time_us: int | None = None,
         buffer_byte_count: int | None = None,
         duration_us: int | None = None,
+        queued_at_us: int | None = None,
     ) -> bool:
-        """Try to enqueue a binary message without disconnecting on queue overflow."""
+        """Try to enqueue a binary message without disconnecting on queue overflow.
+
+        Args:
+            data: Binary data to send.
+            role_family: Role family for epoch tracking.
+            timestamp_us: Playback timestamp from binary header (cached to avoid unpacking).
+            message_type: Binary message type for role lookup (cached).
+            buffer_end_time_us: End timestamp for buffer tracking.
+            buffer_byte_count: Byte count for buffer tracking.
+            duration_us: Duration for buffer tracking.
+            queued_at_us: Pre-computed queue timestamp (optimization for batch sends).
+        """
         epoch_family = self._binary_epoch_by_family.get(role_family, 0)
+        if queued_at_us is None:
+            queued_at_us = self._server.clock.now_us()
+        frame = _BinaryFrame(
+            epoch_all=self._binary_epoch_all,
+            epoch_family=epoch_family,
+            role_family=role_family,
+            data=data,
+            queued_at_us=queued_at_us,
+            timestamp_us=timestamp_us,
+            message_type=message_type,
+            buffer_end_time_us=buffer_end_time_us,
+            buffer_byte_count=buffer_byte_count,
+            duration_us=duration_us,
+        )
+        seq = self._queue_sequence
+        self._queue_sequence += 1
         try:
-            self._to_write.put_nowait(
-                _BinaryFrame(
-                    epoch_all=self._binary_epoch_all,
-                    epoch_family=epoch_family,
-                    role_family=role_family,
-                    data=data,
-                    queued_at_us=self._server.clock.now_us(),
-                    buffer_end_time_us=buffer_end_time_us,
-                    buffer_byte_count=buffer_byte_count,
-                    duration_us=duration_us,
-                )
-            )
+            self._to_write.put_nowait(_PriorityItem(priority=1, sequence=seq, item=frame))
         except asyncio.QueueFull:
             return False
         return True
@@ -181,9 +217,16 @@ class SendspinConnection:
         Binary payloads are considered droppable. Prefer try_send_binary for audio/art/vis.
         """
         if isinstance(message, bytes):
-            if (not self.try_send_binary(message, role_family="unknown")) and (
-                not self._disconnecting
-            ):
+            # Legacy path: parse header to get timestamp/type for binary messages
+            header = unpack_binary_header(message)
+            if (
+                not self.try_send_binary(
+                    message,
+                    role_family="unknown",
+                    timestamp_us=header.timestamp_us,
+                    message_type=header.message_type,
+                )
+            ) and (not self._disconnecting):
                 self._logger.error("Message queue full, client too slow - disconnecting")
                 task = self._server.loop.create_task(self.disconnect(retry_connection=True))
                 task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
@@ -192,8 +235,10 @@ class SendspinConnection:
         if isinstance(message, StreamClearMessage | StreamEndMessage):
             self.drop_pending_binary(message.payload.roles)
 
+        seq = self._queue_sequence
+        self._queue_sequence += 1
         try:
-            self._to_write.put_nowait(message)
+            self._to_write.put_nowait(_PriorityItem(priority=1, sequence=seq, item=message))
         except asyncio.QueueFull:
             if not self._disconnecting:
                 self._logger.error("Message queue full, client too slow - disconnecting")
@@ -206,8 +251,9 @@ class SendspinConnection:
 
     def send_priority_message(self, message: ServerMessage) -> None:
         """Enqueue a high-priority message (processed before regular queue)."""
-        self._priority_queue.put_nowait(message)
-        self._priority_event.set()
+        seq = self._queue_sequence
+        self._queue_sequence += 1
+        self._to_write.put_nowait(_PriorityItem(priority=0, sequence=seq, item=message))
 
     async def disconnect(self, *, retry_connection: bool = True) -> None:
         """Disconnect this connection and detach from its persistent client."""
@@ -462,18 +508,6 @@ class SendspinConnection:
             )
         await wsock.send_str(message.to_json())
 
-    def _log_queue_stall(self, queued_at_us: int, timestamp_us: int, now: int, qsize: int) -> None:
-        """Log if a chunk waited too long in the queue (stall detection)."""
-        queue_wait_ms = (now - queued_at_us) / 1000
-        plays_in_ms = (timestamp_us - now) / 1000
-        if queue_wait_ms > 100:  # Chunk waited >100ms in queue
-            self._logger.debug(
-                "Queue stall: waited=%.0fms queue=%d plays_in=%.0fms",
-                queue_wait_ms,
-                qsize,
-                plays_in_ms,
-            )
-
     async def _send_binary_frame(
         self,
         wsock: web.WebSocketResponse | ClientWebSocketResponse,
@@ -481,93 +515,52 @@ class SendspinConnection:
     ) -> None:
         """Send a binary frame with buffer tracking and late detection."""
         data = item.data
-        header = unpack_binary_header(data)
-        now = self._server.clock.now_us()
+        timestamp_us = item.timestamp_us
+        message_type = item.message_type
 
-        # Detect queue stalls
-        self._log_queue_stall(item.queued_at_us, header.timestamp_us, now, self._to_write.qsize())
-
-        # Find the role that handles this message type
+        # Find the role that handles this message type (O(1) lookup via client cache)
         handling = None
         handling_role = None
+        buffer_tracker = None
         if self._client is not None:
-            for role in self._client.active_roles:
-                handling = role.get_binary_handling(header.message_type)
-                if handling is not None:
-                    handling_role = role
-                    break
+            cached = self._client.get_binary_handling_cached(message_type)
+            if cached is not None:
+                handling, handling_role = cached
+                # Cache buffer_tracker lookup (called once instead of twice)
+                if handling.buffer_track:
+                    buffer_tracker = handling_role.get_buffer_tracker()
 
         # Drop late messages if role requests it
-        if self._check_late_binary(handling, handling_role, header.timestamp_us):
+        if self._check_late_binary(handling, handling_role, timestamp_us):
             return
 
         # Rate limit: wait if we're too far ahead of playback (duration-based only)
-        if handling is not None and handling.buffer_track and handling_role is not None:
-            buffer_tracker = handling_role.get_buffer_tracker()
-            if buffer_tracker is not None:
-                wait_us = buffer_tracker.time_until_duration_capacity(
-                    item.duration_us or 0,
-                )
-                if wait_us > 0:
-                    await asyncio.sleep(wait_us / 1_000_000)
+        if buffer_tracker is not None and handling is not None and handling.rate_limit:
+            wait_us = buffer_tracker.time_until_duration_capacity(item.duration_us or 0)
+            if wait_us > 0:
+                await asyncio.sleep(wait_us / 1_000_000)
 
         await wsock.send_bytes(data)
 
-        now = self._server.clock.now_us()
-        plays_in_ms = (header.timestamp_us - now) / 1000
-        self._logger.debug(
-            "Sent binary: %d bytes, plays_in=%.0fms",
-            len(data),
-            plays_in_ms,
-        )
-
         # Buffer tracking via role's tracker (framework-managed)
         if (
-            handling is not None
-            and handling.buffer_track
-            and handling_role is not None
+            buffer_tracker is not None
             and item.buffer_end_time_us is not None
             and item.buffer_byte_count is not None
         ):
-            buffer_tracker = handling_role.get_buffer_tracker()
-            if buffer_tracker is not None:
-                buffer_tracker.register(
-                    item.buffer_end_time_us,
-                    item.buffer_byte_count,
-                    item.duration_us or 0,
-                )
+            buffer_tracker.register(
+                item.buffer_end_time_us,
+                item.buffer_byte_count,
+                item.duration_us or 0,
+            )
 
     async def _writer(self) -> None:
         wsock = self._wsock_server or self._wsock_client
         assert wsock is not None
         try:
             while not wsock.closed and not self._closing:
-                # Drain priority queue first
-                while True:
-                    try:
-                        priority_msg = self._priority_queue.get_nowait()
-                        await self._send_message(wsock, priority_msg)
-                    except asyncio.QueueEmpty:
-                        break
-                self._priority_event.clear()
-
-                # Wait for either: regular queue item OR priority event
-                get_task = asyncio.create_task(self._to_write.get())
-                event_task = asyncio.create_task(self._priority_event.wait())
-
-                done, pending = await asyncio.wait(
-                    [get_task, event_task],
-                    return_when=asyncio.FIRST_COMPLETED,
-                )
-
-                for task in pending:
-                    task.cancel()
-
-                # If priority event fired, loop back to drain priority queue
-                if get_task not in done:
-                    continue
-
-                item = get_task.result()
+                priority_item = await self._to_write.get()
+                item = priority_item.item
 
                 if isinstance(item, _BinaryFrame):
                     if item.epoch_all != self._binary_epoch_all:

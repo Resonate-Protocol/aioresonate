@@ -776,10 +776,16 @@ class SendspinGroup:
             return
 
         message_type = BinaryMessageType.ARTWORK_CHANNEL_0.value + channel
-        header = pack_binary_header_raw(message_type, self._server.clock.now_us())
+        timestamp_us = self._server.clock.now_us()
+        header = pack_binary_header_raw(message_type, timestamp_us)
 
         if image is None:
-            client.try_send_binary(header, role_family="artwork")
+            client.try_send_binary(
+                header,
+                role_family="artwork",
+                timestamp_us=timestamp_us,
+                message_type=message_type,
+            )
         else:
             channel_state = client_state[channel]
             # Process and encode image in thread to avoid blocking event loop
@@ -790,7 +796,12 @@ class SendspinGroup:
                 channel_state.media_height,
                 channel_state.format,
             )
-            client.try_send_binary(header + img_data, role_family="artwork")
+            client.try_send_binary(
+                header + img_data,
+                role_family="artwork",
+                timestamp_us=timestamp_us,
+                message_type=message_type,
+            )
 
     def _process_and_encode_image(
         self,

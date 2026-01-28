@@ -46,7 +46,12 @@ async def test_stream_end_drops_queued_binary_before_sending() -> None:
     writer = asyncio.create_task(conn._writer())  # noqa: SLF001
     try:
         # Queue a binary payload, then a stream/end message.
-        assert conn.try_send_binary(b"\x04" + b"\x00" * 8 + b"audio", role_family="player")
+        assert conn.try_send_binary(
+            b"\x04" + b"\x00" * 8 + b"audio",
+            role_family="player",
+            timestamp_us=0,
+            message_type=4,
+        )
         conn.send_message(StreamEndMessage(payload=StreamEndPayload(roles=None)))
 
         # Wait until stream/end is sent.
@@ -78,7 +83,12 @@ async def test_stream_clear_drops_queued_binary_before_sending() -> None:
 
     writer = asyncio.create_task(conn._writer())  # noqa: SLF001
     try:
-        assert conn.try_send_binary(b"\x04" + b"\x00" * 8 + b"audio", role_family="player")
+        assert conn.try_send_binary(
+            b"\x04" + b"\x00" * 8 + b"audio",
+            role_family="player",
+            timestamp_us=0,
+            message_type=4,
+        )
         conn.send_message(StreamClearMessage(payload=StreamClearPayload(roles=["player"])))
 
         for _ in range(50):

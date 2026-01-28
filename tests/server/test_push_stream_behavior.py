@@ -59,9 +59,12 @@ class _FakeConnection:
         data: bytes,
         *,
         role_family: str,  # noqa: ARG002
+        timestamp_us: int,  # noqa: ARG002
+        message_type: int,  # noqa: ARG002
         buffer_end_time_us: int | None = None,
         buffer_byte_count: int | None = None,
         duration_us: int | None = None,
+        queued_at_us: int | None = None,  # noqa: ARG002
     ) -> bool:
         self.sent_binary.append(data)
         if (
@@ -103,6 +106,7 @@ class _DummyClient:
     def __init__(self, roles: list[_DummyRole]) -> None:
         self.is_connected = True
         self.active_roles = roles
+        self.connection = _FakeConnection()
 
 
 def _make_connected_player(
@@ -423,7 +427,8 @@ async def test_late_join_uses_cached_chunks_across_role_recreation(mock_loop: An
             frame_duration_us=25_000,
         )
     )
-    group.clients.append(_DummyClient([role1]))
+    client1 = _DummyClient([role1])
+    group.clients.append(client1)
 
     stream = PushStream(
         loop=mock_loop, clock=LoopClock(mock_loop), group=group, channel_router=ChannelRouter()
@@ -433,7 +438,8 @@ async def test_late_join_uses_cached_chunks_across_role_recreation(mock_loop: An
         AudioFormat(sample_rate=48000, bit_depth=16, channels=2),
     )
     await stream.commit_audio()
-    assert role1.received
+    # Batched broadcast sends directly to connection, not via role.on_audio_chunk()
+    assert client1.connection.sent_binary
 
     role2 = _DummyRole(
         AudioRequirements(
