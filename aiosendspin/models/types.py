@@ -210,6 +210,11 @@ def role_family(role_id: str) -> str:
     return role_id.split("@", 1)[0]
 
 
+def has_role_family(role_family_name: str, supported_roles: list[str]) -> bool:
+    """Check if a role family is present in the supported roles list."""
+    return any(role_family(r) == role_family_name for r in supported_roles)
+
+
 def has_role(role_id: str, supported_roles: list[str]) -> bool:
     """Check if a role family is present in the supported roles list.
 
@@ -220,8 +225,7 @@ def has_role(role_id: str, supported_roles: list[str]) -> bool:
         has_role("player@v1", ["player@v1", "metadata@v1"]) -> True
         has_role("player@v1", ["controller@v1"]) -> False
     """
-    target_family = role_family(role_id)
-    return any(role_family(r) == target_family for r in supported_roles)
+    return has_role_family(role_family(role_id), supported_roles)
 
 
 # Server-supported role implementations (versioned)

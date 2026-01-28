@@ -112,6 +112,22 @@ class GroupRole(ABC):
     def on_member_leave(self, role: Role) -> None:  # noqa: B027
         """Handle member unsubscription."""
 
+    def get_group_volume(self) -> int | None:
+        """Return group volume (0-100) if supported."""
+        return None
+
+    def get_group_muted(self) -> bool | None:
+        """Return group mute state if supported."""
+        return None
+
+    def set_group_volume(self, _volume_level: int) -> bool | None:
+        """Set group volume if supported, return True/False or None if unsupported."""
+        return None
+
+    def set_group_muted(self, _muted: bool) -> bool | None:  # noqa: FBT001
+        """Set group mute state if supported, return True/False or None if unsupported."""
+        return None
+
 
 @dataclass(frozen=True)
 class AudioRequirements:

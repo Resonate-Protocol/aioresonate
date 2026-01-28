@@ -44,9 +44,10 @@ from aiosendspin.models.types import (
     PictureFormat,
     PlaybackStateType,
     Roles,
-    has_role,
+    has_role_family,
 )
-from aiosendspin.server.roles import GroupRole, PlayerGroupRole, Role
+from aiosendspin.server.roles import GroupRole, Role
+from aiosendspin.server.roles.group_registry import create_group_roles
 
 from .channels import ChannelRouter
 from .events import ClientEvent, VolumeChangedEvent
@@ -207,10 +208,7 @@ class SendspinGroup:
         self._playback_lock = asyncio.Lock()
         self._push_stream: PushStream | None = None
         self._transformer_pool = TransformerPool()
-        self._group_roles: dict[str, GroupRole] = {}
-
-        # Register built-in group roles
-        self.register_group_role(PlayerGroupRole(self))
+        self._group_roles = create_group_roles(self)
 
         # Set group reference for initial clients
         for client in self._clients:
@@ -844,17 +842,10 @@ class SendspinGroup:
         """Register a GroupRole (called during group initialization)."""
         self._group_roles[group_role.role_family] = group_role
 
-    def _player_group_role(self) -> PlayerGroupRole | None:
-        """Return the PlayerGroupRole, if registered."""
-        role = self._group_roles.get("player")
-        if isinstance(role, PlayerGroupRole):
-            return role
-        return None
-
     def player_clients(self) -> list[SendspinClient]:
         """Return all clients in this group that have the player role."""
         return [
-            client for client in self._clients if has_role("player@v1", client.negotiated_roles)
+            client for client in self._clients if has_role_family("player", client.negotiated_roles)
         ]
 
     def _get_supported_commands(self) -> list[MediaCommand]:
@@ -954,28 +945,32 @@ class SendspinGroup:
 
     @property
     def volume(self) -> int:
-        """Return current group volume (0-100), delegated to PlayerGroupRole."""
-        if player_group := self._player_group_role():
-            return player_group.volume
+        """Return current group volume (0-100), delegated to group roles."""
+        for role in self._group_roles.values():
+            if (volume := role.get_group_volume()) is not None:
+                return volume
         return 100
 
     @property
     def muted(self) -> bool:
-        """Return current group mute state, delegated to PlayerGroupRole."""
-        if player_group := self._player_group_role():
-            return player_group.muted
+        """Return current group mute state, delegated to group roles."""
+        for role in self._group_roles.values():
+            if (muted := role.get_group_muted()) is not None:
+                return muted
         return False
 
     def set_volume(self, volume_level: int) -> None:
-        """Set group volume, delegated to PlayerGroupRole."""
-        if player_group := self._player_group_role():
-            player_group.set_volume(volume_level)
+        """Set group volume, delegated to group roles."""
+        for role in self._group_roles.values():
+            if role.set_group_volume(volume_level) is not None:
+                break
         self._send_controller_state_to_clients()
 
     def set_mute(self, muted: bool) -> None:  # noqa: FBT001
-        """Set group mute state, delegated to PlayerGroupRole."""
-        if player_group := self._player_group_role():
-            player_group.set_mute(muted)
+        """Set group mute state, delegated to group roles."""
+        for role in self._group_roles.values():
+            if role.set_group_muted(muted) is not None:
+                break
         self._send_controller_state_to_clients()
 
     def set_supported_commands(self, commands: list[MediaCommand]) -> None:

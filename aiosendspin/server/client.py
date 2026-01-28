@@ -24,6 +24,7 @@ from aiosendspin.models.types import (
     PlaybackStateType,
     Roles,
     has_role,
+    has_role_family,
 )
 from aiosendspin.server.events import ClientEvent, ClientGroupChangedEvent
 
@@ -339,7 +340,7 @@ class SendspinClient:
         all_groups = self._get_all_groups()
 
         # Build the cycle list based on client's player role
-        has_player_role = has_role("player@v1", self._negotiated_roles)
+        has_player_role = has_role_family("player", self._negotiated_roles)
         cycle_groups = self._build_group_cycle(all_groups, current_group, has_player_role)
 
         if not cycle_groups:
@@ -410,15 +411,17 @@ class SendspinClient:
             if client_count > 1 and is_playing:
                 # Verify the group has at least one player
                 # (groups with only controllers/metadata can't actually be "playing")
-                has_player = any(has_role("player@v1", c.negotiated_roles) for c in group.clients)
+                has_player = any(
+                    has_role_family("player", c.negotiated_roles) for c in group.clients
+                )
                 if has_player:
                     multi_client_playing.append(group)
             elif client_count == 1 and is_playing:
                 # Get the single client in this group
                 single_client_obj = group.clients[0]
                 # Skip current group, it will be handled as solo option for player clients
-                if group != current_group and has_role(
-                    "player@v1", single_client_obj.negotiated_roles
+                if group != current_group and has_role_family(
+                    "player", single_client_obj.negotiated_roles
                 ):
                     # Only include single-client groups where the client has player role
                     single_client.append(group)

@@ -18,8 +18,7 @@ class PlayerGroupRole(GroupRole):
         """
         return list(self._members)
 
-    @property
-    def volume(self) -> int:
+    def get_group_volume(self) -> int | None:
         """Return current group volume (average of player volumes)."""
         players = self._player_roles()
         if not players:
@@ -33,8 +32,7 @@ class PlayerGroupRole(GroupRole):
                 count += 1
         return round(total / count) if count else 100
 
-    @property
-    def muted(self) -> bool:
+    def get_group_muted(self) -> bool | None:
         """Return current group mute state (true only when ALL players muted)."""
         players = self._player_roles()
         if not players:
@@ -45,12 +43,12 @@ class PlayerGroupRole(GroupRole):
                 return False
         return True
 
-    def set_volume(self, level: int) -> None:
+    def set_group_volume(self, level: int) -> bool | None:
         """Set group volume using redistribution algorithm."""
         level = max(0, min(100, level))
         players = self._player_roles()
         if not players:
-            return
+            return True
 
         # Build mapping of player -> current volume (only players with volume support)
         player_volumes: dict[Role, float] = {}
@@ -60,7 +58,7 @@ class PlayerGroupRole(GroupRole):
                 player_volumes[p] = float(vol)
 
         if not player_volumes:
-            return
+            return True
 
         # Calculate initial delta
         current_avg = sum(player_volumes.values()) / len(player_volumes)
@@ -97,8 +95,28 @@ class PlayerGroupRole(GroupRole):
         # Apply to players
         for player, final_vol in player_volumes.items():
             player.set_player_volume(round(final_vol))
+        return True
 
-    def set_mute(self, muted: bool) -> None:  # noqa: FBT001
+    def set_group_muted(self, muted: bool) -> bool | None:  # noqa: FBT001
         """Set mute state on all players."""
         for player in self._player_roles():
             player.set_player_mute(muted)
+        return True
+
+    @property
+    def volume(self) -> int:
+        """Return current group volume (average of player volumes)."""
+        return self.get_group_volume() or 100
+
+    @property
+    def muted(self) -> bool:
+        """Return current group mute state (true only when ALL players muted)."""
+        return bool(self.get_group_muted())
+
+    def set_volume(self, level: int) -> None:
+        """Set group volume using redistribution algorithm."""
+        self.set_group_volume(level)
+
+    def set_mute(self, muted: bool) -> None:  # noqa: FBT001
+        """Set mute state on all players."""
+        self.set_group_muted(muted)
