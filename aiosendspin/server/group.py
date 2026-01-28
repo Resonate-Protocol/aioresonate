@@ -46,7 +46,7 @@ from aiosendspin.models.types import (
     Roles,
     has_role,
 )
-from aiosendspin.server.roles import Role
+from aiosendspin.server.roles import GroupRole, Role
 
 from .channels import ChannelRouter
 from .events import ClientEvent, VolumeChangedEvent
@@ -172,6 +172,8 @@ class SendspinGroup:
     """Current PushStream for push-based streaming, None when not active."""
     _transformer_pool: TransformerPool
     """Pool for shared transformer instances (encoders, etc.) across roles."""
+    _group_roles: dict[str, GroupRole]
+    """Registry of GroupRole instances, keyed by role family."""
 
     def __init__(self, server: SendspinServer, *args: SendspinClient) -> None:
         """
@@ -205,6 +207,7 @@ class SendspinGroup:
         self._playback_lock = asyncio.Lock()
         self._push_stream: PushStream | None = None
         self._transformer_pool = TransformerPool()
+        self._group_roles: dict[str, GroupRole] = {}
 
         # Set group reference for initial clients
         for client in self._clients:
@@ -829,6 +832,14 @@ class SendspinGroup:
     def transformer_pool(self) -> TransformerPool:
         """Return the transformer pool for encoder deduplication."""
         return self._transformer_pool
+
+    def group_role(self, family: str) -> GroupRole | None:
+        """Get the GroupRole for a role family."""
+        return self._group_roles.get(family)
+
+    def register_group_role(self, group_role: GroupRole) -> None:
+        """Register a GroupRole (called during group initialization)."""
+        self._group_roles[group_role.role_family] = group_role
 
     def player_clients(self) -> list[SendspinClient]:
         """Return all clients in this group that have the player role."""

@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import TYPE_CHECKING
 
-from aiosendspin.server.roles.player_v1 import PlayerRole
+from aiosendspin.server.roles.player import PlayerRole
 
 if TYPE_CHECKING:
     from aiosendspin.server.client import SendspinClient

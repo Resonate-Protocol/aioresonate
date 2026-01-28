@@ -19,6 +19,7 @@ if TYPE_CHECKING:
     from aiosendspin.models.types import GoodbyeReason, ServerMessage
     from aiosendspin.server.audio import BufferTracker
     from aiosendspin.server.client import SendspinClient
+    from aiosendspin.server.group import SendspinGroup
     from aiosendspin.server.transformers import AudioTransformer
 
 
@@ -72,6 +73,46 @@ class AudioChunk:
     """Size of data (for buffer tracking)."""
 
 
+class GroupRole(ABC):
+    """Group-level role coordination.
+
+    GroupRole is the group-level API for a role family. Client Role instances
+    subscribe when they connect and unsubscribe when they disconnect.
+
+    GroupRole can:
+    - Coordinate operations across all members (e.g., volume redistribution)
+    - Own group-level state (e.g., current metadata)
+    - Provide computed properties from member state (e.g., average volume)
+    """
+
+    role_family: str
+    """Role family name this GroupRole coordinates (e.g., 'player')."""
+
+    def __init__(self, group: SendspinGroup) -> None:
+        """Initialize with reference to the owning group."""
+        self._group = group
+        self._members: list[Role] = []
+
+    def subscribe(self, role: Role) -> None:
+        """Add a client role as a member of this group role."""
+        if role in self._members:
+            return
+        self._members.append(role)
+        self.on_member_join(role)
+
+    def unsubscribe(self, role: Role) -> None:
+        """Remove a client role from this group role."""
+        if role in self._members:
+            self._members.remove(role)
+            self.on_member_leave(role)
+
+    def on_member_join(self, role: Role) -> None:  # noqa: B027
+        """Handle member subscription (override for catch-up logic)."""
+
+    def on_member_leave(self, role: Role) -> None:  # noqa: B027
+        """Handle member unsubscription."""
+
+
 @dataclass(frozen=True)
 class AudioRequirements:
     """Declaration that a role needs audio chunks.
@@ -115,6 +156,9 @@ class Role(ABC):
 
     _has_transport: bool = False
     """Whether this role has an active WebSocket transport."""
+
+    _group_role: GroupRole | None = None
+    """Reference to the subscribed GroupRole, if any."""
 
     # Timing state for binary handling (used by connection)
     _stream_start_time_us: int | None = None
@@ -233,11 +277,31 @@ class Role(ABC):
 
     @abstractmethod
     def on_connect(self) -> None:
-        """Handle connection establishment."""
+        """Handle connection establishment.
+
+        Implementations should call _subscribe_to_group_role() to subscribe
+        to the corresponding GroupRole.
+        """
 
     @abstractmethod
     def on_disconnect(self) -> None:
-        """Handle connection close."""
+        """Handle connection close.
+
+        Implementations should call _unsubscribe_from_group_role() to unsubscribe
+        from the corresponding GroupRole.
+        """
+
+    def _subscribe_to_group_role(self) -> None:
+        """Subscribe to the corresponding GroupRole (call from on_connect)."""
+        if group_role := self._client.group.group_role(self.role_family):
+            group_role.subscribe(self)
+            self._group_role = group_role
+
+    def _unsubscribe_from_group_role(self) -> None:
+        """Unsubscribe from the GroupRole (call from on_disconnect)."""
+        if self._group_role:
+            self._group_role.unsubscribe(self)
+            self._group_role = None
 
     def requires_initial_state(self) -> bool:
         """Whether this role requires initial client/state before being 'connected'.

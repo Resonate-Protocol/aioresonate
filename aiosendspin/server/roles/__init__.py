@@ -10,14 +10,17 @@ Roles encapsulate per-connection behavior for different client capabilities.
 from aiosendspin.server.roles.base import (
     AudioChunk,
     AudioRequirements,
+    GroupRole,
     Role,
     StreamRequirements,
 )
-from aiosendspin.server.roles.player_v1 import PlayerRole
+from aiosendspin.server.roles.player import PlayerGroupRole, PlayerRole
 
 __all__ = [
     "AudioChunk",
     "AudioRequirements",
+    "GroupRole",
+    "PlayerGroupRole",
     "PlayerRole",
     "Role",
     "StreamRequirements",
