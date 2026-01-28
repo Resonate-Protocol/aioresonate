@@ -83,3 +83,10 @@ repos:
         types: [python]
         require_serial: true
         pass_filenames: false
+      - id: pytest
+        name: 🧪 Pytest
+        entry: scripts/run-in-env.sh pytest
+        language: script
+        types: [python]
+        require_serial: true
+        pass_filenames: false
