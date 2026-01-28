@@ -47,7 +47,7 @@ from aiosendspin.models.types import (
     has_role_family,
 )
 from aiosendspin.server.roles import GroupRole, Role
-from aiosendspin.server.roles.group_registry import create_group_roles
+from aiosendspin.server.roles.registry import create_group_roles
 
 from .channels import ChannelRouter
 from .events import ClientEvent, VolumeChangedEvent

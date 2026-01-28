@@ -5,17 +5,18 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import TYPE_CHECKING
 
-from aiosendspin.server.roles.player import PlayerRole
+from aiosendspin.server.roles.base import GroupRole
 
 if TYPE_CHECKING:
     from aiosendspin.server.client import SendspinClient
+    from aiosendspin.server.group import SendspinGroup
     from aiosendspin.server.roles.base import Role
 
 RoleFactory = Callable[["SendspinClient"], "Role"]
+GroupRoleFactory = Callable[["SendspinGroup"], GroupRole]
 
-ROLE_FACTORIES: dict[str, RoleFactory] = {
-    "player@v1": lambda client: PlayerRole(client=client),
-}
+ROLE_FACTORIES: dict[str, RoleFactory] = {}
+GROUP_ROLE_FACTORIES: dict[str, GroupRoleFactory] = {}
 
 
 def register_role(role_id: str, factory: RoleFactory) -> None:
@@ -29,3 +30,13 @@ def create_role(role_id: str, client: SendspinClient) -> Role | None:
     if factory is None:
         return None
     return factory(client)
+
+
+def register_group_role(role_family: str, factory: GroupRoleFactory) -> None:
+    """Register a group role factory for a role family."""
+    GROUP_ROLE_FACTORIES[role_family] = factory
+
+
+def create_group_roles(group: SendspinGroup) -> dict[str, GroupRole]:
+    """Create group roles for a new group from registered factories."""
+    return {family: factory(group) for family, factory in GROUP_ROLE_FACTORIES.items()}
