@@ -13,7 +13,7 @@ from aiosendspin.models.types import AudioCodec, GoodbyeReason, PlayerCommand, R
 from aiosendspin.server.client import SendspinClient
 from aiosendspin.server.clock import LoopClock
 from aiosendspin.server.group import SendspinGroup
-from aiosendspin.server.roles.player_v1 import PlayerPersistentState
+from aiosendspin.server.roles.player.v1 import PlayerPersistentState
 
 
 @dataclass(slots=True)

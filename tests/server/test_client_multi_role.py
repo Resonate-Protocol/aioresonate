@@ -36,6 +36,9 @@ class _DummyGroup:
     def _unregister_client_events(self, client: SendspinClient) -> None:  # noqa: ARG002
         return
 
+    def group_role(self, family: str) -> None:  # noqa: ARG002
+        return None
+
 
 class _FakeConnection:
     def __init__(self) -> None:

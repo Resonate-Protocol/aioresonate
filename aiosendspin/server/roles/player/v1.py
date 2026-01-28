@@ -158,7 +158,8 @@ class PlayerRole(Role):
     # --- Lifecycle hooks ---
 
     def on_connect(self) -> None:
-        """Reset stream state on new connection."""
+        """Reset stream state and subscribe to PlayerGroupRole."""
+        self._subscribe_to_group_role()
         self._stream_started = False
         state = self._state()
         if state.buffer_reset_handle is not None:
@@ -172,7 +173,8 @@ class PlayerRole(Role):
         self._ensure_audio_requirements(state)
 
     def on_disconnect(self) -> None:
-        """Clean up on disconnect."""
+        """Clean up and unsubscribe from PlayerGroupRole."""
+        self._unsubscribe_from_group_role()
         self._stream_started = False
 
     def requires_initial_state(self) -> bool:

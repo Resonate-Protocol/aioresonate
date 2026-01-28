@@ -38,6 +38,9 @@ class _DummyGroup:
     def on_client_connected(self, client: Any) -> None:  # noqa: ARG002
         return
 
+    def group_role(self, family: str) -> None:  # noqa: ARG002
+        return None
+
 
 @pytest.mark.asyncio
 async def test_buffer_tracker_does_not_backpressure_until_send() -> None:

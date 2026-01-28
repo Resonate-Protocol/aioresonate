@@ -40,6 +40,9 @@ class _DummyGroup:
     def on_client_connected(self, client: SendspinClient) -> None:  # noqa: ARG002
         return
 
+    def group_role(self, family: str) -> None:  # noqa: ARG002
+        return None
+
 
 class _FakeConnection:
     def __init__(self) -> None:

@@ -46,7 +46,7 @@ from aiosendspin.models.types import (
     Roles,
     has_role,
 )
-from aiosendspin.server.roles import GroupRole, Role
+from aiosendspin.server.roles import GroupRole, PlayerGroupRole, Role
 
 from .channels import ChannelRouter
 from .events import ClientEvent, VolumeChangedEvent
@@ -208,6 +208,9 @@ class SendspinGroup:
         self._push_stream: PushStream | None = None
         self._transformer_pool = TransformerPool()
         self._group_roles: dict[str, GroupRole] = {}
+
+        # Register built-in group roles
+        self.register_group_role(PlayerGroupRole(self))
 
         # Set group reference for initial clients
         for client in self._clients:
@@ -841,6 +844,13 @@ class SendspinGroup:
         """Register a GroupRole (called during group initialization)."""
         self._group_roles[group_role.role_family] = group_role
 
+    def _player_group_role(self) -> PlayerGroupRole | None:
+        """Return the PlayerGroupRole, if registered."""
+        role = self._group_roles.get("player")
+        if isinstance(role, PlayerGroupRole):
+            return role
+        return None
+
     def player_clients(self) -> list[SendspinClient]:
         """Return all clients in this group that have the player role."""
         return [
@@ -944,113 +954,28 @@ class SendspinGroup:
 
     @property
     def volume(self) -> int:
-        """Current group volume (0-100), calculated as average of player volumes."""
-        players = self.player_clients()
-        if not players:
-            return 100
-        total_volume = 0
-        count = 0
-        for client in players:
-            role = self._get_player_role(client)
-            if role is None:
-                continue
-            volume = role.get_player_volume()
-            if volume is None:
-                continue
-            total_volume += volume
-            count += 1
-        return round(total_volume / count) if count else 100
+        """Return current group volume (0-100), delegated to PlayerGroupRole."""
+        if player_group := self._player_group_role():
+            return player_group.volume
+        return 100
 
     @property
     def muted(self) -> bool:
-        """Current group mute state - true only when ALL players are muted."""
-        players = self.player_clients()
-        if not players:
-            return False
-        for client in players:
-            role = self._get_player_role(client)
-            if role is None:
-                return False
-            muted = role.get_player_muted()
-            if muted is None or not muted:
-                return False
-        return True
+        """Return current group mute state, delegated to PlayerGroupRole."""
+        if player_group := self._player_group_role():
+            return player_group.muted
+        return False
 
     def set_volume(self, volume_level: int) -> None:
-        """Set group volume using redistribution algorithm from spec."""
-        volume_level = max(0, min(100, volume_level))
-        players = self.player_clients()
-        if not players:
-            return
-
-        # Build mapping of client -> role (only clients with valid role)
-        client_roles: dict[SendspinClient, Role] = {}
-        for client in players:
-            role = self._get_player_role(client)
-            if role is not None and role.get_player_volume() is not None:
-                client_roles[client] = role
-
-        if not client_roles:
-            return
-
-        # Initialize working state with current volumes via PlayerRole
-        player_volumes = {
-            c: float(role.get_player_volume() or 0) for c, role in client_roles.items()
-        }
-
-        # Calculate initial target delta
-        current_avg = sum(player_volumes.values()) / len(player_volumes)
-        delta = volume_level - current_avg
-
-        # Track who is still participating in redistribution
-        active_clients = list(client_roles.keys())
-
-        for _ in range(5):
-            # Apply delta to all active players and calculate lost delta (overflow)
-            lost_delta_sum = 0.0
-            next_active_clients: list[SendspinClient] = []
-
-            for client in active_clients:
-                current_vol = player_volumes[client]
-                proposed = current_vol + delta
-
-                # Clamp and calculate loss
-                if proposed > 100:
-                    clamped = 100.0
-                    lost_delta_sum += proposed - clamped
-                elif proposed < 0:
-                    clamped = 0.0
-                    lost_delta_sum += proposed - clamped
-                else:
-                    clamped = proposed
-                    next_active_clients.append(client)
-
-                # Update our working state
-                player_volumes[client] = clamped
-
-            # If everyone is clamped or no delta lost, we are done
-            if not next_active_clients or abs(lost_delta_sum) < 0.01:
-                break
-
-            # Prepare for next iteration
-            # Redistribute the lost delta among the remaining active players
-            delta = lost_delta_sum / len(next_active_clients)
-            active_clients = next_active_clients
-
-        # Apply final calculated volumes via PlayerRole
-        for client, volume in player_volumes.items():
-            client_roles[client].set_player_volume(round(volume))
-
-        # Send state update to controller clients
+        """Set group volume, delegated to PlayerGroupRole."""
+        if player_group := self._player_group_role():
+            player_group.set_volume(volume_level)
         self._send_controller_state_to_clients()
 
     def set_mute(self, muted: bool) -> None:  # noqa: FBT001
-        """Set group mute state and propagate to all players via PlayerRole."""
-        for client in self.player_clients():
-            role = self._get_player_role(client)
-            if role is not None:
-                role.set_player_mute(muted)
-        # Send state update to controller clients
+        """Set group mute state, delegated to PlayerGroupRole."""
+        if player_group := self._player_group_role():
+            player_group.set_mute(muted)
         self._send_controller_state_to_clients()
 
     def set_supported_commands(self, commands: list[MediaCommand]) -> None:
