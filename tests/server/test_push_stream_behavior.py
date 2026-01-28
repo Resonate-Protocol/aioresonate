@@ -438,8 +438,7 @@ async def test_late_join_uses_cached_chunks_across_role_recreation(mock_loop: An
         AudioFormat(sample_rate=48000, bit_depth=16, channels=2),
     )
     await stream.commit_audio()
-    # Batched broadcast sends directly to connection, not via role.on_audio_chunk()
-    assert client1.connection.sent_binary
+    assert role1.received
 
     role2 = _DummyRole(
         AudioRequirements(

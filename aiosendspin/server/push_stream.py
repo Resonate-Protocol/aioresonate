@@ -9,7 +9,6 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, NamedTuple
 from uuid import UUID
 
-from aiosendspin.models import BinaryMessageType, pack_binary_header_raw
 from aiosendspin.server.audio import AudioFormat, _get_av, _resolve_audio_format
 from aiosendspin.server.channels import MAIN_CHANNEL
 from aiosendspin.server.roles import AudioChunk
@@ -21,7 +20,6 @@ if TYPE_CHECKING:
     from aiosendspin.server.channels import ChannelRouter
     from aiosendspin.server.client import SendspinClient
     from aiosendspin.server.clock import Clock
-    from aiosendspin.server.connection import SendspinConnection
     from aiosendspin.server.group import SendspinGroup
     from aiosendspin.server.roles import AudioRequirements, Role
     from aiosendspin.server.transformers import AudioTransformer
@@ -87,99 +85,6 @@ class CachedChunk:
     """Encoded audio payload bytes (without binary header)."""
     byte_count: int
     """Size of encoded audio data (without header)."""
-
-
-class BroadcastBatch:
-    """Batches binary sends to multiple connections sharing the same audio format.
-
-    All players with the same TransformKey receive identical binary data.
-    This class pre-packs the binary frame once and batch-sends to all connections,
-    avoiding per-role overhead that becomes a bottleneck at scale (10k+ players).
-    """
-
-    __slots__ = (
-        "_buffer_byte_count",
-        "_buffer_end_time_us",
-        "_clock",
-        "_connections",
-        "_duration_us",
-        "_message_type",
-        "_packed_data",
-        "_role_family",
-        "_timestamp_us",
-    )
-
-    def __init__(
-        self,
-        *,
-        packed_data: bytes,
-        role_family: str,
-        timestamp_us: int,
-        message_type: int,
-        buffer_end_time_us: int,
-        buffer_byte_count: int,
-        duration_us: int,
-        clock: Clock,
-    ) -> None:
-        """Create a broadcast batch for a single pre-packed audio frame.
-
-        Args:
-            packed_data: Binary header + audio payload, ready to send.
-            role_family: Role family for epoch tracking (e.g., 'player').
-            timestamp_us: Playback timestamp from binary header.
-            message_type: Binary message type for role lookup.
-            buffer_end_time_us: End timestamp for buffer tracking.
-            buffer_byte_count: Byte count for buffer tracking.
-            duration_us: Duration of this chunk in microseconds.
-            clock: Clock for timestamp generation.
-        """
-        self._packed_data = packed_data
-        self._role_family = role_family
-        self._timestamp_us = timestamp_us
-        self._message_type = message_type
-        self._buffer_end_time_us = buffer_end_time_us
-        self._buffer_byte_count = buffer_byte_count
-        self._duration_us = duration_us
-        self._clock = clock
-        self._connections: list[SendspinConnection] = []
-
-    def add(self, connection: SendspinConnection) -> None:
-        """Add a connection to receive this batch."""
-        self._connections.append(connection)
-
-    def send_all(self) -> set[SendspinConnection]:
-        """Send to all connections. Returns set of backpressured connections.
-
-        Optimized for scale: gets timestamp once and minimizes per-connection overhead.
-        """
-        backpressured: set[SendspinConnection] = set()
-
-        # Get timestamp once for all connections (saves N clock.now_us() calls)
-        queued_at_us = self._clock.now_us()
-
-        # Cache frequently accessed values
-        packed_data = self._packed_data
-        role_family = self._role_family
-        timestamp_us = self._timestamp_us
-        message_type = self._message_type
-        buffer_end_time_us = self._buffer_end_time_us
-        buffer_byte_count = self._buffer_byte_count
-        duration_us = self._duration_us
-
-        for conn in self._connections:
-            if not conn.try_send_binary(
-                packed_data,
-                role_family=role_family,
-                timestamp_us=timestamp_us,
-                message_type=message_type,
-                buffer_end_time_us=buffer_end_time_us,
-                buffer_byte_count=buffer_byte_count,
-                duration_us=duration_us,
-                queued_at_us=queued_at_us,
-            ):
-                backpressured.add(conn)
-
-        return backpressured
 
 
 class StreamStoppedError(Exception):
@@ -596,12 +501,7 @@ class PushStream:
         ],
         resampled_pcm: dict[tuple[UUID, int, int, int], tuple[bytes, int]],
     ) -> dict[TransformKey, list[CachedChunk]]:
-        """Transform PCM and deliver to roles using batched broadcast.
-
-        All players with the same TransformKey receive identical binary data.
-        This method packs the binary header once per format and batch-sends
-        to all connections, avoiding O(N) method calls at scale.
-        """
+        """Transform PCM and deliver to roles. Returns cache results."""
         # TransformKey -> list of (data, timestamp_us, duration_us)
         transformed: dict[TransformKey, list[tuple[bytes, int, int]]] = {}
         # Track roles per transform key
@@ -656,69 +556,26 @@ class PushStream:
                             frame_list.append((frame_data, frame_ts, frame_dur))
                     transformed[tkey] = frame_list
 
-        return self._broadcast_frames(transformed, roles_by_transform)
-
-    def _broadcast_frames(
-        self,
-        transformed: dict[TransformKey, list[tuple[bytes, int, int]]],
-        roles_by_transform: dict[
-            TransformKey, list[tuple[SendspinClient, Role, AudioRequirements]]
-        ],
-    ) -> dict[TransformKey, list[CachedChunk]]:
-        """Broadcast transformed frames to connections and build cache."""
+        # Deliver and cache
         cache_results: defaultdict[TransformKey, list[CachedChunk]] = defaultdict(list)
-        role_family = "player"  # Currently only player roles receive audio
 
         for tkey, frame_list in transformed.items():
-            roles_for_key = roles_by_transform.get(tkey, [])
-
-            # Pre-collect connections and handle stream starts (once per TransformKey)
-            connections: list[SendspinConnection] = []
-            conn_to_role: dict[SendspinConnection, Role] = {}
-            for client, role, _req in roles_for_key:
-                if role not in self._started_roles:
-                    role.on_stream_start()
-                    self._started_roles.add(role)
-                conn = client.connection
-                if conn is not None:
-                    connections.append(conn)
-                    conn_to_role[conn] = role
-
-            # Process each frame with pre-collected connections
-            message_type = BinaryMessageType.AUDIO_CHUNK.value
             for data, ts, dur in frame_list:
-                byte_count = len(data)
-                chunk_end_us = ts + dur
-
-                # Cache the chunk for late joiners
+                chunk = AudioChunk(
+                    data=data, timestamp_us=ts, duration_us=dur, byte_count=len(data)
+                )
                 cached = CachedChunk(
-                    timestamp_us=ts, duration_us=dur, payload=data, byte_count=byte_count
+                    timestamp_us=ts, duration_us=dur, payload=data, byte_count=len(data)
                 )
                 cache_results[tkey].append(cached)
 
-                # Pack binary header ONCE per frame (shared by all connections)
-                header = pack_binary_header_raw(message_type, ts)
-                packed_data = header + data
+                for _client, role, _req in roles_by_transform.get(tkey, []):
+                    if role not in self._started_roles:
+                        role.on_stream_start()
+                        self._started_roles.add(role)
 
-                # Create batch and send to all connections
-                batch = BroadcastBatch(
-                    packed_data=packed_data,
-                    role_family=role_family,
-                    timestamp_us=ts,
-                    message_type=message_type,
-                    buffer_end_time_us=chunk_end_us,
-                    buffer_byte_count=byte_count,
-                    duration_us=dur,
-                    clock=self._clock,
-                )
-                for conn in connections:
-                    batch.add(conn)
-
-                # Track backpressured roles
-                for conn in batch.send_all():
-                    bp_role = conn_to_role.get(conn)
-                    if bp_role is not None:
-                        self._backpressured_roles.add(bp_role)
+                    if not role.on_audio_chunk(chunk):
+                        self._backpressured_roles.add(role)
 
         return cache_results
 
