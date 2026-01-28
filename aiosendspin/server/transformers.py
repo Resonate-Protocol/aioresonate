@@ -6,10 +6,13 @@ They are managed by TransformerPool for deduplication across roles.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol, TypeVar, runtime_checkable
+from uuid import UUID
 
 from aiosendspin.server.audio import AudioFormat, _get_av, _resolve_audio_format
+from aiosendspin.server.transform_keys import normalize_options
 
 if TYPE_CHECKING:
     import av
@@ -72,16 +75,19 @@ class AudioTransformer(Protocol):
 class TransformerKey:
     """Unique identifier for a transformer configuration."""
 
+    channel_id: UUID
     transformer_type: type
     sample_rate: int
     bit_depth: int
     channels: int
+    frame_duration_us: int
+    options: tuple[tuple[str, str], ...]
 
 
 class TransformerPool:
     """Manages shared transformer instances.
 
-    Transformers are keyed by (type, sample_rate, bit_depth, channels).
+    Transformers are keyed by (channel_id, type, sample_rate, bit_depth, channels, frame).
     Multiple roles with the same configuration share the same transformer,
     enabling encoding deduplication.
     """
@@ -94,22 +100,30 @@ class TransformerPool:
         self,
         transformer_type: type[T],
         *,
+        channel_id: UUID,
         sample_rate: int,
         bit_depth: int,
         channels: int,
+        frame_duration_us: int,
+        options: Mapping[str, str] | None = None,
     ) -> T:
         """Get existing transformer or create new one."""
         key = TransformerKey(
+            channel_id=channel_id,
             transformer_type=transformer_type,
             sample_rate=sample_rate,
             bit_depth=bit_depth,
             channels=channels,
+            frame_duration_us=frame_duration_us,
+            options=normalize_options(options),
         )
         if key not in self._transformers:
             self._transformers[key] = transformer_type(  # type: ignore[call-arg]
                 sample_rate=sample_rate,
                 bit_depth=bit_depth,
                 channels=channels,
+                chunk_duration_us=frame_duration_us,
+                options=options,
             )
         return self._transformers[key]  # type: ignore[return-value]
 
@@ -132,6 +146,7 @@ class PcmPassthrough:
         bit_depth: int,
         channels: int,
         chunk_duration_us: int = 25_000,
+        options: Mapping[str, str] | None = None,
     ) -> None:
         """Initialize with audio format parameters.
 
@@ -144,6 +159,7 @@ class PcmPassthrough:
         self._sample_rate = sample_rate
         self._chunk_duration_us = chunk_duration_us
         self._frame_stride = (bit_depth // 8) * channels
+        self._options = options
         # Calculate frame size: samples = sample_rate * duration_s
         # For 48kHz, 25ms: 48000 * 0.025 = 1200 samples
         # Frame size = samples * frame_stride = 1200 * 4 = 4800 bytes
@@ -240,6 +256,7 @@ class FlacEncoder:
         bit_depth: int,
         channels: int,
         chunk_duration_us: int = 25_000,
+        options: Mapping[str, str] | None = None,
     ) -> None:
         """Initialize FLAC encoder with audio format parameters.
 
@@ -253,6 +270,7 @@ class FlacEncoder:
         self._bit_depth = bit_depth
         self._channels = channels
         self._chunk_duration_us = chunk_duration_us
+        self._options = options or {}
         self._encoder: av.AudioCodecContext | None = None
         self._codec_header: bytes | None = None
         self._av_format: str | None = None
@@ -299,7 +317,7 @@ class FlacEncoder:
         self._encoder.sample_rate = self._sample_rate
         self._encoder.layout = self._av_layout
         self._encoder.format = self._av_format
-        self._encoder.options = {"compression_level": "5"}
+        self._encoder.options = {"compression_level": self._options.get("compression_level", "5")}
 
         with av.logging.Capture():
             self._encoder.open()

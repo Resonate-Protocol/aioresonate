@@ -29,6 +29,7 @@ from aiosendspin.models.core import (
 from aiosendspin.models.player import PlayerCommandPayload, StreamStartPlayer
 from aiosendspin.models.types import GoodbyeReason, PlayerCommand
 from aiosendspin.server.audio import AudioFormat, BufferTracker
+from aiosendspin.server.channels import MAIN_CHANNEL
 from aiosendspin.server.events import VolumeChangedEvent
 from aiosendspin.server.roles.base import (
     AudioChunk,
@@ -572,20 +573,26 @@ class PlayerRole(Role):
             return
 
         group = self._client.group
+        frame_duration_us = 25_000
+        channel_id = MAIN_CHANNEL
         transformer: FlacEncoder | PcmPassthrough
         if audio_codec == AudioCodec.FLAC:
             transformer = group.transformer_pool.get_or_create(
                 FlacEncoder,
+                channel_id=channel_id,
                 sample_rate=audio_format.sample_rate,
                 bit_depth=audio_format.bit_depth,
                 channels=audio_format.channels,
+                frame_duration_us=frame_duration_us,
             )
         else:
             transformer = group.transformer_pool.get_or_create(
                 PcmPassthrough,
+                channel_id=channel_id,
                 sample_rate=audio_format.sample_rate,
                 bit_depth=audio_format.bit_depth,
                 channels=audio_format.channels,
+                frame_duration_us=frame_duration_us,
             )
 
         self._audio_requirements = AudioRequirements(
@@ -593,4 +600,6 @@ class PlayerRole(Role):
             bit_depth=audio_format.bit_depth,
             channels=audio_format.channels,
             transformer=transformer,
+            channel_id=channel_id,
+            frame_duration_us=frame_duration_us,
         )

@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 from unittest.mock import MagicMock
+from uuid import UUID
 
 import pytest
 
@@ -13,15 +14,12 @@ from aiosendspin.models.core import StreamClearMessage, StreamEndMessage, Stream
 from aiosendspin.models.player import ClientHelloPlayerSupport, SupportedAudioFormat
 from aiosendspin.models.types import AudioCodec, PlayerCommand, Roles
 from aiosendspin.server.audio import AudioFormat
-from aiosendspin.server.channels import ChannelRouter
+from aiosendspin.server.channels import MAIN_CHANNEL, ChannelRouter
 from aiosendspin.server.client import SendspinClient
 from aiosendspin.server.clock import LoopClock
 from aiosendspin.server.push_stream import PushStream
-from aiosendspin.server.roles import AudioRequirements
+from aiosendspin.server.roles import AudioChunk, AudioRequirements
 from aiosendspin.server.transformers import PcmPassthrough, TransformerPool
-
-# Shared transformer for tests that need consistent cache keys
-_SHARED_PCM_PASSTHROUGH = PcmPassthrough(sample_rate=48000, bit_depth=16, channels=2)
 
 
 @dataclass(slots=True)
@@ -75,6 +73,38 @@ class _FakeConnection:
         return True
 
 
+class _DummyRole:
+    def __init__(self, requirements: AudioRequirements) -> None:
+        self._requirements = requirements
+        self.received: list[AudioChunk] = []
+        self.started = 0
+
+    def get_audio_requirements(self) -> AudioRequirements | None:
+        return self._requirements
+
+    def get_join_delay_s(self) -> float:
+        return 0.0
+
+    def on_stream_start(self) -> None:
+        self.started += 1
+
+    def on_audio_chunk(self, chunk: AudioChunk) -> bool:
+        self.received.append(chunk)
+        return True
+
+    def on_stream_end(self) -> None:
+        return
+
+    def on_stream_clear(self) -> None:
+        return
+
+
+class _DummyClient:
+    def __init__(self, roles: list[_DummyRole]) -> None:
+        self.is_connected = True
+        self.active_roles = roles
+
+
 def _make_connected_player(
     mock_loop: Any,
     group: _DummyGroup,
@@ -118,13 +148,22 @@ def _make_connected_player(
         conn.buffer_tracker = role.get_buffer_tracker()
 
     # Set up audio requirements on the player role for hook-based streaming
-    # Use shared transformer to ensure consistent cache keys across tests
     if role is not None:
+        transformer = group.transformer_pool.get_or_create(
+            PcmPassthrough,
+            channel_id=MAIN_CHANNEL,
+            sample_rate=48000,
+            bit_depth=16,
+            channels=2,
+            frame_duration_us=25_000,
+        )
         role._audio_requirements = AudioRequirements(  # noqa: SLF001
             sample_rate=48000,
             bit_depth=16,
             channels=2,
-            transformer=_SHARED_PCM_PASSTHROUGH,
+            transformer=transformer,
+            channel_id=MAIN_CHANNEL,
+            frame_duration_us=25_000,
         )
 
     return client, conn
@@ -224,3 +263,312 @@ async def test_on_role_join_sends_catchup_chunks(mock_loop: Any) -> None:
 
     assert any(isinstance(m, StreamStartMessage) for m in conn2.sent_json)
     assert conn2.sent_binary, "expected catch-up binary chunks"
+
+
+@pytest.mark.asyncio
+async def test_transform_dedup_uses_transform_key_not_instance(mock_loop: Any) -> None:
+    """Transformer dedupe should be based on TransformKey, not instance id."""
+
+    class CountingTransformer:
+        calls = 0
+
+        def __init__(self) -> None:
+            self._frame_duration_us = 25_000
+
+        @property
+        def frame_duration_us(self) -> int:
+            return self._frame_duration_us
+
+        def process(self, pcm: bytes, _ts: int, _dur: int) -> list[bytes]:
+            CountingTransformer.calls += 1
+            return [pcm]
+
+        def flush(self) -> list[bytes]:
+            return []
+
+        def get_header(self) -> bytes | None:
+            return None
+
+        def reset(self) -> None:
+            return
+
+    CountingTransformer.calls = 0
+    group = _DummyGroup(clients=[])
+    role1 = _DummyRole(
+        AudioRequirements(
+            sample_rate=48000,
+            bit_depth=16,
+            channels=2,
+            transformer=CountingTransformer(),
+            channel_id=MAIN_CHANNEL,
+            frame_duration_us=25_000,
+        )
+    )
+    role2 = _DummyRole(
+        AudioRequirements(
+            sample_rate=48000,
+            bit_depth=16,
+            channels=2,
+            transformer=CountingTransformer(),
+            channel_id=MAIN_CHANNEL,
+            frame_duration_us=25_000,
+        )
+    )
+    group.clients.extend([_DummyClient([role1]), _DummyClient([role2])])
+
+    stream = PushStream(
+        loop=mock_loop, clock=LoopClock(mock_loop), group=group, channel_router=ChannelRouter()
+    )
+    stream.prepare_audio(
+        bytes(4800),
+        AudioFormat(sample_rate=48000, bit_depth=16, channels=2),
+    )
+    await stream.commit_audio()
+
+    assert CountingTransformer.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_transform_key_separates_frame_duration(mock_loop: Any) -> None:
+    """Different frame_duration_us should not share transformer work."""
+
+    class CountingTransformer:
+        calls = 0
+
+        def __init__(self, frame_duration_us: int) -> None:
+            self._frame_duration_us = frame_duration_us
+
+        @property
+        def frame_duration_us(self) -> int:
+            return self._frame_duration_us
+
+        def process(self, pcm: bytes, _ts: int, _dur: int) -> list[bytes]:
+            CountingTransformer.calls += 1
+            return [pcm]
+
+        def flush(self) -> list[bytes]:
+            return []
+
+        def get_header(self) -> bytes | None:
+            return None
+
+        def reset(self) -> None:
+            return
+
+    CountingTransformer.calls = 0
+    group = _DummyGroup(clients=[])
+    role1 = _DummyRole(
+        AudioRequirements(
+            sample_rate=48000,
+            bit_depth=16,
+            channels=2,
+            transformer=CountingTransformer(25_000),
+            channel_id=MAIN_CHANNEL,
+            frame_duration_us=25_000,
+        )
+    )
+    role2 = _DummyRole(
+        AudioRequirements(
+            sample_rate=48000,
+            bit_depth=16,
+            channels=2,
+            transformer=CountingTransformer(50_000),
+            channel_id=MAIN_CHANNEL,
+            frame_duration_us=50_000,
+        )
+    )
+    group.clients.extend([_DummyClient([role1]), _DummyClient([role2])])
+
+    stream = PushStream(
+        loop=mock_loop, clock=LoopClock(mock_loop), group=group, channel_router=ChannelRouter()
+    )
+    stream.prepare_audio(
+        bytes(4800),
+        AudioFormat(sample_rate=48000, bit_depth=16, channels=2),
+    )
+    await stream.commit_audio()
+
+    assert CountingTransformer.calls == 2
+
+
+@pytest.mark.asyncio
+async def test_late_join_uses_cached_chunks_across_role_recreation(mock_loop: Any) -> None:
+    """Late join uses cache even if transformer instance changes."""
+
+    class PassTransformer:
+        @property
+        def frame_duration_us(self) -> int:
+            return 25_000
+
+        def process(self, pcm: bytes, _ts: int, _dur: int) -> list[bytes]:
+            return [pcm]
+
+        def flush(self) -> list[bytes]:
+            return []
+
+        def get_header(self) -> bytes | None:
+            return None
+
+        def reset(self) -> None:
+            return
+
+    group = _DummyGroup(clients=[])
+    role1 = _DummyRole(
+        AudioRequirements(
+            sample_rate=48000,
+            bit_depth=16,
+            channels=2,
+            transformer=PassTransformer(),
+            channel_id=MAIN_CHANNEL,
+            frame_duration_us=25_000,
+        )
+    )
+    group.clients.append(_DummyClient([role1]))
+
+    stream = PushStream(
+        loop=mock_loop, clock=LoopClock(mock_loop), group=group, channel_router=ChannelRouter()
+    )
+    stream.prepare_audio(
+        bytes(4800),
+        AudioFormat(sample_rate=48000, bit_depth=16, channels=2),
+    )
+    await stream.commit_audio()
+    assert role1.received
+
+    role2 = _DummyRole(
+        AudioRequirements(
+            sample_rate=48000,
+            bit_depth=16,
+            channels=2,
+            transformer=PassTransformer(),
+            channel_id=MAIN_CHANNEL,
+            frame_duration_us=25_000,
+        )
+    )
+    stream.on_role_join(role2)
+
+    assert role2.started == 1
+    assert role2.received
+
+
+@pytest.mark.asyncio
+async def test_stop_flush_fans_out_to_all_roles(mock_loop: Any) -> None:
+    """stop() flush frames to all roles sharing a TransformKey."""
+
+    class FlushingTransformer:
+        @property
+        def frame_duration_us(self) -> int:
+            return 25_000
+
+        def process(self, pcm: bytes, _ts: int, _dur: int) -> list[bytes]:
+            return [pcm]
+
+        def flush(self) -> list[bytes]:
+            return [b"final"]
+
+        def get_header(self) -> bytes | None:
+            return None
+
+        def reset(self) -> None:
+            return
+
+    group = _DummyGroup(clients=[])
+    role1 = _DummyRole(
+        AudioRequirements(
+            sample_rate=48000,
+            bit_depth=16,
+            channels=2,
+            transformer=FlushingTransformer(),
+            channel_id=MAIN_CHANNEL,
+            frame_duration_us=25_000,
+        )
+    )
+    role2 = _DummyRole(
+        AudioRequirements(
+            sample_rate=48000,
+            bit_depth=16,
+            channels=2,
+            transformer=FlushingTransformer(),
+            channel_id=MAIN_CHANNEL,
+            frame_duration_us=25_000,
+        )
+    )
+    group.clients.extend([_DummyClient([role1]), _DummyClient([role2])])
+
+    stream = PushStream(
+        loop=mock_loop, clock=LoopClock(mock_loop), group=group, channel_router=ChannelRouter()
+    )
+    stream.stop()
+
+    assert len(role1.received) == 1
+    assert len(role2.received) == 1
+
+
+@pytest.mark.asyncio
+async def test_transform_key_separates_channels(mock_loop: Any) -> None:
+    """TransformKey includes channel_id to avoid cross-channel sharing."""
+
+    class CountingTransformer:
+        calls = 0
+
+        def __init__(self) -> None:
+            self._frame_duration_us = 25_000
+
+        @property
+        def frame_duration_us(self) -> int:
+            return self._frame_duration_us
+
+        def process(self, pcm: bytes, _ts: int, _dur: int) -> list[bytes]:
+            CountingTransformer.calls += 1
+            return [pcm]
+
+        def flush(self) -> list[bytes]:
+            return []
+
+        def get_header(self) -> bytes | None:
+            return None
+
+        def reset(self) -> None:
+            return
+
+    CountingTransformer.calls = 0
+    group = _DummyGroup(clients=[])
+    other_channel = UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
+    role1 = _DummyRole(
+        AudioRequirements(
+            sample_rate=48000,
+            bit_depth=16,
+            channels=2,
+            transformer=CountingTransformer(),
+            channel_id=MAIN_CHANNEL,
+            frame_duration_us=25_000,
+        )
+    )
+    role2 = _DummyRole(
+        AudioRequirements(
+            sample_rate=48000,
+            bit_depth=16,
+            channels=2,
+            transformer=CountingTransformer(),
+            channel_id=other_channel,
+            frame_duration_us=25_000,
+        )
+    )
+    group.clients.extend([_DummyClient([role1]), _DummyClient([role2])])
+
+    stream = PushStream(
+        loop=mock_loop, clock=LoopClock(mock_loop), group=group, channel_router=ChannelRouter()
+    )
+    stream.prepare_audio(
+        bytes(4800),
+        AudioFormat(sample_rate=48000, bit_depth=16, channels=2),
+        channel_id=MAIN_CHANNEL,
+    )
+    stream.prepare_audio(
+        bytes(4800),
+        AudioFormat(sample_rate=48000, bit_depth=16, channels=2),
+        channel_id=other_channel,
+    )
+    await stream.commit_audio()
+
+    assert CountingTransformer.calls == 2

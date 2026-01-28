@@ -11,6 +11,7 @@ from uuid import UUID
 from aiosendspin.server.audio import AudioFormat, _get_av, _resolve_audio_format
 from aiosendspin.server.channels import MAIN_CHANNEL
 from aiosendspin.server.roles import AudioChunk
+from aiosendspin.server.transform_keys import TransformKey, normalize_options
 
 if TYPE_CHECKING:
     import av
@@ -20,6 +21,7 @@ if TYPE_CHECKING:
     from aiosendspin.server.clock import Clock
     from aiosendspin.server.group import SendspinGroup
     from aiosendspin.server.roles import AudioRequirements, Role
+    from aiosendspin.server.transformers import AudioTransformer
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -128,8 +130,8 @@ class PushStream:
         self._backpressured_roles: set[Role] = set()
         # Inline resamplers for role-based audio delivery
         self._resamplers: dict[_ResamplerKey, _ResamplerState] = {}
-        # Role-based chunk cache: (channel_id, transformer_id) -> list of cached chunks
-        self._role_chunk_cache: dict[tuple[UUID, int], list[CachedChunk]] = {}
+        # Role-based chunk cache: TransformKey -> list of cached chunks
+        self._role_chunk_cache: dict[TransformKey, list[CachedChunk]] = {}
 
     @property
     def is_stopped(self) -> bool:
@@ -456,19 +458,38 @@ class PushStream:
 
         return resampled
 
+    def _resolve_frame_duration_us(self, req: AudioRequirements) -> int:
+        if req.frame_duration_us is not None:
+            return req.frame_duration_us
+        if req.transformer is not None:
+            return req.transformer.frame_duration_us
+        return 25_000
+
+    def _build_transform_key(self, req: AudioRequirements, channel_id: UUID) -> TransformKey:
+        transformer_type = type(req.transformer) if req.transformer is not None else type(None)
+        return TransformKey(
+            channel_id=channel_id,
+            transformer_type=transformer_type,
+            sample_rate=req.sample_rate,
+            bit_depth=req.bit_depth,
+            channels=req.channels,
+            frame_duration_us=self._resolve_frame_duration_us(req),
+            options=normalize_options(req.transform_options),
+        )
+
     def _transform_and_deliver(
         self,
         roles_by_pcm: dict[
             tuple[UUID, int, int, int], list[tuple[SendspinClient, Role, AudioRequirements]]
         ],
         resampled_pcm: dict[tuple[UUID, int, int, int], tuple[bytes, int]],
-    ) -> dict[tuple[UUID, int], list[CachedChunk]]:
+    ) -> dict[TransformKey, list[CachedChunk]]:
         """Transform PCM and deliver to roles. Returns cache results."""
-        # (channel_id, transformer_id) -> list of (data, timestamp_us, duration_us)
-        transformed: dict[tuple[UUID, int], list[tuple[bytes, int, int]]] = {}
+        # TransformKey -> list of (data, timestamp_us, duration_us)
+        transformed: dict[TransformKey, list[tuple[bytes, int, int]]] = {}
         # Track roles per transform key
         roles_by_transform: dict[
-            tuple[UUID, int], list[tuple[SendspinClient, Role, AudioRequirements]]
+            TransformKey, list[tuple[SendspinClient, Role, AudioRequirements]]
         ] = {}
 
         for pcm_key, roles_list in roles_by_pcm.items():
@@ -480,45 +501,46 @@ class PushStream:
             sample_count = len(pcm_data) // frame_stride if frame_stride > 0 else 0
             duration_us = int(sample_count * 1_000_000 / rate) if rate > 0 else 0
 
-            # Group by transformer
-            by_transformer: dict[int, list[tuple[SendspinClient, Role, AudioRequirements]]] = {}
+            grouped_by_key: dict[
+                TransformKey, list[tuple[SendspinClient, Role, AudioRequirements]]
+            ] = {}
             for client, role, req in roles_list:
-                tid = id(req.transformer) if req.transformer else 0
-                by_transformer.setdefault(tid, []).append((client, role, req))
+                tkey = self._build_transform_key(req, channel_id)
+                roles_by_transform.setdefault(tkey, []).append((client, role, req))
+                grouped_by_key.setdefault(tkey, []).append((client, role, req))
 
-            for tid, grouped in by_transformer.items():
-                tkey = (channel_id, tid)
-                roles_by_transform.setdefault(tkey, []).extend(grouped)
+            for tkey, grouped in grouped_by_key.items():
+                if tkey in transformed:
+                    continue
 
-                if tkey not in transformed:
-                    transformer = grouped[0][2].transformer
-                    if transformer is None:
-                        # No transformer - passthrough as single frame
-                        transformed[tkey] = [(pcm_data, output_ts, duration_us)]
-                    else:
-                        # Transformer returns list[bytes] - one tuple per frame
-                        frames = transformer.process(pcm_data, output_ts, duration_us)
+                transformer = grouped[0][2].transformer
+                if transformer is None:
+                    # No transformer - passthrough as single frame
+                    transformed[tkey] = [(pcm_data, output_ts, duration_us)]
+                else:
+                    # Transformer returns list[bytes] - one tuple per frame
+                    frames = transformer.process(pcm_data, output_ts, duration_us)
 
-                        # Get base timestamp AFTER processing. Transformers track output
-                        # timeline via pending_timestamp_us. Getting it after process()
-                        # ensures gap detection (which resets the timeline) is applied.
-                        # pending_timestamp_us points to the NEXT frame's timestamp,
-                        # so base_ts = pending - (num_frames * frame_dur).
-                        frame_list: list[tuple[bytes, int, int]] = []
-                        if frames:
-                            frame_dur = transformer.frame_duration_us
-                            base_ts = output_ts
-                            if hasattr(transformer, "pending_timestamp_us"):
-                                pending = transformer.pending_timestamp_us
-                                if pending is not None:
-                                    base_ts = pending - (len(frames) * frame_dur)
-                            for i, frame_data in enumerate(frames):
-                                frame_ts = base_ts + (i * frame_dur)
-                                frame_list.append((frame_data, frame_ts, frame_dur))
-                        transformed[tkey] = frame_list
+                    # Get base timestamp AFTER processing. Transformers track output
+                    # timeline via pending_timestamp_us. Getting it after process()
+                    # ensures gap detection (which resets the timeline) is applied.
+                    # pending_timestamp_us points to the NEXT frame's timestamp,
+                    # so base_ts = pending - (num_frames * frame_dur).
+                    frame_list: list[tuple[bytes, int, int]] = []
+                    if frames:
+                        frame_dur = transformer.frame_duration_us
+                        base_ts = output_ts
+                        if hasattr(transformer, "pending_timestamp_us"):
+                            pending = transformer.pending_timestamp_us
+                            if pending is not None:
+                                base_ts = pending - (len(frames) * frame_dur)
+                        for i, frame_data in enumerate(frames):
+                            frame_ts = base_ts + (i * frame_dur)
+                            frame_list.append((frame_data, frame_ts, frame_dur))
+                    transformed[tkey] = frame_list
 
         # Deliver and cache
-        cache_results: dict[tuple[UUID, int], list[CachedChunk]] = {}
+        cache_results: dict[TransformKey, list[CachedChunk]] = {}
 
         for tkey, frame_list in transformed.items():
             for data, ts, dur in frame_list:
@@ -547,7 +569,7 @@ class PushStream:
         self,
         prepared: dict[UUID, tuple[bytes, AudioFormat]],
         channel_play_start: dict[UUID, int],
-    ) -> dict[tuple[UUID, int], list[CachedChunk]]:
+    ) -> dict[TransformKey, list[CachedChunk]]:
         """
         Deliver audio to roles using the hook-based flow.
 
@@ -557,7 +579,7 @@ class PushStream:
         3. Transforms and delivers via role.on_audio_chunk()
 
         Returns:
-            Dict of (channel_id, transformer_id) -> list of CachedChunk for late joiners.
+            Dict of TransformKey -> list of CachedChunk for late joiners.
         """
         roles_by_pcm = self._group_roles_by_pcm_requirements(prepared)
         if not roles_by_pcm:
@@ -630,12 +652,10 @@ class PushStream:
         if req is None:
             return
 
-        transformer = req.transformer
         channel_id = req.channel_id or MAIN_CHANNEL
 
         # Get cached chunks for this transformer from the role-based cache
-        transformer_id = id(transformer) if transformer else 0
-        cache_key = (channel_id, transformer_id)
+        cache_key = self._build_transform_key(req, channel_id)
         cached = self._role_chunk_cache.get(cache_key, [])
 
         if not cached:
@@ -687,26 +707,30 @@ class PushStream:
         self._is_stopped = True
 
         # Flush remaining audio from transformers and reset them
-        flushed_transformers: set[int] = set()
+        roles_by_transform: dict[TransformKey, list[Role]] = {}
+        transformers_by_key: dict[TransformKey, AudioTransformer] = {}
         for _client, role in self._get_audio_roles():
             req = role.get_audio_requirements()
             if req and req.transformer:
-                tid = id(req.transformer)
-                if tid not in flushed_transformers:
-                    flushed_transformers.add(tid)
-                    final_frames = req.transformer.flush()
-                    if final_frames:
-                        frame_duration_us = req.transformer.frame_duration_us
-                        for frame_data in final_frames:
-                            chunk = AudioChunk(
-                                data=frame_data,
-                                timestamp_us=0,  # Timestamp doesn't matter at stream end
-                                duration_us=frame_duration_us,
-                                byte_count=len(frame_data),
-                            )
-                            role.on_audio_chunk(chunk)
-                    # Reset transformer for next stream
-                    req.transformer.reset()
+                channel_id = req.channel_id or MAIN_CHANNEL
+                tkey = self._build_transform_key(req, channel_id)
+                roles_by_transform.setdefault(tkey, []).append(role)
+                transformers_by_key.setdefault(tkey, req.transformer)
+
+        for tkey, transformer in transformers_by_key.items():
+            final_frames = transformer.flush()
+            if final_frames:
+                frame_duration_us = transformer.frame_duration_us
+                for frame_data in final_frames:
+                    chunk = AudioChunk(
+                        data=frame_data,
+                        timestamp_us=0,  # Timestamp doesn't matter at stream end
+                        duration_us=frame_duration_us,
+                        byte_count=len(frame_data),
+                    )
+                    for role in roles_by_transform.get(tkey, []):
+                        role.on_audio_chunk(chunk)
+            transformer.reset()
 
         # Send stream/end to all roles with audio requirements via hooks
         for _client, role in self._get_audio_roles():
@@ -736,14 +760,16 @@ class PushStream:
         self._resamplers.clear()
 
         # Reset transformers so they don't carry stale timestamp state
-        reset_transformers: set[int] = set()
+        reset_transformers: dict[TransformKey, AudioTransformer] = {}
         for _client, role in self._get_audio_roles():
             req = role.get_audio_requirements()
             if req and req.transformer:
-                tid = id(req.transformer)
-                if tid not in reset_transformers:
-                    reset_transformers.add(tid)
-                    req.transformer.reset()
+                channel_id = req.channel_id or MAIN_CHANNEL
+                tkey = self._build_transform_key(req, channel_id)
+                reset_transformers.setdefault(tkey, req.transformer)
+
+        for transformer in reset_transformers.values():
+            transformer.reset()
 
         # Clear role tracking state
         self._started_roles.clear()

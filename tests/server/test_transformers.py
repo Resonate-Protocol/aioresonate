@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from aiosendspin.server.channels import MAIN_CHANNEL
 from aiosendspin.server.transformers import (
     AudioTransformer,
     FlacEncoder,
@@ -224,22 +225,55 @@ class TestTransformerPool:
         """Pool creates new transformer when none exists for key."""
         pool = TransformerPool()
         transformer = pool.get_or_create(
-            PcmPassthrough, sample_rate=48000, bit_depth=16, channels=2
+            PcmPassthrough,
+            channel_id=MAIN_CHANNEL,
+            sample_rate=48000,
+            bit_depth=16,
+            channels=2,
+            frame_duration_us=25_000,
         )
         assert isinstance(transformer, PcmPassthrough)
 
     def test_get_or_create_returns_same_instance(self) -> None:
         """Pool returns same instance for identical key."""
         pool = TransformerPool()
-        t1 = pool.get_or_create(PcmPassthrough, sample_rate=48000, bit_depth=16, channels=2)
-        t2 = pool.get_or_create(PcmPassthrough, sample_rate=48000, bit_depth=16, channels=2)
+        t1 = pool.get_or_create(
+            PcmPassthrough,
+            channel_id=MAIN_CHANNEL,
+            sample_rate=48000,
+            bit_depth=16,
+            channels=2,
+            frame_duration_us=25_000,
+        )
+        t2 = pool.get_or_create(
+            PcmPassthrough,
+            channel_id=MAIN_CHANNEL,
+            sample_rate=48000,
+            bit_depth=16,
+            channels=2,
+            frame_duration_us=25_000,
+        )
         assert t1 is t2
 
     def test_get_or_create_different_config_different_instance(self) -> None:
         """Pool creates different instances for different keys."""
         pool = TransformerPool()
-        t1 = pool.get_or_create(PcmPassthrough, sample_rate=48000, bit_depth=16, channels=2)
-        t2 = pool.get_or_create(PcmPassthrough, sample_rate=44100, bit_depth=16, channels=2)
+        t1 = pool.get_or_create(
+            PcmPassthrough,
+            channel_id=MAIN_CHANNEL,
+            sample_rate=48000,
+            bit_depth=16,
+            channels=2,
+            frame_duration_us=25_000,
+        )
+        t2 = pool.get_or_create(
+            PcmPassthrough,
+            channel_id=MAIN_CHANNEL,
+            sample_rate=44100,
+            bit_depth=16,
+            channels=2,
+            frame_duration_us=25_000,
+        )
         assert t1 is not t2
 
     def test_reset_all_calls_reset_on_all_transformers(self) -> None:
@@ -270,15 +304,19 @@ class TestTransformerPool:
         pool = TransformerPool()
         pool.get_or_create(
             CountingTransformer,
+            channel_id=MAIN_CHANNEL,
             sample_rate=48000,
             bit_depth=16,
             channels=2,  # type: ignore[type-var]
+            frame_duration_us=25_000,
         )
         pool.get_or_create(
             CountingTransformer,
+            channel_id=MAIN_CHANNEL,
             sample_rate=44100,
             bit_depth=16,
             channels=2,  # type: ignore[type-var]
+            frame_duration_us=25_000,
         )
         pool.reset_all()
         assert reset_counts == [1, 1]

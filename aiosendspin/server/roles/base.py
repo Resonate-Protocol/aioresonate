@@ -10,6 +10,7 @@ This module contains:
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 from uuid import UUID
@@ -151,6 +152,12 @@ class AudioRequirements:
 
     channel_id: UUID | None = None
     """Channel to receive audio from. None means main channel."""
+
+    frame_duration_us: int | None = None
+    """Requested output frame duration in microseconds (optional)."""
+
+    transform_options: Mapping[str, str] | None = None
+    """Optional transformer-specific options (e.g., codec settings)."""
 
 
 class Role(ABC):

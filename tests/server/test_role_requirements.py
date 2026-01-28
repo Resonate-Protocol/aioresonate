@@ -46,6 +46,8 @@ class TestAudioRequirements:
         assert req.channels == 2
         assert req.transformer is None
         assert req.channel_id is None
+        assert req.frame_duration_us is None
+        assert req.transform_options is None
 
     def test_audio_requirements_with_transformer(self) -> None:
         """AudioRequirements can include a transformer."""
