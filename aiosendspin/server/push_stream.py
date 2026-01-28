@@ -648,6 +648,12 @@ class PushStream:
             roles_by_transform[tkey].append((client, role, req))
         return roles_by_transform
 
+    def _ensure_role_started(self, role: Role) -> None:
+        if role in self._started_roles:
+            return
+        role.on_stream_start()
+        self._started_roles.add(role)
+
     def _pump_role_cache(
         self, role: Role, tkey: TransformKey, cached: list[CachedChunk], now_us: int
     ) -> int | None:
@@ -670,9 +676,7 @@ class PushStream:
                     next_ready_us = now_us + wait_us
                     break
 
-            if role not in self._started_roles:
-                role.on_stream_start()
-                self._started_roles.add(role)
+            self._ensure_role_started(role)
 
             chunk = AudioChunk(
                 data=cached_chunk.payload,
@@ -778,6 +782,8 @@ class PushStream:
         cached = self._role_chunk_cache.get(cache_key, [])
 
         if not cached:
+            if self._channel_timing:
+                self._ensure_role_started(role)
             return
 
         now_us = self._clock.now_us()
@@ -790,6 +796,8 @@ class PushStream:
             start_index += 1
 
         if start_index >= len(cached):
+            if self._channel_timing:
+                self._ensure_role_started(role)
             return
 
         role_cursors = self._role_chunk_cursors.setdefault(role, {})
@@ -806,6 +814,8 @@ class PushStream:
                 last_ts,
             )
 
+        if self._channel_timing:
+            self._ensure_role_started(role)
         ready_at = self._pump_role_cache(role, cache_key, cached, now_us)
         if ready_at is not None:
             delay_s = max((ready_at - now_us) / 1_000_000, 0.0)
