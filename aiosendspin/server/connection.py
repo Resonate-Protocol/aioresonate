@@ -69,26 +69,22 @@ class _PriorityItem:
     Priority 0 = high (time sync), 1 = normal.
     Binary frames are sorted by playback timestamp for proper A/V sync.
     Sequence provides FIFO tie-breaking for JSON messages.
+
+    The sort_key is pre-computed to avoid isinstance() checks during comparison:
+    - For binary frames with timestamp: (priority, timestamp_us, sequence)
+    - For JSON messages or no timestamp: (priority, MAX_INT, sequence) for FIFO
     """
 
-    priority: int
-    sequence: int
+    sort_key: tuple[int, int, int]
     item: ServerMessage | _BinaryFrame
 
     def __lt__(self, other: _PriorityItem) -> bool:
-        if self.priority != other.priority:
-            return self.priority < other.priority
-        # Binary frames: sort by playback timestamp for A/V sync
-        # timestamp_us=0 means "no playback semantics" - use FIFO instead
-        if isinstance(self.item, _BinaryFrame) and isinstance(other.item, _BinaryFrame):
-            self_ts = self.item.timestamp_us
-            other_ts = other.item.timestamp_us
-            if self_ts > 0 and other_ts > 0 and self_ts != other_ts:
-                return self_ts < other_ts
-            # No timestamp or same timestamp: fall back to sequence (FIFO)
-            return self.sequence < other.sequence
-        # JSON messages or mixed: use sequence (FIFO)
-        return self.sequence < other.sequence
+        return self.sort_key < other.sort_key
+
+
+# Max timestamp value used to ensure FIFO ordering for JSON messages
+# (they sort after all timestamped binary frames at the same priority)
+_FIFO_TIMESTAMP = 2**62
 
 
 class SendspinConnection:
@@ -208,8 +204,10 @@ class SendspinConnection:
         )
         seq = self._queue_sequence
         self._queue_sequence += 1
+        # Use timestamp for ordering if present, otherwise FIFO
+        sort_ts = timestamp_us if timestamp_us > 0 else _FIFO_TIMESTAMP
         try:
-            self._to_write.put_nowait(_PriorityItem(priority=1, sequence=seq, item=frame))
+            self._to_write.put_nowait(_PriorityItem(sort_key=(1, sort_ts, seq), item=frame))
         except asyncio.QueueFull:
             return False
         return True
@@ -226,7 +224,9 @@ class SendspinConnection:
         seq = self._queue_sequence
         self._queue_sequence += 1
         try:
-            self._to_write.put_nowait(_PriorityItem(priority=1, sequence=seq, item=message))
+            self._to_write.put_nowait(
+                _PriorityItem(sort_key=(1, _FIFO_TIMESTAMP, seq), item=message)
+            )
         except asyncio.QueueFull:
             if not self._disconnecting:
                 self._logger.error("Message queue full, client too slow - disconnecting")
@@ -241,7 +241,7 @@ class SendspinConnection:
         """Enqueue a high-priority message (processed before regular queue)."""
         seq = self._queue_sequence
         self._queue_sequence += 1
-        self._to_write.put_nowait(_PriorityItem(priority=0, sequence=seq, item=message))
+        self._to_write.put_nowait(_PriorityItem(sort_key=(0, _FIFO_TIMESTAMP, seq), item=message))
 
     async def disconnect(self, *, retry_connection: bool = True) -> None:
         """Disconnect this connection and detach from its persistent client."""
