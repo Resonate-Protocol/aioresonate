@@ -67,7 +67,8 @@ class _PriorityItem:
     """Wrapper for priority queue ordering.
 
     Priority 0 = high (time sync), 1 = normal.
-    Sequence provides FIFO tie-breaking within the same priority.
+    Binary frames are sorted by playback timestamp for proper A/V sync.
+    Sequence provides FIFO tie-breaking for JSON messages.
     """
 
     priority: int
@@ -75,7 +76,19 @@ class _PriorityItem:
     item: ServerMessage | _BinaryFrame
 
     def __lt__(self, other: _PriorityItem) -> bool:
-        return (self.priority, self.sequence) < (other.priority, other.sequence)
+        if self.priority != other.priority:
+            return self.priority < other.priority
+        # Binary frames: sort by playback timestamp for A/V sync
+        # timestamp_us=0 means "no playback semantics" - use FIFO instead
+        if isinstance(self.item, _BinaryFrame) and isinstance(other.item, _BinaryFrame):
+            self_ts = self.item.timestamp_us
+            other_ts = other.item.timestamp_us
+            if self_ts > 0 and other_ts > 0 and self_ts != other_ts:
+                return self_ts < other_ts
+            # No timestamp or same timestamp: fall back to sequence (FIFO)
+            return self.sequence < other.sequence
+        # JSON messages or mixed: use sequence (FIFO)
+        return self.sequence < other.sequence
 
 
 class SendspinConnection:
@@ -429,7 +442,8 @@ class SendspinConnection:
         self, handling: BinaryHandling | None, role: Role | None, timestamp_us: int
     ) -> bool:
         """Check if binary message is late and should be dropped. Returns True to drop."""
-        if handling is None or role is None or not handling.drop_late:
+        # timestamp_us=0 means "no playback semantics" - skip late detection
+        if handling is None or role is None or not handling.drop_late or timestamp_us == 0:
             return False
 
         now = self._server.clock.now_us()
