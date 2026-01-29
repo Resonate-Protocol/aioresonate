@@ -111,7 +111,7 @@ class SendspinConnection:
         if request is not None:
             if wsock_client is not None:
                 raise ValueError("Only one of request or wsock_client may be provided")
-            self._wsock_server = web.WebSocketResponse(heartbeat=55)
+            self._wsock_server = web.WebSocketResponse(heartbeat=55, compress=False)
             self._logger = logger.getChild(f"unknown-{request.remote}")
         elif wsock_client is not None:
             self._logger = logger.getChild("unknown-client")
