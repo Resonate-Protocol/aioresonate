@@ -246,7 +246,6 @@ class PushStream:
         self._channel_timing: dict[UUID, int] = {}
         # Role-based streaming tracking (for hook-based flow)
         self._started_roles: set[Role] = set()
-        self._backpressured_roles: set[Role] = set()
         # Inline resamplers for role-based audio delivery
         self._resamplers: dict[_ResamplerKey, _ResamplerState] = {}
         # Role-based chunk cache: TransformKey -> list of cached chunks
@@ -353,9 +352,8 @@ class PushStream:
 
         This is an asynchronous method that:
         1. Encodes prepared PCM for each required format
-        2. Applies backpressure (timeline shift if needed)
-        3. Assigns timestamps to encoded chunks
-        4. Sends chunks to connected players via role hooks
+        2. Assigns timestamps to encoded chunks
+        3. Sends chunks to connected players via role hooks
 
         Returns:
             The earliest play_start_us timestamp across all channels.
@@ -755,14 +753,10 @@ class PushStream:
 
     def _pump_role_cache(
         self, role: Role, tkey: TransformKey, cached: list[CachedChunk], now_us: int
-    ) -> int | None:
+    ) -> None:
         role_cursors = self._role_chunk_cursors.setdefault(role, {})
         cursor = role_cursors.get(tkey, 0)
-        next_ready_us: int | None = None
         skipped_late = 0
-
-        get_tracker = getattr(role, "get_buffer_tracker", None)
-        buffer_tracker = get_tracker() if callable(get_tracker) else None
 
         while cursor < len(cached):
             cached_chunk = cached[cursor]
@@ -770,12 +764,6 @@ class PushStream:
                 skipped_late += 1
                 cursor += 1
                 continue
-
-            if buffer_tracker is not None:
-                wait_us = buffer_tracker.time_until_duration_capacity(cached_chunk.duration_us)
-                if wait_us > 0:
-                    next_ready_us = now_us + wait_us
-                    break
 
             self._ensure_role_started(role)
 
@@ -785,11 +773,7 @@ class PushStream:
                 duration_us=cached_chunk.duration_us,
                 byte_count=cached_chunk.byte_count,
             )
-            if not role.on_audio_chunk(chunk):
-                self._backpressured_roles.add(role)
-                next_ready_us = now_us + 50_000
-                break
-
+            role.on_audio_chunk(chunk)
             cursor += 1
 
         if skipped_late > 0:
@@ -801,7 +785,6 @@ class PushStream:
             )
 
         role_cursors[tkey] = cursor
-        return next_ready_us
 
     def _pump_cached_chunks(self) -> None:
         if self._is_stopped:
@@ -809,7 +792,6 @@ class PushStream:
         self._cache_pump_handle = None
 
         now_us = self._clock.now_us()
-        next_ready_us: int | None = None
         roles_by_transform = self._get_roles_by_transform()
 
         for tkey, roles in roles_by_transform.items():
@@ -817,44 +799,13 @@ class PushStream:
             if not cached:
                 continue
             for _client, role, _req in roles:
-                ready_at = self._pump_role_cache(role, tkey, cached, now_us)
-                if ready_at is None:
-                    continue
-                if next_ready_us is None or ready_at < next_ready_us:
-                    next_ready_us = ready_at
-
-        if next_ready_us is not None:
-            delay_s = max((next_ready_us - now_us) / 1_000_000, 0.0)
-            self._cache_pump_handle = self._loop.call_later(delay_s, self._pump_cached_chunks)
+                self._pump_role_cache(role, tkey, cached, now_us)
 
     def _trigger_cache_pump(self) -> None:
         if self._cache_pump_handle is not None:
             self._cache_pump_handle.cancel()
             self._cache_pump_handle = None
         self._pump_cached_chunks()
-
-    async def wait_for_buffer_space(self) -> None:
-        """
-        Wait until there is buffer space available on clients.
-
-        This is useful for throttling audio production to match
-        player consumption rates. Uses an estimated chunk size
-        to determine buffer capacity needs.
-        """
-        # Estimate chunk size: 25ms of 48kHz stereo 16-bit PCM = 4800 bytes
-        # This is a reasonable default for typical audio streaming
-        estimated_chunk_bytes = 4800
-
-        max_wait_us = 0
-        for _client, role in self._get_audio_roles():
-            buffer_tracker = role.get_buffer_tracker()
-            if buffer_tracker is not None:
-                wait_us = buffer_tracker.time_until_capacity(estimated_chunk_bytes)
-                max_wait_us = max(max_wait_us, wait_us)
-
-        if max_wait_us > 0:
-            # Convert microseconds to seconds for asyncio.sleep
-            await asyncio.sleep(max_wait_us / 1_000_000)
 
     def has_cached_chunks(self) -> bool:
         """Return True if there are cached chunks for late joiners."""
@@ -925,12 +876,7 @@ class PushStream:
 
         if self._channel_timing:
             self._ensure_role_started(role)
-        ready_at = self._pump_role_cache(role, cache_key, cached, now_us)
-        if ready_at is not None:
-            delay_s = max((ready_at - now_us) / 1_000_000, 0.0)
-            if self._cache_pump_handle is not None:
-                self._cache_pump_handle.cancel()
-            self._cache_pump_handle = self._loop.call_later(delay_s, self._pump_cached_chunks)
+        self._pump_role_cache(role, cache_key, cached, now_us)
 
     def stop(self) -> None:
         """
@@ -977,7 +923,6 @@ class PushStream:
 
         # Clear role tracking state
         self._started_roles.clear()
-        self._backpressured_roles.clear()
         self._role_chunk_cursors.clear()
 
     def clear(self) -> None:
@@ -1017,7 +962,6 @@ class PushStream:
 
         # Clear role tracking state
         self._started_roles.clear()
-        self._backpressured_roles.clear()
 
         # Send stream/clear to all roles with audio requirements via hooks
         for _client, role in self._get_audio_roles():
