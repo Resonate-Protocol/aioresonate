@@ -115,6 +115,34 @@ class _ResamplerState:
     """Timestamp of the earliest audio sample not yet emitted by this resampler."""
 
 
+def _create_resampler_state(
+    key: _ResamplerKey,
+    source_format: AudioFormat,
+    target_format: AudioFormat,
+) -> _ResamplerState:
+    """Create a new resampler state. Thread-safe (no shared state)."""
+    av = _get_av()
+
+    _source_bytes_per_sample, source_av_format, source_layout = _resolve_audio_format(source_format)
+    target_bytes_per_sample, target_av_format, target_layout = _resolve_audio_format(target_format)
+
+    resampler = av.AudioResampler(
+        format=target_av_format,
+        layout=target_layout,
+        rate=target_format.sample_rate,
+    )
+
+    return _ResamplerState(
+        key=key,
+        resampler=resampler,
+        source_av_format=source_av_format,
+        source_av_layout=source_layout,
+        target_av_format=target_av_format,
+        target_layout=target_layout,
+        target_frame_stride=target_bytes_per_sample * target_format.channels,
+    )
+
+
 def _resample_pcm_standalone(
     resampler_state: _ResamplerState,
     source_pcm: bytes,
@@ -190,6 +218,9 @@ def _resample_pcm_standalone(
 # stream may have no chunks whose *start* timestamp is >= now + DEFAULT_INITIAL_DELAY_US.
 LATE_JOINER_MIN_LEAD_US = 100_000  # 100ms
 
+# Max chunks to pump per role before yielding to the event loop
+_PUMP_BATCH_SIZE = 20
+
 
 @dataclass(frozen=True)
 class CachedChunk:
@@ -256,7 +287,7 @@ class PushStream:
         self._role_chunk_cursors: weakref.WeakKeyDictionary[Role, dict[TransformKey, int]] = (
             weakref.WeakKeyDictionary()
         )
-        self._cache_pump_handle: asyncio.TimerHandle | None = None
+        self._cache_pump_handle: asyncio.Handle | None = None
 
     @property
     def is_stopped(self) -> bool:
@@ -276,46 +307,13 @@ class PushStream:
             )
         return result
 
-    def _get_or_create_resampler(
-        self,
-        key: _ResamplerKey,
-        source_format: AudioFormat,
-        target_format: AudioFormat,
-    ) -> _ResamplerState:
-        """Get existing resampler or create a new one."""
-        if key in self._resamplers:
-            return self._resamplers[key]
+    def _get_cached_resampler(self, key: _ResamplerKey) -> _ResamplerState | None:
+        """Get existing resampler from cache, or None if not cached."""
+        return self._resamplers.get(key)
 
-        av = _get_av()
-
-        # Get source format params
-        _source_bytes_per_sample, source_av_format, source_layout = _resolve_audio_format(
-            source_format
-        )
-
-        # Get target format params
-        target_bytes_per_sample, target_av_format, target_layout = _resolve_audio_format(
-            target_format
-        )
-
-        # Create resampler
-        resampler = av.AudioResampler(
-            format=target_av_format,
-            layout=target_layout,
-            rate=target_format.sample_rate,
-        )
-
-        state = _ResamplerState(
-            key=key,
-            resampler=resampler,
-            source_av_format=source_av_format,
-            source_av_layout=source_layout,
-            target_av_format=target_av_format,
-            target_layout=target_layout,
-            target_frame_stride=target_bytes_per_sample * target_format.channels,
-        )
-        self._resamplers[key] = state
-        return state
+    def _cache_resampler(self, state: _ResamplerState) -> None:
+        """Store a resampler state in the cache."""
+        self._resamplers[state.key] = state
 
     def has_pending_audio(self) -> bool:
         """Return True if there is pending audio to commit."""
@@ -487,12 +485,19 @@ class PushStream:
     ) -> dict[tuple[UUID, int, int, int], tuple[bytes, int]]:
         """Resample PCM once per unique PCM key. Returns (channel, rate, depth, ch) -> (pcm, ts).
 
-        Resampling runs in the thread pool to avoid blocking the event loop.
+        Both resampler creation and resampling run in the thread pool to avoid
+        blocking the event loop.
         """
-        # Build resampler states on main thread (accesses self._resamplers)
-        resample_tasks: dict[
+        if not roles_by_pcm:
+            return {}
+
+        executor = _get_encode_executor()
+        running_loop = asyncio.get_running_loop()
+
+        # Collect info for each pcm_key
+        pcm_key_info: dict[
             tuple[UUID, int, int, int],
-            tuple[_ResamplerState, bytes, AudioFormat, int],
+            tuple[_ResamplerKey, AudioFormat, AudioFormat, bytes, int],
         ] = {}
 
         for pcm_key in roles_by_pcm:
@@ -514,23 +519,53 @@ class PushStream:
                 target_bit_depth=target_bit_depth,
             )
 
-            resampler_state = self._get_or_create_resampler(
-                resampler_key, source_format, target_format
-            )
-            resample_tasks[pcm_key] = (
-                resampler_state,
-                source_pcm,
+            pcm_key_info[pcm_key] = (
+                resampler_key,
                 source_format,
+                target_format,
+                source_pcm,
                 input_timestamp_us,
             )
 
-        if not resample_tasks:
-            return {}
+        # Separate cached vs new resamplers
+        cached_states: dict[tuple[UUID, int, int, int], _ResamplerState] = {}
+        keys_needing_creation: list[
+            tuple[tuple[UUID, int, int, int], _ResamplerKey, AudioFormat, AudioFormat]
+        ] = []
 
-        # Run resampling in thread pool
-        executor = _get_encode_executor()
-        running_loop = asyncio.get_running_loop()
+        for pcm_key, (rkey, src_fmt, tgt_fmt, _pcm, _ts) in pcm_key_info.items():
+            cached = self._get_cached_resampler(rkey)
+            if cached is not None:
+                cached_states[pcm_key] = cached
+            else:
+                keys_needing_creation.append((pcm_key, rkey, src_fmt, tgt_fmt))
 
+        # Create new resamplers in thread pool
+        if keys_needing_creation:
+
+            async def create_resampler(
+                pcm_key: tuple[UUID, int, int, int],
+                rkey: _ResamplerKey,
+                src_fmt: AudioFormat,
+                tgt_fmt: AudioFormat,
+            ) -> tuple[tuple[UUID, int, int, int], _ResamplerState]:
+                state = await running_loop.run_in_executor(
+                    executor, _create_resampler_state, rkey, src_fmt, tgt_fmt
+                )
+                return (pcm_key, state)
+
+            creation_tasks = [
+                create_resampler(pcm_key, rkey, src_fmt, tgt_fmt)
+                for pcm_key, rkey, src_fmt, tgt_fmt in keys_needing_creation
+            ]
+            creation_results = await asyncio.gather(*creation_tasks)
+
+            # Cache newly created resamplers
+            for pcm_key, state in creation_results:
+                self._cache_resampler(state)
+                cached_states[pcm_key] = state
+
+        # Now run resampling in thread pool
         async def run_resample(
             pcm_key: tuple[UUID, int, int, int],
             resampler_state: _ResamplerState,
@@ -548,11 +583,17 @@ class PushStream:
             )
             return (pcm_key, result)
 
-        tasks = [
-            run_resample(pcm_key, state, pcm, fmt, ts)
-            for pcm_key, (state, pcm, fmt, ts) in resample_tasks.items()
+        resample_tasks = [
+            run_resample(
+                pcm_key,
+                cached_states[pcm_key],
+                pcm_key_info[pcm_key][3],  # source_pcm
+                pcm_key_info[pcm_key][1],  # source_format
+                pcm_key_info[pcm_key][4],  # input_timestamp_us
+            )
+            for pcm_key in pcm_key_info
         ]
-        results = await asyncio.gather(*tasks)
+        results = await asyncio.gather(*resample_tasks)
         return dict(results)
 
     def _resolve_frame_duration_us(self, req: AudioRequirements) -> int:
@@ -753,10 +794,15 @@ class PushStream:
 
     def _pump_role_cache(
         self, role: Role, tkey: TransformKey, cached: list[CachedChunk], now_us: int
-    ) -> None:
+    ) -> bool:
+        """Pump cached chunks to a role, up to _PUMP_BATCH_SIZE at a time.
+
+        Returns True if more chunks remain to be pumped, False if done.
+        """
         role_cursors = self._role_chunk_cursors.setdefault(role, {})
         cursor = role_cursors.get(tkey, 0)
         skipped_late = 0
+        chunks_sent = 0
 
         while cursor < len(cached):
             cached_chunk = cached[cursor]
@@ -775,6 +821,19 @@ class PushStream:
             )
             role.on_audio_chunk(chunk)
             cursor += 1
+            chunks_sent += 1
+
+            # Yield to event loop after batch to prevent stalling
+            if chunks_sent >= _PUMP_BATCH_SIZE:
+                role_cursors[tkey] = cursor
+                if skipped_late > 0:
+                    _LOGGER.debug(
+                        "Pump skipped %s late chunk(s) for role %s (ts < now_us=%s)",
+                        skipped_late,
+                        role.role_family,
+                        now_us,
+                    )
+                return cursor < len(cached)  # More work remains
 
         if skipped_late > 0:
             _LOGGER.debug(
@@ -785,21 +844,29 @@ class PushStream:
             )
 
         role_cursors[tkey] = cursor
+        return False  # No more work
 
     def _pump_cached_chunks(self) -> None:
+        """Pump cached chunks to all roles, yielding to event loop between batches."""
         if self._is_stopped:
             return
         self._cache_pump_handle = None
 
         now_us = self._clock.now_us()
         roles_by_transform = self._get_roles_by_transform()
+        has_more_work = False
 
         for tkey, roles in roles_by_transform.items():
             cached = self._role_chunk_cache.get(tkey)
             if not cached:
                 continue
             for _client, role, _req in roles:
-                self._pump_role_cache(role, tkey, cached, now_us)
+                if self._pump_role_cache(role, tkey, cached, now_us):
+                    has_more_work = True
+
+        # Schedule continuation if more work remains
+        if has_more_work and not self._is_stopped:
+            self._cache_pump_handle = self._loop.call_soon(self._pump_cached_chunks)
 
     def _trigger_cache_pump(self) -> None:
         if self._cache_pump_handle is not None:
@@ -876,7 +943,9 @@ class PushStream:
 
         if self._channel_timing:
             self._ensure_role_started(role)
-        self._pump_role_cache(role, cache_key, cached, now_us)
+        has_more = self._pump_role_cache(role, cache_key, cached, now_us)
+        if has_more and self._cache_pump_handle is None:
+            self._cache_pump_handle = self._loop.call_soon(self._pump_cached_chunks)
 
     def stop(self) -> None:
         """
