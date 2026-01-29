@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
+import threading
 import weakref
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, NamedTuple
 from uuid import UUID
@@ -29,6 +32,50 @@ _LOGGER = logging.getLogger(__name__)
 
 # Default initial delay before first audio plays (microseconds)
 DEFAULT_INITIAL_DELAY_US = 250_000  # 250ms
+
+
+# Thread pool for parallel encoding
+class _ExecutorHolder:
+    """Holds the shared encoding thread pool (avoids global statement)."""
+
+    executor: ThreadPoolExecutor | None = None
+    lock = threading.Lock()
+
+
+def _get_encode_executor() -> ThreadPoolExecutor:
+    """Get or create the shared encoding thread pool."""
+    if _ExecutorHolder.executor is None:
+        with _ExecutorHolder.lock:
+            if _ExecutorHolder.executor is None:
+                _ExecutorHolder.executor = ThreadPoolExecutor(
+                    max_workers=min(4, (os.cpu_count() or 1)),
+                    thread_name_prefix="sendspin-encode-",
+                )
+    return _ExecutorHolder.executor
+
+
+def _encode_for_transform_key(
+    transformer: AudioTransformer | None,
+    pcm_data: bytes,
+    output_ts: int,
+    duration_us: int,
+) -> list[tuple[bytes, int, int]]:
+    """Encode PCM for a single TransformKey. Thread-safe (no shared state)."""
+    if transformer is None:
+        return [(pcm_data, output_ts, duration_us)]
+
+    frames = transformer.process(pcm_data, output_ts, duration_us)
+    if not frames:
+        return []
+
+    frame_dur = transformer.frame_duration_us
+    base_ts = output_ts
+    if hasattr(transformer, "pending_timestamp_us"):
+        pending = transformer.pending_timestamp_us
+        if pending is not None:
+            base_ts = pending - (len(frames) * frame_dur)
+
+    return [(data, base_ts + i * frame_dur, frame_dur) for i, data in enumerate(frames)]
 
 
 class _ResamplerKey(NamedTuple):
@@ -66,6 +113,76 @@ class _ResamplerState:
     """Bytes per frame in target format."""
     pending_timestamp_us: int | None = None
     """Timestamp of the earliest audio sample not yet emitted by this resampler."""
+
+
+def _resample_pcm_standalone(
+    resampler_state: _ResamplerState,
+    source_pcm: bytes,
+    source_format: AudioFormat,
+    input_timestamp_us: int,
+) -> tuple[bytes, int]:
+    """Resample PCM data to the target format.
+
+    Thread-safe per resampler_state instance (each call should use its own state).
+
+    Args:
+        resampler_state: The resampler state to use.
+        source_pcm: Source PCM bytes.
+        source_format: Source audio format.
+        input_timestamp_us: Timestamp for the input audio.
+
+    Returns:
+        Tuple of (resampled_pcm_bytes, output_start_timestamp_us).
+    """
+    av = _get_av()
+
+    # Handle timestamp tracking
+    if resampler_state.pending_timestamp_us is None:
+        resampler_state.pending_timestamp_us = input_timestamp_us
+    else:
+        # Resync if timestamp drifts too far (e.g., resampler was idle)
+        drift_us = abs(resampler_state.pending_timestamp_us - input_timestamp_us)
+        if drift_us > 20_000:
+            resampler_state.pending_timestamp_us = input_timestamp_us
+            resampler_state.resampler = av.AudioResampler(
+                format=resampler_state.target_av_format,
+                layout=resampler_state.target_layout,
+                rate=resampler_state.key.target_sample_rate,
+            )
+
+    # Calculate sample count from input
+    bytes_per_sample = source_format.bit_depth // 8
+    frame_stride = bytes_per_sample * source_format.channels
+    sample_count = len(source_pcm) // frame_stride
+
+    if sample_count == 0:
+        return b"", resampler_state.pending_timestamp_us
+
+    # Create input frame
+    frame = av.AudioFrame(
+        format=resampler_state.source_av_format,
+        layout=resampler_state.source_av_layout,
+        samples=sample_count,
+    )
+    frame.sample_rate = source_format.sample_rate
+    frame.planes[0].update(source_pcm)
+
+    # Resample
+    out_frames = resampler_state.resampler.resample(frame)
+    out_pcm = bytearray()
+    for out_frame in out_frames:
+        expected = resampler_state.target_frame_stride * out_frame.samples
+        pcm_bytes = bytes(out_frame.planes[0])[:expected]
+        out_pcm.extend(pcm_bytes)
+
+    output_start_ts = resampler_state.pending_timestamp_us
+
+    # Update pending timestamp based on output samples
+    output_sample_count = len(out_pcm) // resampler_state.target_frame_stride
+    duration_us = int(output_sample_count * 1_000_000 / resampler_state.key.target_sample_rate)
+    resampler_state.pending_timestamp_us += duration_us
+
+    return bytes(out_pcm), output_start_ts
 
 
 # Minimum lead time (from now) for sending catch-up audio to late joiners.
@@ -201,74 +318,6 @@ class PushStream:
         self._resamplers[key] = state
         return state
 
-    def _resample_pcm(
-        self,
-        resampler_state: _ResamplerState,
-        pcm_data: bytes,
-        source_format: AudioFormat,
-        input_timestamp_us: int,
-    ) -> tuple[bytes, int]:
-        """Resample PCM data to the target format.
-
-        Args:
-            resampler_state: The resampler state to use.
-            pcm_data: Source PCM bytes.
-            source_format: Source audio format.
-            input_timestamp_us: Timestamp for the input audio.
-
-        Returns:
-            Tuple of (resampled_pcm_bytes, output_start_timestamp_us).
-        """
-        av = _get_av()
-
-        # Handle timestamp tracking
-        if resampler_state.pending_timestamp_us is None:
-            resampler_state.pending_timestamp_us = input_timestamp_us
-        else:
-            # Resync if timestamp drifts too far (e.g., resampler was idle)
-            drift_us = abs(resampler_state.pending_timestamp_us - input_timestamp_us)
-            if drift_us > 20_000:
-                resampler_state.pending_timestamp_us = input_timestamp_us
-                resampler_state.resampler = av.AudioResampler(
-                    format=resampler_state.target_av_format,
-                    layout=resampler_state.target_layout,
-                    rate=resampler_state.key.target_sample_rate,
-                )
-
-        # Calculate sample count from input
-        bytes_per_sample = source_format.bit_depth // 8
-        frame_stride = bytes_per_sample * source_format.channels
-        sample_count = len(pcm_data) // frame_stride
-
-        if sample_count == 0:
-            return b"", resampler_state.pending_timestamp_us
-
-        # Create input frame
-        frame = av.AudioFrame(
-            format=resampler_state.source_av_format,
-            layout=resampler_state.source_av_layout,
-            samples=sample_count,
-        )
-        frame.sample_rate = source_format.sample_rate
-        frame.planes[0].update(pcm_data)
-
-        # Resample
-        out_frames = resampler_state.resampler.resample(frame)
-        out_pcm = bytearray()
-        for out_frame in out_frames:
-            expected = resampler_state.target_frame_stride * out_frame.samples
-            pcm_bytes = bytes(out_frame.planes[0])[:expected]
-            out_pcm.extend(pcm_bytes)
-
-        output_start_ts = resampler_state.pending_timestamp_us
-
-        # Update pending timestamp based on output samples
-        output_sample_count = len(out_pcm) // resampler_state.target_frame_stride
-        duration_us = int(output_sample_count * 1_000_000 / resampler_state.key.target_sample_rate)
-        resampler_state.pending_timestamp_us += duration_us
-
-        return bytes(out_pcm), output_start_ts
-
     def has_pending_audio(self) -> bool:
         """Return True if there is pending audio to commit."""
         return len(self._channel_buffers) > 0
@@ -360,7 +409,7 @@ class PushStream:
             self._channel_timing[channel_id] += duration_us
 
         # Role-based audio delivery via hooks
-        role_cache_results = self._deliver_audio_to_roles(prepared, channel_play_start)
+        role_cache_results = await self._deliver_audio_to_roles(prepared, channel_play_start)
         # Merge role-based cache results into the cache
         for cache_key, chunks in role_cache_results.items():
             self._role_chunk_cache[cache_key].extend(chunks)
@@ -430,7 +479,7 @@ class PushStream:
 
         return roles_by_pcm
 
-    def _resample_for_roles(
+    async def _resample_for_roles(
         self,
         roles_by_pcm: dict[
             tuple[UUID, int, int, int], list[tuple[SendspinClient, Role, AudioRequirements]]
@@ -438,8 +487,15 @@ class PushStream:
         prepared: dict[UUID, tuple[bytes, AudioFormat]],
         channel_play_start: dict[UUID, int],
     ) -> dict[tuple[UUID, int, int, int], tuple[bytes, int]]:
-        """Resample PCM once per unique PCM key. Returns (channel, rate, depth, ch) -> (pcm, ts)."""
-        resampled: dict[tuple[UUID, int, int, int], tuple[bytes, int]] = {}
+        """Resample PCM once per unique PCM key. Returns (channel, rate, depth, ch) -> (pcm, ts).
+
+        Resampling runs in the thread pool to avoid blocking the event loop.
+        """
+        # Build resampler states on main thread (accesses self._resamplers)
+        resample_tasks: dict[
+            tuple[UUID, int, int, int],
+            tuple[_ResamplerState, bytes, AudioFormat, int],
+        ] = {}
 
         for pcm_key in roles_by_pcm:
             channel_id, target_sample_rate, target_bit_depth, target_channels = pcm_key
@@ -463,12 +519,43 @@ class PushStream:
             resampler_state = self._get_or_create_resampler(
                 resampler_key, source_format, target_format
             )
-            pcm_out, output_ts = self._resample_pcm(
-                resampler_state, source_pcm, source_format, input_timestamp_us
+            resample_tasks[pcm_key] = (
+                resampler_state,
+                source_pcm,
+                source_format,
+                input_timestamp_us,
             )
-            resampled[pcm_key] = (pcm_out, output_ts)
 
-        return resampled
+        if not resample_tasks:
+            return {}
+
+        # Run resampling in thread pool
+        executor = _get_encode_executor()
+        running_loop = asyncio.get_running_loop()
+
+        async def run_resample(
+            pcm_key: tuple[UUID, int, int, int],
+            resampler_state: _ResamplerState,
+            source_pcm: bytes,
+            source_format: AudioFormat,
+            input_timestamp_us: int,
+        ) -> tuple[tuple[UUID, int, int, int], tuple[bytes, int]]:
+            result = await running_loop.run_in_executor(
+                executor,
+                _resample_pcm_standalone,
+                resampler_state,
+                source_pcm,
+                source_format,
+                input_timestamp_us,
+            )
+            return (pcm_key, result)
+
+        tasks = [
+            run_resample(pcm_key, state, pcm, fmt, ts)
+            for pcm_key, (state, pcm, fmt, ts) in resample_tasks.items()
+        ]
+        results = await asyncio.gather(*tasks)
+        return dict(results)
 
     def _resolve_frame_duration_us(self, req: AudioRequirements) -> int:
         if req.frame_duration_us is not None:
@@ -503,16 +590,19 @@ class PushStream:
 
         return tkey
 
-    def _transform_and_deliver(
+    async def _transform_and_deliver(
         self,
         roles_by_pcm: dict[
             tuple[UUID, int, int, int], list[tuple[SendspinClient, Role, AudioRequirements]]
         ],
         resampled_pcm: dict[tuple[UUID, int, int, int], tuple[bytes, int]],
     ) -> dict[TransformKey, list[CachedChunk]]:
-        """Transform PCM and deliver to roles. Returns cache results."""
-        # TransformKey -> list of (data, timestamp_us, duration_us)
-        transformed: dict[TransformKey, list[tuple[bytes, int, int]]] = {}
+        """Transform PCM and deliver to roles. Returns cache results.
+
+        Encoding is parallelized across unique TransformKeys via a thread pool.
+        """
+        # Collect unique encoding tasks: tkey -> (transformer, pcm_data, output_ts, duration_us)
+        encode_tasks: dict[TransformKey, tuple[AudioTransformer | None, bytes, int, int]] = {}
 
         for pcm_key, roles_list in roles_by_pcm.items():
             channel_id, rate, depth, channels = pcm_key
@@ -531,34 +621,43 @@ class PushStream:
                 grouped_by_key[tkey].append((client, role, req))
 
             for tkey, grouped in grouped_by_key.items():
-                if tkey in transformed:
+                if tkey in encode_tasks:
                     continue
-
                 transformer = grouped[0][2].transformer
-                if transformer is None:
-                    # No transformer - passthrough as single frame
-                    transformed[tkey] = [(pcm_data, output_ts, duration_us)]
-                else:
-                    # Transformer returns list[bytes] - one tuple per frame
-                    frames = transformer.process(pcm_data, output_ts, duration_us)
+                encode_tasks[tkey] = (transformer, pcm_data, output_ts, duration_us)
 
-                    # Get base timestamp AFTER processing. Transformers track output
-                    # timeline via pending_timestamp_us. Getting it after process()
-                    # ensures gap detection (which resets the timeline) is applied.
-                    # pending_timestamp_us points to the NEXT frame's timestamp,
-                    # so base_ts = pending - (num_frames * frame_dur).
-                    frame_list: list[tuple[bytes, int, int]] = []
-                    if frames:
-                        frame_dur = transformer.frame_duration_us
-                        base_ts = output_ts
-                        if hasattr(transformer, "pending_timestamp_us"):
-                            pending = transformer.pending_timestamp_us
-                            if pending is not None:
-                                base_ts = pending - (len(frames) * frame_dur)
-                        for i, frame_data in enumerate(frames):
-                            frame_ts = base_ts + (i * frame_dur)
-                            frame_list.append((frame_data, frame_ts, frame_dur))
-                    transformed[tkey] = frame_list
+        # TransformKey -> list of (data, timestamp_us, duration_us)
+        transformed: dict[TransformKey, list[tuple[bytes, int, int]]] = {}
+
+        if encode_tasks:
+            # Multiple encoders: run in parallel via thread pool
+            executor = _get_encode_executor()
+            # Use the real running loop for run_in_executor (self._loop may be mocked)
+            running_loop = asyncio.get_running_loop()
+
+            async def run_encode(
+                tkey: TransformKey,
+                transformer: AudioTransformer | None,
+                pcm_data: bytes,
+                output_ts: int,
+                duration_us: int,
+            ) -> tuple[TransformKey, list[tuple[bytes, int, int]]]:
+                result = await running_loop.run_in_executor(
+                    executor,
+                    _encode_for_transform_key,
+                    transformer,
+                    pcm_data,
+                    output_ts,
+                    duration_us,
+                )
+                return (tkey, result)
+
+            tasks = [
+                run_encode(tkey, transformer, pcm_data, output_ts, duration_us)
+                for tkey, (transformer, pcm_data, output_ts, duration_us) in encode_tasks.items()
+            ]
+            results = await asyncio.gather(*tasks)
+            transformed = dict(results)
 
         cache_results: defaultdict[TransformKey, list[CachedChunk]] = defaultdict(list)
 
@@ -571,7 +670,7 @@ class PushStream:
 
         return cache_results
 
-    def _deliver_audio_to_roles(
+    async def _deliver_audio_to_roles(
         self,
         prepared: dict[UUID, tuple[bytes, AudioFormat]],
         channel_play_start: dict[UUID, int],
@@ -591,8 +690,8 @@ class PushStream:
         if not roles_by_pcm:
             return {}
 
-        resampled = self._resample_for_roles(roles_by_pcm, prepared, channel_play_start)
-        return self._transform_and_deliver(roles_by_pcm, resampled)
+        resampled = await self._resample_for_roles(roles_by_pcm, prepared, channel_play_start)
+        return await self._transform_and_deliver(roles_by_pcm, resampled)
 
     def _prune_role_chunk_cache(self) -> None:
         """Remove old chunks from the role-based cache."""
