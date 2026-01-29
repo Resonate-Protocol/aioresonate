@@ -759,6 +759,7 @@ class PushStream:
         role_cursors = self._role_chunk_cursors.setdefault(role, {})
         cursor = role_cursors.get(tkey, 0)
         next_ready_us: int | None = None
+        skipped_late = 0
 
         get_tracker = getattr(role, "get_buffer_tracker", None)
         buffer_tracker = get_tracker() if callable(get_tracker) else None
@@ -766,6 +767,7 @@ class PushStream:
         while cursor < len(cached):
             cached_chunk = cached[cursor]
             if cached_chunk.timestamp_us < now_us:
+                skipped_late += 1
                 cursor += 1
                 continue
 
@@ -789,6 +791,14 @@ class PushStream:
                 break
 
             cursor += 1
+
+        if skipped_late > 0:
+            _LOGGER.debug(
+                "Pump skipped %s late chunk(s) for role %s (ts < now_us=%s)",
+                skipped_late,
+                role.role_family,
+                now_us,
+            )
 
         role_cursors[tkey] = cursor
         return next_ready_us

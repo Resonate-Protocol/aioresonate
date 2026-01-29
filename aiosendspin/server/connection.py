@@ -39,6 +39,7 @@ from aiosendspin.models.types import (
 from .client import SendspinClient
 
 if TYPE_CHECKING:
+    from .audio import BufferTracker
     from .roles.base import BinaryHandling, Role
     from .server import SendspinServer
 
@@ -517,77 +518,15 @@ class SendspinConnection:
         async with asyncio.timeout(SEND_TIMEOUT_S):
             await wsock.send_str(message.to_json())
 
-    def _get_binary_frame_wait_us(self, item: _BinaryFrame) -> int:
-        """Check if binary frame needs rate limiting or should be dropped.
-
-        Returns:
-            -1 if frame should be dropped (late).
-            0 if frame is ready to send immediately.
-            > 0 if frame should be delayed by that many microseconds.
-        """
-        message_type = item.message_type
-
-        if self._client is None:
-            return 0
-
-        cached = self._client.get_binary_handling_cached(message_type)
-        if cached is None:
-            return 0
-
-        handling, handling_role = cached
-
-        # Drop late messages if role requests it
-        if self._check_late_binary(handling, handling_role, item.timestamp_us):
-            return -1  # Drop
-
-        # Check rate limit
-        if handling.buffer_track and handling.rate_limit:
-            buffer_tracker = handling_role.get_buffer_tracker()
-            if buffer_tracker is not None:
-                wait_us = buffer_tracker.time_until_duration_capacity(item.duration_us or 0)
-                if wait_us > 0:
-                    return wait_us
-
-        return 0  # Ready to send
-
     async def _send_binary_frame(
         self,
         wsock: web.WebSocketResponse | ClientWebSocketResponse,
         item: _BinaryFrame,
+        buffer_tracker: BufferTracker | None,
     ) -> None:
         """Send a binary frame with buffer tracking. Assumes rate limit already checked."""
-        data = item.data
-        message_type = item.message_type
-        role_family = item.role_family
-        timestamp_us = item.timestamp_us
-
-        # Find the role that handles this message type (O(1) lookup via client cache)
-        buffer_tracker = None
-        if self._client is not None:
-            cached = self._client.get_binary_handling_cached(message_type)
-            if cached is not None:
-                handling, handling_role = cached
-                if handling.buffer_track:
-                    buffer_tracker = handling_role.get_buffer_tracker()
-
-        # Log timing info
-        now_us = self._server.clock.now_us()
-        last_send_us = self._last_send_time_us_by_family.get(role_family)
-        last_ts_us = self._last_timestamp_us_by_family.get(role_family)
-        send_gap_ms = (now_us - last_send_us) / 1000 if last_send_us is not None else 0
-        ts_gap_ms = (timestamp_us - last_ts_us) / 1000 if last_ts_us is not None else 0
-        self._logger.debug(
-            "Binary send: role=%s ts=%.1fms send_gap=%.1fms ts_gap=%.1fms",
-            role_family,
-            timestamp_us / 1000,
-            send_gap_ms,
-            ts_gap_ms,
-        )
-        self._last_send_time_us_by_family[role_family] = now_us
-        self._last_timestamp_us_by_family[role_family] = timestamp_us
-
         async with asyncio.timeout(SEND_TIMEOUT_S):
-            await wsock.send_bytes(data)
+            await wsock.send_bytes(item.data)
 
         # Buffer tracking via role's tracker (framework-managed)
         if (
@@ -601,29 +540,33 @@ class SendspinConnection:
                 item.duration_us or 0,
             )
 
-    async def _writer(self) -> None:  # noqa: PLR0915
+    async def _writer(self) -> None:  # noqa: C901, PLR0912, PLR0915
         wsock = self._wsock_server or self._wsock_client
         assert wsock is not None
 
-        # Cache hot attributes as locals to avoid repeated self._ lookups
+        # Cache hot attributes as locals to avoid repeated attribute lookups
         clock_now_us = self._server.clock.now_us
         delayed_frames = self._delayed_frames
         to_write = self._to_write
         binary_epoch_by_family = self._binary_epoch_by_family
+        client = self._client
+        log_debug = self._logger.isEnabledFor(logging.DEBUG)
+        last_send_us_by_family = self._last_send_time_us_by_family
+        last_ts_us_by_family = self._last_timestamp_us_by_family
+        logger_debug = self._logger.debug
 
         iterations_since_yield = 0
         now_us = clock_now_us()
 
         try:
             while not wsock.closed and not self._closing:
-                # Periodic yield to prevent spin loop when many frames need delaying
+                # Periodic yield to prevent event loop starvation
                 if iterations_since_yield >= 50:
                     await asyncio.sleep(0)
                     iterations_since_yield = 0
                     now_us = clock_now_us()
 
-                # Process delayed frames that are now ready (batch collect to avoid
-                # dict modification during iteration)
+                # Process delayed frames that are now ready
                 if delayed_frames:
                     ready_families = [
                         family
@@ -631,7 +574,7 @@ class SendspinConnection:
                         if ready_at <= now_us
                     ]
                     for family in ready_families:
-                        ready_at_us, delayed_item = delayed_frames.pop(family)
+                        _, delayed_item = delayed_frames.pop(family)
                         frame = delayed_item.item
                         assert isinstance(frame, _BinaryFrame)
                         # Check epoch (may have been invalidated while delayed)
@@ -639,11 +582,17 @@ class SendspinConnection:
                             continue
                         if frame.epoch_family != binary_epoch_by_family[frame.role_family]:
                             continue
-                        await self._send_binary_frame(wsock, frame)
+                        # Get buffer tracker for delayed frame
+                        buffer_tracker = None
+                        if client is not None:
+                            cached = client.get_binary_handling_cached(frame.message_type)
+                            if cached is not None and cached[0].buffer_track:
+                                buffer_tracker = cached[1].get_buffer_tracker()
+                        await self._send_binary_frame(wsock, frame, buffer_tracker)
                         now_us = clock_now_us()
                         iterations_since_yield = 0
 
-                # Try to get next item from queue (avoid exception-based control flow)
+                # Try to get next item from queue
                 if delayed_frames:
                     # Non-blocking: don't wait if we have delayed frames to track
                     if to_write.empty():
@@ -664,32 +613,68 @@ class SendspinConnection:
                 item = priority_item.item
 
                 if isinstance(item, _BinaryFrame):
-                    # Check epoch
+                    # Check epoch - frame may have been invalidated
                     if item.epoch_all != self._binary_epoch_all:
                         continue
-                    if item.epoch_family != binary_epoch_by_family[item.role_family]:
+                    role_family = item.role_family
+                    if item.epoch_family != binary_epoch_by_family[role_family]:
                         continue
 
                     # If this family already has a delayed frame, re-queue this one
-                    if item.role_family in delayed_frames:
+                    if role_family in delayed_frames:
                         to_write.put_nowait(priority_item)
                         iterations_since_yield += 1
                         continue
 
+                    # Get binary handling info (single lookup for rate limit + buffer tracking)
+                    cached = (
+                        client.get_binary_handling_cached(item.message_type) if client else None
+                    )
+                    handling = cached[0] if cached else None
+                    handling_role = cached[1] if cached else None
+
                     # Check rate limit
-                    wait_us = self._get_binary_frame_wait_us(item)
-                    if wait_us < 0:
-                        # Frame is late, discard it
-                        continue
+                    wait_us = 0
+                    if handling is not None and handling_role is not None:
+                        # Drop late messages if role requests it
+                        if self._check_late_binary(handling, handling_role, item.timestamp_us):
+                            continue  # Drop
+                        # Check rate limit
+                        if handling.buffer_track and handling.rate_limit:
+                            buffer_tracker = handling_role.get_buffer_tracker()
+                            if buffer_tracker is not None:
+                                wait_us = buffer_tracker.time_until_duration_capacity(
+                                    item.duration_us or 0
+                                )
+
                     if wait_us > 0:
                         # Delay this frame - one per role family
-                        ready_at_us = now_us + wait_us
-                        delayed_frames[item.role_family] = (ready_at_us, priority_item)
+                        delayed_frames[role_family] = (now_us + wait_us, priority_item)
                         iterations_since_yield += 1
                         continue
 
+                    # Log timing info (only if debug enabled)
+                    if log_debug:
+                        timestamp_us = item.timestamp_us
+                        last_send_us = last_send_us_by_family.get(role_family)
+                        last_ts_us = last_ts_us_by_family.get(role_family)
+                        send_gap_ms = (now_us - last_send_us) / 1000 if last_send_us else 0
+                        ts_gap_ms = (timestamp_us - last_ts_us) / 1000 if last_ts_us else 0
+                        logger_debug(
+                            "Binary send: role=%s ts=%.1fms send_gap=%.1fms ts_gap=%.1fms",
+                            role_family,
+                            timestamp_us / 1000,
+                            send_gap_ms,
+                            ts_gap_ms,
+                        )
+                        last_send_us_by_family[role_family] = now_us
+                        last_ts_us_by_family[role_family] = timestamp_us
+
                     # Send immediately
-                    await self._send_binary_frame(wsock, item)
+                    buffer_tracker = None
+                    if handling is not None and handling.buffer_track and handling_role is not None:
+                        buffer_tracker = handling_role.get_buffer_tracker()
+                    await self._send_binary_frame(wsock, item, buffer_tracker)
                     now_us = clock_now_us()
                     iterations_since_yield = 0
                     continue
