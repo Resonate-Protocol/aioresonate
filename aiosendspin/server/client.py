@@ -179,14 +179,7 @@ class SendspinClient:
         - If in multi-client group: remember previous group, move to solo group
         - If already in solo group: stop playback
         """
-        old_state = self._client_state
         self._client_state = new_state
-
-        self._logger.info(
-            "Client state transition: %s -> %s",
-            old_state.value,
-            new_state.value,
-        )
 
         if new_state != ClientStateType.EXTERNAL_SOURCE:
             return
