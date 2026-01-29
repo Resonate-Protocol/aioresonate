@@ -46,6 +46,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 MAX_PENDING_MSG = 4096
+SEND_TIMEOUT_S = 5.0  # Max time to wait for a single send before disconnecting
 
 
 @dataclass(frozen=True, slots=True)
@@ -513,7 +514,8 @@ class SendspinConnection:
                     server_transmitted=self._server.clock.now_us(),
                 )
             )
-        await wsock.send_str(message.to_json())
+        async with asyncio.timeout(SEND_TIMEOUT_S):
+            await wsock.send_str(message.to_json())
 
     def _get_binary_frame_wait_us(self, item: _BinaryFrame) -> int:
         """Check if binary frame needs rate limiting or should be dropped.
@@ -584,7 +586,8 @@ class SendspinConnection:
         self._last_send_time_us_by_family[role_family] = now_us
         self._last_timestamp_us_by_family[role_family] = timestamp_us
 
-        await wsock.send_bytes(data)
+        async with asyncio.timeout(SEND_TIMEOUT_S):
+            await wsock.send_bytes(data)
 
         # Buffer tracking via role's tracker (framework-managed)
         if (
@@ -696,6 +699,11 @@ class SendspinConnection:
                 iterations_since_yield = 0
         except asyncio.CancelledError:
             self._logger.debug("Writer cancelled")
+        except TimeoutError:
+            self._logger.warning("Send timed out - client too slow, disconnecting")
+            if not wsock.closed:
+                with suppress(Exception):
+                    await wsock.close()
         except Exception:
             self._logger.exception("Writer failed")
             # Close the websocket to signal the message loop to exit
