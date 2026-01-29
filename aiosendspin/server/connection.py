@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from collections import defaultdict
 from contextlib import suppress
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, cast
@@ -140,7 +141,11 @@ class SendspinConnection:
 
         self._last_goodbye_reason: GoodbyeReason | None = None
         self._binary_epoch_all = 0
-        self._binary_epoch_by_family: dict[str, int] = {}
+        self._binary_epoch_by_family: defaultdict[str, int] = defaultdict(int)
+
+        # Timing tracking for binary frame logging (per role family)
+        self._last_send_time_us_by_family: dict[str, int] = {}
+        self._last_timestamp_us_by_family: dict[str, int] = {}
 
     @property
     def websocket_connection(self) -> web.WebSocketResponse | ClientWebSocketResponse:
@@ -166,7 +171,7 @@ class SendspinConnection:
             self._binary_epoch_all += 1
             return
         for family in roles:
-            self._binary_epoch_by_family[family] = self._binary_epoch_by_family.get(family, 0) + 1
+            self._binary_epoch_by_family[family] += 1
 
     def try_send_binary(
         self,
@@ -190,7 +195,7 @@ class SendspinConnection:
             buffer_byte_count: Byte count for buffer tracking.
             duration_us: Duration for buffer tracking.
         """
-        epoch_family = self._binary_epoch_by_family.get(role_family, 0)
+        epoch_family = self._binary_epoch_by_family[role_family]
         frame = _BinaryFrame(
             epoch_all=self._binary_epoch_all,
             epoch_family=epoch_family,
@@ -538,6 +543,8 @@ class SendspinConnection:
         """Send a binary frame with buffer tracking. Assumes rate limit already checked."""
         data = item.data
         message_type = item.message_type
+        role_family = item.role_family
+        timestamp_us = item.timestamp_us
 
         # Find the role that handles this message type (O(1) lookup via client cache)
         buffer_tracker = None
@@ -547,6 +554,22 @@ class SendspinConnection:
                 handling, handling_role = cached
                 if handling.buffer_track:
                     buffer_tracker = handling_role.get_buffer_tracker()
+
+        # Log timing info
+        now_us = self._server.clock.now_us()
+        last_send_us = self._last_send_time_us_by_family.get(role_family)
+        last_ts_us = self._last_timestamp_us_by_family.get(role_family)
+        send_gap_ms = (now_us - last_send_us) / 1000 if last_send_us is not None else 0
+        ts_gap_ms = (timestamp_us - last_ts_us) / 1000 if last_ts_us is not None else 0
+        self._logger.debug(
+            "Binary send: role=%s ts=%.1fms send_gap=%.1fms ts_gap=%.1fms",
+            role_family,
+            timestamp_us / 1000,
+            send_gap_ms,
+            ts_gap_ms,
+        )
+        self._last_send_time_us_by_family[role_family] = now_us
+        self._last_timestamp_us_by_family[role_family] = timestamp_us
 
         await wsock.send_bytes(data)
 
@@ -562,44 +585,65 @@ class SendspinConnection:
                 item.duration_us or 0,
             )
 
-    async def _writer(self) -> None:
+    async def _writer(self) -> None:  # noqa: PLR0915
         wsock = self._wsock_server or self._wsock_client
         assert wsock is not None
+
+        # Cache hot attributes as locals to avoid repeated self._ lookups
+        clock_now_us = self._server.clock.now_us
+        delayed_frames = self._delayed_frames
+        to_write = self._to_write
+        binary_epoch_by_family = self._binary_epoch_by_family
+
+        iterations_since_yield = 0
+        now_us = clock_now_us()
+
         try:
             while not wsock.closed and not self._closing:
-                now_us = self._server.clock.now_us()
+                # Periodic yield to prevent spin loop when many frames need delaying
+                if iterations_since_yield >= 50:
+                    await asyncio.sleep(0)
+                    iterations_since_yield = 0
+                    now_us = clock_now_us()
 
-                # Process delayed frames that are now ready
-                for family in list(self._delayed_frames.keys()):
-                    ready_at_us, delayed_item = self._delayed_frames[family]
-                    if ready_at_us <= now_us:
-                        del self._delayed_frames[family]
+                # Process delayed frames that are now ready (batch collect to avoid
+                # dict modification during iteration)
+                if delayed_frames:
+                    ready_families = [
+                        family
+                        for family, (ready_at, _) in delayed_frames.items()
+                        if ready_at <= now_us
+                    ]
+                    for family in ready_families:
+                        ready_at_us, delayed_item = delayed_frames.pop(family)
                         frame = delayed_item.item
                         assert isinstance(frame, _BinaryFrame)
                         # Check epoch (may have been invalidated while delayed)
                         if frame.epoch_all != self._binary_epoch_all:
                             continue
-                        if frame.epoch_family != self._binary_epoch_by_family.get(
-                            frame.role_family, 0
-                        ):
+                        if frame.epoch_family != binary_epoch_by_family[frame.role_family]:
                             continue
                         await self._send_binary_frame(wsock, frame)
+                        now_us = clock_now_us()
+                        iterations_since_yield = 0
 
-                # Try to get next item from queue
-                try:
-                    if self._delayed_frames:
-                        # Non-blocking: don't wait if we have delayed frames to track
-                        priority_item = self._to_write.get_nowait()
-                    else:
-                        # Blocking: wait for next item
-                        priority_item = await self._to_write.get()
-                except asyncio.QueueEmpty:
-                    # Queue empty but we have delayed frames - sleep until soonest is ready
-                    if self._delayed_frames:
-                        soonest_us = min(ready_at for ready_at, _ in self._delayed_frames.values())
+                # Try to get next item from queue (avoid exception-based control flow)
+                if delayed_frames:
+                    # Non-blocking: don't wait if we have delayed frames to track
+                    if to_write.empty():
+                        # Sleep until soonest delayed frame is ready
+                        soonest_us = min(ready_at for ready_at, _ in delayed_frames.values())
                         sleep_us = max(0, soonest_us - now_us)
                         await asyncio.sleep(sleep_us / 1_000_000)
-                    continue
+                        now_us = clock_now_us()
+                        iterations_since_yield = 0
+                        continue
+                    priority_item = to_write.get_nowait()
+                else:
+                    # Blocking: wait for next item
+                    priority_item = await to_write.get()
+                    now_us = clock_now_us()
+                    iterations_since_yield = 0
 
                 item = priority_item.item
 
@@ -607,7 +651,13 @@ class SendspinConnection:
                     # Check epoch
                     if item.epoch_all != self._binary_epoch_all:
                         continue
-                    if item.epoch_family != self._binary_epoch_by_family.get(item.role_family, 0):
+                    if item.epoch_family != binary_epoch_by_family[item.role_family]:
+                        continue
+
+                    # If this family already has a delayed frame, re-queue this one
+                    if item.role_family in delayed_frames:
+                        to_write.put_nowait(priority_item)
+                        iterations_since_yield += 1
                         continue
 
                     # Check rate limit
@@ -618,14 +668,19 @@ class SendspinConnection:
                     if wait_us > 0:
                         # Delay this frame - one per role family
                         ready_at_us = now_us + wait_us
-                        self._delayed_frames[item.role_family] = (ready_at_us, priority_item)
+                        delayed_frames[item.role_family] = (ready_at_us, priority_item)
+                        iterations_since_yield += 1
                         continue
 
                     # Send immediately
                     await self._send_binary_frame(wsock, item)
+                    now_us = clock_now_us()
+                    iterations_since_yield = 0
                     continue
 
                 await self._send_message(wsock, item)
+                now_us = clock_now_us()
+                iterations_since_yield = 0
         except asyncio.CancelledError:
             self._logger.debug("Writer cancelled")
         except Exception:
