@@ -274,7 +274,7 @@ class SendspinClient:
 
     # ---- Messaging (delegates to connection) ----
 
-    def send_message(self, message: ServerMessage | bytes) -> None:
+    def send_message(self, message: ServerMessage) -> None:
         """Send a message if connected; otherwise no-op."""
         if self._connection is None:
             return

@@ -11,7 +11,6 @@ from typing import TYPE_CHECKING, cast
 
 from aiohttp import ClientWebSocketResponse, WSMsgType, web
 
-from aiosendspin.models import unpack_binary_header
 from aiosendspin.models.core import (
     ClientCommandMessage,
     ClientGoodbyeMessage,
@@ -204,28 +203,8 @@ class SendspinConnection:
         """Return (qsize, maxsize) for the outgoing queue."""
         return self._to_write.qsize(), self._to_write.maxsize
 
-    def send_message(self, message: ServerMessage | bytes) -> None:
-        """
-        Enqueue a JSON or binary message to be sent to the client.
-
-        Binary payloads are considered droppable. Prefer try_send_binary for audio/art/vis.
-        """
-        if isinstance(message, bytes):
-            # Legacy path: parse header to get timestamp/type for binary messages
-            header = unpack_binary_header(message)
-            if (
-                not self.try_send_binary(
-                    message,
-                    role_family="unknown",
-                    timestamp_us=header.timestamp_us,
-                    message_type=header.message_type,
-                )
-            ) and (not self._disconnecting):
-                self._logger.error("Message queue full, client too slow - disconnecting")
-                task = self._server.loop.create_task(self.disconnect(retry_connection=True))
-                task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
-            return
-
+    def send_message(self, message: ServerMessage) -> None:
+        """Enqueue a JSON message to be sent to the client."""
         if isinstance(message, StreamClearMessage | StreamEndMessage):
             self.drop_pending_binary(message.payload.roles)
 
