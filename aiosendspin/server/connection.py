@@ -56,7 +56,6 @@ class _BinaryFrame:
     epoch_family: int
     role_family: str
     data: bytes
-    queued_at_us: int
     timestamp_us: int  # playback timestamp from header (cached to avoid unpacking)
     message_type: int  # binary message type for role lookup (cached)
     buffer_end_time_us: int | None = None
@@ -169,7 +168,6 @@ class SendspinConnection:
         buffer_end_time_us: int | None = None,
         buffer_byte_count: int | None = None,
         duration_us: int | None = None,
-        queued_at_us: int | None = None,
     ) -> bool:
         """Try to enqueue a binary message without disconnecting on queue overflow.
 
@@ -181,17 +179,13 @@ class SendspinConnection:
             buffer_end_time_us: End timestamp for buffer tracking.
             buffer_byte_count: Byte count for buffer tracking.
             duration_us: Duration for buffer tracking.
-            queued_at_us: Pre-computed queue timestamp (optimization for batch sends).
         """
         epoch_family = self._binary_epoch_by_family.get(role_family, 0)
-        if queued_at_us is None:
-            queued_at_us = self._server.clock.now_us()
         frame = _BinaryFrame(
             epoch_all=self._binary_epoch_all,
             epoch_family=epoch_family,
             role_family=role_family,
             data=data,
-            queued_at_us=queued_at_us,
             timestamp_us=timestamp_us,
             message_type=message_type,
             buffer_end_time_us=buffer_end_time_us,

@@ -68,7 +68,6 @@ class _CaptureConnection:
         buffer_end_time_us: int | None = None,
         buffer_byte_count: int | None = None,
         duration_us: int | None = None,
-        queued_at_us: int | None = None,  # noqa: ARG002
     ) -> bool:
         self.events.append(_Event(kind="bin", payload=data))
         if (

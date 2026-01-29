@@ -38,7 +38,6 @@ def test_binary_frame_supports_buffer_registration_metadata() -> None:
         epoch_family=1,
         role_family="player",
         data=b"test",
-        queued_at_us=0,
         timestamp_us=0,
         message_type=4,
     )
@@ -50,7 +49,6 @@ def test_binary_frame_supports_buffer_registration_metadata() -> None:
         epoch_family=1,
         role_family="player",
         data=b"test",
-        queued_at_us=0,
         timestamp_us=0,
         message_type=4,
         buffer_end_time_us=1_000_000,
