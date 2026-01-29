@@ -117,8 +117,8 @@ async def test_ungraceful_disconnect_delays_buffer_tracker_reset() -> None:
 
 
 @pytest.mark.asyncio
-async def test_reconnect_cancels_scheduled_buffer_tracker_reset() -> None:
-    """Reconnect cancels the pending delayed BufferTracker reset."""
+async def test_reconnect_resets_buffer_tracker() -> None:
+    """Reconnect resets buffer tracker immediately (client buffer is empty after reconnect)."""
     loop = asyncio.get_running_loop()
     server = _DummyServer(loop=loop, clock=LoopClock(loop))
     client = SendspinClient(server, client_id="player-1")
@@ -135,8 +135,11 @@ async def test_reconnect_cancels_scheduled_buffer_tracker_reset() -> None:
     assert state is not None
     assert state.buffer_tracker is not None
     state.buffer_tracker.register(end_time_us=1_000_000, byte_count=1234)
+    assert state.buffer_tracker.buffered_bytes == 1234
+
     client.detach_connection(None)
 
+    # Reconnect before the delayed reset callback fires
     await asyncio.sleep(1.0)
     client.attach_connection(
         _DummyConnection(),
@@ -145,5 +148,6 @@ async def test_reconnect_cancels_scheduled_buffer_tracker_reset() -> None:
     )
     client.mark_connected()
 
-    await asyncio.sleep(1.5)
-    assert state.buffer_tracker.buffered_bytes == 1234
+    # Buffer tracker should be reset immediately on reconnect
+    # (client's actual buffer is empty after reconnect)
+    assert state.buffer_tracker.buffered_bytes == 0

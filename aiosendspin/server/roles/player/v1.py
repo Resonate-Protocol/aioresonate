@@ -172,6 +172,9 @@ class PlayerRole(Role):
                 handle.cancel()
         state.disconnect_time_us = None
         self._ensure_buffer_tracker(state)
+        # Reset buffer tracker on (re)connect - client buffer is empty after reconnect
+        if state.buffer_tracker is not None:
+            state.buffer_tracker.reset()
         self._ensure_preferred_format(state)
         self._ensure_audio_requirements(state)
 
