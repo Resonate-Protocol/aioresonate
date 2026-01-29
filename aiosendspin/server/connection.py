@@ -111,7 +111,7 @@ class SendspinConnection:
         if request is not None:
             if wsock_client is not None:
                 raise ValueError("Only one of request or wsock_client may be provided")
-            self._wsock_server = web.WebSocketResponse(heartbeat=55, compress=False)
+            self._wsock_server = web.WebSocketResponse(heartbeat=30, compress=False)
             self._logger = logger.getChild(f"unknown-{request.remote}")
         elif wsock_client is not None:
             self._logger = logger.getChild("unknown-client")
@@ -320,6 +320,15 @@ class SendspinConnection:
                 timestamp_us = self._server.clock.now_us()
 
                 if msg.type in (WSMsgType.CLOSE, WSMsgType.CLOSING, WSMsgType.CLOSED):
+                    self._logger.info(
+                        "WebSocket closed: type=%s close_code=%s",
+                        msg.type.name,
+                        wsock.close_code,
+                    )
+                    break
+
+                if msg.type == WSMsgType.ERROR:
+                    self._logger.warning("WebSocket error: %s", wsock.exception() or "unknown")
                     break
 
                 if msg.type == WSMsgType.BINARY:
@@ -327,11 +336,15 @@ class SendspinConnection:
                     continue
 
                 if msg.type != WSMsgType.TEXT:
+                    self._logger.debug("Ignoring message type: %s", msg.type.name)
                     continue
 
                 await self._handle_message(
                     ClientMessage.from_json(cast("str", msg.data)), timestamp_us
                 )
+            else:
+                # Loop exited normally (iterator exhausted) - connection closed
+                self._logger.info("WebSocket iterator exhausted, close_code=%s", wsock.close_code)
         except asyncio.CancelledError:
             self._logger.debug("Message loop cancelled")
         except Exception:
@@ -685,6 +698,10 @@ class SendspinConnection:
             self._logger.debug("Writer cancelled")
         except Exception:
             self._logger.exception("Writer failed")
+            # Close the websocket to signal the message loop to exit
+            if not wsock.closed:
+                with suppress(Exception):
+                    await wsock.close()
 
     async def _handle_client(self) -> None:
         """Run the complete websocket connection lifecycle (internal)."""
