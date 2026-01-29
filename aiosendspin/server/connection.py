@@ -125,6 +125,8 @@ class SendspinConnection:
             maxsize=MAX_PENDING_MSG
         )
         self._queue_sequence: int = 0  # FIFO tie-breaker for priority queue
+        # Delayed frames waiting for rate limit, one per role family
+        self._delayed_frames: dict[str, tuple[int, _PriorityItem]] = {}
         self._writer_task: asyncio.Task[None] | None = None
         self._message_loop_task: asyncio.Task[None] | None = None
 
@@ -495,37 +497,56 @@ class SendspinConnection:
             )
         await wsock.send_str(message.to_json())
 
+    def _get_binary_frame_wait_us(self, item: _BinaryFrame) -> int:
+        """Check if binary frame needs rate limiting or should be dropped.
+
+        Returns:
+            -1 if frame should be dropped (late).
+            0 if frame is ready to send immediately.
+            > 0 if frame should be delayed by that many microseconds.
+        """
+        message_type = item.message_type
+
+        if self._client is None:
+            return 0
+
+        cached = self._client.get_binary_handling_cached(message_type)
+        if cached is None:
+            return 0
+
+        handling, handling_role = cached
+
+        # Drop late messages if role requests it
+        if self._check_late_binary(handling, handling_role, item.timestamp_us):
+            return -1  # Drop
+
+        # Check rate limit
+        if handling.buffer_track and handling.rate_limit:
+            buffer_tracker = handling_role.get_buffer_tracker()
+            if buffer_tracker is not None:
+                wait_us = buffer_tracker.time_until_duration_capacity(item.duration_us or 0)
+                if wait_us > 0:
+                    return wait_us
+
+        return 0  # Ready to send
+
     async def _send_binary_frame(
         self,
         wsock: web.WebSocketResponse | ClientWebSocketResponse,
         item: _BinaryFrame,
     ) -> None:
-        """Send a binary frame with buffer tracking and late detection."""
+        """Send a binary frame with buffer tracking. Assumes rate limit already checked."""
         data = item.data
-        timestamp_us = item.timestamp_us
         message_type = item.message_type
 
         # Find the role that handles this message type (O(1) lookup via client cache)
-        handling = None
-        handling_role = None
         buffer_tracker = None
         if self._client is not None:
             cached = self._client.get_binary_handling_cached(message_type)
             if cached is not None:
                 handling, handling_role = cached
-                # Cache buffer_tracker lookup (called once instead of twice)
                 if handling.buffer_track:
                     buffer_tracker = handling_role.get_buffer_tracker()
-
-        # Drop late messages if role requests it
-        if self._check_late_binary(handling, handling_role, timestamp_us):
-            return
-
-        # Rate limit: wait if we're too far ahead of playback (duration-based only)
-        if buffer_tracker is not None and handling is not None and handling.rate_limit:
-            wait_us = buffer_tracker.time_until_duration_capacity(item.duration_us or 0)
-            if wait_us > 0:
-                await asyncio.sleep(wait_us / 1_000_000)
 
         await wsock.send_bytes(data)
 
@@ -546,14 +567,61 @@ class SendspinConnection:
         assert wsock is not None
         try:
             while not wsock.closed and not self._closing:
-                priority_item = await self._to_write.get()
+                now_us = self._server.clock.now_us()
+
+                # Process delayed frames that are now ready
+                for family in list(self._delayed_frames.keys()):
+                    ready_at_us, delayed_item = self._delayed_frames[family]
+                    if ready_at_us <= now_us:
+                        del self._delayed_frames[family]
+                        frame = delayed_item.item
+                        assert isinstance(frame, _BinaryFrame)
+                        # Check epoch (may have been invalidated while delayed)
+                        if frame.epoch_all != self._binary_epoch_all:
+                            continue
+                        if frame.epoch_family != self._binary_epoch_by_family.get(
+                            frame.role_family, 0
+                        ):
+                            continue
+                        await self._send_binary_frame(wsock, frame)
+
+                # Try to get next item from queue
+                try:
+                    if self._delayed_frames:
+                        # Non-blocking: don't wait if we have delayed frames to track
+                        priority_item = self._to_write.get_nowait()
+                    else:
+                        # Blocking: wait for next item
+                        priority_item = await self._to_write.get()
+                except asyncio.QueueEmpty:
+                    # Queue empty but we have delayed frames - sleep until soonest is ready
+                    if self._delayed_frames:
+                        soonest_us = min(ready_at for ready_at, _ in self._delayed_frames.values())
+                        sleep_us = max(0, soonest_us - now_us)
+                        await asyncio.sleep(sleep_us / 1_000_000)
+                    continue
+
                 item = priority_item.item
 
                 if isinstance(item, _BinaryFrame):
+                    # Check epoch
                     if item.epoch_all != self._binary_epoch_all:
                         continue
                     if item.epoch_family != self._binary_epoch_by_family.get(item.role_family, 0):
                         continue
+
+                    # Check rate limit
+                    wait_us = self._get_binary_frame_wait_us(item)
+                    if wait_us < 0:
+                        # Frame is late, discard it
+                        continue
+                    if wait_us > 0:
+                        # Delay this frame - one per role family
+                        ready_at_us = now_us + wait_us
+                        self._delayed_frames[item.role_family] = (ready_at_us, priority_item)
+                        continue
+
+                    # Send immediately
                     await self._send_binary_frame(wsock, item)
                     continue
 
