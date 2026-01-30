@@ -229,10 +229,10 @@ class ControllerGroupRole(GroupRole):
             except Exception:
                 logger.exception("Error in controller event listener")
 
-    # --- Player volume event subscription ---
+    # --- Client added/removed hooks ---
 
-    def subscribe_to_player_client(self, client: SendspinClient) -> None:
-        """Subscribe to volume events from a player client."""
+    def on_client_added(self, client: SendspinClient) -> None:
+        """Subscribe to volume events from player clients."""
         if client in self._player_client_unsubs:
             return
         if not has_role_family("player", client.negotiated_roles):
@@ -245,8 +245,8 @@ class ControllerGroupRole(GroupRole):
         unsub = client.add_event_listener(on_client_event)
         self._player_client_unsubs[client] = unsub
 
-    def unsubscribe_from_player_client(self, client: SendspinClient) -> None:
-        """Unsubscribe from volume events from a player client."""
+    def on_client_removed(self, client: SendspinClient) -> None:
+        """Unsubscribe from player client events."""
         if client in self._player_client_unsubs:
             self._player_client_unsubs[client]()
             del self._player_client_unsubs[client]

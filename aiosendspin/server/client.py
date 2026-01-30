@@ -181,35 +181,14 @@ class SendspinClient:
         return self._client_state
 
     async def handle_state_transition(self, new_state: ClientStateType) -> None:
-        """Handle client state transitions.
-
-        When transitioning to external_source:
-        - If in multi-client group: remember previous group, move to solo group
-        - If already in solo group: stop playback
-        """
-        from .roles.controller.v1 import ControllerRoleState  # noqa: PLC0415
-
+        """Handle client state transitions by notifying all roles."""
+        old_state = self._client_state
         self._client_state = new_state
 
-        if new_state != ClientStateType.EXTERNAL_SOURCE:
-            return
-
-        is_multi_client_group = len(self.group.clients) > 1
-
-        if is_multi_client_group:
-            # Store previous group in controller role state (persists across reconnects)
-            state = self.ensure_role_state("controller", ControllerRoleState)
-            state.previous_group_id = self.group.group_id
-            self._logger.debug(
-                "Storing previous group %s for external_source client",
-                state.previous_group_id,
-            )
-            await self.group.remove_client(self)
-            state.external_source_solo_group_id = self.group.group_id
-            return
-
-        self._logger.debug("Client already in solo group, stopping playback for external_source")
-        await self.group.stop()
+        for role in self._roles.values():
+            coro = role.on_state_transition(old_state, new_state)
+            if coro is not None:
+                await coro
 
     def check_role(self, role: Roles) -> bool:
         """Check if the client has a role active (by role family)."""

@@ -16,12 +16,15 @@ from typing import TYPE_CHECKING
 from uuid import UUID
 
 if TYPE_CHECKING:
+    from collections.abc import Coroutine
+    from typing import Any
+
     from aiosendspin.models.core import (
         ClientCommandPayload,
         ClientStatePayload,
         StreamRequestFormatPayload,
     )
-    from aiosendspin.models.types import GoodbyeReason, ServerMessage
+    from aiosendspin.models.types import ClientStateType, GoodbyeReason, ServerMessage
     from aiosendspin.server.audio import BufferTracker
     from aiosendspin.server.audio_transformers import AudioTransformer
     from aiosendspin.server.client import SendspinClient
@@ -116,6 +119,16 @@ class GroupRole(ABC):
 
     def on_member_leave(self, role: Role) -> None:  # noqa: B027
         """Handle member unsubscription."""
+
+    def on_client_added(self, client: SendspinClient) -> None:  # noqa: B027
+        """Handle a client being added to this group.
+
+        Called for ALL clients, not just those with matching roles.
+        Use for cross-role coordination (e.g., controller subscribing to player volume).
+        """
+
+    def on_client_removed(self, client: SendspinClient) -> None:  # noqa: B027
+        """Handle a client being removed from this group."""
 
     def get_group_volume(self) -> int | None:
         """Return group volume (0-100) if supported."""
@@ -342,6 +355,18 @@ class Role(ABC):
         """Handle group changes by re-subscribing to the new GroupRole."""
         self._unsubscribe_from_group_role()
         self._subscribe_to_group_role()
+
+    def on_state_transition(
+        self,
+        old_state: ClientStateType,  # noqa: ARG002
+        new_state: ClientStateType,  # noqa: ARG002
+    ) -> Coroutine[Any, Any, None] | None:
+        """Handle client state transitions.
+
+        Return a coroutine if async work is needed, else None.
+        Called when client/state reports a new operational state.
+        """
+        return None
 
     # --- Message hooks ---
 

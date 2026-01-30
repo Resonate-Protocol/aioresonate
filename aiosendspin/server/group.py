@@ -29,7 +29,6 @@ from .push_stream import PushStream
 
 if TYPE_CHECKING:
     from .client import SendspinClient
-    from .roles.controller.group import ControllerGroupRole
     from .server import SendspinServer
 
 logger = logging.getLogger(__name__)
@@ -342,15 +341,6 @@ class SendspinGroup:
         """Get the GroupRole for a role family."""
         return self._group_roles.get(family)
 
-    def _controller_group_role(self) -> ControllerGroupRole | None:
-        """Get the ControllerGroupRole (type-safe accessor)."""
-        from .roles.controller.group import ControllerGroupRole  # noqa: PLC0415
-
-        role = self._group_roles.get("controller")
-        if isinstance(role, ControllerGroupRole):
-            return role
-        return None
-
     def register_group_role(self, group_role: GroupRole) -> None:
         """Register a GroupRole (called during group initialization)."""
         self._group_roles[group_role.role_family] = group_role
@@ -383,16 +373,14 @@ class SendspinGroup:
                 logger.exception("Error in event listener")
 
     def _register_client_events(self, client: SendspinClient) -> None:
-        """Register event listeners for client events like volume changes."""
-        controller_role = self._controller_group_role()
-        if controller_role is not None:
-            controller_role.subscribe_to_player_client(client)
+        """Notify GroupRoles that a client was added."""
+        for group_role in self._group_roles.values():
+            group_role.on_client_added(client)
 
     def _unregister_client_events(self, client: SendspinClient) -> None:
-        """Unregister event listeners for a client."""
-        controller_role = self._controller_group_role()
-        if controller_role is not None:
-            controller_role.unsubscribe_from_player_client(client)
+        """Notify GroupRoles that a client was removed."""
+        for group_role in self._group_roles.values():
+            group_role.on_client_removed(client)
 
     @property
     def group_id(self) -> str:
@@ -445,9 +433,11 @@ class SendspinGroup:
             commands: List of MediaCommand values that the application can handle.
                 Empty list means no commands are supported.
         """
-        controller_role = self._controller_group_role()
-        if controller_role is not None:
-            controller_role.set_supported_commands(commands)
+        from .roles.controller.group import ControllerGroupRole  # noqa: PLC0415
+
+        role = self._group_roles.get("controller")
+        if isinstance(role, ControllerGroupRole):
+            role.set_supported_commands(commands)
 
     async def remove_client(self, client: SendspinClient) -> None:
         """

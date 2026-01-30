@@ -9,8 +9,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Coroutine
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from aiosendspin.models.controller import ControllerCommandPayload
 from aiosendspin.models.types import (
@@ -83,6 +84,40 @@ class ControllerRole(Role):
     def on_disconnect(self) -> None:
         """Unsubscribe from ControllerGroupRole."""
         self._unsubscribe_from_group_role()
+
+    def on_state_transition(
+        self,
+        old_state: ClientStateType,  # noqa: ARG002
+        new_state: ClientStateType,
+    ) -> Coroutine[Any, Any, None] | None:
+        """Handle external_source transitions by moving client to solo group."""
+        if new_state != ClientStateType.EXTERNAL_SOURCE:
+            return None
+        return self._handle_external_source_transition()
+
+    async def _handle_external_source_transition(self) -> None:
+        """Handle transition to external_source state.
+
+        When transitioning to external_source:
+        - If in multi-client group: remember previous group, move to solo group
+        - If already in solo group: stop playback
+        """
+        is_multi_client_group = len(self._client.group.clients) > 1
+
+        if is_multi_client_group:
+            # Store previous group in controller role state (persists across reconnects)
+            state = self._get_state()
+            state.previous_group_id = self._client.group.group_id
+            self._logger.debug(
+                "Storing previous group %s for external_source client",
+                state.previous_group_id,
+            )
+            await self._client.group.remove_client(self._client)
+            state.external_source_solo_group_id = self._client.group.group_id
+            return
+
+        self._logger.debug("Client already in solo group, stopping playback for external_source")
+        await self._client.group.stop()
 
     def on_command(self, payload: ClientCommandPayload) -> None:
         """Handle client/command payload."""
