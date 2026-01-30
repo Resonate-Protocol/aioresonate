@@ -14,7 +14,6 @@ __all__ = [
     "ClientGroupChangedEvent",
     "ClientRemovedEvent",
     "DisconnectBehaviour",
-    "GroupCommandEvent",
     "GroupDeletedEvent",
     "GroupEvent",
     "GroupMemberAddedEvent",
@@ -33,7 +32,6 @@ from .audio import AudioFormat
 from .client import DisconnectBehaviour, SendspinClient
 from .events import ClientEvent, ClientGroupChangedEvent, VolumeChangedEvent
 from .group import (
-    GroupCommandEvent,
     GroupDeletedEvent,
     GroupEvent,
     GroupMemberAddedEvent,

@@ -453,7 +453,7 @@ class SendspinConnection:
         if isinstance(message, StreamRequestFormatMessage):
             if self._client is None:
                 return
-            await self._client.group.handle_stream_format_request(self._client, message.payload)
+            self._client.group.handle_stream_format_request(self._client, message.payload)
             return
 
         if isinstance(message, ClientCommandMessage):

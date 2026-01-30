@@ -90,8 +90,7 @@ def _make_player_client(
     return client, conn
 
 
-@pytest.mark.asyncio
-async def test_player_format_request_does_not_send_stream_start_when_stream_active(
+def test_player_format_request_does_not_send_stream_start_when_stream_active(
     mock_server: MagicMock,
 ) -> None:
     """
@@ -117,14 +116,13 @@ async def test_player_format_request_does_not_send_stream_start_when_stream_acti
             codec=AudioCodec.FLAC, sample_rate=48000, channels=2, bit_depth=16
         )
     )
-    await group.handle_stream_format_request(client, request)
+    group.handle_stream_format_request(client, request)
 
     # No immediate stream/start should be sent while streaming is active.
     assert not any(isinstance(msg, StreamStartMessage) for msg in conn.sent)
 
 
-@pytest.mark.asyncio
-async def test_player_format_request_sends_stream_start_when_no_stream_active(
+def test_player_format_request_sends_stream_start_when_no_stream_active(
     mock_server: MagicMock,
 ) -> None:
     """When no PushStream is active, stream/request-format should be acked with stream/start."""
@@ -143,6 +141,6 @@ async def test_player_format_request_sends_stream_start_when_no_stream_active(
             codec=AudioCodec.FLAC, sample_rate=48000, channels=2, bit_depth=16
         )
     )
-    await group.handle_stream_format_request(client, request)
+    group.handle_stream_format_request(client, request)
 
     assert any(isinstance(msg, StreamStartMessage) for msg in conn.sent)

@@ -8,35 +8,18 @@ import uuid
 from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import dataclass
-from io import BytesIO
 from typing import TYPE_CHECKING
 
-from PIL import Image
-
-from aiosendspin.models import (
-    BinaryMessageType,
-    pack_binary_header_raw,
-)
-from aiosendspin.models.artwork import (
-    ArtworkChannel,
-    StreamArtworkChannelConfig,
-    StreamStartArtwork,
-)
 from aiosendspin.models.core import (
     GroupUpdateServerMessage,
     GroupUpdateServerPayload,
     StreamEndMessage,
     StreamEndPayload,
     StreamRequestFormatPayload,
-    StreamStartMessage,
-    StreamStartPayload,
 )
 from aiosendspin.models.types import (
-    ArtworkSource,
     MediaCommand,
-    PictureFormat,
     PlaybackStateType,
-    Roles,
     has_role_family,
 )
 from aiosendspin.server.roles import GroupRole, Role
@@ -57,19 +40,6 @@ logger = logging.getLogger(__name__)
 
 class GroupEvent:
     """Base event type used by SendspinGroup.add_event_listener()."""
-
-
-# TODO: make types more fancy
-@dataclass
-class GroupCommandEvent(GroupEvent):
-    """A command was sent to the group."""
-
-    command: MediaCommand
-    """The command that was sent."""
-    volume: int | None = None
-    """For MediaCommand.VOLUME, the target volume (0-100)."""
-    mute: bool | None = None
-    """For MediaCommand.MUTE, the target mute status."""
 
 
 @dataclass
@@ -101,24 +71,6 @@ class GroupDeletedEvent(GroupEvent):
     """This group has no more members and has been deleted."""
 
 
-def _build_artwork_stream_info(
-    client_state: dict[int, ArtworkChannel],
-) -> StreamStartArtwork:
-    """Build StreamStartArtwork from client artwork channel state."""
-    stream_channels = []
-    for channel_num in sorted(client_state.keys()):
-        channel = client_state[channel_num]
-        stream_channels.append(
-            StreamArtworkChannelConfig(
-                source=channel.source,
-                format=channel.format,
-                width=channel.media_width,
-                height=channel.media_height,
-            )
-        )
-    return StreamStartArtwork(channels=stream_channels)
-
-
 class SendspinGroup:
     """
     A group of one or more clients for synchronized playback.
@@ -130,12 +82,8 @@ class SendspinGroup:
 
     _clients: list[SendspinClient]
     """List of all clients in this group."""
-    _client_artwork_state: dict[str, dict[int, ArtworkChannel]]
-    """Mapping of client IDs to their per-channel artwork state (channel 0-3)."""
     _server: SendspinServer
     """Reference to the SendspinServer instance."""
-    _current_media_art: dict[ArtworkSource, Image.Image]
-    """Current media art images for the group, keyed by source type."""
     _event_cbs: list[Callable[[SendspinGroup, GroupEvent], None]]
     """List of event callbacks for this group."""
     _current_state: PlaybackStateType = PlaybackStateType.STOPPED
@@ -171,9 +119,7 @@ class SendspinGroup:
         """
         self._clients = list(args)
         assert len(self._clients) > 0, "A group must have at least one client"
-        self._client_artwork_state = {}
         self._server = server
-        self._current_media_art = {}
         self._event_cbs = []
         self._group_id = str(uuid.uuid4())
         self._group_name: str | None = None
@@ -330,9 +276,6 @@ class SendspinGroup:
             roles: Optional list of roles to end streams for. If None, ends all streams.
         """
         logger.debug("ending stream for %s (%s), roles=%s", client.name, client.client_id, roles)
-        # Lifetime of artwork state is bound to the stream
-        if roles is None or "artwork" in roles:
-            self._client_artwork_state.pop(client.client_id, None)
         client.send_message(StreamEndMessage(payload=StreamEndPayload(roles=roles)))
 
     def _schedule_delayed_stop(self, stop_time_us: int, active: bool, needs_cleanup: bool) -> bool:  # noqa: FBT001
@@ -439,182 +382,6 @@ class SendspinGroup:
 
             self._send_stopped_state_to_clients()
             return True
-
-    async def set_media_art(
-        self, image: Image.Image | None, source: ArtworkSource = ArtworkSource.ALBUM
-    ) -> None:
-        """Set or clear artwork image for the current media.
-
-        Args:
-            image: The artwork image to set, or None to clear artwork for this source
-            source: Source type (ALBUM or ARTIST), NONE is not allowed
-        """
-        if source == ArtworkSource.NONE:
-            raise ValueError("Cannot set artwork with source NONE")
-
-        if image is None:
-            self._current_media_art.pop(source, None)
-        else:
-            self._current_media_art[source] = image
-
-        # Gather all send tasks for matching channels
-        send_tasks = []
-        for client in self._clients:
-            client_state = self._client_artwork_state.get(client.client_id)
-            if client_state:
-                for channel_num, channel_config in client_state.items():
-                    if channel_config.source == source:
-                        send_tasks.append(
-                            self._send_media_art_to_client(client, image, channel_num)
-                        )
-
-        if send_tasks:
-            await asyncio.gather(*send_tasks, return_exceptions=True)
-
-    def _letterbox_image(
-        self, image: Image.Image, target_width: int, target_height: int
-    ) -> Image.Image:
-        """
-        Resize image to fit within target dimensions while preserving aspect ratio.
-
-        Uses letterboxing (black bars) to fill any remaining space.
-
-        Args:
-            image: Source image to resize
-            target_width: Target width in pixels
-            target_height: Target height in pixels
-
-        Returns:
-            Resized image with letterboxing if needed
-        """
-        # Calculate aspect ratios
-        image_aspect = image.width / image.height
-        target_aspect = target_width / target_height
-
-        if image_aspect > target_aspect:
-            # Image is wider than target - fit by width, letterbox on top/bottom
-            new_width = target_width
-            new_height = int(target_width / image_aspect)
-        else:
-            # Image is taller than target - fit by height, letterbox on left/right
-            new_height = target_height
-            new_width = int(target_height * image_aspect)
-
-        # Resize the image to the calculated size
-        resized = image.resize((new_width, new_height), Image.Resampling.LANCZOS)
-
-        # Create a new image with the target size and black background
-        letterboxed = Image.new("RGB", (target_width, target_height), (0, 0, 0))
-
-        # Calculate position to center the resized image
-        x_offset = (target_width - new_width) // 2
-        y_offset = (target_height - new_height) // 2
-
-        # Paste the resized image onto the letterboxed background
-        letterboxed.paste(resized, (x_offset, y_offset))
-
-        return letterboxed
-
-    async def _send_existing_artwork_to_clients(self) -> None:
-        """Send any pre-existing artwork images to all artwork clients."""
-        for client in self._clients:
-            client_state = self._client_artwork_state.get(client.client_id)
-            if client_state:
-                send_tasks = []
-                for channel_num, channel_config in client_state.items():
-                    if channel_config.source == ArtworkSource.NONE:
-                        continue
-                    artwork = self._current_media_art.get(channel_config.source)
-                    if artwork:
-                        send_tasks.append(
-                            self._send_media_art_to_client(client, artwork, channel_num)
-                        )
-                if send_tasks:
-                    await asyncio.gather(*send_tasks, return_exceptions=True)
-
-    async def _send_media_art_to_client(
-        self, client: SendspinClient, image: Image.Image | None, channel: int
-    ) -> None:
-        """Send or clear media art to a specific client channel.
-
-        Args:
-            client: Client to send to
-            image: Image to send, or None to clear artwork on this channel
-            channel: Channel number (0-3)
-        """
-        if not client.check_role(Roles.ARTWORK):
-            return
-
-        client_state = self._client_artwork_state.get(client.client_id)
-        if client_state is None:
-            logger.warning(
-                "Cannot send artwork to client %s channel %d: no active stream",
-                client.client_id,
-                channel,
-            )
-            return
-        if channel not in client_state:
-            logger.warning(
-                "Cannot send artwork to client %s channel %d: channel not configured",
-                client.client_id,
-                channel,
-            )
-            return
-
-        message_type = BinaryMessageType.ARTWORK_CHANNEL_0.value + channel
-        timestamp_us = self._server.clock.now_us()
-        header = pack_binary_header_raw(message_type, timestamp_us)
-
-        if image is None:
-            client.try_send_binary(
-                header,
-                role_family="artwork",
-                timestamp_us=timestamp_us,
-                message_type=message_type,
-            )
-        else:
-            channel_state = client_state[channel]
-            # Process and encode image in thread to avoid blocking event loop
-            img_data = await asyncio.to_thread(
-                self._process_and_encode_image,
-                image,
-                channel_state.media_width,
-                channel_state.media_height,
-                channel_state.format,
-            )
-            client.try_send_binary(
-                header + img_data,
-                role_family="artwork",
-                timestamp_us=timestamp_us,
-                message_type=message_type,
-            )
-
-    def _process_and_encode_image(
-        self,
-        image: Image.Image,
-        width: int,
-        height: int,
-        art_format: PictureFormat,
-    ) -> bytes:
-        """
-        Process and encode image for client.
-
-        NOTE: This method is not async friendly.
-        """
-        # Use letterboxing to preserve aspect ratio
-        resized_image = self._letterbox_image(image, width, height)
-
-        with BytesIO() as img_bytes:
-            if art_format == PictureFormat.JPEG:
-                resized_image.save(img_bytes, format="JPEG", quality=85)
-            elif art_format == PictureFormat.PNG:
-                resized_image.save(img_bytes, format="PNG", compress_level=6)
-            elif art_format == PictureFormat.BMP:
-                resized_image.save(img_bytes, format="BMP")
-            else:
-                raise NotImplementedError(f"Unsupported artwork format: {art_format}")
-            img_bytes.seek(0)
-            return img_bytes.read()
 
     @property
     def clients(self) -> list[SendspinClient]:
@@ -784,10 +551,7 @@ class SendspinGroup:
             for role in client.active_roles:
                 role.on_stream_end()
                 handled = True
-            if handled:
-                # Artwork state lifetime is bound to the stream.
-                self._client_artwork_state.pop(client.client_id, None)
-            else:
+            if not handled:
                 self._send_stream_end_msg(client)
         if not self._clients:
             # Emit event for group deletion, no clients left
@@ -874,30 +638,17 @@ class SendspinGroup:
         logger.debug("Sending group update to new client %s", client.client_id)
         client.send_message(group_message)
 
-        # Note: Controller state is sent via ControllerGroupRole.on_member_join()
+        # Note: Role-specific state (controller, metadata, artwork) is sent
+        # via respective GroupRole.on_member_join() methods
 
-        # Send current media art to the new client if available
-        client_state = self._client_artwork_state.get(client.client_id)
-        if client_state:
-            send_tasks = []
-            for channel_num, channel_config in client_state.items():
-                if channel_config.source == ArtworkSource.NONE:
-                    continue
-                artwork = self._current_media_art.get(channel_config.source)
-                if artwork:
-                    send_tasks.append(self._send_media_art_to_client(client, artwork, channel_num))
-            if send_tasks:
-                await asyncio.gather(*send_tasks, return_exceptions=True)
-
-    async def handle_stream_format_request(
+    def handle_stream_format_request(
         self,
         client: SendspinClient,
         request: StreamRequestFormatPayload,
     ) -> None:
         """Handle stream/request-format from a client.
 
-        If a PushStream is active, format switching is delegated to the stream/role
-        layer so stream/start(new) is emitted at a safe boundary.
+        Delegates to the appropriate role for handling.
         """
         if request.player:
             player_roles = client.roles_by_family("player")
@@ -910,66 +661,14 @@ class SendspinGroup:
                 role.on_stream_request_format(request, stream_active=self.has_active_stream)
 
         if request.artwork:
-            if not client.check_role(Roles.ARTWORK):
+            artwork_roles = client.roles_by_family("artwork")
+            if not artwork_roles:
                 raise ValueError(
                     f"Client {client.client_id} sent artwork format request "
-                    "but does not have artwork role"
+                    "but has no active artwork role"
                 )
-
-            artwork_request = request.artwork
-
-            if not client.info.artwork_support:
-                raise ValueError(
-                    f"Client {client.client_id} sent artwork format request "
-                    "but has no artwork support"
-                )
-
-            client_state = self._client_artwork_state.get(client.client_id)
-            if client_state is None:
-                return
-
-            if artwork_request.channel not in client_state:
-                raise ValueError(
-                    f"Invalid channel {artwork_request.channel} from client {client.client_id} "
-                    f"(client declared {len(client.info.artwork_support.channels)} channels)"
-                )
-
-            current_channel = client_state[artwork_request.channel]
-
-            updated_channel = ArtworkChannel(
-                source=artwork_request.source
-                if artwork_request.source is not None
-                else current_channel.source,
-                format=artwork_request.format
-                if artwork_request.format is not None
-                else current_channel.format,
-                media_width=artwork_request.media_width
-                if artwork_request.media_width is not None
-                else current_channel.media_width,
-                media_height=artwork_request.media_height
-                if artwork_request.media_height is not None
-                else current_channel.media_height,
-            )
-
-            client_state[artwork_request.channel] = updated_channel
-
-            stream_start = StreamStartPayload(
-                artwork=_build_artwork_stream_info(client_state),
-            )
-
-            logger.debug(
-                "Sending stream/start to client %s for artwork format change on channel %d",
-                client.client_id,
-                artwork_request.channel,
-            )
-            client.send_message(StreamStartMessage(stream_start))
-
-            if updated_channel.source != ArtworkSource.NONE:
-                artwork = self._current_media_art.get(updated_channel.source)
-                if artwork:
-                    await self._send_media_art_to_client(client, artwork, artwork_request.channel)
-
-        # Player format changes are handled above.
+            for role in artwork_roles:
+                role.on_stream_request_format(request)
 
     def _get_player_role(self, client: SendspinClient) -> Role | None:
         """Return the first active player role for a client."""
