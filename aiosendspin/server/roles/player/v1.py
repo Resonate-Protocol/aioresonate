@@ -98,6 +98,8 @@ class PlayerRole(Role):
         self._late_skips_since_log = 0
         # Cached state reference (avoids repeated dict lookup + isinstance check)
         self._cached_state: PlayerPersistentState | None = None
+        self._stream_start_delay_until_us: int | None = None
+        self._stream_start_burst_until_us: int | None = None
 
     @property
     def role_id(self) -> str:
@@ -262,6 +264,12 @@ class PlayerRole(Role):
         )
         self.send_message(stream_start)
         self._stream_started = True
+        # Allow client to process stream/start before first binary audio.
+        self._stream_start_delay_until_us = self._client._server.clock.now_us() + 200_000  # noqa: SLF001
+        # Allow initial burst to fill client buffer quickly (legacy behavior).
+        self._stream_start_burst_until_us = (
+            self._client._server.clock.now_us() + 5_000_000  # noqa: SLF001
+        )
 
     def on_audio_chunk(self, chunk: AudioChunk) -> bool:
         """Pack and send binary audio. Late audio is discarded by connection."""
