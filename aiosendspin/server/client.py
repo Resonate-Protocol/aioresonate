@@ -7,6 +7,7 @@ its identity, group membership, and per-role persistent state (e.g. BufferTracke
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Callable
 from contextlib import suppress
@@ -21,6 +22,7 @@ from aiosendspin.models.core import (
 from aiosendspin.models.types import (
     BinaryMessageType,
     ClientStateType,
+    GoodbyeReason,
     MediaCommand,
     PlaybackStateType,
     Roles,
@@ -34,7 +36,7 @@ from .roles.base import BinaryHandling
 from .roles.registry import create_role
 
 if TYPE_CHECKING:
-    from aiosendspin.models.types import GoodbyeReason, ServerMessage
+    from aiosendspin.models.types import ServerMessage
 
     from .connection import SendspinConnection
     from .group import SendspinGroup
@@ -44,6 +46,18 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _T = TypeVar("_T")
+
+# Cleanup delay for non-immediate disconnect reasons (seconds)
+CLIENT_CLEANUP_DELAY = 30.0
+
+# Reasons that trigger immediate client cleanup from the registry
+IMMEDIATE_CLEANUP_REASONS: frozenset[GoodbyeReason] = frozenset(
+    {
+        GoodbyeReason.SHUTDOWN,
+        GoodbyeReason.USER_REQUEST,
+        GoodbyeReason.ANOTHER_SERVER,  # TODO(multi-server): handle multi server support
+    }
+)
 
 
 class DisconnectBehaviour(Enum):
@@ -96,6 +110,9 @@ class SendspinClient:
         # Cache for binary handling lookup: message_type -> (BinaryHandling, Role)
         # Built when roles are attached for O(1) lookup in _send_binary_frame().
         self._binary_handling_cache: dict[int, tuple[BinaryHandling, Role]] = {}
+
+        # Pending cleanup handle (scheduled via loop.call_soon/call_later on disconnect)
+        self._cleanup_handle: asyncio.Handle | None = None
 
     @property
     def client_id(self) -> str:
@@ -211,6 +228,12 @@ class SendspinClient:
         active_roles: list[str],
     ) -> None:
         """Attach a new WebSocket connection to this client."""
+        # Cancel pending cleanup if client reconnected before cleanup fired
+        if self._cleanup_handle is not None:
+            self._logger.debug("Cancelling pending cleanup due to reconnect")
+            self._cleanup_handle.cancel()
+            self._cleanup_handle = None
+
         if self._connection is not None and self._connection is not connection:
             # Replace an existing connection for the same device.
             self._logger.debug("Replacing existing connection for %s", self._client_id)
@@ -271,6 +294,36 @@ class SendspinClient:
         self._binary_handling_cache.clear()
 
         self._connection = None
+
+        # Schedule client cleanup from registry
+        self._schedule_cleanup(goodbye_reason)
+
+    def _schedule_cleanup(self, goodbye_reason: GoodbyeReason | None) -> None:
+        """Schedule cleanup from server registry based on disconnect reason."""
+        if goodbye_reason in IMMEDIATE_CLEANUP_REASONS:
+            # Immediate cleanup for explicit disconnect reasons
+            self._logger.debug("Scheduling immediate cleanup (reason: %s)", goodbye_reason)
+            self._cleanup_handle = self._server.loop.call_soon(self._do_cleanup)
+        else:
+            # Delayed cleanup for reconnect-friendly scenarios
+            self._logger.debug(
+                "Scheduling delayed cleanup in %.0fs (reason: %s)",
+                CLIENT_CLEANUP_DELAY,
+                goodbye_reason,
+            )
+            self._cleanup_handle = self._server.loop.call_later(
+                CLIENT_CLEANUP_DELAY, self._do_cleanup
+            )
+
+    def _do_cleanup(self) -> None:
+        """Remove this client from the server registry."""
+        self._cleanup_handle = None
+        if self._connected:
+            # Client reconnected, don't clean up
+            return
+        self._logger.debug("Cleaning up client from registry")
+        task = self._server.loop.create_task(self._server.remove_client(self._client_id))
+        task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
 
     # ---- Messaging (delegates to connection) ----
 

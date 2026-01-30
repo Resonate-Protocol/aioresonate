@@ -158,6 +158,14 @@ class SendspinServer:
             self._signal_event(ClientAddedEvent(client_id))
         return client
 
+    async def remove_client(self, client_id: str) -> None:
+        """Remove a client from the persistent registry."""
+        client = self._clients.pop(client_id, None)
+        if client is None:
+            return
+        await client.group.remove_client(client)
+        self._signal_event(ClientRemovedEvent(client_id))
+
     def add_event_listener(
         self, callback: Callable[[SendspinServer, SendspinEvent], None]
     ) -> Callable[[], None]:
