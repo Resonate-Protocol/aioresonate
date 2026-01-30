@@ -85,7 +85,7 @@ repos:
         pass_filenames: false
       - id: pytest
         name: 🧪 Pytest
-        entry: scripts/run-in-env.sh pytest
+        entry: scripts/run-in-env.sh pytest --no-cov
         language: script
         types: [python]
         require_serial: true

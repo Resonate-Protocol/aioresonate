@@ -38,6 +38,7 @@ test = [
   "pytest==9.0.2",
   "pytest-aiohttp==1.1.0",
   "pytest-cov==7.0.0",
+  "pytest-xdist==3.8.0",
   "syrupy==5.0.0",
   "tomli==2.4.0",
   "ruff==0.14.11",
@@ -103,7 +104,7 @@ packages = ["aiosendspin"]
 line-ending = "lf"
 
 [tool.pytest.ini_options]
-addopts = "--cov"
+addopts = "--cov -n auto"
 asyncio_mode = "auto"
 
 [tool.ruff.lint]

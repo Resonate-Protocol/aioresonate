@@ -11,7 +11,8 @@ import pytest
 from aiosendspin.models.core import ClientHelloPayload
 from aiosendspin.models.player import ClientHelloPlayerSupport, SupportedAudioFormat
 from aiosendspin.models.types import AudioCodec, GoodbyeReason, PlayerCommand, Roles
-from aiosendspin.server.client import CLIENT_CLEANUP_DELAY, SendspinClient
+from aiosendspin.server import client as client_module
+from aiosendspin.server.client import SendspinClient
 from aiosendspin.server.clock import LoopClock
 from aiosendspin.server.group import SendspinGroup
 
@@ -76,6 +77,11 @@ async def mock_server() -> _MockServer:
     return _MockServer(loop=loop, clock=LoopClock(loop))
 
 
+@pytest.fixture(autouse=True)
+def _fast_cleanup_delay(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(client_module, "CLIENT_CLEANUP_DELAY", 0.2)
+
+
 @pytest.fixture
 async def client(mock_server: _MockServer) -> SendspinClient:
     """Create a connected client attached to the mock server."""
@@ -134,7 +140,7 @@ async def test_delayed_cleanup_on_reconnectable_disconnect(
     mock_server.remove_client.assert_not_awaited()
 
     # Wait for the delayed cleanup
-    await asyncio.sleep(CLIENT_CLEANUP_DELAY + 0.1)
+    await asyncio.sleep(client_module.CLIENT_CLEANUP_DELAY + 0.1)
 
     mock_server.remove_client.assert_awaited_once_with("player-1")
 
@@ -147,7 +153,7 @@ async def test_cleanup_cancelled_on_reconnect(
     client.detach_connection(GoodbyeReason.RESTART)
 
     # Wait some time but not until cleanup fires
-    await asyncio.sleep(1.0)
+    await asyncio.sleep(client_module.CLIENT_CLEANUP_DELAY / 2)
     mock_server.remove_client.assert_not_awaited()
 
     # Client reconnects
@@ -159,7 +165,7 @@ async def test_cleanup_cancelled_on_reconnect(
     client.mark_connected()
 
     # Wait past the original cleanup time
-    await asyncio.sleep(CLIENT_CLEANUP_DELAY)
+    await asyncio.sleep(client_module.CLIENT_CLEANUP_DELAY)
 
     # Should not have been cleaned up
     mock_server.remove_client.assert_not_awaited()
