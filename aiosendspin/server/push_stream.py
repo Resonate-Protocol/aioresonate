@@ -904,6 +904,16 @@ class PushStream:
             self._cache_pump_handle = None
         self._pump_cached_chunks()
 
+    def on_role_leave(self, role: Role) -> None:
+        """Remove role-specific state so re-joins get fresh stream/start."""
+        self._started_roles.discard(role)
+        self._role_chunk_cursors.pop(role, None)
+        # Drop cached transform keys for this role to avoid stale lookups.
+        role_id = id(role)
+        for cache_key in list(self._transform_key_cache.keys()):
+            if cache_key[0] == role_id:
+                self._transform_key_cache.pop(cache_key, None)
+
     def has_cached_chunks(self) -> bool:
         """Return True if there are cached chunks for late joiners."""
         return any(len(chunks) > 0 for chunks in self._role_chunk_cache.values())

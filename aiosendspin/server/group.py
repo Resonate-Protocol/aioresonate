@@ -476,6 +476,8 @@ class SendspinGroup:
             handled = False
             for role in client.active_roles:
                 role.on_stream_end()
+                if self._push_stream is not None and not self._push_stream.is_stopped:
+                    self._push_stream.on_role_leave(role)
                 handled = True
             if not handled:
                 self._send_stream_end_msg(client)
