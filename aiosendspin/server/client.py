@@ -319,25 +319,15 @@ class SendspinClient:
 
     async def handle_controller_command(self, payload: ControllerCommandPayload) -> None:
         """Handle controller commands from this client."""
-        # Get supported commands from the group
-        supported_commands = self.group._get_supported_commands()  # noqa: SLF001
-
-        # Validate command is supported
-        if payload.command not in supported_commands:
-            self._logger.warning(
-                "Client %s sent unsupported command '%s'. Supported commands: %s",
-                self._client_id,
-                payload.command.value,
-                [cmd.value for cmd in supported_commands],
-            )
-            # Silently ignore unsupported commands (spec doesn't define error responses)
-            return
-
+        # SWITCH command requires async handling at client level
         if payload.command == MediaCommand.SWITCH:
             await self._handle_switch_command()
-        else:
-            # Forward other commands to the group
-            self.group._handle_group_command(payload)  # noqa: SLF001
+            return
+
+        # Forward all other commands to ControllerGroupRole
+        controller_role = self.group._controller_group_role()  # noqa: SLF001
+        if controller_role is not None:
+            controller_role.handle_command(payload)
 
     async def _handle_switch_command(self) -> None:
         """Handle the switch command to cycle through groups."""

@@ -22,15 +22,9 @@ from aiosendspin.models.artwork import (
     StreamArtworkChannelConfig,
     StreamStartArtwork,
 )
-from aiosendspin.models.controller import (
-    ControllerCommandPayload,
-    ControllerStatePayload,
-)
 from aiosendspin.models.core import (
     GroupUpdateServerMessage,
     GroupUpdateServerPayload,
-    ServerStateMessage,
-    ServerStatePayload,
     StreamEndMessage,
     StreamEndPayload,
     StreamRequestFormatPayload,
@@ -55,6 +49,7 @@ from .transformers import TransformerPool
 
 if TYPE_CHECKING:
     from .client import SendspinClient
+    from .roles.controller.group import ControllerGroupRole
     from .server import SendspinServer
 
 logger = logging.getLogger(__name__)
@@ -153,14 +148,6 @@ class SendspinGroup:
     """Absolute timestamp in microseconds when playback started, None when not streaming."""
     _scheduled_stop_handle: asyncio.TimerHandle | None
     """Timer handle for scheduled stop, None when no stop is scheduled."""
-    _last_sent_volume: int | None
-    """Last volume sent to controller clients, for change detection."""
-    _last_sent_muted: bool | None
-    """Last muted state sent to controller clients, for change detection."""
-    _last_sent_supported_commands: list[MediaCommand] | None
-    """Last computed supported commands sent to clients (output of _get_supported_commands())."""
-    _supported_commands: list[MediaCommand]
-    """Commands supported by the application (input to _get_supported_commands())."""
     _playback_lock: asyncio.Lock
     """Lock to serialize play_media() and stop() operations, preventing race conditions."""
     _push_stream: PushStream | None
@@ -192,10 +179,6 @@ class SendspinGroup:
         self._group_name: str | None = None
         self._play_start_time_us: int | None = None
         self._scheduled_stop_handle: asyncio.TimerHandle | None = None
-        self._last_sent_volume: int | None = None
-        self._last_sent_muted: bool | None = None
-        self._last_sent_supported_commands: list[MediaCommand] | None = None
-        self._supported_commands: list[MediaCommand] = []
         self._client_event_unsubs: dict[SendspinClient, Callable[[], None]] = {}
         self._playback_lock = asyncio.Lock()
         self._push_stream: PushStream | None = None
@@ -253,7 +236,7 @@ class SendspinGroup:
             self._push_stream.stop()
 
     def _send_group_update_to_clients(self) -> None:
-        """Send group/update and server/state messages to all clients."""
+        """Send group/update messages to all clients."""
         group_message = GroupUpdateServerMessage(
             GroupUpdateServerPayload(
                 playback_state=self._current_state,
@@ -261,36 +244,8 @@ class SendspinGroup:
                 group_name=self.group_name,
             )
         )
-        supported_commands = self._get_supported_commands()
-        controller_state = ControllerStatePayload(
-            supported_commands=supported_commands,
-            volume=self.volume,
-            muted=self.muted,
-        )
-        # Update tracking variables
-        self._last_sent_volume = self.volume
-        self._last_sent_muted = self.muted
-        self._last_sent_supported_commands = supported_commands
-
         for client in self._clients:
-            self._send_group_update_to_client(client, group_message, controller_state)
-
-    def _send_group_update_to_client(
-        self,
-        client: SendspinClient,
-        group_message: GroupUpdateServerMessage,
-        controller_state: ControllerStatePayload,
-    ) -> None:
-        """Send group/update and the relevant server/state fields to a single client."""
-        client.send_message(group_message)
-
-        controller_for_client = controller_state if client.check_role(Roles.CONTROLLER) else None
-
-        if controller_for_client is None:
-            return
-
-        state_message = ServerStateMessage(ServerStatePayload(controller=controller_for_client))
-        client.send_message(state_message)
+            client.send_message(group_message)
 
     def on_client_connected(self, client: SendspinClient) -> None:
         """Send current group state to a client that just finished handshaking."""
@@ -304,49 +259,18 @@ class SendspinGroup:
                 group_name=self.group_name,
             )
         )
-        supported_commands = self._get_supported_commands()
-        controller_state = ControllerStatePayload(
-            supported_commands=supported_commands,
-            volume=self.volume,
-            muted=self.muted,
-        )
-        self._last_sent_volume = self.volume
-        self._last_sent_muted = self.muted
-        self._last_sent_supported_commands = supported_commands
-
-        self._send_group_update_to_client(client, group_message, controller_state)
+        client.send_message(group_message)
 
         if self._push_stream is not None and not self._push_stream.is_stopped:
             for role in client.active_roles:
                 if role.get_audio_requirements() is not None:
                     self._push_stream.on_role_join(role)
 
-    def _send_controller_state_to_clients(self) -> None:
-        """Send server/state with controller payload to all controller clients."""
-        current_volume = self.volume
-        current_muted = self.muted
-        current_supported_commands = self._get_supported_commands()
-
-        # Only send if any field changed
-        if (
-            self._last_sent_volume == current_volume
-            and self._last_sent_muted == current_muted
-            and self._last_sent_supported_commands == current_supported_commands
-        ):
-            return
-
-        self._last_sent_volume = current_volume
-        self._last_sent_muted = current_muted
-        self._last_sent_supported_commands = current_supported_commands
-        controller_state = ControllerStatePayload(
-            supported_commands=current_supported_commands,
-            volume=current_volume,
-            muted=current_muted,
-        )
-        for client in self._clients:
-            if client.check_role(Roles.CONTROLLER):
-                state_message = ServerStateMessage(ServerStatePayload(controller=controller_state))
-                client.send_message(state_message)
+    def _notify_controller_state_changed(self) -> None:
+        """Notify ControllerGroupRole to push state to members."""
+        controller_role = self._controller_group_role()
+        if controller_role is not None:
+            controller_role._push_state_to_members()  # noqa: SLF001
 
     def suggest_optimal_sample_rate(self, source_sample_rate: int) -> int:
         """
@@ -461,25 +385,8 @@ class SendspinGroup:
                 group_name=self.group_name,
             )
         )
-        supported_commands = self._get_supported_commands()
-        controller_state = ControllerStatePayload(
-            supported_commands=supported_commands,
-            volume=self.volume,
-            muted=self.muted,
-        )
-        # Update tracking variables
-        self._last_sent_volume = self.volume
-        self._last_sent_muted = self.muted
-        self._last_sent_supported_commands = supported_commands
-
         for client in self._clients:
-            # Send group/update to all clients
             client.send_message(group_message)
-
-            # Send controller state to controller clients
-            if client.check_role(Roles.CONTROLLER):
-                state_message = ServerStateMessage(ServerStatePayload(controller=controller_state))
-                client.send_message(state_message)
 
     async def stop(self, stop_time_us: int | None = None) -> bool:
         """
@@ -728,6 +635,15 @@ class SendspinGroup:
         """Get the GroupRole for a role family."""
         return self._group_roles.get(family)
 
+    def _controller_group_role(self) -> ControllerGroupRole | None:
+        """Get the ControllerGroupRole (type-safe accessor)."""
+        from .roles.controller.group import ControllerGroupRole  # noqa: PLC0415
+
+        role = self._group_roles.get("controller")
+        if isinstance(role, ControllerGroupRole):
+            return role
+        return None
+
     def register_group_role(self, group_role: GroupRole) -> None:
         """Register a GroupRole (called during group initialization)."""
         self._group_roles[group_role.role_family] = group_role
@@ -737,41 +653,6 @@ class SendspinGroup:
         return [
             client for client in self._clients if has_role_family("player", client.negotiated_roles)
         ]
-
-    def _get_supported_commands(self) -> list[MediaCommand]:
-        """Get list of commands supported based on application capabilities."""
-        # Commands handled internally by this library (always supported)
-        # TODO: differentiate between protocol and application supported commands?
-        # Now it's not clear if MediaCommand.SWITCH or VOLUME needs to be handled by the app
-        protocol_commands = [
-            MediaCommand.VOLUME,
-            MediaCommand.MUTE,
-            MediaCommand.SWITCH,
-        ]
-
-        if self._supported_commands:
-            # Return union of protocol commands and app-declared commands
-            return list(set(protocol_commands) | set(self._supported_commands))
-
-        # If app didn't declare any commands, only protocol commands are supported
-        return protocol_commands
-
-    def _handle_group_command(self, cmd: ControllerCommandPayload) -> None:
-        # Handle volume and mute commands directly
-        if cmd.command == MediaCommand.VOLUME and cmd.volume is not None:
-            self.set_volume(cmd.volume)
-            return
-        if cmd.command == MediaCommand.MUTE and cmd.mute is not None:
-            self.set_mute(cmd.mute)
-            return
-
-        # Signal the event for application commands (PLAY, PAUSE, STOP, etc.)
-        event = GroupCommandEvent(
-            command=cmd.command,
-            volume=cmd.volume,
-            mute=cmd.mute,
-        )
-        self._signal_event(event)
 
     def add_event_listener(
         self, callback: Callable[[SendspinGroup, GroupEvent], None]
@@ -806,8 +687,8 @@ class SendspinGroup:
         # Inline function to capture self
         def on_client_event(_client: SendspinClient, event: ClientEvent) -> None:
             if isinstance(event, VolumeChangedEvent):
-                # When any player's volume changes, update controller clients
-                self._send_controller_state_to_clients()
+                # When any player's volume changes, notify ControllerGroupRole
+                self._notify_controller_state_changed()
 
         unsub = client.add_event_listener(on_client_event)
         self._client_event_unsubs[client] = unsub
@@ -854,14 +735,14 @@ class SendspinGroup:
         for role in self._group_roles.values():
             if role.set_group_volume(volume_level) is not None:
                 break
-        self._send_controller_state_to_clients()
+        self._notify_controller_state_changed()
 
     def set_mute(self, muted: bool) -> None:  # noqa: FBT001
         """Set group mute state, delegated to group roles."""
         for role in self._group_roles.values():
             if role.set_group_muted(muted) is not None:
                 break
-        self._send_controller_state_to_clients()
+        self._notify_controller_state_changed()
 
     def set_supported_commands(self, commands: list[MediaCommand]) -> None:
         """
@@ -871,8 +752,9 @@ class SendspinGroup:
             commands: List of MediaCommand values that the application can handle.
                 Empty list means no commands are supported.
         """
-        self._supported_commands = commands
-        self._send_controller_state_to_clients()
+        controller_role = self._controller_group_role()
+        if controller_role is not None:
+            controller_role.set_supported_commands(commands)
 
     async def remove_client(self, client: SendspinClient) -> None:
         """
@@ -992,16 +874,7 @@ class SendspinGroup:
         logger.debug("Sending group update to new client %s", client.client_id)
         client.send_message(group_message)
 
-        # Send controller state to controller clients
-        if client.check_role(Roles.CONTROLLER):
-            controller_state = ControllerStatePayload(
-                supported_commands=self._get_supported_commands(),
-                volume=self.volume,
-                muted=self.muted,
-            )
-            state_message = ServerStateMessage(ServerStatePayload(controller=controller_state))
-            logger.debug("Sending server state to new client %s", client.client_id)
-            client.send_message(state_message)
+        # Note: Controller state is sent via ControllerGroupRole.on_member_join()
 
         # Send current media art to the new client if available
         client_state = self._client_artwork_state.get(client.client_id)
