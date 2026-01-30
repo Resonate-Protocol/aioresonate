@@ -30,7 +30,7 @@ from aiosendspin.models.types import AudioCodec
 
 from .audio import AudioFormat
 from .client import DisconnectBehaviour, SendspinClient
-from .events import ClientEvent, ClientGroupChangedEvent, VolumeChangedEvent
+from .events import ClientEvent, ClientGroupChangedEvent
 from .group import (
     GroupDeletedEvent,
     GroupEvent,
@@ -39,4 +39,5 @@ from .group import (
     GroupStateChangedEvent,
     SendspinGroup,
 )
+from .roles.player.events import VolumeChangedEvent
 from .server import ClientAddedEvent, ClientRemovedEvent, SendspinEvent, SendspinServer

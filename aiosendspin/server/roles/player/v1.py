@@ -30,7 +30,6 @@ from aiosendspin.models.player import PlayerCommandPayload, StreamStartPlayer
 from aiosendspin.models.types import GoodbyeReason, PlayerCommand
 from aiosendspin.server.audio import AudioFormat, BufferTracker
 from aiosendspin.server.channels import MAIN_CHANNEL
-from aiosendspin.server.events import VolumeChangedEvent
 from aiosendspin.server.roles.base import (
     AudioChunk,
     AudioRequirements,
@@ -39,6 +38,7 @@ from aiosendspin.server.roles.base import (
     StreamRequirements,
 )
 from aiosendspin.server.roles.player.audio_transformers import FlacEncoder, PcmPassthrough
+from aiosendspin.server.roles.player.events import VolumeChangedEvent
 
 if TYPE_CHECKING:
     from aiosendspin.server.client import SendspinClient

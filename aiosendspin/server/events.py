@@ -1,4 +1,4 @@
-"""Event types for the Sendspin server."""
+"""Client event base types."""
 
 from __future__ import annotations
 
@@ -6,19 +6,11 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from .group import SendspinGroup
+    from aiosendspin.server.group import SendspinGroup
 
 
 class ClientEvent:
     """Base event type used by Client.add_event_listener()."""
-
-
-@dataclass
-class VolumeChangedEvent(ClientEvent):
-    """The volume or mute status of the player was changed."""
-
-    volume: int
-    muted: bool
 
 
 @dataclass

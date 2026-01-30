@@ -25,8 +25,8 @@ from aiosendspin.models.types import (
     Roles,
     has_role,
 )
-from aiosendspin.server.events import ClientEvent, ClientGroupChangedEvent
 
+from .events import ClientEvent, ClientGroupChangedEvent
 from .roles import Role
 from .roles.base import BinaryHandling
 from .roles.registry import create_role

@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING
 from aiosendspin.models.controller import ControllerCommandPayload, ControllerStatePayload
 from aiosendspin.models.core import ServerStateMessage, ServerStatePayload
 from aiosendspin.models.types import MediaCommand, RepeatMode, has_role_family
-from aiosendspin.server.events import ClientEvent, VolumeChangedEvent
+from aiosendspin.server.events import ClientEvent
 from aiosendspin.server.roles.base import GroupRole, Role
 from aiosendspin.server.roles.controller.events import (
     ControllerEvent,
@@ -25,6 +25,7 @@ from aiosendspin.server.roles.controller.events import (
     ControllerSwitchEvent,
     ControllerVolumeEvent,
 )
+from aiosendspin.server.roles.player.events import VolumeChangedEvent
 
 if TYPE_CHECKING:
     from aiosendspin.server.client import SendspinClient
