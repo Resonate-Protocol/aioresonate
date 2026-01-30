@@ -7,7 +7,7 @@ import logging
 import uuid
 from collections.abc import Callable
 from contextlib import suppress
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from io import BytesIO
 from typing import TYPE_CHECKING
 
@@ -37,7 +37,6 @@ from aiosendspin.models.core import (
     StreamStartMessage,
     StreamStartPayload,
 )
-from aiosendspin.models.metadata import Progress
 from aiosendspin.models.types import (
     ArtworkSource,
     MediaCommand,
@@ -51,7 +50,6 @@ from aiosendspin.server.roles.registry import create_group_roles
 
 from .channels import ChannelRouter
 from .events import ClientEvent, VolumeChangedEvent
-from .metadata import Metadata
 from .push_stream import PushStream
 from .transformers import TransformerPool
 
@@ -141,8 +139,6 @@ class SendspinGroup:
     """Mapping of client IDs to their per-channel artwork state (channel 0-3)."""
     _server: SendspinServer
     """Reference to the SendspinServer instance."""
-    _current_metadata: Metadata | None = None
-    """Current metadata for the group, None if no metadata set."""
     _current_media_art: dict[ArtworkSource, Image.Image]
     """Current media art images for the group, keyed by source type."""
     _event_cbs: list[Callable[[SendspinGroup, GroupEvent], None]]
@@ -155,8 +151,6 @@ class SendspinGroup:
     """Friendly name for this group."""
     _play_start_time_us: int | None
     """Absolute timestamp in microseconds when playback started, None when not streaming."""
-    _track_progress_timestamp_us: int | None
-    """Timestamp in microseconds when track_progress was last updated, for progress calculation."""
     _scheduled_stop_handle: asyncio.TimerHandle | None
     """Timer handle for scheduled stop, None when no stop is scheduled."""
     _last_sent_volume: int | None
@@ -192,13 +186,11 @@ class SendspinGroup:
         assert len(self._clients) > 0, "A group must have at least one client"
         self._client_artwork_state = {}
         self._server = server
-        self._current_metadata = None
         self._current_media_art = {}
         self._event_cbs = []
         self._group_id = str(uuid.uuid4())
         self._group_name: str | None = None
         self._play_start_time_us: int | None = None
-        self._track_progress_timestamp_us: int | None = None
         self._scheduled_stop_handle: asyncio.TimerHandle | None = None
         self._last_sent_volume: int | None = None
         self._last_sent_muted: bool | None = None
@@ -292,36 +284,12 @@ class SendspinGroup:
         """Send group/update and the relevant server/state fields to a single client."""
         client.send_message(group_message)
 
-        metadata_for_client = None
-        if client.check_role(Roles.METADATA):
-            if self._current_metadata is not None:
-                metadata_update = self._current_metadata.snapshot_update(
-                    self._server.clock.now_us()
-                )
-            else:
-                metadata_update = Metadata.cleared_update(self._server.clock.now_us())
-            if self._current_metadata is not None:
-                current_progress = self._get_current_track_progress()
-                if (
-                    current_progress is not None
-                    and self._current_metadata.track_duration is not None
-                    and self._current_metadata.playback_speed is not None
-                ):
-                    metadata_update.progress = Progress(
-                        track_progress=current_progress,
-                        track_duration=self._current_metadata.track_duration,
-                        playback_speed=self._current_metadata.playback_speed,
-                    )
-            metadata_for_client = metadata_update
-
         controller_for_client = controller_state if client.check_role(Roles.CONTROLLER) else None
 
-        if metadata_for_client is None and controller_for_client is None:
+        if controller_for_client is None:
             return
 
-        state_message = ServerStateMessage(
-            ServerStatePayload(metadata=metadata_for_client, controller=controller_for_client)
-        )
+        state_message = ServerStateMessage(ServerStatePayload(controller=controller_for_client))
         client.send_message(state_message)
 
     def on_client_connected(self, client: SendspinClient) -> None:
@@ -564,95 +532,6 @@ class SendspinGroup:
 
             self._send_stopped_state_to_clients()
             return True
-
-    def _get_current_track_progress(self) -> int | None:
-        """
-        Calculate the current track progress in milliseconds.
-
-        Returns the calculated progress based on playback time if actively playing,
-        otherwise returns the stored progress value.
-        """
-        if self._current_metadata is None or self._current_metadata.track_progress is None:
-            return None
-
-        # If we have a stored timestamp and we're actively playing, calculate current progress
-        if (
-            self._track_progress_timestamp_us is not None
-            and self.has_active_stream
-            and self._current_metadata.playback_speed is not None
-        ):
-            current_time_us = self._server.clock.now_us()
-            elapsed_us = current_time_us - self._track_progress_timestamp_us
-            # playback_speed is stored as int * 1000 (e.g., 1000 = normal speed)
-            # Convert elapsed microseconds to milliseconds, accounting for playback speed
-            elapsed_ms = (elapsed_us * self._current_metadata.playback_speed) // 1_000_000
-            calculated_progress = self._current_metadata.track_progress + elapsed_ms
-
-            # Clamp to valid range
-            # If track_duration is 0, it indicates unlimited/unknown duration (e.g., live streams)
-            # In this case, only clamp to >= 0
-            if (
-                self._current_metadata.track_duration is not None
-                and self._current_metadata.track_duration > 0
-            ):
-                # Normal track with known duration: clamp to [0, track_duration]
-                calculated_progress = max(
-                    0, min(calculated_progress, self._current_metadata.track_duration)
-                )
-            else:
-                # Live stream (track_duration == 0) or unknown duration: only clamp to >= 0
-                calculated_progress = max(0, calculated_progress)
-
-            return calculated_progress
-
-        # Otherwise return the stored value
-        return self._current_metadata.track_progress
-
-    def set_metadata(self, metadata: Metadata | None) -> None:
-        """
-        Set metadata for the group and send to all clients.
-
-        Only sends updates for fields that have changed since the last call.
-
-        Args:
-            metadata: The new metadata to send to clients.
-        """
-        # TODO: integrate this more closely with play_media?
-        timestamp = self._server.clock.now_us()
-
-        if metadata is not None:
-            if metadata.timestamp_us is None:
-                metadata = replace(metadata, timestamp_us=timestamp)
-            else:
-                timestamp = metadata.timestamp_us
-
-        if metadata is not None and metadata.equals(self._current_metadata):
-            # No meaningful change, skip this update
-            return
-        last_metadata = self._current_metadata
-        if metadata is None:
-            # Clear all metadata fields when metadata is None
-            metadata_update = Metadata.cleared_update(timestamp)
-        else:
-            # Only include fields that have changed since the last metadata update
-            metadata_update = metadata.diff_update(last_metadata, timestamp)
-
-        # Send server/state for metadata only to metadata clients
-        for client in self._clients:
-            if client.check_role(Roles.METADATA):
-                state_message = ServerStateMessage(ServerStatePayload(metadata=metadata_update))
-                logger.debug(
-                    "Sending server state to client %s",
-                    client.client_id,
-                )
-                client.send_message(state_message)
-
-        # Update current metadata
-        self._current_metadata = metadata
-
-        # Store timestamp when track_progress is updated for progress calculation
-        if metadata is not None and metadata.track_progress is not None:
-            self._track_progress_timestamp_us = timestamp
 
     async def set_media_art(
         self, image: Image.Image | None, source: ArtworkSource = ArtworkSource.ALBUM
@@ -1039,7 +918,7 @@ class SendspinGroup:
         # Send group update to notify client of their new solo group
         new_group.on_client_connected(client)
 
-    async def add_client(self, client: SendspinClient) -> None:  # noqa: PLR0915
+    async def add_client(self, client: SendspinClient) -> None:
         """
         Add a client to this group.
 
@@ -1113,44 +992,14 @@ class SendspinGroup:
         logger.debug("Sending group update to new client %s", client.client_id)
         client.send_message(group_message)
 
-        # Build server/state payload with relevant fields for this client
-        metadata_for_client = None
-        if client.check_role(Roles.METADATA):
-            if self._current_metadata is not None:
-                metadata_update = self._current_metadata.snapshot_update(
-                    self._server.clock.now_us()
-                )
-                # Use calculated track progress for actively playing content
-                current_progress = self._get_current_track_progress()
-                # Update the progress object with current calculated progress
-                if (
-                    current_progress is not None
-                    and self._current_metadata.track_duration is not None
-                    and self._current_metadata.playback_speed is not None
-                ):
-                    metadata_update.progress = Progress(
-                        track_progress=current_progress,
-                        track_duration=self._current_metadata.track_duration,
-                        playback_speed=self._current_metadata.playback_speed,
-                    )
-                metadata_for_client = metadata_update
-            else:
-                # Explicitly clear metadata for clients joining a group without existing metadata
-                metadata_for_client = Metadata.cleared_update(self._server.clock.now_us())
-
-        controller_for_client = None
+        # Send controller state to controller clients
         if client.check_role(Roles.CONTROLLER):
-            controller_for_client = ControllerStatePayload(
+            controller_state = ControllerStatePayload(
                 supported_commands=self._get_supported_commands(),
                 volume=self.volume,
                 muted=self.muted,
             )
-
-        # Send single server/state message with all relevant payloads
-        if metadata_for_client is not None or controller_for_client is not None:
-            state_message = ServerStateMessage(
-                ServerStatePayload(metadata=metadata_for_client, controller=controller_for_client)
-            )
+            state_message = ServerStateMessage(ServerStatePayload(controller=controller_state))
             logger.debug("Sending server state to new client %s", client.client_id)
             client.send_message(state_message)
 
