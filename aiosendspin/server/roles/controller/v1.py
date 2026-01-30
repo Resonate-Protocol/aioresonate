@@ -7,10 +7,10 @@ This role handles bidirectional communication:
 
 from __future__ import annotations
 
+import asyncio
 import logging
-from collections.abc import Coroutine
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from aiosendspin.models.controller import ControllerCommandPayload
 from aiosendspin.models.types import (
@@ -83,19 +83,21 @@ class ControllerRole(Role):
         """Unsubscribe from ControllerGroupRole."""
         self._unsubscribe_from_group_role()
 
-    def on_command(self, payload: ClientCommandPayload) -> Coroutine[Any, Any, None] | None:
+    def on_command(self, payload: ClientCommandPayload) -> None:
         """Handle client/command payload."""
         controller_cmd = payload.controller
         if controller_cmd is None:
-            return None
+            return
 
         if controller_cmd.command == MediaCommand.SWITCH:
-            return self._handle_switch_command()
+            # Launch eager task for async group operations
+            task = asyncio.create_task(self._handle_switch_command())
+            task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
+            return
 
         # Forward other commands to group role
         if self._group_role is not None:
             self._group_role.handle_command(controller_cmd)
-        return None
 
     def handle_command(self, cmd: ControllerCommandPayload) -> None:
         """Forward a controller command to the group role.

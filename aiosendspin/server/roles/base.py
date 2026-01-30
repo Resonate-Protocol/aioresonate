@@ -10,9 +10,9 @@ This module contains:
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from collections.abc import Coroutine, Mapping
+from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 from uuid import UUID
 
 if TYPE_CHECKING:
@@ -354,10 +354,8 @@ class Role(ABC):
     ) -> None:
         """Handle stream/request-format payload."""
 
-    def on_command(self, payload: ClientCommandPayload) -> Coroutine[Any, Any, None] | None:  # noqa: ARG002
+    def on_command(self, payload: ClientCommandPayload) -> None:  # noqa: B027
         """Handle client/command payload.
 
-        Return a coroutine if async handling is needed, None otherwise.
-        The connection will await the coroutine if returned.
+        Handlers must be synchronous. For async operations, launch eager tasks.
         """
-        return None

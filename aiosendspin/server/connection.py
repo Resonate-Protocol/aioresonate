@@ -461,9 +461,7 @@ class SendspinConnection:
             if self._client is None:
                 return
             for role in self._client.active_roles:
-                coro = role.on_command(message.payload)
-                if coro is not None:
-                    await coro
+                role.on_command(message.payload)
             return
 
         if isinstance(message, ClientGoodbyeMessage):
