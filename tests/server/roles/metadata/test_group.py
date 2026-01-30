@@ -6,7 +6,7 @@ from unittest.mock import MagicMock
 
 from aiosendspin.models.core import ServerStateMessage
 from aiosendspin.models.types import RepeatMode
-from aiosendspin.server.metadata import Metadata
+from aiosendspin.server.roles.metadata import Metadata
 from aiosendspin.server.roles.metadata.group import MetadataGroupRole
 
 

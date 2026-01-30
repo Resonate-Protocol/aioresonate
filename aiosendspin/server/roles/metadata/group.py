@@ -8,8 +8,8 @@ from typing import TYPE_CHECKING
 from aiosendspin.models.core import ServerStateMessage, ServerStatePayload
 from aiosendspin.models.metadata import Progress
 from aiosendspin.models.types import RepeatMode
-from aiosendspin.server.metadata import Metadata
 from aiosendspin.server.roles.base import GroupRole, Role
+from aiosendspin.server.roles.metadata.state import Metadata
 
 if TYPE_CHECKING:
     from aiosendspin.server.group import SendspinGroup
