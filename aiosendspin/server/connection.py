@@ -20,8 +20,12 @@ from aiosendspin.models.core import (
     ClientHelloPayload,
     ClientStateMessage,
     ClientTimeMessage,
+    GroupUpdateServerMessage,
+    GroupUpdateServerPayload,
     ServerHelloMessage,
     ServerHelloPayload,
+    ServerStateMessage,
+    ServerStatePayload,
     ServerTimeMessage,
     ServerTimePayload,
     StreamClearMessage,
@@ -229,6 +233,14 @@ class SendspinConnection:
         if isinstance(message, StreamClearMessage | StreamEndMessage):
             self.drop_pending_binary(message.payload.roles)
 
+        # Coalesce consecutive state-like messages to avoid client-side clearing on omitted fields.
+        if self._normal_messages:
+            last_seq, last_message = self._normal_messages[-1]
+            merged = self._merge_state_messages(last_message, message)
+            if merged is not None:
+                self._normal_messages[-1] = (last_seq, merged)
+                return
+
         if self._queue_size >= MAX_PENDING_MSG:
             if not self._disconnecting:
                 self._logger.error("Message queue full, client too slow - disconnecting")
@@ -244,6 +256,39 @@ class SendspinConnection:
 
         if not isinstance(message, ServerTimeMessage):
             self._logger.debug("Enqueueing message: %s", type(message).__name__)
+
+    def _merge_state_messages(
+        self,
+        existing: ServerMessage,
+        incoming: ServerMessage,
+    ) -> ServerMessage | None:
+        """Merge consecutive state-like messages where safe."""
+        if isinstance(existing, ServerStateMessage) and isinstance(incoming, ServerStateMessage):
+            metadata = incoming.payload.metadata or existing.payload.metadata
+            controller = incoming.payload.controller or existing.payload.controller
+            return ServerStateMessage(ServerStatePayload(metadata=metadata, controller=controller))
+        if isinstance(existing, GroupUpdateServerMessage) and isinstance(
+            incoming, GroupUpdateServerMessage
+        ):
+            payload = GroupUpdateServerPayload(
+                playback_state=(
+                    incoming.payload.playback_state
+                    if incoming.payload.playback_state is not None
+                    else existing.payload.playback_state
+                ),
+                group_id=(
+                    incoming.payload.group_id
+                    if incoming.payload.group_id is not None
+                    else existing.payload.group_id
+                ),
+                group_name=(
+                    incoming.payload.group_name
+                    if incoming.payload.group_name is not None
+                    else existing.payload.group_name
+                ),
+            )
+            return GroupUpdateServerMessage(payload)
+        return None
 
     def send_priority_message(self, message: ServerMessage) -> None:
         """Enqueue a high-priority message (processed before regular queue)."""
