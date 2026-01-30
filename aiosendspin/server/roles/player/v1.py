@@ -53,8 +53,8 @@ class PlayerPersistentState:
     preferred_format: AudioFormat | None = None
     preferred_codec: AudioCodec | None = None
     buffer_tracker: BufferTracker | None = None
-    buffer_capacity_scale: float = 1 / 3
-    max_duration_us: int = 2_000_000
+    buffer_capacity_scale: float = 1.0
+    max_duration_us: int = 10_000_000
     disconnect_time_us: int | None = None
     buffer_reset_handle: object | None = None
 
