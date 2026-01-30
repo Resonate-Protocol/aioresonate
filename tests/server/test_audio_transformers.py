@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-from aiosendspin.server.channels import MAIN_CHANNEL
-from aiosendspin.server.transformers import (
+from aiosendspin.server.audio_transformers import (
     AudioTransformer,
     FlacEncoder,
     PcmPassthrough,
     TransformerPool,
 )
+from aiosendspin.server.channels import MAIN_CHANNEL
 
 
 class TestAudioTransformerProtocol:

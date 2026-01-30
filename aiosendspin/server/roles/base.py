@@ -23,9 +23,9 @@ if TYPE_CHECKING:
     )
     from aiosendspin.models.types import GoodbyeReason, ServerMessage
     from aiosendspin.server.audio import BufferTracker
+    from aiosendspin.server.audio_transformers import AudioTransformer
     from aiosendspin.server.client import SendspinClient
     from aiosendspin.server.group import SendspinGroup
-    from aiosendspin.server.transformers import AudioTransformer
 
 
 @dataclass(frozen=True)

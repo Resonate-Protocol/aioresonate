@@ -7,11 +7,11 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from aiosendspin.models.types import Roles
+from aiosendspin.server.audio_transformers import TransformerPool
 from aiosendspin.server.channels import ChannelRouter
 from aiosendspin.server.clock import LoopClock
 from aiosendspin.server.group import SendspinGroup
 from aiosendspin.server.push_stream import PushStream
-from aiosendspin.server.transformers import TransformerPool
 
 
 class TestGroupStartStream:

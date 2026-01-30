@@ -19,13 +19,13 @@ from aiosendspin.models.core import StreamClearMessage, StreamEndMessage, Stream
 from aiosendspin.models.player import ClientHelloPlayerSupport, SupportedAudioFormat
 from aiosendspin.models.types import AudioCodec, PlayerCommand, Roles
 from aiosendspin.server.audio import AudioFormat
+from aiosendspin.server.audio_transformers import FlacEncoder, PcmPassthrough
 from aiosendspin.server.channels import MAIN_CHANNEL, ChannelRouter
 from aiosendspin.server.client import SendspinClient
 from aiosendspin.server.clock import ManualClock
 from aiosendspin.server.group import SendspinGroup
 from aiosendspin.server.push_stream import PushStream
 from aiosendspin.server.roles import AudioRequirements
-from aiosendspin.server.transformers import FlacEncoder, PcmPassthrough
 
 
 @dataclass(slots=True)

@@ -23,9 +23,9 @@ from aiosendspin.models.types import (
 from aiosendspin.server.roles import GroupRole
 from aiosendspin.server.roles.registry import create_group_roles
 
+from .audio_transformers import TransformerPool
 from .channels import ChannelRouter
 from .push_stream import PushStream
-from .transformers import TransformerPool
 
 if TYPE_CHECKING:
     from .client import SendspinClient

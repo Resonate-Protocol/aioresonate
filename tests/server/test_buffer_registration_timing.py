@@ -11,11 +11,11 @@ import pytest
 
 from aiosendspin.models.player import ClientHelloPlayerSupport, SupportedAudioFormat
 from aiosendspin.models.types import AudioCodec, PlayerCommand, Roles
+from aiosendspin.server.audio_transformers import TransformerPool
 from aiosendspin.server.client import SendspinClient
 from aiosendspin.server.clock import LoopClock
 from aiosendspin.server.connection import SendspinConnection
 from aiosendspin.server.roles.base import AudioChunk
-from aiosendspin.server.transformers import TransformerPool
 
 
 @dataclass(slots=True)

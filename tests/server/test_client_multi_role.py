@@ -8,10 +8,10 @@ from unittest.mock import MagicMock
 
 from aiosendspin.models.player import ClientHelloPlayerSupport, SupportedAudioFormat
 from aiosendspin.models.types import AudioCodec, PlayerCommand
+from aiosendspin.server.audio_transformers import TransformerPool
 from aiosendspin.server.client import SendspinClient
 from aiosendspin.server.clock import LoopClock
 from aiosendspin.server.roles import PlayerRole
-from aiosendspin.server.transformers import TransformerPool
 
 
 @dataclass(slots=True)

@@ -21,12 +21,12 @@ from aiosendspin.server.transform_keys import TransformKey, normalize_options
 if TYPE_CHECKING:
     import av
 
+    from aiosendspin.server.audio_transformers import AudioTransformer
     from aiosendspin.server.channels import ChannelRouter
     from aiosendspin.server.client import SendspinClient
     from aiosendspin.server.clock import Clock
     from aiosendspin.server.group import SendspinGroup
     from aiosendspin.server.roles import AudioRequirements, Role
-    from aiosendspin.server.transformers import AudioTransformer
 
 _LOGGER = logging.getLogger(__name__)
 
