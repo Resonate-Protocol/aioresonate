@@ -217,7 +217,6 @@ class SendspinServer:
                     async with self._client_session.ws_connect(
                         url,
                         heartbeat=30,
-                        compress=False,
                         timeout=ClientWSTimeout(ws_close=10, ws_receive=60),  # pyright: ignore[reportCallIssue]
                     ) as wsock:
                         backoff = 1.0
