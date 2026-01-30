@@ -9,7 +9,8 @@ from typing import TYPE_CHECKING
 
 from aiosendspin.models.controller import ControllerCommandPayload, ControllerStatePayload
 from aiosendspin.models.core import ServerStateMessage, ServerStatePayload
-from aiosendspin.models.types import MediaCommand, RepeatMode
+from aiosendspin.models.types import MediaCommand, RepeatMode, has_role_family
+from aiosendspin.server.events import ClientEvent, VolumeChangedEvent
 from aiosendspin.server.roles.base import GroupRole, Role
 from aiosendspin.server.roles.controller.events import (
     ControllerEvent,
@@ -26,6 +27,7 @@ from aiosendspin.server.roles.controller.events import (
 )
 
 if TYPE_CHECKING:
+    from aiosendspin.server.client import SendspinClient
     from aiosendspin.server.group import SendspinGroup
 
 logger = logging.getLogger(__name__)
@@ -48,6 +50,8 @@ class ControllerGroupRole(GroupRole):
         self._last_sent_muted: bool | None = None
         self._last_sent_supported_commands: list[MediaCommand] | None = None
         self._event_cbs: list[Callable[[ControllerEvent], None]] = []
+        # Track volume event subscriptions for player clients
+        self._player_client_unsubs: dict[SendspinClient, Callable[[], None]] = {}
 
     @property
     def volume(self) -> int:
@@ -223,3 +227,25 @@ class ControllerGroupRole(GroupRole):
                 cb(event)
             except Exception:
                 logger.exception("Error in controller event listener")
+
+    # --- Player volume event subscription ---
+
+    def subscribe_to_player_client(self, client: SendspinClient) -> None:
+        """Subscribe to volume events from a player client."""
+        if client in self._player_client_unsubs:
+            return
+        if not has_role_family("player", client.negotiated_roles):
+            return
+
+        def on_client_event(_client: SendspinClient, event: ClientEvent) -> None:
+            if isinstance(event, VolumeChangedEvent):
+                self._push_state_to_members()
+
+        unsub = client.add_event_listener(on_client_event)
+        self._player_client_unsubs[client] = unsub
+
+    def unsubscribe_from_player_client(self, client: SendspinClient) -> None:
+        """Unsubscribe from volume events from a player client."""
+        if client in self._player_client_unsubs:
+            self._player_client_unsubs[client]()
+            del self._player_client_unsubs[client]

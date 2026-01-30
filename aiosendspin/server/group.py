@@ -24,7 +24,6 @@ from aiosendspin.server.roles import GroupRole
 from aiosendspin.server.roles.registry import create_group_roles
 
 from .channels import ChannelRouter
-from .events import ClientEvent, VolumeChangedEvent
 from .push_stream import PushStream
 from .transformers import TransformerPool
 
@@ -123,7 +122,6 @@ class SendspinGroup:
         self._group_name: str | None = None
         self._play_start_time_us: int | None = None
         self._scheduled_stop_handle: asyncio.TimerHandle | None = None
-        self._client_event_unsubs: dict[SendspinClient, Callable[[], None]] = {}
         self._playback_lock = asyncio.Lock()
         self._push_stream: PushStream | None = None
         self._transformer_pool = TransformerPool()
@@ -209,12 +207,6 @@ class SendspinGroup:
             for role in client.active_roles:
                 if role.get_audio_requirements() is not None:
                     self._push_stream.on_role_join(role)
-
-    def _notify_controller_state_changed(self) -> None:
-        """Notify ControllerGroupRole to push state to members."""
-        controller_role = self._controller_group_role()
-        if controller_role is not None:
-            controller_role._push_state_to_members()  # noqa: SLF001
 
     def _send_stream_end_msg(self, client: SendspinClient, roles: list[str] | None = None) -> None:
         """Send a stream end message to a client.
@@ -392,21 +384,15 @@ class SendspinGroup:
 
     def _register_client_events(self, client: SendspinClient) -> None:
         """Register event listeners for client events like volume changes."""
-
-        # Inline function to capture self
-        def on_client_event(_client: SendspinClient, event: ClientEvent) -> None:
-            if isinstance(event, VolumeChangedEvent):
-                # When any player's volume changes, notify ControllerGroupRole
-                self._notify_controller_state_changed()
-
-        unsub = client.add_event_listener(on_client_event)
-        self._client_event_unsubs[client] = unsub
+        controller_role = self._controller_group_role()
+        if controller_role is not None:
+            controller_role.subscribe_to_player_client(client)
 
     def _unregister_client_events(self, client: SendspinClient) -> None:
         """Unregister event listeners for a client."""
-        if client in self._client_event_unsubs:
-            self._client_event_unsubs[client]()
-            del self._client_event_unsubs[client]
+        controller_role = self._controller_group_role()
+        if controller_role is not None:
+            controller_role.unsubscribe_from_player_client(client)
 
     @property
     def group_id(self) -> str:
@@ -444,14 +430,12 @@ class SendspinGroup:
         for role in self._group_roles.values():
             if role.set_group_volume(volume_level) is not None:
                 break
-        self._notify_controller_state_changed()
 
     def set_mute(self, muted: bool) -> None:  # noqa: FBT001
         """Set group mute state, delegated to group roles."""
         for role in self._group_roles.values():
             if role.set_group_muted(muted) is not None:
                 break
-        self._notify_controller_state_changed()
 
     def set_supported_commands(self, commands: list[MediaCommand]) -> None:
         """
