@@ -63,6 +63,7 @@ class ControllerRole(Role):
         self._stream_started = False
         self._buffer_tracker = None
         self._group_role: ControllerGroupRole | None = None
+        self._switch_lock = asyncio.Lock()
         self._logger = logger.getChild(str(client.client_id))
 
     @property
@@ -116,6 +117,14 @@ class ControllerRole(Role):
 
     async def _handle_switch_command(self) -> None:
         """Handle the switch command to cycle through groups."""
+        if self._switch_lock.locked():
+            self._logger.debug("Ignoring switch command; switch already in progress")
+            return
+        async with self._switch_lock:
+            await self._handle_switch_command_locked()
+
+    async def _handle_switch_command_locked(self) -> None:
+        """Handle the switch command to cycle through groups (locked)."""
         # Clients in external_source can't participate in playback
         if self._client.client_state == ClientStateType.EXTERNAL_SOURCE:
             self._logger.warning("Ignoring switch command while client is in external_source state")
