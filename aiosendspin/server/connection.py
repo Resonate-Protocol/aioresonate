@@ -732,71 +732,21 @@ class SendspinConnection:
                         wait_us = max(wait_us, delay_until - now_us)
                     if handling.buffer_track:
                         buffer_tracker = handling_role.get_buffer_tracker()
-                    if handling.rate_limit:
+                    if handling.rate_limit and buffer_tracker is not None:
                         duration_us = frame.duration_us or 0
-                        wait_us_duration = 0
-                        wait_us_ts = 0
-                        target_lead_us = 0
-                        allow_burst = False
-
-                        # Buffer-duration pacing (when tracker is available)
-                        initial_target_us = 0
-                        buffer_depth_us = 0
-                        if buffer_tracker is not None:
-                            buffer_tracker.prune_consumed(now_us)
-                            buffer_depth_us = buffer_tracker.buffered_duration_us
-                            max_dur = buffer_tracker.max_duration_us
-                            if max_dur > 0 and duration_us > 0:
-                                initial_target_us = max(handling.grace_period_us, 5_000_000)
-                                burst_until = getattr(
-                                    handling_role, "_stream_start_burst_until_us", None
-                                )
-                                if burst_until is not None and now_us < burst_until:
-                                    allow_burst = True
-                                if buffer_depth_us < initial_target_us:
-                                    effective_max = initial_target_us
-                                else:
-                                    effective_max = int(max_dur * handling.rate_limit_factor)
-                                if handling.grace_period_us > 0:
-                                    stream_start = handling_role._stream_start_time_us  # noqa: SLF001
-                                    if stream_start is not None:
-                                        elapsed_us = now_us - stream_start
-                                        if elapsed_us < handling.grace_period_us:
-                                            effective_max = max(
-                                                effective_max, max_dur + handling.grace_period_us
-                                            )
-                                projected = buffer_depth_us + duration_us
-                                if projected > effective_max:
-                                    wait_us_duration = projected - effective_max
-                        else:
+                        buffer_tracker.prune_consumed(now_us)
+                        buffer_depth_us = buffer_tracker.buffered_duration_us
+                        max_dur = buffer_tracker.max_duration_us
+                        if max_dur > 0 and duration_us > 0:
+                            # Allow burst during initial fill window
                             burst_until = getattr(
                                 handling_role, "_stream_start_burst_until_us", None
                             )
-                            if burst_until is not None and now_us < burst_until:
-                                allow_burst = True
-
-                        # Timestamp-based pacing (works even without buffer tracker)
-                        if frame.timestamp_us > 0:
-                            frame_duration_us = frame.duration_us or 25_000
-                            target_lead_us = max(target_lead_us, frame_duration_us)
-                            if buffer_tracker is not None and buffer_depth_us < initial_target_us:
-                                # Allow staged burst during initial fill to reach start threshold.
-                                if buffer_depth_us < 1_000_000:
-                                    target_lead_us = max(
-                                        target_lead_us, int(frame_duration_us * 4.0)
-                                    )
-                                elif buffer_depth_us < 3_000_000:
-                                    target_lead_us = max(
-                                        target_lead_us, int(frame_duration_us * 2.0)
-                                    )
-                            lead_us = frame.timestamp_us - now_us
-                            if lead_us > target_lead_us:
-                                wait_us_ts = lead_us - target_lead_us
-
-                        if allow_burst:
-                            wait_us_ts = 0
-                            wait_us_duration = 0
-                        wait_us = max(wait_us_ts, wait_us_duration)
+                            if burst_until is None or now_us >= burst_until:
+                                effective_max = int(max_dur * handling.rate_limit_factor)
+                                projected = buffer_depth_us + duration_us
+                                if projected > effective_max:
+                                    wait_us = max(wait_us, projected - effective_max)
 
                 if wait_us > 0:
                     # Delay this frame - one per role family
