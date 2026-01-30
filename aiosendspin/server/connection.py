@@ -83,16 +83,19 @@ class SendspinConnection:
         *,
         request: web.Request | None = None,
         wsock_client: ClientWebSocketResponse | None = None,
+        url: str | None = None,
     ) -> None:
         """Initialize a SendspinConnection.
 
         Exactly one of `request` (client-initiated) or `wsock_client` (server-initiated)
-        must be provided.
+        must be provided. For server-initiated connections, `url` should be provided
+        for connection reason lookup and client URL registration.
         """
         self._server = server
         self._wsock_client = wsock_client
         self._wsock_server: web.WebSocketResponse | None = None
         self._request = request
+        self._url = url  # For server-initiated connections
 
         if request is not None:
             if wsock_client is not None:
@@ -441,6 +444,17 @@ class SendspinConnection:
             client.attach_connection(self, client_info=client_info, active_roles=self._active_roles)
             self._client = client
 
+            # Register client_id → URL mapping for server-initiated connections
+            if self._url is not None:
+                self._server.register_client_url(client_info.client_id, self._url)
+
+            # Look up connection reason for server-initiated connections
+            connection_reason = (
+                self._server.get_connection_reason(self._url)
+                if self._url is not None
+                else ConnectionReason.DISCOVERY
+            )
+
             self.send_message(
                 ServerHelloMessage(
                     payload=ServerHelloPayload(
@@ -448,7 +462,7 @@ class SendspinConnection:
                         name=self._server.name,
                         version=1,
                         active_roles=self._active_roles,
-                        connection_reason=ConnectionReason.DISCOVERY,
+                        connection_reason=connection_reason,
                     )
                 )
             )

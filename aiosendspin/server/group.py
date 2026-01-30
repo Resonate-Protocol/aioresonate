@@ -160,6 +160,13 @@ class SendspinGroup:
             group=self,
             channel_router=channel_router,
         )
+
+        # Reclaim any disconnected clients in the group (multi-server support).
+        # This reconnects to clients that may have switched to another server.
+        for client in self._clients:
+            if not client.is_connected:
+                self._server.reclaim_client_for_playback(client.client_id)
+
         # Starting a stream implies the group is actively playing.
         if self._current_state != PlaybackStateType.PLAYING:
             self._current_state = PlaybackStateType.PLAYING
@@ -540,10 +547,15 @@ class SendspinGroup:
 
         # Handle player joining/reconnecting with active PushStream
         if self._push_stream is not None and not self._push_stream.is_stopped:
-            # Call on_role_join for all roles with audio requirements (hook-based flow)
-            for role in client.active_roles:
-                if role.get_audio_requirements() is not None:
-                    self._push_stream.on_role_join(role)
+            if not client.is_connected:
+                # Client is disconnected but joining a group with active playback.
+                # Try to reclaim it (multi-server support).
+                self._server.reclaim_client_for_playback(client.client_id)
+            else:
+                # Call on_role_join for all roles with audio requirements (hook-based flow)
+                for role in client.active_roles:
+                    if role.get_audio_requirements() is not None:
+                        self._push_stream.on_role_join(role)
 
         # Send current state to the new client
         group_message = GroupUpdateServerMessage(

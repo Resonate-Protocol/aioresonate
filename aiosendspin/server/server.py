@@ -26,6 +26,7 @@ from zeroconf import (
 )
 from zeroconf.asyncio import AsyncServiceBrowser, AsyncServiceInfo, AsyncZeroconf
 
+from aiosendspin.models.types import ConnectionReason
 from aiosendspin.util import get_local_ip
 
 from .client import SendspinClient
@@ -98,6 +99,8 @@ class SendspinServer:
 
         self._connection_tasks: dict[str, asyncio.Task[None]] = {}
         self._retry_events: dict[str, asyncio.Event] = {}
+        self._connection_reasons: dict[str, ConnectionReason] = {}  # url → reason
+        self._client_urls: dict[str, str] = {}  # client_id → url
 
         self._mdns_client_urls: dict[str, str] = {}
         self._app: web.Application | None = None
@@ -196,8 +199,11 @@ class SendspinServer:
         assert isinstance(websocket, web.WebSocketResponse)
         return websocket
 
-    def connect_to_client(self, url: str) -> None:
+    def connect_to_client(
+        self, url: str, *, connection_reason: ConnectionReason = ConnectionReason.DISCOVERY
+    ) -> None:
         """Connect to a Sendspin client at the given URL with automatic retries."""
+        self._connection_reasons[url] = connection_reason
         prev_task = self._connection_tasks.get(url)
         if prev_task is not None:
             if retry_event := self._retry_events.get(url):
@@ -206,6 +212,31 @@ class SendspinServer:
 
         self._retry_events[url] = asyncio.Event()
         self._connection_tasks[url] = self._loop.create_task(self._handle_client_connection(url))
+
+    def get_connection_reason(self, url: str) -> ConnectionReason:
+        """Get the connection reason for a URL (for use by SendspinConnection)."""
+        return self._connection_reasons.get(url, ConnectionReason.DISCOVERY)
+
+    def register_client_url(self, client_id: str, url: str) -> None:
+        """Record the URL used to connect to a client."""
+        self._client_urls[client_id] = url
+
+    def get_client_url(self, client_id: str) -> str | None:
+        """Get the URL for a client (for reconnection)."""
+        return self._client_urls.get(client_id)
+
+    def reclaim_client_for_playback(self, client_id: str) -> bool:
+        """Attempt to reconnect to a client for playback.
+
+        Returns True if reconnection was initiated, False if no URL available.
+        Used when starting playback to reclaim clients that disconnected with 'another_server'.
+        """
+        url = self._client_urls.get(client_id)
+        if url is None:
+            return False
+
+        self.connect_to_client(url, connection_reason=ConnectionReason.PLAYBACK)
+        return True
 
     def disconnect_from_client(self, url: str) -> None:
         """Disconnect a server-initiated connection previously established via connect_to_client."""
@@ -228,7 +259,7 @@ class SendspinServer:
                         timeout=ClientWSTimeout(ws_close=10, ws_receive=60),  # pyright: ignore[reportCallIssue]
                     ) as wsock:
                         backoff = 1.0
-                        conn = SendspinConnection(self, wsock_client=wsock)
+                        conn = SendspinConnection(self, wsock_client=wsock, url=url)
                         await conn._handle_client()  # noqa: SLF001
 
                     if self._client_session.closed:

@@ -46,12 +46,13 @@ _T = TypeVar("_T")
 # Cleanup delay for non-immediate disconnect reasons (seconds)
 CLIENT_CLEANUP_DELAY = 30.0
 
-# Reasons that trigger immediate client cleanup from the registry
+# Reasons that trigger immediate client cleanup from the registry.
+# Note: ANOTHER_SERVER is NOT included - the client stays registered so it can be
+# reclaimed for playback via server.reclaim_client_for_playback().
 IMMEDIATE_CLEANUP_REASONS: frozenset[GoodbyeReason] = frozenset(
     {
         GoodbyeReason.SHUTDOWN,
         GoodbyeReason.USER_REQUEST,
-        GoodbyeReason.ANOTHER_SERVER,  # TODO(multi-server): handle multi server support
     }
 )
 

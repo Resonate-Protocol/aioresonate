@@ -102,13 +102,12 @@ async def client(mock_server: _MockServer) -> SendspinClient:
     [
         GoodbyeReason.SHUTDOWN,
         GoodbyeReason.USER_REQUEST,
-        GoodbyeReason.ANOTHER_SERVER,
     ],
 )
 async def test_immediate_cleanup_on_explicit_disconnect(
     mock_server: _MockServer, client: SendspinClient, reason: GoodbyeReason
 ) -> None:
-    """Client is removed from registry immediately on SHUTDOWN/USER_REQUEST/ANOTHER_SERVER."""
+    """Client is removed from registry immediately on SHUTDOWN/USER_REQUEST."""
     client.detach_connection(reason)
 
     # Allow scheduled callback and resulting task to run
@@ -124,13 +123,14 @@ async def test_immediate_cleanup_on_explicit_disconnect(
     "reason",
     [
         GoodbyeReason.RESTART,
+        GoodbyeReason.ANOTHER_SERVER,  # Delayed for multi-server reclaim support
         None,  # Ungraceful disconnect
     ],
 )
 async def test_delayed_cleanup_on_reconnectable_disconnect(
     mock_server: _MockServer, client: SendspinClient, reason: GoodbyeReason | None
 ) -> None:
-    """Client cleanup is delayed for RESTART and ungraceful disconnects."""
+    """Client cleanup is delayed for RESTART, ANOTHER_SERVER, and ungraceful disconnects."""
     client.detach_connection(reason)
 
     # Allow immediate callbacks to run
