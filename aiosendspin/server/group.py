@@ -15,7 +15,6 @@ from aiosendspin.models.core import (
     GroupUpdateServerPayload,
     StreamEndMessage,
     StreamEndPayload,
-    StreamRequestFormatPayload,
 )
 from aiosendspin.models.types import (
     MediaCommand,
@@ -583,32 +582,3 @@ class SendspinGroup:
 
         # Note: Role-specific state (controller, metadata, artwork) is sent
         # via respective GroupRole.on_member_join() methods
-
-    def handle_stream_format_request(
-        self,
-        client: SendspinClient,
-        request: StreamRequestFormatPayload,
-    ) -> None:
-        """Handle stream/request-format from a client.
-
-        Delegates to the appropriate role for handling.
-        """
-        if request.player:
-            player_roles = client.roles_by_family("player")
-            if not player_roles:
-                raise ValueError(
-                    f"Client {client.client_id} sent player format request "
-                    "but has no active player role"
-                )
-            for role in player_roles:
-                role.on_stream_request_format(request, stream_active=self.has_active_stream)
-
-        if request.artwork:
-            artwork_roles = client.roles_by_family("artwork")
-            if not artwork_roles:
-                raise ValueError(
-                    f"Client {client.client_id} sent artwork format request "
-                    "but has no active artwork role"
-                )
-            for role in artwork_roles:
-                role.on_stream_request_format(request)

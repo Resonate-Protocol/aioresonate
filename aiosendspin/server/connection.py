@@ -32,7 +32,6 @@ from aiosendspin.models.types import (
     ClientMessage,
     ConnectionReason,
     GoodbyeReason,
-    Roles,
     ServerMessage,
     negotiate_active_roles,
 )
@@ -453,14 +452,18 @@ class SendspinConnection:
         if isinstance(message, StreamRequestFormatMessage):
             if self._client is None:
                 return
-            self._client.group.handle_stream_format_request(self._client, message.payload)
+            stream_active = self._client.group.has_active_stream
+            for role in self._client.active_roles:
+                role.on_stream_request_format(message.payload, stream_active=stream_active)
             return
 
         if isinstance(message, ClientCommandMessage):
             if self._client is None:
                 return
-            if message.payload.controller is not None and self._client.check_role(Roles.CONTROLLER):
-                await self._client.handle_controller_command(message.payload.controller)
+            for role in self._client.active_roles:
+                coro = role.on_command(message.payload)
+                if coro is not None:
+                    await coro
             return
 
         if isinstance(message, ClientGoodbyeMessage):

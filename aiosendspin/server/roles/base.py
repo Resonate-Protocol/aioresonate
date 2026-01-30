@@ -10,13 +10,17 @@ This module contains:
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from collections.abc import Mapping
+from collections.abc import Coroutine, Mapping
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
 if TYPE_CHECKING:
-    from aiosendspin.models.core import ClientStatePayload, StreamRequestFormatPayload
+    from aiosendspin.models.core import (
+        ClientCommandPayload,
+        ClientStatePayload,
+        StreamRequestFormatPayload,
+    )
     from aiosendspin.models.types import GoodbyeReason, ServerMessage
     from aiosendspin.server.audio import BufferTracker
     from aiosendspin.server.client import SendspinClient
@@ -349,3 +353,11 @@ class Role(ABC):
         stream_active: bool | None = None,
     ) -> None:
         """Handle stream/request-format payload."""
+
+    def on_command(self, payload: ClientCommandPayload) -> Coroutine[Any, Any, None] | None:  # noqa: ARG002
+        """Handle client/command payload.
+
+        Return a coroutine if async handling is needed, None otherwise.
+        The connection will await the coroutine if returned.
+        """
+        return None
