@@ -338,8 +338,10 @@ class Role(ABC):
         """
         return False
 
-    def on_group_changed(self, group: object) -> None:  # noqa: B027
-        """Handle group changes (e.g., for transformer pool updates)."""
+    def on_group_changed(self, group: object) -> None:  # noqa: ARG002
+        """Handle group changes by re-subscribing to the new GroupRole."""
+        self._unsubscribe_from_group_role()
+        self._subscribe_to_group_role()
 
     # --- Message hooks ---
 

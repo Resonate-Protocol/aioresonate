@@ -226,8 +226,9 @@ class PlayerRole(Role):
             reset_after_s, _maybe_reset
         )
 
-    def on_group_changed(self, group: object) -> None:  # noqa: ARG002
+    def on_group_changed(self, group: object) -> None:
         """Refresh transformer selection when group changes."""
+        super().on_group_changed(group)
         self._ensure_audio_requirements(self._state(), force=True)
 
     # --- Stream lifecycle hooks ---
