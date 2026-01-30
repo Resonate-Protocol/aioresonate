@@ -12,8 +12,6 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ./scripts/run-in-env.sh pytest -k "test_name"  # Run tests matching pattern
 ```
 
-If `~/.cache` is restricted: `PRE_COMMIT_HOME=$PWD/.cache/pre-commit ./scripts/run-in-env.sh ...`
-
 ## Architecture
 
 **aiosendspin** implements the [Sendspin Protocol](https://github.com/Sendspin-Protocol/spec) for synchronized audio streaming across networked devices.
