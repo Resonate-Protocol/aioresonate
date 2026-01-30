@@ -79,8 +79,11 @@ async def test_try_send_binary_accepts_buffer_metadata() -> None:
     )
     assert result is True
 
-    priority_item = conn._to_write.get_nowait()  # noqa: SLF001
-    frame = priority_item.item
+    # Access the per-family binary queue
+    family_queue = conn._binary_queues.get("player")  # noqa: SLF001
+    assert family_queue is not None
+    assert len(family_queue) == 1
+    _, _, frame = family_queue[0]
     assert frame.buffer_end_time_us == 1_000_000
     assert frame.buffer_byte_count == 100
 
@@ -105,6 +108,8 @@ async def test_writer_registers_buffer_after_send() -> None:
     mock_buffer_tracker.time_until_duration_capacity.return_value = 0
     mock_role.get_buffer_tracker.return_value = mock_buffer_tracker
     mock_role._stream_start_time_us = None  # noqa: SLF001
+    mock_role._stream_start_delay_until_us = None  # noqa: SLF001
+    mock_role._stream_start_burst_until_us = None  # noqa: SLF001
     mock_role._last_late_log_s = 0.0  # noqa: SLF001
     mock_role._late_skips_since_log = 0  # noqa: SLF001
     mock_role.get_binary_handling.return_value = BinaryHandling(
@@ -161,6 +166,8 @@ async def test_writer_does_not_register_without_metadata() -> None:
     mock_buffer_tracker.time_until_duration_capacity.return_value = 0
     mock_role.get_buffer_tracker.return_value = mock_buffer_tracker
     mock_role._stream_start_time_us = None  # noqa: SLF001
+    mock_role._stream_start_delay_until_us = None  # noqa: SLF001
+    mock_role._stream_start_burst_until_us = None  # noqa: SLF001
     mock_role._last_late_log_s = 0.0  # noqa: SLF001
     mock_role._late_skips_since_log = 0  # noqa: SLF001
 

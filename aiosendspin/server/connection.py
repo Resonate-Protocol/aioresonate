@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import heapq
 import logging
 import time
-from collections import defaultdict
+from collections import defaultdict, deque
 from contextlib import suppress
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, cast
@@ -65,26 +66,6 @@ class _BinaryFrame:
     duration_us: int | None = None
 
 
-@dataclass(frozen=True, slots=True)
-class _PriorityItem:
-    """Wrapper for priority queue ordering.
-
-    Priority 0 = high (time sync), 1 = normal.
-    Binary frames are sorted by playback timestamp for proper A/V sync.
-    Sequence provides FIFO tie-breaking for JSON messages.
-
-    The sort_key is pre-computed to avoid isinstance() checks during comparison:
-    - For binary frames with timestamp: (priority, timestamp_us, sequence)
-    - For JSON messages or no timestamp: (priority, MAX_INT, sequence) for FIFO
-    """
-
-    sort_key: tuple[int, int, int]
-    item: ServerMessage | _BinaryFrame
-
-    def __lt__(self, other: _PriorityItem) -> bool:
-        return self.sort_key < other.sort_key
-
-
 # Max timestamp value used to ensure FIFO ordering for JSON messages
 # (they sort after all timestamped binary frames at the same priority)
 _FIFO_TIMESTAMP = 2**62
@@ -120,12 +101,19 @@ class SendspinConnection:
         else:
             raise ValueError("Either request or wsock_client must be provided")
 
-        self._to_write: asyncio.PriorityQueue[_PriorityItem] = asyncio.PriorityQueue(
-            maxsize=MAX_PENDING_MSG
-        )
-        self._queue_sequence: int = 0  # FIFO tie-breaker for priority queue
-        # Delayed frames waiting for rate limit, one per role family
-        self._delayed_frames: dict[str, tuple[int, _PriorityItem]] = {}
+        self._queue_sequence: int = 0  # FIFO tie-breaker across all queues
+        self._queue_size: int = 0
+        # Outgoing message queues
+        self._priority_messages: deque[ServerMessage] = deque()
+        self._normal_messages: deque[tuple[int, ServerMessage]] = deque()
+        # Binary queues: per role family min-heap of (sort_ts, seq, frame)
+        self._binary_queues: dict[str, list[tuple[int, int, _BinaryFrame]]] = defaultdict(list)
+        # Global scheduler heaps for binary families
+        self._ready_families: list[tuple[int, int, str]] = []
+        self._delayed_families: list[tuple[int, int, str]] = []
+        self._blocked_until_us: dict[str, int] = {}
+        self._block_generation: defaultdict[str, int] = defaultdict(int)
+        self._writer_wakeup = asyncio.Event()
         self._writer_task: asyncio.Task[None] | None = None
         self._message_loop_task: asyncio.Task[None] | None = None
 
@@ -148,6 +136,8 @@ class SendspinConnection:
         # Timing tracking for binary frame logging (per role family)
         self._last_send_time_us_by_family: dict[str, int] = {}
         self._last_timestamp_us_by_family: dict[str, int] = {}
+        self._send_stats_by_family: dict[str, dict[str, float | int]] = {}
+        self._send_summary_last_log_s = time.monotonic()
 
     @property
     def websocket_connection(self) -> web.WebSocketResponse | ClientWebSocketResponse:
@@ -171,9 +161,11 @@ class SendspinConnection:
         """Drop queued binary payloads for the specified role families."""
         if roles is None:
             self._binary_epoch_all += 1
+            self._writer_wakeup.set()
             return
         for family in roles:
             self._binary_epoch_by_family[family] += 1
+        self._writer_wakeup.set()
 
     def try_send_binary(
         self,
@@ -209,46 +201,63 @@ class SendspinConnection:
             buffer_byte_count=buffer_byte_count,
             duration_us=duration_us,
         )
+        if self._queue_size >= MAX_PENDING_MSG:
+            return False
+
         seq = self._queue_sequence
         self._queue_sequence += 1
         # Use timestamp for ordering if present, otherwise FIFO
         sort_ts = timestamp_us if timestamp_us > 0 else _FIFO_TIMESTAMP
-        try:
-            self._to_write.put_nowait(_PriorityItem(sort_key=(1, sort_ts, seq), item=frame))
-        except asyncio.QueueFull:
-            return False
+        family_queue = self._binary_queues[role_family]
+        heapq.heappush(family_queue, (sort_ts, seq, frame))
+        self._queue_size += 1
+
+        # If family not blocked and this is the head, schedule it
+        if role_family not in self._blocked_until_us:
+            head_sort_ts, head_seq, _ = family_queue[0]
+            if head_sort_ts == sort_ts and head_seq == seq:
+                heapq.heappush(self._ready_families, (head_sort_ts, head_seq, role_family))
+
+        self._writer_wakeup.set()
         return True
 
     def queue_status(self) -> tuple[int, int]:
         """Return (qsize, maxsize) for the outgoing queue."""
-        return self._to_write.qsize(), self._to_write.maxsize
+        return self._queue_size, MAX_PENDING_MSG
 
     def send_message(self, message: ServerMessage) -> None:
         """Enqueue a JSON message to be sent to the client."""
         if isinstance(message, StreamClearMessage | StreamEndMessage):
             self.drop_pending_binary(message.payload.roles)
 
-        seq = self._queue_sequence
-        self._queue_sequence += 1
-        try:
-            self._to_write.put_nowait(
-                _PriorityItem(sort_key=(1, _FIFO_TIMESTAMP, seq), item=message)
-            )
-        except asyncio.QueueFull:
+        if self._queue_size >= MAX_PENDING_MSG:
             if not self._disconnecting:
                 self._logger.error("Message queue full, client too slow - disconnecting")
                 task = self._server.loop.create_task(self.disconnect(retry_connection=True))
                 task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
             return
 
+        seq = self._queue_sequence
+        self._queue_sequence += 1
+        self._normal_messages.append((seq, message))
+        self._queue_size += 1
+        self._writer_wakeup.set()
+
         if not isinstance(message, ServerTimeMessage):
             self._logger.debug("Enqueueing message: %s", type(message).__name__)
 
     def send_priority_message(self, message: ServerMessage) -> None:
         """Enqueue a high-priority message (processed before regular queue)."""
-        seq = self._queue_sequence
+        if self._queue_size >= MAX_PENDING_MSG:
+            if not self._disconnecting:
+                self._logger.error("Message queue full, client too slow - disconnecting")
+                task = self._server.loop.create_task(self.disconnect(retry_connection=True))
+                task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
+            return
         self._queue_sequence += 1
-        self._to_write.put_nowait(_PriorityItem(sort_key=(0, _FIFO_TIMESTAMP, seq), item=message))
+        self._priority_messages.append(message)
+        self._queue_size += 1
+        self._writer_wakeup.set()
 
     async def disconnect(self, *, retry_connection: bool = True) -> None:
         """Disconnect this connection and detach from its persistent client."""
@@ -346,7 +355,11 @@ class SendspinConnection:
                 )
             else:
                 # Loop exited normally (iterator exhausted) - connection closed
-                self._logger.info("WebSocket iterator exhausted, close_code=%s", wsock.close_code)
+                self._logger.error(
+                    "WebSocket iterator exhausted, close_code=%s close_message=%s",
+                    wsock.close_code,
+                    getattr(wsock, "close_message", None),
+                )
         except asyncio.CancelledError:
             self._logger.debug("Message loop cancelled")
         except Exception:
@@ -525,8 +538,18 @@ class SendspinConnection:
         buffer_tracker: BufferTracker | None,
     ) -> None:
         """Send a binary frame with buffer tracking. Assumes rate limit already checked."""
+        start_s = time.monotonic()
         async with asyncio.timeout(SEND_TIMEOUT_S):
             await wsock.send_bytes(item.data)
+        elapsed_ms = (time.monotonic() - start_s) * 1000
+        if elapsed_ms >= 50.0:
+            self._logger.error(
+                "Slow send_bytes: %.1fms size=%s ts_us=%s role=%s",
+                elapsed_ms,
+                len(item.data),
+                item.timestamp_us,
+                item.role_family,
+            )
 
         # Buffer tracking via role's tracker (framework-managed)
         if (
@@ -540,20 +563,63 @@ class SendspinConnection:
                 item.duration_us or 0,
             )
 
+    def _schedule_family_head(self, role_family: str) -> None:
+        if role_family in self._blocked_until_us:
+            return
+        if family_queue := self._binary_queues.get(role_family):
+            head_sort_ts, head_seq, _ = family_queue[0]
+            heapq.heappush(self._ready_families, (head_sort_ts, head_seq, role_family))
+
+    def _discard_family_head(self, role_family: str) -> None:
+        family_queue = self._binary_queues.get(role_family)
+        if not family_queue:
+            return
+        heapq.heappop(family_queue)
+        self._queue_size = max(self._queue_size - 1, 0)
+        if not family_queue:
+            self._binary_queues.pop(role_family, None)
+
+    def _peek_ready_binary(self) -> tuple[str, _BinaryFrame, int, int] | None:
+        while self._ready_families:
+            sort_ts, seq, role_family = heapq.heappop(self._ready_families)
+            if role_family in self._blocked_until_us:
+                continue
+            family_queue = self._binary_queues.get(role_family)
+            if not family_queue:
+                continue
+            head_sort_ts, head_seq, head_frame = family_queue[0]
+            if head_sort_ts != sort_ts or head_seq != seq:
+                heapq.heappush(self._ready_families, (head_sort_ts, head_seq, role_family))
+                continue
+            return role_family, head_frame, head_sort_ts, head_seq
+        return None
+
+    def _block_family(self, role_family: str, ready_at_us: int) -> None:
+        self._blocked_until_us[role_family] = ready_at_us
+        generation = self._block_generation[role_family] + 1
+        self._block_generation[role_family] = generation
+        heapq.heappush(self._delayed_families, (ready_at_us, generation, role_family))
+
+    def _promote_ready_families(self, now_us: int) -> None:
+        while self._delayed_families and self._delayed_families[0][0] <= now_us:
+            ready_at_us, generation, role_family = heapq.heappop(self._delayed_families)
+            if self._block_generation.get(role_family, 0) != generation:
+                continue
+            blocked_until = self._blocked_until_us.get(role_family)
+            if blocked_until is None or blocked_until != ready_at_us:
+                continue
+            self._blocked_until_us.pop(role_family, None)
+            self._schedule_family_head(role_family)
+
     async def _writer(self) -> None:  # noqa: C901, PLR0912, PLR0915
         wsock = self._wsock_server or self._wsock_client
         assert wsock is not None
 
         # Cache hot attributes as locals to avoid repeated attribute lookups
         clock_now_us = self._server.clock.now_us
-        delayed_frames = self._delayed_frames
-        to_write = self._to_write
         binary_epoch_by_family = self._binary_epoch_by_family
-        client = self._client
-        log_debug = self._logger.isEnabledFor(logging.DEBUG)
         last_send_us_by_family = self._last_send_time_us_by_family
         last_ts_us_by_family = self._last_timestamp_us_by_family
-        logger_debug = self._logger.debug
 
         iterations_since_yield = 0
         now_us = clock_now_us()
@@ -566,120 +632,275 @@ class SendspinConnection:
                     iterations_since_yield = 0
                     now_us = clock_now_us()
 
-                # Process delayed frames that are now ready
-                if delayed_frames:
-                    ready_families = [
-                        family
-                        for family, (ready_at, _) in delayed_frames.items()
-                        if ready_at <= now_us
-                    ]
-                    for family in ready_families:
-                        _, delayed_item = delayed_frames.pop(family)
-                        frame = delayed_item.item
-                        assert isinstance(frame, _BinaryFrame)
-                        # Check epoch (may have been invalidated while delayed)
-                        if frame.epoch_all != self._binary_epoch_all:
-                            continue
-                        if frame.epoch_family != binary_epoch_by_family[frame.role_family]:
-                            continue
-                        # Get buffer tracker for delayed frame
-                        buffer_tracker = None
-                        if client is not None:
-                            cached = client.get_binary_handling_cached(frame.message_type)
-                            if cached is not None and cached[0].buffer_track:
-                                buffer_tracker = cached[1].get_buffer_tracker()
-                        await self._send_binary_frame(wsock, frame, buffer_tracker)
-                        now_us = clock_now_us()
-                        iterations_since_yield = 0
-
-                # Try to get next item from queue
-                if delayed_frames:
-                    # Non-blocking: don't wait if we have delayed frames to track
-                    if to_write.empty():
-                        # Sleep until soonest delayed frame is ready
-                        soonest_us = min(ready_at for ready_at, _ in delayed_frames.values())
-                        sleep_us = max(0, soonest_us - now_us)
-                        await asyncio.sleep(sleep_us / 1_000_000)
-                        now_us = clock_now_us()
-                        iterations_since_yield = 0
-                        continue
-                    priority_item = to_write.get_nowait()
-                else:
-                    # Blocking: wait for next item
-                    priority_item = await to_write.get()
-                    now_us = clock_now_us()
-                    iterations_since_yield = 0
-
-                item = priority_item.item
-
-                if isinstance(item, _BinaryFrame):
-                    # Check epoch - frame may have been invalidated
-                    if item.epoch_all != self._binary_epoch_all:
-                        continue
-                    role_family = item.role_family
-                    if item.epoch_family != binary_epoch_by_family[role_family]:
-                        continue
-
-                    # If this family already has a delayed frame, re-queue this one
-                    if role_family in delayed_frames:
-                        to_write.put_nowait(priority_item)
-                        iterations_since_yield += 1
-                        continue
-
-                    # Get binary handling info (single lookup for rate limit + buffer tracking)
-                    cached = (
-                        client.get_binary_handling_cached(item.message_type) if client else None
-                    )
-                    handling = cached[0] if cached else None
-                    handling_role = cached[1] if cached else None
-
-                    # Check rate limit
-                    wait_us = 0
-                    if handling is not None and handling_role is not None:
-                        # Drop late messages if role requests it
-                        if self._check_late_binary(handling, handling_role, item.timestamp_us):
-                            continue  # Drop
-                        # Check rate limit
-                        if handling.buffer_track and handling.rate_limit:
-                            buffer_tracker = handling_role.get_buffer_tracker()
-                            if buffer_tracker is not None:
-                                wait_us = buffer_tracker.time_until_duration_capacity(
-                                    item.duration_us or 0
-                                )
-
-                    if wait_us > 0:
-                        # Delay this frame - one per role family
-                        delayed_frames[role_family] = (now_us + wait_us, priority_item)
-                        iterations_since_yield += 1
-                        continue
-
-                    # Log timing info (only if debug enabled)
-                    if log_debug:
-                        timestamp_us = item.timestamp_us
-                        last_send_us = last_send_us_by_family.get(role_family)
-                        last_ts_us = last_ts_us_by_family.get(role_family)
-                        send_gap_ms = (now_us - last_send_us) / 1000 if last_send_us else 0
-                        ts_gap_ms = (timestamp_us - last_ts_us) / 1000 if last_ts_us else 0
-                        logger_debug(
-                            "Binary send: role=%s ts=%.1fms send_gap=%.1fms ts_gap=%.1fms",
-                            role_family,
-                            timestamp_us / 1000,
-                            send_gap_ms,
-                            ts_gap_ms,
-                        )
-                        last_send_us_by_family[role_family] = now_us
-                        last_ts_us_by_family[role_family] = timestamp_us
-
-                    # Send immediately
-                    buffer_tracker = None
-                    if handling is not None and handling.buffer_track and handling_role is not None:
-                        buffer_tracker = handling_role.get_buffer_tracker()
-                    await self._send_binary_frame(wsock, item, buffer_tracker)
+                # Priority messages always go first
+                if self._priority_messages:
+                    message = self._priority_messages.popleft()
+                    self._queue_size = max(self._queue_size - 1, 0)
+                    await self._send_message(wsock, message)
                     now_us = clock_now_us()
                     iterations_since_yield = 0
                     continue
 
-                await self._send_message(wsock, item)
+                now_us = clock_now_us()
+                self._promote_ready_families(now_us)
+
+                ready_binary = self._peek_ready_binary()
+                normal_entry = self._normal_messages[0] if self._normal_messages else None
+
+                if ready_binary is None and normal_entry is None:
+                    # No immediate work; wait for new items or next delayed family
+                    self._writer_wakeup.clear()
+                    if self._priority_messages or self._normal_messages or self._ready_families:
+                        continue
+
+                    sleep_s = None
+                    if self._delayed_families:
+                        next_ready_us = self._delayed_families[0][0]
+                        sleep_s = max((next_ready_us - now_us) / 1_000_000, 0.0)
+
+                    try:
+                        if sleep_s is None:
+                            await self._writer_wakeup.wait()
+                        else:
+                            await asyncio.wait_for(self._writer_wakeup.wait(), timeout=sleep_s)
+                    except TimeoutError:
+                        pass
+                    continue
+
+                if ready_binary is None and normal_entry is not None:
+                    _, message = self._normal_messages.popleft()
+                    self._queue_size = max(self._queue_size - 1, 0)
+                    await self._send_message(wsock, message)
+                    now_us = clock_now_us()
+                    iterations_since_yield = 0
+                    continue
+
+                assert ready_binary is not None
+                role_family, frame, sort_ts, seq = ready_binary
+
+                # Compare with normal messages when timestamps are FIFO-equivalent
+                if normal_entry is not None and sort_ts == _FIFO_TIMESTAMP:
+                    normal_seq, _ = normal_entry
+                    if normal_seq < seq:
+                        heapq.heappush(self._ready_families, (sort_ts, seq, role_family))
+                        _, message = self._normal_messages.popleft()
+                        self._queue_size = max(self._queue_size - 1, 0)
+                        await self._send_message(wsock, message)
+                        now_us = clock_now_us()
+                        iterations_since_yield = 0
+                        continue
+
+                # Check epoch - frame may have been invalidated
+                if frame.epoch_all != self._binary_epoch_all:
+                    self._discard_family_head(role_family)
+                    self._schedule_family_head(role_family)
+                    iterations_since_yield += 1
+                    continue
+                if frame.epoch_family != binary_epoch_by_family[role_family]:
+                    self._discard_family_head(role_family)
+                    self._schedule_family_head(role_family)
+                    iterations_since_yield += 1
+                    continue
+
+                # Get binary handling info (single lookup for rate limit + buffer tracking)
+                cached = (
+                    self._client.get_binary_handling_cached(frame.message_type)
+                    if self._client
+                    else None
+                )
+                handling = cached[0] if cached else None
+                handling_role = cached[1] if cached else None
+
+                # Drop late messages if role requests it
+                if (
+                    handling is not None
+                    and handling_role is not None
+                    and self._check_late_binary(handling, handling_role, frame.timestamp_us)
+                ):
+                    self._discard_family_head(role_family)
+                    self._schedule_family_head(role_family)
+                    iterations_since_yield += 1
+                    continue
+
+                # Check rate limit
+                wait_us = 0
+                buffer_tracker = None
+                if handling is not None and handling_role is not None:
+                    # Optional stream-start delay (for clients that need a gap before first binary)
+                    delay_until = getattr(handling_role, "_stream_start_delay_until_us", None)
+                    if delay_until is not None and now_us < delay_until:
+                        wait_us = max(wait_us, delay_until - now_us)
+                    if handling.buffer_track:
+                        buffer_tracker = handling_role.get_buffer_tracker()
+                    if handling.rate_limit:
+                        duration_us = frame.duration_us or 0
+                        wait_us_duration = 0
+                        wait_us_ts = 0
+                        target_lead_us = 0
+                        allow_burst = False
+
+                        # Buffer-duration pacing (when tracker is available)
+                        initial_target_us = 0
+                        buffer_depth_us = 0
+                        if buffer_tracker is not None:
+                            buffer_tracker.prune_consumed(now_us)
+                            buffer_depth_us = buffer_tracker.buffered_duration_us
+                            max_dur = buffer_tracker.max_duration_us
+                            if max_dur > 0 and duration_us > 0:
+                                initial_target_us = max(handling.grace_period_us, 5_000_000)
+                                burst_until = getattr(
+                                    handling_role, "_stream_start_burst_until_us", None
+                                )
+                                if burst_until is not None and now_us < burst_until:
+                                    allow_burst = True
+                                if buffer_depth_us < initial_target_us:
+                                    effective_max = initial_target_us
+                                else:
+                                    effective_max = int(max_dur * handling.rate_limit_factor)
+                                if handling.grace_period_us > 0:
+                                    stream_start = handling_role._stream_start_time_us  # noqa: SLF001
+                                    if stream_start is not None:
+                                        elapsed_us = now_us - stream_start
+                                        if elapsed_us < handling.grace_period_us:
+                                            effective_max = max(
+                                                effective_max, max_dur + handling.grace_period_us
+                                            )
+                                projected = buffer_depth_us + duration_us
+                                if projected > effective_max:
+                                    wait_us_duration = projected - effective_max
+                        else:
+                            burst_until = getattr(
+                                handling_role, "_stream_start_burst_until_us", None
+                            )
+                            if burst_until is not None and now_us < burst_until:
+                                allow_burst = True
+
+                        # Timestamp-based pacing (works even without buffer tracker)
+                        if frame.timestamp_us > 0:
+                            frame_duration_us = frame.duration_us or 25_000
+                            target_lead_us = max(target_lead_us, frame_duration_us)
+                            if buffer_tracker is not None and buffer_depth_us < initial_target_us:
+                                # Allow staged burst during initial fill to reach start threshold.
+                                if buffer_depth_us < 1_000_000:
+                                    target_lead_us = max(
+                                        target_lead_us, int(frame_duration_us * 4.0)
+                                    )
+                                elif buffer_depth_us < 3_000_000:
+                                    target_lead_us = max(
+                                        target_lead_us, int(frame_duration_us * 2.0)
+                                    )
+                            lead_us = frame.timestamp_us - now_us
+                            if lead_us > target_lead_us:
+                                wait_us_ts = lead_us - target_lead_us
+
+                        if allow_burst:
+                            wait_us_ts = 0
+                            wait_us_duration = 0
+                        wait_us = max(wait_us_ts, wait_us_duration)
+
+                if wait_us > 0:
+                    # Delay this frame - one per role family
+                    self._block_family(role_family, now_us + wait_us)
+                    iterations_since_yield += 1
+                    continue
+
+                # Log timing info (only if debug enabled)
+                timestamp_us = frame.timestamp_us
+                last_send_us = last_send_us_by_family.get(role_family)
+                last_ts_us = last_ts_us_by_family.get(role_family)
+                send_gap_ms = (now_us - last_send_us) / 1000 if last_send_us is not None else 0
+                ts_gap_ms = (timestamp_us - last_ts_us) / 1000 if last_ts_us is not None else 0
+                last_send_us_by_family[role_family] = now_us
+                last_ts_us_by_family[role_family] = timestamp_us
+
+                # Send immediately
+                self._discard_family_head(role_family)
+                await self._send_binary_frame(wsock, frame, buffer_tracker)
+                stats = self._send_stats_by_family.setdefault(
+                    role_family,
+                    {
+                        "count": 0,
+                        "send_gap_sum_ms": 0.0,
+                        "send_gap_min_ms": 1e9,
+                        "send_gap_max_ms": 0.0,
+                        "ts_gap_sum_ms": 0.0,
+                        "ts_gap_min_ms": 1e9,
+                        "ts_gap_max_ms": 0.0,
+                        "buf_count": 0,
+                        "buf_sum_ms": 0.0,
+                        "buf_min_ms": 1e9,
+                        "buf_max_ms": 0.0,
+                    },
+                )
+                if last_send_us is not None and last_ts_us is not None:
+                    stats["count"] += 1
+                    stats["send_gap_sum_ms"] += send_gap_ms
+                    stats["send_gap_min_ms"] = min(stats["send_gap_min_ms"], send_gap_ms)
+                    stats["send_gap_max_ms"] = max(stats["send_gap_max_ms"], send_gap_ms)
+                    stats["ts_gap_sum_ms"] += ts_gap_ms
+                    stats["ts_gap_min_ms"] = min(stats["ts_gap_min_ms"], ts_gap_ms)
+                    stats["ts_gap_max_ms"] = max(stats["ts_gap_max_ms"], ts_gap_ms)
+                    if buffer_tracker is not None:
+                        buf_ms = buffer_tracker.buffered_duration_us / 1000
+                        stats["buf_count"] += 1
+                        stats["buf_sum_ms"] += buf_ms
+                        stats["buf_min_ms"] = min(stats["buf_min_ms"], buf_ms)
+                        stats["buf_max_ms"] = max(stats["buf_max_ms"], buf_ms)
+
+                now_s = time.monotonic()
+                if now_s - self._send_summary_last_log_s >= 5.0:
+                    self._send_summary_last_log_s = now_s
+                    for fam, fam_stats in self._send_stats_by_family.items():
+                        count = int(fam_stats["count"])
+                        if count <= 0:
+                            continue
+                        avg_send = fam_stats["send_gap_sum_ms"] / count
+                        avg_ts = fam_stats["ts_gap_sum_ms"] / count
+                        if fam_stats["buf_count"] > 0:
+                            avg_buf = fam_stats["buf_sum_ms"] / fam_stats["buf_count"]
+                            self._logger.info(
+                                "Send summary role=%s samples=%s "
+                                "send_gap_ms(avg=%.1f min=%.1f max=%.1f) "
+                                "ts_gap_ms(avg=%.1f min=%.1f max=%.1f) "
+                                "buf_ms(avg=%.1f min=%.1f max=%.1f)",
+                                fam,
+                                count,
+                                avg_send,
+                                fam_stats["send_gap_min_ms"],
+                                fam_stats["send_gap_max_ms"],
+                                avg_ts,
+                                fam_stats["ts_gap_min_ms"],
+                                fam_stats["ts_gap_max_ms"],
+                                avg_buf,
+                                fam_stats["buf_min_ms"],
+                                fam_stats["buf_max_ms"],
+                            )
+                        else:
+                            self._logger.info(
+                                "Send summary role=%s samples=%s "
+                                "send_gap_ms(avg=%.1f min=%.1f max=%.1f) "
+                                "ts_gap_ms(avg=%.1f min=%.1f max=%.1f)",
+                                fam,
+                                count,
+                                avg_send,
+                                fam_stats["send_gap_min_ms"],
+                                fam_stats["send_gap_max_ms"],
+                                avg_ts,
+                                fam_stats["ts_gap_min_ms"],
+                                fam_stats["ts_gap_max_ms"],
+                            )
+                        fam_stats["count"] = 0
+                        fam_stats["send_gap_sum_ms"] = 0.0
+                        fam_stats["send_gap_min_ms"] = 1e9
+                        fam_stats["send_gap_max_ms"] = 0.0
+                        fam_stats["ts_gap_sum_ms"] = 0.0
+                        fam_stats["ts_gap_min_ms"] = 1e9
+                        fam_stats["ts_gap_max_ms"] = 0.0
+                        fam_stats["buf_count"] = 0
+                        fam_stats["buf_sum_ms"] = 0.0
+                        fam_stats["buf_min_ms"] = 1e9
+                        fam_stats["buf_max_ms"] = 0.0
+                self._schedule_family_head(role_family)
                 now_us = clock_now_us()
                 iterations_since_yield = 0
         except asyncio.CancelledError:
