@@ -20,9 +20,8 @@ from aiosendspin.models.core import (
 from aiosendspin.models.types import (
     MediaCommand,
     PlaybackStateType,
-    has_role_family,
 )
-from aiosendspin.server.roles import GroupRole, Role
+from aiosendspin.server.roles import GroupRole
 from aiosendspin.server.roles.registry import create_group_roles
 
 from .channels import ChannelRouter
@@ -218,56 +217,6 @@ class SendspinGroup:
         if controller_role is not None:
             controller_role._push_state_to_members()  # noqa: SLF001
 
-    def suggest_optimal_sample_rate(self, source_sample_rate: int) -> int:
-        """
-        Suggest an optimal sample rate for the next track.
-
-        Analyzes all player clients in this group and returns the best sample rate that
-        minimizes resampling across group members. Preference order:
-        - If there is a common supported rate across all players, choose the one closest
-          to the source sample rate (tie-breaker: higher rate).
-        - Otherwise, choose the rate supported by the most players; among those, pick the
-          closest to the source (tie-breaker: higher rate).
-
-        Args:
-            source_sample_rate: The sample rate of the upcoming source media.
-
-        Returns:
-            The recommended sample rate in Hz.
-        """
-        supported_sets: list[set[int]] = []
-        for client in self._clients:
-            role = self._get_player_role(client)
-            if role is None:
-                continue
-            rates = role.get_player_supported_sample_rates()
-            if rates:
-                supported_sets.append(rates)
-
-        if not supported_sets:
-            return source_sample_rate
-
-        # Helper for choosing the closest candidate, biasing towards higher rates on ties
-        def choose(candidates: set[int]) -> int:
-            # Compute the minimal absolute distance to the source sample rate
-            best_distance = min(abs(r - source_sample_rate) for r in candidates)
-            # Keep all candidates at that distance and pick the highest rate on a tie
-            best_rates = [r for r in candidates if abs(r - source_sample_rate) == best_distance]
-            return max(best_rates)
-
-        # 1) Intersection across all players
-        if (supported_sets) and (intersection := set.intersection(*supported_sets)):
-            return choose(intersection)
-
-        # 2) No common rate; pick the rate supported by the most players, then closest to source
-        counts: dict[int, int] = {}
-        for s in supported_sets:
-            for r in s:
-                counts[r] = counts.get(r, 0) + 1
-        max_count = max(counts.values())
-        top_rates = {r for r, c in counts.items() if c == max_count}
-        return choose(top_rates)
-
     def _send_stream_end_msg(self, client: SendspinClient, roles: list[str] | None = None) -> None:
         """Send a stream end message to a client.
 
@@ -414,12 +363,6 @@ class SendspinGroup:
     def register_group_role(self, group_role: GroupRole) -> None:
         """Register a GroupRole (called during group initialization)."""
         self._group_roles[group_role.role_family] = group_role
-
-    def player_clients(self) -> list[SendspinClient]:
-        """Return all clients in this group that have the player role."""
-        return [
-            client for client in self._clients if has_role_family("player", client.negotiated_roles)
-        ]
 
     def add_event_listener(
         self, callback: Callable[[SendspinGroup, GroupEvent], None]
@@ -669,10 +612,3 @@ class SendspinGroup:
                 )
             for role in artwork_roles:
                 role.on_stream_request_format(request)
-
-    def _get_player_role(self, client: SendspinClient) -> Role | None:
-        """Return the first active player role for a client."""
-        for role in client.active_roles:
-            if role.role_family == "player":
-                return role
-        return None
