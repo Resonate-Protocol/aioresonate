@@ -8,6 +8,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from aiosendspin.server.roles.base import Role
+from aiosendspin.server.roles.metadata.group import MetadataGroupRole
 
 if TYPE_CHECKING:
     from aiosendspin.server.client import SendspinClient
@@ -44,6 +45,16 @@ class MetadataRole(Role):
     def role_family(self) -> str:
         """Role family name for protocol messages."""
         return "metadata"
+
+    def on_transport_attach(self) -> None:
+        """Handle WebSocket connect/reconnect."""
+        super().on_transport_attach()
+        if self._group_role is None:
+            self._subscribe_to_group_role()
+        if self._group_role is None:
+            return
+        if isinstance(self._group_role, MetadataGroupRole):
+            self._group_role._send_state_to_role(self)  # noqa: SLF001
 
     def on_connect(self) -> None:
         """Subscribe to MetadataGroupRole for state updates."""

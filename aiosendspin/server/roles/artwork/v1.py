@@ -23,11 +23,11 @@ from aiosendspin.models.core import (
     StreamStartPayload,
 )
 from aiosendspin.models.types import ArtworkSource
+from aiosendspin.server.roles.artwork.group import ArtworkGroupRole
 from aiosendspin.server.roles.base import Role
 
 if TYPE_CHECKING:
     from aiosendspin.server.client import SendspinClient
-    from aiosendspin.server.roles.artwork.group import ArtworkGroupRole
 
 
 class ArtworkRole(Role):
@@ -81,6 +81,10 @@ class ArtworkRole(Role):
         super().on_transport_attach()
         if self._channel_configs:
             self._send_stream_start()
+        if self._group_role is None:
+            return
+        if isinstance(self._group_role, ArtworkGroupRole):
+            self._group_role._send_artwork_to_role(self)  # noqa: SLF001
 
     def _init_channel_configs(self) -> None:
         """Initialize channel configs from client hello artwork support."""
