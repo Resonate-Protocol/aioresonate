@@ -994,6 +994,8 @@ class PushStream:
         Flushes remaining audio from transformers, then sends stream/end message
         to all roles via hooks.
         """
+        if self._is_stopped:
+            return
         self._is_stopped = True
         if self._cache_pump_handle is not None:
             self._cache_pump_handle.cancel()
