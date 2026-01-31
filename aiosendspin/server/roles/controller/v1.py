@@ -152,11 +152,15 @@ class ControllerRole(Role):
 
     async def _handle_switch_command(self) -> None:
         """Handle the switch command to cycle through groups."""
-        if self._switch_lock.locked():
+        try:
+            await asyncio.wait_for(self._switch_lock.acquire(), timeout=0)
+        except TimeoutError:
             self._logger.debug("Ignoring switch command; switch already in progress")
             return
-        async with self._switch_lock:
+        try:
             await self._handle_switch_command_locked()
+        finally:
+            self._switch_lock.release()
 
     async def _handle_switch_command_locked(self) -> None:
         """Handle the switch command to cycle through groups (locked)."""
