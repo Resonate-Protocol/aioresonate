@@ -31,7 +31,7 @@ SendspinServer → SendspinGroup → PushStream → Roles → WebSocket clients
 
 - **`server/roles/`**: Extensible role system. `Role` (ABC) handles per-connection behavior; `GroupRole` (ABC) handles group-level coordination. Built-in: `PlayerRole` (v1), `PlayerGroupRole`.
 
-- **`server/transformers.py`**: Audio encoding/resampling pool with deduplication (FLAC, Opus, PCM variants).
+- **`server/audio_transformers.py`**: Audio encoding/resampling pool with deduplication (FLAC, Opus, PCM variants).
 
 ### Audio Pipeline
 ```
