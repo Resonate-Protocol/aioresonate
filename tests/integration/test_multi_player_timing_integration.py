@@ -20,7 +20,6 @@ from aiosendspin.models.player import ClientHelloPlayerSupport, SupportedAudioFo
 from aiosendspin.models.types import AudioCodec, PlayerCommand, Roles
 from aiosendspin.server.audio import AudioFormat
 from aiosendspin.server.audio_transformers import FlacEncoder, PcmPassthrough
-from aiosendspin.server.channels import MAIN_CHANNEL, ChannelRouter
 from aiosendspin.server.client import SendspinClient
 from aiosendspin.server.clock import ManualClock
 from aiosendspin.server.group import SendspinGroup
@@ -597,7 +596,7 @@ async def test_multi_player_group_join_sync_stable_source() -> None:
     clock = ManualClock()
     server = _DummyServer(loop=loop, clock=clock)
 
-    player_a, group_a, conn_a = _make_player(
+    _player_a, group_a, conn_a = _make_player(
         server,
         "pA",
         supported_formats=[
@@ -614,11 +613,7 @@ async def test_multi_player_group_join_sync_stable_source() -> None:
         buffer_capacity=60_000,
     )
 
-    router = ChannelRouter()
-    router.set_channel(player_a.client_id, MAIN_CHANNEL)
-    router.set_channel(player_b.client_id, MAIN_CHANNEL)
-
-    stream = group_a.start_stream(channel_router=router)
+    stream = group_a.start_stream()
 
     source_fmt = AudioFormat(sample_rate=48_000, bit_depth=16, channels=2)
 
@@ -683,7 +678,7 @@ async def test_multi_player_sync_with_jittery_source_is_continuous() -> None:
     clock = ManualClock()
     server = _DummyServer(loop=loop, clock=clock)
 
-    player_a, group_a, conn_a = _make_player(
+    _player_a, group_a, conn_a = _make_player(
         server,
         "pA",
         supported_formats=[
@@ -700,11 +695,7 @@ async def test_multi_player_sync_with_jittery_source_is_continuous() -> None:
         buffer_capacity=60_000,
     )
 
-    router = ChannelRouter()
-    router.set_channel(player_a.client_id, MAIN_CHANNEL)
-    router.set_channel(player_b.client_id, MAIN_CHANNEL)
-
-    stream = group_a.start_stream(channel_router=router)
+    stream = group_a.start_stream()
     await group_a.add_client(player_b)
 
     source_fmt = AudioFormat(sample_rate=48_000, bit_depth=16, channels=2)
@@ -770,7 +761,7 @@ async def test_production_gap_rebases_timeline() -> None:
     clock = ManualClock()
     server = _DummyServer(loop=loop, clock=clock)
 
-    _player_a, group_a, conn_a = _make_player(
+    __player_a, group_a, conn_a = _make_player(
         server,
         "pA",
         supported_formats=[
@@ -779,7 +770,7 @@ async def test_production_gap_rebases_timeline() -> None:
         buffer_capacity=90_000,
     )
 
-    stream = group_a.start_stream(channel_router=ChannelRouter())
+    stream = group_a.start_stream()
     source_fmt = AudioFormat(sample_rate=48_000, bit_depth=16, channels=2)
 
     next_play_start_us = clock.now_us() + 250_000
@@ -827,7 +818,7 @@ async def test_four_players_regroup_fast_start_and_sync() -> None:  # noqa: PLR0
     clock = ManualClock()
     server = _DummyServer(loop=loop, clock=clock)
 
-    player_a, group_a, conn_a = _make_player(
+    _player_a, group_a, conn_a = _make_player(
         server,
         "pA",
         supported_formats=[
@@ -865,11 +856,7 @@ async def test_four_players_regroup_fast_start_and_sync() -> None:  # noqa: PLR0
         buffer_capacity=64_000,
     )
 
-    router = ChannelRouter()
-    for player in (player_a, player_b, player_c, player_d):
-        router.set_channel(player.client_id, MAIN_CHANNEL)
-
-    stream = group_a.start_stream(channel_router=router)
+    stream = group_a.start_stream()
     source_fmt = AudioFormat(sample_rate=48_000, bit_depth=16, channels=2)
 
     # 100ms per commit to ensure FLAC yields packets promptly.
@@ -978,7 +965,7 @@ async def test_first_time_join_unique_format_starts_under_1s_without_next_commit
     clock = ManualClock()
     server = _DummyServer(loop=loop, clock=clock)
 
-    player_a, group_a, _conn_a = _make_player(
+    _player_a, group_a, _conn_a = _make_player(
         server,
         "pA",
         supported_formats=[
@@ -999,11 +986,7 @@ async def test_first_time_join_unique_format_starts_under_1s_without_next_commit
         buffer_capacity=60_000,
     )
 
-    router = ChannelRouter()
-    for player in (player_a, player_b):
-        router.set_channel(player.client_id, MAIN_CHANNEL)
-
-    stream = group_a.start_stream(channel_router=router)
+    stream = group_a.start_stream()
     source_fmt = AudioFormat(sample_rate=48_000, bit_depth=16, channels=2)
 
     # Build up future PCM cache for A only.

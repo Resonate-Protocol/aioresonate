@@ -9,6 +9,7 @@ from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
+from uuid import UUID
 
 from aiosendspin.models.core import (
     GroupUpdateServerMessage,
@@ -25,7 +26,7 @@ from aiosendspin.server.roles.controller.group import ControllerGroupRole
 from aiosendspin.server.roles.registry import create_group_roles
 
 from .audio_transformers import TransformerPool
-from .channels import ChannelRouter
+from .channels import ChannelResolver, default_channel_resolver
 from .push_stream import PushStream
 
 if TYPE_CHECKING:
@@ -101,6 +102,8 @@ class SendspinGroup:
     """Pool for shared transformer instances (encoders, etc.) across roles."""
     _group_roles: dict[str, GroupRole]
     """Registry of GroupRole instances, keyed by role family."""
+    _channel_resolver: ChannelResolver
+    """Callback to determine which channel a player should receive audio from."""
 
     def __init__(self, server: SendspinServer, *args: SendspinClient) -> None:
         """
@@ -126,6 +129,7 @@ class SendspinGroup:
         self._push_stream: PushStream | None = None
         self._transformer_pool = TransformerPool()
         self._group_roles = create_group_roles(self)
+        self._channel_resolver = default_channel_resolver
 
         # Set group reference for initial clients
         for client in self._clients:
@@ -140,26 +144,28 @@ class SendspinGroup:
     def start_stream(
         self,
         *,
-        channel_router: ChannelRouter | None = None,
+        channel_resolver: ChannelResolver | None = None,
     ) -> PushStream:
         """
         Create a new PushStream for push-based audio streaming.
 
         Args:
-            channel_router: Optional custom channel router. If not provided,
-                a new ChannelRouter is created.
+            channel_resolver: Optional callback to determine which channel a player
+                should receive audio from. If not provided, all players receive
+                audio from MAIN_CHANNEL.
 
         Returns:
             A new PushStream instance configured for this group.
         """
-        if channel_router is None:
-            channel_router = ChannelRouter()
+        if channel_resolver is not None:
+            self._channel_resolver = channel_resolver
+        else:
+            self._channel_resolver = default_channel_resolver
 
         self._push_stream = PushStream(
             loop=self._server.loop,
             clock=self._server.clock,
             group=self,
-            channel_router=channel_router,
         )
 
         # Reclaim any disconnected clients in the group (multi-server support).
@@ -344,6 +350,18 @@ class SendspinGroup:
     def transformer_pool(self) -> TransformerPool:
         """Return the transformer pool for encoder deduplication."""
         return self._transformer_pool
+
+    def get_channel_for_player(self, player_id: str) -> UUID:
+        """
+        Get the channel a player should receive audio from.
+
+        Args:
+            player_id: The player's client_id.
+
+        Returns:
+            The channel UUID for this player.
+        """
+        return self._channel_resolver(player_id)
 
     def group_role(self, family: str) -> GroupRole | None:
         """Get the GroupRole for a role family."""

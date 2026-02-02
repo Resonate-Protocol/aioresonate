@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
+from uuid import UUID
 
 import pytest
 
@@ -12,7 +13,7 @@ from aiosendspin.models.player import ClientHelloPlayerSupport, SupportedAudioFo
 from aiosendspin.models.types import AudioCodec, PlayerCommand, Roles
 from aiosendspin.server.audio import AudioFormat
 from aiosendspin.server.audio_transformers import FlacEncoder, PcmPassthrough, TransformerPool
-from aiosendspin.server.channels import MAIN_CHANNEL, ChannelRouter
+from aiosendspin.server.channels import MAIN_CHANNEL
 from aiosendspin.server.client import SendspinClient
 from aiosendspin.server.clock import ManualClock
 from aiosendspin.server.push_stream import PushStream
@@ -37,6 +38,9 @@ class _DummyGroup:
 
     def group_role(self, family: str) -> None:  # noqa: ARG002
         return None
+
+    def get_channel_for_player(self, player_id: str) -> UUID:  # noqa: ARG002
+        return MAIN_CHANNEL
 
 
 class _CaptureConnection:
@@ -148,7 +152,7 @@ async def test_late_joiner_receives_catchup_for_uncached_codec() -> None:
     group = _DummyGroup(clients=[])
 
     _, conn1 = _make_connected_player(server, group, "flac-client", codec=AudioCodec.FLAC)
-    stream = PushStream(loop=loop, clock=clock, group=group, channel_router=ChannelRouter())
+    stream = PushStream(loop=loop, clock=clock, group=group)
 
     stream.prepare_audio(
         bytes(19_200),

@@ -16,7 +16,7 @@ from aiosendspin.models.player import ClientHelloPlayerSupport, SupportedAudioFo
 from aiosendspin.models.types import AudioCodec, PlayerCommand, Roles
 from aiosendspin.server.audio import AudioFormat
 from aiosendspin.server.audio_transformers import PcmPassthrough, TransformerPool
-from aiosendspin.server.channels import MAIN_CHANNEL, ChannelRouter
+from aiosendspin.server.channels import MAIN_CHANNEL
 from aiosendspin.server.client import SendspinClient
 from aiosendspin.server.clock import LoopClock
 from aiosendspin.server.push_stream import PushStream
@@ -41,6 +41,9 @@ class _DummyGroup:
 
     def group_role(self, family: str) -> None:  # noqa: ARG002
         return None
+
+    def get_channel_for_player(self, player_id: str) -> UUID:  # noqa: ARG002
+        return MAIN_CHANNEL
 
 
 class _FakeConnection:
@@ -179,9 +182,7 @@ async def test_commit_audio_sends_stream_start_and_binary(mock_loop: Any) -> Non
     group = _DummyGroup(clients=[])
     client, conn = _make_connected_player(mock_loop, group, "p1")
 
-    stream = PushStream(
-        loop=mock_loop, clock=LoopClock(mock_loop), group=group, channel_router=ChannelRouter()
-    )
+    stream = PushStream(loop=mock_loop, clock=LoopClock(mock_loop), group=group)
     stream.prepare_audio(
         bytes(4800),
         AudioFormat(sample_rate=48000, bit_depth=16, channels=2),
@@ -205,9 +206,7 @@ async def test_stop_sends_stream_end_and_resets_buffer_tracker(mock_loop: Any) -
     group = _DummyGroup(clients=[])
     client, conn = _make_connected_player(mock_loop, group, "p1")
 
-    stream = PushStream(
-        loop=mock_loop, clock=LoopClock(mock_loop), group=group, channel_router=ChannelRouter()
-    )
+    stream = PushStream(loop=mock_loop, clock=LoopClock(mock_loop), group=group)
     stream.prepare_audio(
         bytes(4800),
         AudioFormat(sample_rate=48000, bit_depth=16, channels=2),
@@ -230,9 +229,7 @@ async def test_clear_sends_stream_clear(mock_loop: Any) -> None:
     group = _DummyGroup(clients=[])
     _, conn = _make_connected_player(mock_loop, group, "p1")
 
-    stream = PushStream(
-        loop=mock_loop, clock=LoopClock(mock_loop), group=group, channel_router=ChannelRouter()
-    )
+    stream = PushStream(loop=mock_loop, clock=LoopClock(mock_loop), group=group)
     stream.prepare_audio(
         bytes(4800),
         AudioFormat(sample_rate=48000, bit_depth=16, channels=2),
@@ -248,9 +245,7 @@ async def test_on_role_join_sends_catchup_chunks(mock_loop: Any) -> None:
     """Late join via on_role_join triggers stream/start and cached audio catch-up."""
     group = _DummyGroup(clients=[])
     _, conn1 = _make_connected_player(mock_loop, group, "p1")
-    stream = PushStream(
-        loop=mock_loop, clock=LoopClock(mock_loop), group=group, channel_router=ChannelRouter()
-    )
+    stream = PushStream(loop=mock_loop, clock=LoopClock(mock_loop), group=group)
 
     stream.prepare_audio(
         bytes(4800),
@@ -311,7 +306,6 @@ async def test_pcm_cache_catchup_for_uncached_codec() -> None:
         loop=loop,
         clock=LoopClock(loop),
         group=group,
-        channel_router=ChannelRouter(),
     )
     stream.prepare_audio(
         bytes(4800),
@@ -396,9 +390,7 @@ async def test_transform_dedup_uses_transform_key_not_instance(mock_loop: Any) -
     )
     group.clients.extend([_DummyClient([role1]), _DummyClient([role2])])
 
-    stream = PushStream(
-        loop=mock_loop, clock=LoopClock(mock_loop), group=group, channel_router=ChannelRouter()
-    )
+    stream = PushStream(loop=mock_loop, clock=LoopClock(mock_loop), group=group)
     stream.prepare_audio(
         bytes(4800),
         AudioFormat(sample_rate=48000, bit_depth=16, channels=2),
@@ -459,9 +451,7 @@ async def test_transform_key_separates_frame_duration(mock_loop: Any) -> None:
     )
     group.clients.extend([_DummyClient([role1]), _DummyClient([role2])])
 
-    stream = PushStream(
-        loop=mock_loop, clock=LoopClock(mock_loop), group=group, channel_router=ChannelRouter()
-    )
+    stream = PushStream(loop=mock_loop, clock=LoopClock(mock_loop), group=group)
     stream.prepare_audio(
         bytes(4800),
         AudioFormat(sample_rate=48000, bit_depth=16, channels=2),
@@ -506,9 +496,7 @@ async def test_late_join_uses_cached_chunks_across_role_recreation(mock_loop: An
     client1 = _DummyClient([role1])
     group.clients.append(client1)
 
-    stream = PushStream(
-        loop=mock_loop, clock=LoopClock(mock_loop), group=group, channel_router=ChannelRouter()
-    )
+    stream = PushStream(loop=mock_loop, clock=LoopClock(mock_loop), group=group)
     stream.prepare_audio(
         bytes(4800),
         AudioFormat(sample_rate=48000, bit_depth=16, channels=2),
@@ -576,9 +564,7 @@ async def test_stop_flush_fans_out_to_all_roles(mock_loop: Any) -> None:
     )
     group.clients.extend([_DummyClient([role1]), _DummyClient([role2])])
 
-    stream = PushStream(
-        loop=mock_loop, clock=LoopClock(mock_loop), group=group, channel_router=ChannelRouter()
-    )
+    stream = PushStream(loop=mock_loop, clock=LoopClock(mock_loop), group=group)
     stream.stop()
 
     assert len(role1.received) == 1
@@ -637,9 +623,7 @@ async def test_transform_key_separates_channels(mock_loop: Any) -> None:
     )
     group.clients.extend([_DummyClient([role1]), _DummyClient([role2])])
 
-    stream = PushStream(
-        loop=mock_loop, clock=LoopClock(mock_loop), group=group, channel_router=ChannelRouter()
-    )
+    stream = PushStream(loop=mock_loop, clock=LoopClock(mock_loop), group=group)
     stream.prepare_audio(
         bytes(4800),
         AudioFormat(sample_rate=48000, bit_depth=16, channels=2),

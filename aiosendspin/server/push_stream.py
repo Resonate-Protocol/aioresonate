@@ -22,7 +22,6 @@ if TYPE_CHECKING:
     import av
 
     from aiosendspin.server.audio_transformers import AudioTransformer
-    from aiosendspin.server.channels import ChannelRouter
     from aiosendspin.server.client import SendspinClient
     from aiosendspin.server.clock import Clock
     from aiosendspin.server.group import SendspinGroup
@@ -267,7 +266,6 @@ class PushStream:
         loop: asyncio.AbstractEventLoop,
         clock: Clock,
         group: SendspinGroup,
-        channel_router: ChannelRouter,
     ) -> None:
         """
         Create a new PushStream.
@@ -276,12 +274,10 @@ class PushStream:
             loop: Event loop for timing and async operations.
             clock: Time source used for timestamping.
             group: Group this stream belongs to.
-            channel_router: Router for channel assignments.
         """
         self._loop = loop
         self._clock = clock
         self._group = group
-        self._channel_router = channel_router
         self._is_stopped = False
         # Pending audio per channel: channel_id -> (pcm_bytes, audio_format)
         self._channel_buffers: dict[UUID, tuple[bytes, AudioFormat]] = {}

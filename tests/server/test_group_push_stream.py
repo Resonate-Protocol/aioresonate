@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 from unittest.mock import AsyncMock, MagicMock, patch
+from uuid import UUID
 
 import pytest
 
 from aiosendspin.models.types import Roles
 from aiosendspin.server.audio_transformers import TransformerPool
-from aiosendspin.server.channels import ChannelRouter
+from aiosendspin.server.channels import MAIN_CHANNEL
 from aiosendspin.server.clock import LoopClock
 from aiosendspin.server.group import SendspinGroup
 from aiosendspin.server.push_stream import PushStream
@@ -102,17 +103,24 @@ class TestGroupStartStream:
 
         assert stream1 is not stream2
 
-    def test_start_stream_with_channel_router(
+    def test_start_stream_with_channel_resolver(
         self,
         mock_server: MagicMock,
         mock_client: MagicMock,
     ) -> None:
-        """start_stream() can accept a custom channel router."""
-        group = SendspinGroup(mock_server, mock_client)
-        custom_router = ChannelRouter()
-        stream = group.start_stream(channel_router=custom_router)
+        """start_stream() can accept a custom channel resolver callback."""
+        left_channel = UUID("11111111-1111-1111-1111-111111111111")
 
-        assert stream._channel_router is custom_router  # noqa: SLF001
+        def custom_resolver(player_id: str) -> UUID:
+            if player_id == "left-speaker":
+                return left_channel
+            return MAIN_CHANNEL
+
+        group = SendspinGroup(mock_server, mock_client)
+        group.start_stream(channel_resolver=custom_resolver)
+
+        assert group.get_channel_for_player("left-speaker") == left_channel
+        assert group.get_channel_for_player("other") == MAIN_CHANNEL
 
 
 class TestRoleJoinWithActiveStream:

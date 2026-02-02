@@ -5,10 +5,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 from unittest.mock import MagicMock
+from uuid import UUID
 
 from aiosendspin.models.player import ClientHelloPlayerSupport, SupportedAudioFormat
 from aiosendspin.models.types import AudioCodec, PlayerCommand
 from aiosendspin.server.audio_transformers import TransformerPool
+from aiosendspin.server.channels import MAIN_CHANNEL
 from aiosendspin.server.client import SendspinClient
 from aiosendspin.server.clock import LoopClock
 from aiosendspin.server.roles import PlayerV1Role
@@ -38,6 +40,9 @@ class _DummyGroup:
 
     def group_role(self, family: str) -> None:  # noqa: ARG002
         return None
+
+    def get_channel_for_player(self, player_id: str) -> UUID:  # noqa: ARG002
+        return MAIN_CHANNEL
 
 
 class _FakeConnection:
