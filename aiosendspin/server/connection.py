@@ -50,7 +50,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-MAX_PENDING_MSG = 4096
+MAX_PENDING_MSG = 4096  # Should be more than enough for ~1 minute of buffering
 SEND_TIMEOUT_S = 5.0  # Max time to wait for a single send before disconnecting
 
 

@@ -218,12 +218,6 @@ def _resample_pcm_standalone(
 # stream may have no chunks whose *start* timestamp is >= now + DEFAULT_INITIAL_DELAY_US.
 LATE_JOINER_MIN_LEAD_US = 100_000  # 100ms
 
-# Max lead time for catch-up pumping; prevents enqueue bursts at join time.
-NORMAL_PUMP_LEAD_US = 5_000_000  # 5s
-CATCHUP_PUMP_LEAD_US = 100_000  # 100ms
-# Allow a limited initial burst on join to match legacy behavior.
-CATCHUP_BURST_ON_JOIN_US = 2_000_000  # 2s
-
 # Max chunks to pump per role before yielding to the event loop
 _PUMP_BATCH_SIZE = 20
 
@@ -804,19 +798,15 @@ class PushStream:
         tkey: TransformKey,
         cached: list[CachedChunk],
         now_us: int,
-        *,
-        lead_limit_us: int,
-        allow_burst_until_us: int | None = None,
-    ) -> int | None:
+    ) -> bool:
         """Pump cached chunks to a role, up to _PUMP_BATCH_SIZE at a time.
 
-        Returns next_ready_us if more work remains but should be delayed, or None if done.
+        Returns True if more work remains (batch yielding), False if done.
         """
         role_cursors = self._role_chunk_cursors.setdefault(role, {})
         cursor = role_cursors.get(tkey, 0)
         skipped_late = 0
         chunks_sent = 0
-        next_ready_us: int | None = None
 
         while cursor < len(cached):
             cached_chunk = cached[cursor]
@@ -826,15 +816,6 @@ class PushStream:
                 continue
 
             self._ensure_role_started(role)
-
-            # Pace catch-up to avoid enqueue bursts for fragile clients,
-            # unless within the initial burst window.
-            outside_burst = (
-                allow_burst_until_us is None or cached_chunk.timestamp_us > allow_burst_until_us
-            )
-            if outside_burst and cached_chunk.timestamp_us > now_us + lead_limit_us:
-                next_ready_us = cached_chunk.timestamp_us - lead_limit_us
-                break
 
             chunk = AudioChunk(
                 data=cached_chunk.payload,
@@ -848,7 +829,6 @@ class PushStream:
 
             # Yield to event loop after batch to prevent stalling
             if chunks_sent >= _PUMP_BATCH_SIZE:
-                next_ready_us = now_us  # schedule immediate continuation
                 break
 
         if skipped_late > 0:
@@ -860,9 +840,7 @@ class PushStream:
             )
 
         role_cursors[tkey] = cursor
-        if cursor < len(cached):
-            return next_ready_us if next_ready_us is not None else now_us
-        return None  # No more work
+        return cursor < len(cached)
 
     def _pump_cached_chunks(self) -> None:
         """Pump cached chunks to all roles, yielding to event loop between batches."""
@@ -872,31 +850,20 @@ class PushStream:
 
         now_us = self._clock.now_us()
         roles_by_transform = self._get_roles_by_transform()
-        next_ready_us: int | None = None
+        has_more_work = False
 
         for tkey, roles in roles_by_transform.items():
             cached = self._role_chunk_cache.get(tkey)
             if not cached:
                 continue
             for _client, role, _req in roles:
-                burst_until_us = getattr(role, "_stream_start_burst_until_us", None)
-                ready_at = self._pump_role_cache(
-                    role,
-                    tkey,
-                    cached,
-                    now_us,
-                    lead_limit_us=NORMAL_PUMP_LEAD_US,
-                    allow_burst_until_us=burst_until_us,
-                )
-                if ready_at is None:
-                    continue
-                if next_ready_us is None or ready_at < next_ready_us:
-                    next_ready_us = ready_at
+                more = self._pump_role_cache(role, tkey, cached, now_us)
+                if more:
+                    has_more_work = True
 
-        # Schedule continuation if more work remains
-        if next_ready_us is not None and not self._is_stopped:
-            delay_s = max((next_ready_us - now_us) / 1_000_000, 0.0)
-            self._cache_pump_handle = self._loop.call_later(delay_s, self._pump_cached_chunks)
+        # Schedule immediate continuation if more work remains (batch yielding)
+        if has_more_work and not self._is_stopped:
+            self._cache_pump_handle = self._loop.call_soon(self._pump_cached_chunks)
 
     def _trigger_cache_pump(self) -> None:
         if self._cache_pump_handle is not None:
@@ -983,18 +950,9 @@ class PushStream:
 
         if self._channel_timing:
             self._ensure_role_started(role)
-        burst_until_us = now_us + CATCHUP_BURST_ON_JOIN_US
-        ready_at = self._pump_role_cache(
-            role,
-            cache_key,
-            cached,
-            now_us,
-            lead_limit_us=CATCHUP_PUMP_LEAD_US,
-            allow_burst_until_us=burst_until_us,
-        )
-        if ready_at is not None and self._cache_pump_handle is None:
-            delay_s = max((ready_at - now_us) / 1_000_000, 0.0)
-            self._cache_pump_handle = self._loop.call_later(delay_s, self._pump_cached_chunks)
+        has_more = self._pump_role_cache(role, cache_key, cached, now_us)
+        if has_more and self._cache_pump_handle is None:
+            self._cache_pump_handle = self._loop.call_soon(self._pump_cached_chunks)
 
     def stop(self) -> None:
         """
