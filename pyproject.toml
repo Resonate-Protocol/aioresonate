@@ -44,6 +44,10 @@ test = [
   "ruff==0.14.11",
 ]
 
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["aiosendspin*"]
+
 [tool.codespell]
 # ignore-words-list = ""
 
