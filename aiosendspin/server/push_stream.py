@@ -7,10 +7,10 @@ import logging
 import os
 import threading
 import weakref
-from collections import defaultdict
+from collections import defaultdict, deque
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, NamedTuple
+from typing import TYPE_CHECKING, Literal, NamedTuple
 from uuid import UUID
 
 from aiosendspin.server.audio import AudioFormat, _get_av, _resolve_audio_format
@@ -236,6 +236,18 @@ class CachedChunk:
     """Size of encoded audio data (without header)."""
 
 
+@dataclass(frozen=True, slots=True)
+class CachedPCMChunk:
+    """Raw PCM cache entry for catch-up encoding."""
+
+    timestamp_us: int
+    duration_us: int
+    pcm_data: bytes
+    sample_rate: int
+    bit_depth: int
+    channels: int
+
+
 class StreamStoppedError(Exception):
     """Raised when trying to commit audio on a stopped stream."""
 
@@ -281,6 +293,14 @@ class PushStream:
         self._resamplers: dict[_ResamplerKey, _ResamplerState] = {}
         # Role-based chunk cache: TransformKey -> list of cached chunks
         self._role_chunk_cache: defaultdict[TransformKey, list[CachedChunk]] = defaultdict(list)
+        # PCM chunk cache: channel_id.int -> deque of cached PCM chunks
+        self._pcm_chunk_cache: dict[int, deque[CachedPCMChunk]] = {}
+        # Channels with PCM caching enabled
+        self._pcm_cache_enabled_channels: set[int] = {MAIN_CHANNEL.int}
+        # Catch-up encoding state per TransformKey
+        self._catchup_state: dict[TransformKey, Literal["catching_up", "live"]] = {}
+        self._catchup_roles: dict[TransformKey, set[Role]] = {}
+        self._catchup_tasks: dict[TransformKey, asyncio.Task[None]] = {}
         # TransformKey cache by (role_id, channel_id_int) - avoids rebuilding keys each frame
         self._transform_key_cache: dict[tuple[int, int], TransformKey] = {}
         # Per-role chunk cursor for cache delivery.
@@ -318,6 +338,23 @@ class PushStream:
     def has_pending_audio(self) -> bool:
         """Return True if there is pending audio to commit."""
         return len(self._channel_buffers) > 0
+
+    def enable_pcm_cache_for_channel(self, channel_id: UUID) -> None:
+        """Enable raw PCM caching for a channel."""
+        self._pcm_cache_enabled_channels.add(channel_id.int)
+
+    def disable_pcm_cache_for_channel(self, channel_id: UUID) -> None:
+        """Disable raw PCM caching for a channel."""
+        channel_int = channel_id.int
+        self._pcm_cache_enabled_channels.discard(channel_int)
+        self._pcm_chunk_cache.pop(channel_int, None)
+
+    def _has_pcm_cache(self, channel_id: UUID) -> bool:
+        """Return True if PCM caching is enabled and cached chunks exist."""
+        channel_int = channel_id.int
+        if channel_int not in self._pcm_cache_enabled_channels:
+            return False
+        return bool(self._pcm_chunk_cache.get(channel_int))
 
     def get_pending_audio(self) -> dict[UUID, tuple[bytes, AudioFormat]]:
         """Return the pending audio buffers (for testing/inspection)."""
@@ -403,6 +440,21 @@ class PushStream:
         # Advance each channel's timing by its duration
         for channel_id, duration_us in durations_us.items():
             self._channel_timing[channel_id] += duration_us
+
+        # Cache PCM chunks before encoding (if enabled)
+        for channel_id, (pcm_bytes, fmt) in prepared.items():
+            channel_int = channel_id.int
+            if channel_int not in self._pcm_cache_enabled_channels:
+                continue
+            pcm_chunk = CachedPCMChunk(
+                timestamp_us=channel_play_start[channel_id],
+                duration_us=durations_us[channel_id],
+                pcm_data=pcm_bytes,
+                sample_rate=fmt.sample_rate,
+                bit_depth=fmt.bit_depth,
+                channels=fmt.channels,
+            )
+            self._pcm_chunk_cache.setdefault(channel_int, deque()).append(pcm_chunk)
 
         # Role-based audio delivery via hooks
         role_cache_results = await self._deliver_audio_to_roles(prepared, channel_play_start)
@@ -660,6 +712,8 @@ class PushStream:
                 grouped_by_key[tkey].append((client, role, req))
 
             for tkey, grouped in grouped_by_key.items():
+                if self._catchup_state.get(tkey) == "catching_up":
+                    continue
                 if tkey in encode_tasks:
                     continue
                 transformer = grouped[0][2].transformer
@@ -751,6 +805,13 @@ class PushStream:
             if not self._role_chunk_cache[key]:
                 del self._role_chunk_cache[key]
                 self._drop_role_chunk_cursors(key)
+
+        for channel_int in list(self._pcm_chunk_cache.keys()):
+            pcm_chunks = self._pcm_chunk_cache[channel_int]
+            while pcm_chunks and pcm_chunks[0].timestamp_us < now_us:
+                pcm_chunks.popleft()
+            if not pcm_chunks:
+                self._pcm_chunk_cache.pop(channel_int, None)
 
     def _adjust_role_chunk_cursors(self, tkey: TransformKey, removed: int) -> None:
         if removed <= 0:
@@ -875,6 +936,15 @@ class PushStream:
         """Remove role-specific state so re-joins get fresh stream/start."""
         self._started_roles.discard(role)
         self._role_chunk_cursors.pop(role, None)
+        for tkey in list(self._catchup_roles.keys()):
+            roles = self._catchup_roles[tkey]
+            roles.discard(role)
+            if not roles:
+                self._catchup_roles.pop(tkey, None)
+                self._catchup_state.pop(tkey, None)
+                task = self._catchup_tasks.pop(tkey, None)
+                if task is not None:
+                    task.cancel()
         # Drop cached transform keys for this role to avoid stale lookups.
         role_id = id(role)
         for cache_key in list(self._transform_key_cache.keys()):
@@ -916,6 +986,21 @@ class PushStream:
         cached = self._role_chunk_cache.get(cache_key, [])
 
         if not cached:
+            if cache_key in self._catchup_state:
+                self._catchup_roles.setdefault(cache_key, set()).add(role)
+                return
+
+            if self._has_pcm_cache(channel_id) and not self._other_roles_use_transform_key(
+                cache_key, role
+            ):
+                self._catchup_state[cache_key] = "catching_up"
+                self._catchup_roles[cache_key] = {role}
+                task = asyncio.create_task(
+                    self._start_catchup_encoding(role, req, channel_id, cache_key)
+                )
+                self._catchup_tasks[cache_key] = task
+                return
+
             if self._channel_timing:
                 self._ensure_role_started(role)
             return
@@ -953,6 +1038,185 @@ class PushStream:
         has_more = self._pump_role_cache(role, cache_key, cached, now_us)
         if has_more and self._cache_pump_handle is None:
             self._cache_pump_handle = self._loop.call_soon(self._pump_cached_chunks)
+
+    def _other_roles_use_transform_key(self, cache_key: TransformKey, exclude_role: Role) -> bool:
+        """Check if any other connected role uses the same TransformKey."""
+        for client in self._group.clients:
+            if not client.is_connected:
+                continue
+            for role in client.active_roles:
+                if role is exclude_role:
+                    continue
+                req = role.get_audio_requirements()
+                if req is None:
+                    continue
+                channel_id = req.channel_id or MAIN_CHANNEL
+                tkey = self._build_transform_key(req, channel_id, role)
+                if tkey == cache_key:
+                    return True
+        return False
+
+    def _encode_pcm_sequence(
+        self,
+        pcm_chunks: list[CachedPCMChunk],
+        encoder: AudioTransformer | None,
+        req: AudioRequirements,
+        channel_id: UUID,
+    ) -> list[CachedChunk]:
+        """Resample PCM chunks to the target format and encode them sequentially."""
+        target_format = AudioFormat(
+            sample_rate=req.sample_rate,
+            bit_depth=req.bit_depth,
+            channels=req.channels,
+        )
+        cached: list[CachedChunk] = []
+        resampler_state: _ResamplerState | None = None
+        resampler_source_format: AudioFormat | None = None
+
+        for chunk in pcm_chunks:
+            source_format = AudioFormat(
+                sample_rate=chunk.sample_rate,
+                bit_depth=chunk.bit_depth,
+                channels=chunk.channels,
+            )
+            if (
+                resampler_state is None
+                or resampler_source_format is None
+                or resampler_source_format != source_format
+            ):
+                resampler_key = _ResamplerKey(
+                    channel_id=channel_id,
+                    source_format=source_format,
+                    target_sample_rate=req.sample_rate,
+                    target_channels=req.channels,
+                    target_bit_depth=req.bit_depth,
+                )
+                resampler_state = _create_resampler_state(
+                    resampler_key,
+                    source_format,
+                    target_format,
+                )
+                resampler_source_format = source_format
+
+            resampled_pcm, output_ts = _resample_pcm_standalone(
+                resampler_state,
+                chunk.pcm_data,
+                source_format,
+                chunk.timestamp_us,
+            )
+            if not resampled_pcm:
+                continue
+
+            frame_stride = (req.bit_depth // 8) * req.channels
+            sample_count = len(resampled_pcm) // frame_stride if frame_stride > 0 else 0
+            duration_us = int(sample_count * 1_000_000 / req.sample_rate) if sample_count > 0 else 0
+
+            encoded_frames = _encode_for_transform_key(
+                encoder,
+                resampled_pcm,
+                output_ts,
+                duration_us,
+            )
+            for data, ts, dur in encoded_frames:
+                cached.append(
+                    CachedChunk(
+                        timestamp_us=ts,
+                        duration_us=dur,
+                        payload=data,
+                        byte_count=len(data),
+                    )
+                )
+
+        return cached
+
+    async def _start_catchup_encoding(
+        self,
+        role: Role,
+        req: AudioRequirements,
+        channel_id: UUID,
+        cache_key: TransformKey,
+    ) -> None:
+        """Start catch-up encoding from PCM cache for a new TransformKey."""
+        channel_int = channel_id.int
+        encoder = req.transformer
+
+        try:
+            pcm_chunks = list(self._pcm_chunk_cache.get(channel_int, []))
+            now_us = self._clock.now_us()
+            min_ts = now_us + LATE_JOINER_MIN_LEAD_US
+            eligible = [chunk for chunk in pcm_chunks if chunk.timestamp_us >= min_ts]
+
+            if not eligible:
+                if self._channel_timing:
+                    for r in self._catchup_roles.get(cache_key, {role}):
+                        self._ensure_role_started(r)
+                return
+
+            encoded = await self._loop.run_in_executor(
+                _get_encode_executor(),
+                self._encode_pcm_sequence,
+                eligible,
+                encoder,
+                req,
+                channel_id,
+            )
+
+            if encoded:
+                self._role_chunk_cache[cache_key].extend(encoded)
+
+            if encoded:
+                last_encoded_end_us = encoded[-1].timestamp_us + encoded[-1].duration_us
+            else:
+                last_encoded_end_us = eligible[-1].timestamp_us + eligible[-1].duration_us
+
+            while True:
+                await asyncio.sleep(0)
+
+                now_us = self._clock.now_us()
+                target_ts = now_us + LATE_JOINER_MIN_LEAD_US
+                if last_encoded_end_us >= target_ts:
+                    break
+
+                new_pcm = [
+                    chunk
+                    for chunk in self._pcm_chunk_cache.get(channel_int, [])
+                    if chunk.timestamp_us >= last_encoded_end_us
+                ]
+                if not new_pcm:
+                    await asyncio.sleep(0.01)
+                    continue
+
+                new_encoded = await self._loop.run_in_executor(
+                    _get_encode_executor(),
+                    self._encode_pcm_sequence,
+                    new_pcm,
+                    encoder,
+                    req,
+                    channel_id,
+                )
+
+                if new_encoded:
+                    self._role_chunk_cache[cache_key].extend(new_encoded)
+                    last_encoded_end_us = new_encoded[-1].timestamp_us + new_encoded[-1].duration_us
+
+            for r in self._catchup_roles.get(cache_key, {role}):
+                self._role_chunk_cursors.setdefault(r, {})[cache_key] = 0
+                self._ensure_role_started(r)
+
+            self._catchup_state[cache_key] = "live"
+            self._trigger_cache_pump()
+        finally:
+            if self._catchup_state.get(cache_key) != "live":
+                self._catchup_state.pop(cache_key, None)
+                self._catchup_roles.pop(cache_key, None)
+            self._catchup_tasks.pop(cache_key, None)
+
+    def _cancel_catchup_tasks(self) -> None:
+        for task in self._catchup_tasks.values():
+            task.cancel()
+        self._catchup_tasks.clear()
+        self._catchup_state.clear()
+        self._catchup_roles.clear()
 
     def stop(self) -> None:
         """
@@ -1002,6 +1266,8 @@ class PushStream:
         # Clear role tracking state
         self._started_roles.clear()
         self._role_chunk_cursors.clear()
+        self._cancel_catchup_tasks()
+        self._pcm_chunk_cache.clear()
 
     def clear(self) -> None:
         """
@@ -1019,6 +1285,8 @@ class PushStream:
         # Clear chunk cache
         self._role_chunk_cache.clear()
         self._role_chunk_cursors.clear()
+        self._pcm_chunk_cache.clear()
+        self._cancel_catchup_tasks()
         if self._cache_pump_handle is not None:
             self._cache_pump_handle.cancel()
             self._cache_pump_handle = None

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from typing import Any
 from unittest.mock import MagicMock
@@ -266,6 +267,82 @@ async def test_on_role_join_sends_catchup_chunks(mock_loop: Any) -> None:
 
     assert any(isinstance(m, StreamStartMessage) for m in conn2.sent_json)
     assert conn2.sent_binary, "expected catch-up binary chunks"
+
+
+@pytest.mark.asyncio
+async def test_pcm_cache_catchup_for_uncached_codec() -> None:
+    """PCM cache should enable catch-up when TransformKey cache is empty."""
+
+    class TransformerA:
+        @property
+        def frame_duration_us(self) -> int:
+            return 25_000
+
+        def process(self, pcm: bytes, _ts: int, _dur: int) -> list[bytes]:
+            return [pcm]
+
+        def flush(self) -> list[bytes]:
+            return []
+
+        def get_header(self) -> bytes | None:
+            return None
+
+        def reset(self) -> None:
+            return
+
+    class TransformerB(TransformerA):
+        pass
+
+    group = _DummyGroup(clients=[])
+    role1 = _DummyRole(
+        AudioRequirements(
+            sample_rate=48000,
+            bit_depth=16,
+            channels=2,
+            transformer=TransformerA(),
+            channel_id=MAIN_CHANNEL,
+            frame_duration_us=25_000,
+        )
+    )
+    group.clients.append(_DummyClient([role1]))
+
+    loop = asyncio.get_running_loop()
+    stream = PushStream(
+        loop=loop,
+        clock=LoopClock(loop),
+        group=group,
+        channel_router=ChannelRouter(),
+    )
+    stream.prepare_audio(
+        bytes(4800),
+        AudioFormat(sample_rate=48000, bit_depth=16, channels=2),
+    )
+    await stream.commit_audio()
+
+    role2 = _DummyRole(
+        AudioRequirements(
+            sample_rate=48000,
+            bit_depth=16,
+            channels=2,
+            transformer=TransformerB(),
+            channel_id=MAIN_CHANNEL,
+            frame_duration_us=25_000,
+        )
+    )
+    group.clients.append(_DummyClient([role2]))
+    stream.on_role_join(role2)
+    stream.prepare_audio(
+        bytes(4800),
+        AudioFormat(sample_rate=48000, bit_depth=16, channels=2),
+    )
+    await stream.commit_audio()
+    for _ in range(50):
+        if role2.received:
+            break
+        await asyncio.sleep(0.01)
+
+    assert role2.started == 1
+    assert role2.received
 
 
 @pytest.mark.asyncio
