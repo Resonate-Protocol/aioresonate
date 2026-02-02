@@ -101,7 +101,8 @@ class PlayerV1Role(Role):
         self._late_skips_since_log = 0
         # Cached state reference (avoids repeated dict lookup + isinstance check)
         self._cached_state: PlayerPersistentState | None = None
-        self._stream_start_delay_until_us: int | None = None
+        # Deferred stream start: set True by on_stream_start(), sent on first audio chunk
+        self._pending_stream_start = False
         self._stream_start_burst_until_us: int | None = None
 
     @property
@@ -237,7 +238,11 @@ class PlayerV1Role(Role):
     # --- Stream lifecycle hooks ---
 
     def on_stream_start(self) -> None:
-        """Send stream/start message using transformer header."""
+        """Mark stream start as pending - actual message sent on first audio chunk.
+
+        This defers the stream/start message until the first audio chunk arrives,
+        ensuring the codec header is available (FLAC generates header on first encode).
+        """
         req = self.get_audio_requirements()
         if req is None:
             self._ensure_audio_requirements(self._state())
@@ -246,6 +251,14 @@ class PlayerV1Role(Role):
             return
 
         if not self._has_transport:
+            return
+
+        self._pending_stream_start = True
+
+    def _send_stream_start_message(self) -> None:
+        """Send stream/start message with codec header from transformer."""
+        req = self.get_audio_requirements()
+        if req is None or not self._has_transport:
             return
 
         transformer = req.transformer
@@ -273,8 +286,11 @@ class PlayerV1Role(Role):
         )
         self.send_message(stream_start)
         self._stream_started = True
+
         # Allow client to process stream/start before first binary audio.
-        self._stream_start_delay_until_us = self._client._server.clock.now_us() + 200_000  # noqa: SLF001
+        if self._buffer_tracker is not None:
+            self._buffer_tracker.set_send_blocked(200_000)
+
         # Allow initial burst to fill client buffer quickly (legacy behavior).
         self._stream_start_burst_until_us = (
             self._client._server.clock.now_us() + 5_000_000  # noqa: SLF001
@@ -282,6 +298,11 @@ class PlayerV1Role(Role):
 
     def on_audio_chunk(self, chunk: AudioChunk) -> bool:
         """Pack and send binary audio. Late audio is discarded by connection."""
+        # Send deferred stream/start on first chunk (ensures encoder header is available)
+        if self._pending_stream_start:
+            self._send_stream_start_message()
+            self._pending_stream_start = False
+
         # Pack binary header and send
         message_type = BinaryMessageType.AUDIO_CHUNK.value
         header = pack_binary_header_raw(message_type, chunk.timestamp_us)
@@ -306,6 +327,7 @@ class PlayerV1Role(Role):
         stream_clear = StreamClearMessage(payload=StreamClearPayload(roles=["player"]))
         self.send_message(stream_clear)
         self._stream_started = False
+        self._pending_stream_start = False
         self.reset_binary_timing()
 
         if self._buffer_tracker is not None:
@@ -320,6 +342,7 @@ class PlayerV1Role(Role):
         stream_end = StreamEndMessage(payload=StreamEndPayload(roles=None))
         self.send_message(stream_end)
         self._stream_started = False
+        self._pending_stream_start = False
         self.reset_binary_timing()
 
         if self._buffer_tracker is not None:

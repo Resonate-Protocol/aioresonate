@@ -786,12 +786,11 @@ class SendspinConnection:
                 wait_us = 0
                 buffer_tracker = None
                 if handling is not None and handling_role is not None:
-                    # Optional stream-start delay (for clients that need a gap before first binary)
-                    delay_until = getattr(handling_role, "_stream_start_delay_until_us", None)
-                    if delay_until is not None and now_us < delay_until:
-                        wait_us = max(wait_us, delay_until - now_us)
                     if handling.buffer_track:
                         buffer_tracker = handling_role.get_buffer_tracker()
+                    # Stream-start delay (for clients that need a gap before first binary)
+                    if buffer_tracker is not None:
+                        wait_us = max(wait_us, buffer_tracker.time_until_unblocked())
                     if handling.rate_limit and buffer_tracker is not None:
                         duration_us = frame.duration_us or 0
                         buffer_tracker.prune_consumed(now_us)

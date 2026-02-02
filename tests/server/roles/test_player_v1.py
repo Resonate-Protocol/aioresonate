@@ -137,8 +137,8 @@ def test_player_role_on_disconnect_resets_stream_state() -> None:
 # --- on_stream_start ---
 
 
-def test_player_role_on_stream_start_sends_message_with_pcm() -> None:
-    """on_stream_start() sends stream/start with PCM codec when using PcmPassthrough."""
+def test_player_role_on_stream_start_sets_pending_flag() -> None:
+    """on_stream_start() sets _pending_stream_start to True (deferred send)."""
     client = _make_client_stub()
     client.send_message = MagicMock()
 
@@ -153,6 +153,30 @@ def test_player_role_on_stream_start_sends_message_with_pcm() -> None:
 
     role.on_stream_start()
 
+    # Message is deferred until first audio chunk
+    client.send_message.assert_not_called()
+    assert role._pending_stream_start is True  # noqa: SLF001
+
+
+def test_player_role_on_audio_chunk_sends_deferred_stream_start_with_pcm() -> None:
+    """on_audio_chunk() sends deferred stream/start with PCM codec."""
+    client = _make_client_stub()
+    client.send_message = MagicMock()
+    client.try_send_binary = MagicMock(return_value=True)
+
+    audio_req = AudioRequirements(
+        sample_rate=48000,
+        bit_depth=16,
+        channels=2,
+        transformer=PcmPassthrough(sample_rate=48000, bit_depth=16, channels=2),
+    )
+    role = PlayerV1Role(client=client, audio_requirements=audio_req)
+    role._has_transport = True  # noqa: SLF001
+    role._pending_stream_start = True  # noqa: SLF001
+
+    chunk = AudioChunk(data=b"\x00" * 100, timestamp_us=0, duration_us=25000, byte_count=100)
+    role.on_audio_chunk(chunk)
+
     client.send_message.assert_called_once()
     msg = client.send_message.call_args.args[0]
     assert isinstance(msg, StreamStartMessage)
@@ -161,12 +185,15 @@ def test_player_role_on_stream_start_sends_message_with_pcm() -> None:
     assert msg.payload.player.channels == 2
     assert msg.payload.player.codec == AudioCodec.PCM
     assert msg.payload.player.codec_header is None
+    assert role._pending_stream_start is False  # noqa: SLF001
+    assert role._stream_started is True  # noqa: SLF001
 
 
-def test_player_role_on_stream_start_sends_message_with_flac() -> None:
-    """on_stream_start() sends stream/start with FLAC codec when using FlacEncoder."""
+def test_player_role_on_audio_chunk_sends_deferred_stream_start_with_flac() -> None:
+    """on_audio_chunk() sends deferred stream/start with FLAC codec and header."""
     client = _make_client_stub()
     client.send_message = MagicMock()
+    client.try_send_binary = MagicMock(return_value=True)
 
     encoder = FlacEncoder(sample_rate=48000, bit_depth=16, channels=2)
     # Force encoder to initialize so we get a header
@@ -175,20 +202,25 @@ def test_player_role_on_stream_start_sends_message_with_flac() -> None:
     audio_req = AudioRequirements(sample_rate=48000, bit_depth=16, channels=2, transformer=encoder)
     role = PlayerV1Role(client=client, audio_requirements=audio_req)
     role._has_transport = True  # noqa: SLF001
+    role._pending_stream_start = True  # noqa: SLF001
 
-    role.on_stream_start()
+    chunk = AudioChunk(data=b"\x00" * 100, timestamp_us=0, duration_us=25000, byte_count=100)
+    role.on_audio_chunk(chunk)
 
     client.send_message.assert_called_once()
     msg = client.send_message.call_args.args[0]
     assert isinstance(msg, StreamStartMessage)
     assert msg.payload.player.codec == AudioCodec.FLAC
     assert msg.payload.player.codec_header is not None  # FLAC has header
+    assert role._pending_stream_start is False  # noqa: SLF001
+    assert role._stream_started is True  # noqa: SLF001
 
 
-def test_player_role_on_stream_start_sets_stream_started_flag() -> None:
-    """on_stream_start() sets _stream_started to True."""
+def test_player_role_on_stream_start_sets_stream_started_flag_on_first_chunk() -> None:
+    """_stream_started is set to True when stream/start is sent on first chunk."""
     client = _make_client_stub()
     client.send_message = MagicMock()
+    client.try_send_binary = MagicMock(return_value=True)
 
     audio_req = AudioRequirements(
         sample_rate=48000,
@@ -201,6 +233,10 @@ def test_player_role_on_stream_start_sets_stream_started_flag() -> None:
     role._stream_started = False  # noqa: SLF001
 
     role.on_stream_start()
+    assert role._stream_started is False  # noqa: SLF001 - not yet
+
+    chunk = AudioChunk(data=b"\x00" * 100, timestamp_us=0, duration_us=25000, byte_count=100)
+    role.on_audio_chunk(chunk)
 
     assert role._stream_started is True  # noqa: SLF001
 

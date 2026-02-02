@@ -145,10 +145,11 @@ def test_player_role_on_stream_end_drops_without_transport() -> None:
 # --- Tests for hook-based streaming methods ---
 
 
-def test_player_role_on_stream_start_sends_message() -> None:
-    """on_stream_start() sends stream/start with format info."""
+def test_player_role_on_stream_start_sets_pending_flag() -> None:
+    """on_stream_start() sets pending flag, message sent on first chunk."""
     client = MagicMock()
     client.send_message = MagicMock()
+    client.try_send_binary = MagicMock(return_value=True)
 
     role = PlayerV1Role(client=client)
     role._has_transport = True  # noqa: SLF001
@@ -161,11 +162,20 @@ def test_player_role_on_stream_start_sends_message() -> None:
 
     role.on_stream_start()
 
+    # Message is deferred until first chunk
+    client.send_message.assert_not_called()
+    assert role._pending_stream_start is True  # noqa: SLF001
+
+    # First chunk triggers the stream/start message
+    chunk = AudioChunk(data=b"\x00" * 100, timestamp_us=0, duration_us=25000, byte_count=100)
+    role.on_audio_chunk(chunk)
+
     client.send_message.assert_called_once()
     msg = client.send_message.call_args.args[0]
     assert isinstance(msg, StreamStartMessage)
     assert msg.payload.player.sample_rate == 48000
     assert msg.payload.player.codec == AudioCodec.PCM
+    assert role._pending_stream_start is False  # noqa: SLF001
 
 
 def test_player_role_on_audio_chunk_returns_true() -> None:
