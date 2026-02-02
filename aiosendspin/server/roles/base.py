@@ -12,12 +12,11 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
 if TYPE_CHECKING:
     from collections.abc import Coroutine
-    from typing import Any
 
     from aiosendspin.models.core import (
         ClientCommandPayload,
@@ -274,9 +273,17 @@ class Role(ABC):
         """Set player mute if supported by this role."""
         return
 
-    def get_player_supported_sample_rates(self) -> set[int] | None:
-        """Return supported sample rates if this role represents a player."""
+    def get_supported_formats(self) -> list[Any] | None:
+        """Return formats both client and server support, in client priority order."""
         return None
+
+    def set_preferred_format(
+        self,
+        audio_format: Any,  # noqa: ARG002
+        codec: Any,  # noqa: ARG002
+    ) -> bool:
+        """Set preferred format if compatible. Returns True on success."""
+        return False
 
     def reset_binary_timing(self) -> None:
         """Reset timing state for binary handling (called on stream clear/end)."""

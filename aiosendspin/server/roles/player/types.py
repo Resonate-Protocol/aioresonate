@@ -5,6 +5,9 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
+    from aiosendspin.models import AudioCodec
+    from aiosendspin.models.player import SupportedAudioFormat
+    from aiosendspin.server.audio import AudioFormat
     from aiosendspin.server.client import SendspinClient
 
 
@@ -35,6 +38,10 @@ class PlayerRoleProtocol(Protocol):
         """Set the player mute state if supported."""
         ...
 
-    def get_player_supported_sample_rates(self) -> set[int] | None:
-        """Return supported sample rates if available."""
+    def get_supported_formats(self) -> list[SupportedAudioFormat] | None:
+        """Return formats both client and server support, in client priority order."""
+        ...
+
+    def set_preferred_format(self, audio_format: AudioFormat, codec: AudioCodec) -> bool:
+        """Set preferred format if compatible. Returns True on success."""
         ...

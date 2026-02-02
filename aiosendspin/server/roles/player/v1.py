@@ -26,7 +26,7 @@ from aiosendspin.models.core import (
     StreamStartMessage,
     StreamStartPayload,
 )
-from aiosendspin.models.player import PlayerCommandPayload, StreamStartPlayer
+from aiosendspin.models.player import PlayerCommandPayload, StreamStartPlayer, SupportedAudioFormat
 from aiosendspin.models.types import GoodbyeReason, PlayerCommand
 from aiosendspin.server.audio import AudioFormat, BufferTracker
 from aiosendspin.server.roles.base import (
@@ -41,6 +41,7 @@ from aiosendspin.server.roles.player.audio_transformers import (
     OpusEncoder,
     PcmPassthrough,
 )
+from aiosendspin.server.roles.player.capabilities import can_encode_format, filter_encodable_formats
 from aiosendspin.server.roles.player.events import VolumeChangedEvent
 
 if TYPE_CHECKING:
@@ -389,12 +390,53 @@ class PlayerV1Role(Role):
         """Set player mute via role API."""
         self.set_mute(muted)
 
-    def get_player_supported_sample_rates(self) -> set[int] | None:
-        """Return supported sample rates for this player."""
+    def get_supported_formats(self) -> list[SupportedAudioFormat] | None:
+        """Return formats both client and server support, in client priority order."""
         support = self._client.info.player_support
         if support is None:
             return None
-        return {fmt.sample_rate for fmt in support.supported_formats}
+        return filter_encodable_formats(support.supported_formats)
+
+    def set_preferred_format(self, audio_format: AudioFormat, codec: AudioCodec) -> bool:
+        """Set preferred format if compatible with both client and server.
+
+        Args:
+            audio_format: The audio format to set (sample_rate, bit_depth, channels).
+            codec: The codec to use.
+
+        Returns:
+            True if the format was set, False if incompatible.
+        """
+        support = self._client.info.player_support
+        if support is None:
+            return False
+
+        # Check if format is in client's supported list
+        client_format = SupportedAudioFormat(
+            codec=codec,
+            sample_rate=audio_format.sample_rate,
+            bit_depth=audio_format.bit_depth,
+            channels=audio_format.channels,
+        )
+        is_client_supported = any(
+            fmt.codec == codec
+            and fmt.sample_rate == audio_format.sample_rate
+            and fmt.bit_depth == audio_format.bit_depth
+            and fmt.channels == audio_format.channels
+            for fmt in support.supported_formats
+        )
+        if not is_client_supported:
+            return False
+
+        # Check if server can encode this format
+        if not can_encode_format(client_format):
+            return False
+
+        # Set the preferred format
+        state = self._state()
+        state.preferred_format = audio_format
+        state.preferred_codec = codec
+        return True
 
     def set_volume(self, volume: int) -> None:
         """Set the volume of this player."""
@@ -580,11 +622,17 @@ class PlayerV1Role(Role):
         if state.preferred_format is None and self._preferred_format_override is not None:
             state.preferred_format = self._preferred_format_override
 
-        supported = support.supported_formats
-        preferred_supported = next(
-            (fmt for fmt in supported if fmt.codec == AudioCodec.OPUS),
-            supported[0],
-        )
+        # Filter to formats the server can actually encode
+        compatible = filter_encodable_formats(support.supported_formats)
+        if not compatible:
+            self._client._logger.warning(  # noqa: SLF001
+                "Client %s has no server-compatible formats",
+                self._client.client_id,
+            )
+            return
+
+        # Use client's first compatible format (client priority order)
+        preferred_supported = compatible[0]
         default_format = AudioFormat(
             sample_rate=preferred_supported.sample_rate,
             bit_depth=preferred_supported.bit_depth,
@@ -599,7 +647,7 @@ class PlayerV1Role(Role):
             and fmt.sample_rate == current_format.sample_rate
             and fmt.bit_depth == current_format.bit_depth
             and fmt.channels == current_format.channels
-            for fmt in supported
+            for fmt in compatible
         )
         if not is_supported:
             state.preferred_format = default_format
