@@ -1,4 +1,4 @@
-"""Tests for MetadataRole (v1) implementation."""
+"""Tests for MetadataV1Role (v1) implementation."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from aiosendspin.server.roles.metadata.v1 import MetadataRole
+from aiosendspin.server.roles.metadata.v1 import MetadataV1Role
 
 
 def _make_client_stub() -> MagicMock:
@@ -18,23 +18,23 @@ def _make_client_stub() -> MagicMock:
 
 
 def test_metadata_role_has_role_id() -> None:
-    """MetadataRole has role_id of 'metadata@v1'."""
+    """MetadataV1Role has role_id of 'metadata@v1'."""
     client = _make_client_stub()
-    role = MetadataRole(client=client)
+    role = MetadataV1Role(client=client)
     assert role.role_id == "metadata@v1"
 
 
 def test_metadata_role_has_role_family() -> None:
-    """MetadataRole has role_family of 'metadata'."""
+    """MetadataV1Role has role_family of 'metadata'."""
     client = _make_client_stub()
-    role = MetadataRole(client=client)
+    role = MetadataV1Role(client=client)
     assert role.role_family == "metadata"
 
 
 def test_metadata_role_requires_client() -> None:
-    """MetadataRole raises ValueError if no client provided."""
+    """MetadataV1Role raises ValueError if no client provided."""
     with pytest.raises(ValueError, match="requires a client"):
-        MetadataRole(client=None)
+        MetadataV1Role(client=None)
 
 
 def test_metadata_role_on_connect_subscribes_to_group_role() -> None:
@@ -43,7 +43,7 @@ def test_metadata_role_on_connect_subscribes_to_group_role() -> None:
     group_role = MagicMock()
     client.group.group_role.return_value = group_role
 
-    role = MetadataRole(client=client)
+    role = MetadataV1Role(client=client)
     role.on_connect()
 
     client.group.group_role.assert_called_with("metadata")
@@ -56,7 +56,7 @@ def test_metadata_role_on_disconnect_unsubscribes_from_group_role() -> None:
     group_role = MagicMock()
     client.group.group_role.return_value = group_role
 
-    role = MetadataRole(client=client)
+    role = MetadataV1Role(client=client)
     role.on_connect()
     role.on_disconnect()
 
@@ -64,14 +64,14 @@ def test_metadata_role_on_disconnect_unsubscribes_from_group_role() -> None:
 
 
 def test_metadata_role_has_no_stream_requirements() -> None:
-    """MetadataRole does not send binary streams."""
+    """MetadataV1Role does not send binary streams."""
     client = _make_client_stub()
-    role = MetadataRole(client=client)
+    role = MetadataV1Role(client=client)
     assert role.get_stream_requirements() is None
 
 
 def test_metadata_role_has_no_audio_requirements() -> None:
-    """MetadataRole does not receive audio."""
+    """MetadataV1Role does not receive audio."""
     client = _make_client_stub()
-    role = MetadataRole(client=client)
+    role = MetadataV1Role(client=client)
     assert role.get_audio_requirements() is None

@@ -1,4 +1,4 @@
-"""Tests for ArtworkRole (v1) implementation."""
+"""Tests for ArtworkV1Role (v1) implementation."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ import pytest
 from aiosendspin.models.artwork import ArtworkChannel
 from aiosendspin.models.core import StreamStartMessage
 from aiosendspin.models.types import ArtworkSource, PictureFormat
-from aiosendspin.server.roles.artwork.v1 import ArtworkRole
+from aiosendspin.server.roles.artwork.v1 import ArtworkV1Role
 
 
 def _make_client_stub() -> MagicMock:
@@ -26,23 +26,23 @@ def _make_client_stub() -> MagicMock:
 
 
 def test_artwork_role_has_role_id() -> None:
-    """ArtworkRole has role_id of 'artwork@v1'."""
+    """ArtworkV1Role has role_id of 'artwork@v1'."""
     client = _make_client_stub()
-    role = ArtworkRole(client=client)
+    role = ArtworkV1Role(client=client)
     assert role.role_id == "artwork@v1"
 
 
 def test_artwork_role_has_role_family() -> None:
-    """ArtworkRole has role_family of 'artwork'."""
+    """ArtworkV1Role has role_family of 'artwork'."""
     client = _make_client_stub()
-    role = ArtworkRole(client=client)
+    role = ArtworkV1Role(client=client)
     assert role.role_family == "artwork"
 
 
 def test_artwork_role_requires_client() -> None:
-    """ArtworkRole raises ValueError if no client provided."""
+    """ArtworkV1Role raises ValueError if no client provided."""
     with pytest.raises(ValueError, match="requires a client"):
-        ArtworkRole(client=None)
+        ArtworkV1Role(client=None)
 
 
 def test_artwork_role_on_connect_subscribes_to_group_role() -> None:
@@ -51,7 +51,7 @@ def test_artwork_role_on_connect_subscribes_to_group_role() -> None:
     group_role = MagicMock()
     client.group.group_role.return_value = group_role
 
-    role = ArtworkRole(client=client)
+    role = ArtworkV1Role(client=client)
     role.on_connect()
 
     client.group.group_role.assert_called_with("artwork")
@@ -64,7 +64,7 @@ def test_artwork_role_on_disconnect_unsubscribes_from_group_role() -> None:
     group_role = MagicMock()
     client.group.group_role.return_value = group_role
 
-    role = ArtworkRole(client=client)
+    role = ArtworkV1Role(client=client)
     role.on_connect()
     role.on_disconnect()
 
@@ -91,7 +91,7 @@ def test_artwork_role_init_channel_configs_from_support() -> None:
     ]
     client.info.artwork_support = support
 
-    role = ArtworkRole(client=client)
+    role = ArtworkV1Role(client=client)
     role.on_connect()
 
     configs = role.get_channel_configs()
@@ -114,7 +114,7 @@ def test_artwork_role_sends_stream_start_on_connect_with_transport() -> None:
     ]
     client.info.artwork_support = support
 
-    role = ArtworkRole(client=client)
+    role = ArtworkV1Role(client=client)
     role._has_transport = True  # noqa: SLF001
     role.on_connect()
 
@@ -128,7 +128,7 @@ def test_artwork_role_sends_stream_start_on_connect_with_transport() -> None:
 def test_artwork_role_send_artwork() -> None:
     """send_artwork() sends binary message with header and image data."""
     client = _make_client_stub()
-    role = ArtworkRole(client=client)
+    role = ArtworkV1Role(client=client)
     role._has_transport = True  # noqa: SLF001
 
     role.send_artwork(channel=0, image_data=b"image", timestamp_us=1000)
@@ -143,7 +143,7 @@ def test_artwork_role_send_artwork() -> None:
 def test_artwork_role_send_artwork_cleared() -> None:
     """send_artwork_cleared() sends empty binary message."""
     client = _make_client_stub()
-    role = ArtworkRole(client=client)
+    role = ArtworkV1Role(client=client)
     role._has_transport = True  # noqa: SLF001
 
     role.send_artwork_cleared(channel=1, timestamp_us=2000)
@@ -156,7 +156,7 @@ def test_artwork_role_send_artwork_cleared() -> None:
 def test_artwork_role_send_artwork_noop_without_transport() -> None:
     """send_artwork() is a no-op when no transport."""
     client = _make_client_stub()
-    role = ArtworkRole(client=client)
+    role = ArtworkV1Role(client=client)
     role._has_transport = False  # noqa: SLF001
 
     role.send_artwork(channel=0, image_data=b"image", timestamp_us=1000)
@@ -165,7 +165,7 @@ def test_artwork_role_send_artwork_noop_without_transport() -> None:
 
 
 def test_artwork_role_has_no_audio_requirements() -> None:
-    """ArtworkRole does not receive audio."""
+    """ArtworkV1Role does not receive audio."""
     client = _make_client_stub()
-    role = ArtworkRole(client=client)
+    role = ArtworkV1Role(client=client)
     assert role.get_audio_requirements() is None

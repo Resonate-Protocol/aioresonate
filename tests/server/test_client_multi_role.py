@@ -11,7 +11,7 @@ from aiosendspin.models.types import AudioCodec, PlayerCommand
 from aiosendspin.server.audio_transformers import TransformerPool
 from aiosendspin.server.client import SendspinClient
 from aiosendspin.server.clock import LoopClock
-from aiosendspin.server.roles import PlayerRole
+from aiosendspin.server.roles import PlayerV1Role
 
 
 @dataclass(slots=True)
@@ -112,10 +112,10 @@ class TestClientRoles:
 
         role = client.role("player@v1")
         assert role is not None
-        assert isinstance(role, PlayerRole)
+        assert isinstance(role, PlayerV1Role)
 
     def test_player_role_has_role_family(self, mock_loop: Any) -> None:
-        """PlayerRole has role_family='player'."""
+        """PlayerV1Role has role_family='player'."""
         server = _DummyServer(loop=mock_loop, clock=LoopClock(mock_loop))
         group = _DummyGroup(clients=[])
         client = SendspinClient(server, client_id="test")
@@ -132,7 +132,7 @@ class TestClientRoles:
         assert role.role_family == "player"
 
     def test_active_roles_includes_player_role(self, mock_loop: Any) -> None:
-        """active_roles includes PlayerRole when player role is active."""
+        """active_roles includes PlayerV1Role when player role is active."""
         server = _DummyServer(loop=mock_loop, clock=LoopClock(mock_loop))
         group = _DummyGroup(clients=[])
         client = SendspinClient(server, client_id="test")
