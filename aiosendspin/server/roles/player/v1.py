@@ -436,6 +436,10 @@ class PlayerV1Role(Role):
         state = self._state()
         state.preferred_format = audio_format
         state.preferred_codec = codec
+
+        # Rebuild audio requirements with the new format
+        self._ensure_audio_requirements(state, force=True)
+
         return True
 
     def set_volume(self, volume: int) -> None:
