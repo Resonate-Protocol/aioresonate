@@ -2,7 +2,7 @@
 
 This package contains the role implementations:
 - Base role classes (Role ABC, dataclasses)
-- Specific role implementations (PlayerRole, ControllerRole, etc.)
+- Specific role implementations (PlayerV1Role, ControllerV1Role, etc.)
 
 Roles encapsulate per-connection behavior for different client capabilities.
 """
@@ -17,7 +17,7 @@ from aiosendspin.server.roles import (
 )
 
 # Re-export role classes for convenience
-from aiosendspin.server.roles.artwork import ArtworkGroupRole, ArtworkRole
+from aiosendspin.server.roles.artwork import ArtworkGroupRole, ArtworkV1Role
 from aiosendspin.server.roles.base import (
     AudioChunk,
     AudioRequirements,
@@ -34,19 +34,19 @@ from aiosendspin.server.roles.controller import (
     ControllerPlayEvent,
     ControllerPreviousEvent,
     ControllerRepeatEvent,
-    ControllerRole,
     ControllerShuffleEvent,
     ControllerStopEvent,
     ControllerSwitchEvent,
+    ControllerV1Role,
     ControllerVolumeEvent,
 )
-from aiosendspin.server.roles.metadata import MetadataGroupRole, MetadataRole
-from aiosendspin.server.roles.player import PlayerGroupRole, PlayerRole
-from aiosendspin.server.roles.visualizer import VisualizerGroupRole, VisualizerRole
+from aiosendspin.server.roles.metadata import MetadataGroupRole, MetadataV1Role
+from aiosendspin.server.roles.player import PlayerGroupRole, PlayerV1Role
+from aiosendspin.server.roles.visualizer import VisualizerGroupRole, VisualizerV1Role
 
 __all__ = [
     "ArtworkGroupRole",
-    "ArtworkRole",
+    "ArtworkV1Role",
     "AudioChunk",
     "AudioRequirements",
     "ControllerEvent",
@@ -57,18 +57,18 @@ __all__ = [
     "ControllerPlayEvent",
     "ControllerPreviousEvent",
     "ControllerRepeatEvent",
-    "ControllerRole",
     "ControllerShuffleEvent",
     "ControllerStopEvent",
     "ControllerSwitchEvent",
+    "ControllerV1Role",
     "ControllerVolumeEvent",
     "GroupRole",
     "MetadataGroupRole",
-    "MetadataRole",
+    "MetadataV1Role",
     "PlayerGroupRole",
-    "PlayerRole",
+    "PlayerV1Role",
     "Role",
     "StreamRequirements",
     "VisualizerGroupRole",
-    "VisualizerRole",
+    "VisualizerV1Role",
 ]

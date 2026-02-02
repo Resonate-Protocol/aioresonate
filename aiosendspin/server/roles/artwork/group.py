@@ -12,11 +12,12 @@ from PIL import Image
 from aiosendspin.models import BinaryMessageType, pack_binary_header_raw
 from aiosendspin.models.artwork import ArtworkChannel
 from aiosendspin.models.types import ArtworkSource, PictureFormat
+from aiosendspin.server.roles.artwork.types import ArtworkRoleProtocol
 from aiosendspin.server.roles.base import GroupRole, Role
 
 if TYPE_CHECKING:
     from aiosendspin.server.group import SendspinGroup
-    from aiosendspin.server.roles.artwork.v1 import ArtworkRole
+
 
 logger = logging.getLogger(__name__)
 
@@ -41,11 +42,8 @@ class ArtworkGroupRole(GroupRole):
 
     def _send_artwork_to_role(self, role: Role) -> None:
         """Send current artwork for all channels to a role."""
-        from aiosendspin.server.roles.artwork.v1 import ArtworkRole  # noqa: PLC0415
-
-        if not isinstance(role, ArtworkRole):
+        if not isinstance(role, ArtworkRoleProtocol):
             return
-
         channel_configs = role.get_channel_configs()
         if not channel_configs:
             return
@@ -59,7 +57,7 @@ class ArtworkGroupRole(GroupRole):
 
     def _schedule_send_artwork(
         self,
-        role: ArtworkRole,
+        role: ArtworkRoleProtocol,
         image: Image.Image,
         channel: int,
         channel_config: ArtworkChannel,
@@ -72,7 +70,7 @@ class ArtworkGroupRole(GroupRole):
 
     async def _send_artwork_to_role_channel(
         self,
-        role: ArtworkRole,
+        role: ArtworkRoleProtocol,
         image: Image.Image,
         channel: int,
         channel_config: ArtworkChannel,
@@ -114,8 +112,6 @@ class ArtworkGroupRole(GroupRole):
 
     async def _set_artwork(self, source: ArtworkSource, image: Image.Image | None) -> None:
         """Set or clear artwork for a source type."""
-        from aiosendspin.server.roles.artwork.v1 import ArtworkRole  # noqa: PLC0415
-
         if image is None:
             self._current_artwork.pop(source, None)
         else:
@@ -123,7 +119,7 @@ class ArtworkGroupRole(GroupRole):
 
         send_tasks = []
         for role in self._members:
-            if not isinstance(role, ArtworkRole):
+            if not isinstance(role, ArtworkRoleProtocol):
                 continue
             channel_configs = role.get_channel_configs()
             if not channel_configs:

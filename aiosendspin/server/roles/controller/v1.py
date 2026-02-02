@@ -1,4 +1,4 @@
-"""ControllerRole implementation (v1).
+"""ControllerV1Role implementation (v1).
 
 This role handles bidirectional communication:
 - Inbound: client/command controller messages
@@ -34,7 +34,7 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class ControllerRoleState:
-    """Persistent state for ControllerRole across reconnects."""
+    """Persistent state for ControllerV1Role across reconnects."""
 
     previous_group_id: str | None = None
     """Group ID to rejoin after external_source ends."""
@@ -43,7 +43,7 @@ class ControllerRoleState:
     """Solo group ID created when entering external_source."""
 
 
-class ControllerRole(Role):
+class ControllerV1Role(Role):
     """Role implementation for controller clients.
 
     Receives controller state from ControllerGroupRole and forwards commands
@@ -51,13 +51,13 @@ class ControllerRole(Role):
     """
 
     def __init__(self, client: SendspinClient | None = None) -> None:
-        """Initialize ControllerRole.
+        """Initialize ControllerV1Role.
 
         Args:
             client: The owning SendspinClient.
         """
         if client is None:
-            msg = "ControllerRole requires a client"
+            msg = "ControllerV1Role requires a client"
             raise ValueError(msg)
         self._client = client
         self._has_transport = False

@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from aiosendspin.server.roles.base import GroupRole, Role
+from aiosendspin.server.roles.base import GroupRole
+from aiosendspin.server.roles.player.types import PlayerRoleProtocol
 
 if TYPE_CHECKING:
     from aiosendspin.server.client import SendspinClient
@@ -15,10 +16,10 @@ class PlayerGroupRole(GroupRole):
 
     role_family = "player"
 
-    def _player_roles(self) -> list[Role]:
+    def _player_roles(self) -> list[PlayerRoleProtocol]:
         """Return player role members.
 
-        All members of PlayerGroupRole are PlayerRole instances since only
+        All members of PlayerGroupRole are PlayerV1Role instances since only
         roles with role_family="player" subscribe to this GroupRole.
         """
         return list(self._members)
@@ -56,7 +57,7 @@ class PlayerGroupRole(GroupRole):
             return True
 
         # Build mapping of player -> current volume (only players with volume support)
-        player_volumes: dict[Role, float] = {}
+        player_volumes: dict[PlayerRoleProtocol, float] = {}
         for p in players:
             vol = p.get_player_volume()
             if vol is not None:
@@ -73,7 +74,7 @@ class PlayerGroupRole(GroupRole):
         active_players = list(player_volumes.keys())
         for _ in range(5):
             lost_delta_sum = 0.0
-            next_active: list[Role] = []
+            next_active: list[PlayerRoleProtocol] = []
 
             for player in active_players:
                 current = player_volumes[player]

@@ -21,6 +21,7 @@ from aiosendspin.models.types import (
     PlaybackStateType,
 )
 from aiosendspin.server.roles import GroupRole
+from aiosendspin.server.roles.controller.group import ControllerGroupRole
 from aiosendspin.server.roles.registry import create_group_roles
 
 from .audio_transformers import TransformerPool
@@ -440,8 +441,6 @@ class SendspinGroup:
             commands: List of MediaCommand values that the application can handle.
                 Empty list means no commands are supported.
         """
-        from .roles.controller.group import ControllerGroupRole  # noqa: PLC0415
-
         role = self._group_roles.get("controller")
         if isinstance(role, ControllerGroupRole):
             role.set_supported_commands(commands)

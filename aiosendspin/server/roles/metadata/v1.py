@@ -1,4 +1,4 @@
-"""MetadataRole implementation (v1).
+"""MetadataV1Role implementation (v1).
 
 This role handles outbound server/state messages with metadata for display clients.
 """
@@ -14,7 +14,7 @@ if TYPE_CHECKING:
     from aiosendspin.server.client import SendspinClient
 
 
-class MetadataRole(Role):
+class MetadataV1Role(Role):
     """Role implementation for metadata display.
 
     Receives metadata updates from MetadataGroupRole and sends server/state
@@ -22,13 +22,13 @@ class MetadataRole(Role):
     """
 
     def __init__(self, client: SendspinClient | None = None) -> None:
-        """Initialize MetadataRole.
+        """Initialize MetadataV1Role.
 
         Args:
             client: The owning SendspinClient.
         """
         if client is None:
-            msg = "MetadataRole requires a client"
+            msg = "MetadataV1Role requires a client"
             raise ValueError(msg)
         self._client = client
         self._has_transport = False

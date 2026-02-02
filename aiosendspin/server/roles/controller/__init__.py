@@ -14,11 +14,12 @@ from aiosendspin.server.roles.controller.events import (
     ControllerVolumeEvent,
 )
 from aiosendspin.server.roles.controller.group import ControllerGroupRole
-from aiosendspin.server.roles.controller.v1 import ControllerRole
+from aiosendspin.server.roles.controller.types import ControllerRoleProtocol
+from aiosendspin.server.roles.controller.v1 import ControllerV1Role
 from aiosendspin.server.roles.registry import register_group_role, register_role
 
 register_group_role("controller", lambda group: ControllerGroupRole(group))
-register_role("controller@v1", lambda client: ControllerRole(client=client))
+register_role("controller@v1", lambda client: ControllerV1Role(client=client))
 
 __all__ = [
     "ControllerEvent",
@@ -29,9 +30,10 @@ __all__ = [
     "ControllerPlayEvent",
     "ControllerPreviousEvent",
     "ControllerRepeatEvent",
-    "ControllerRole",
+    "ControllerRoleProtocol",
     "ControllerShuffleEvent",
     "ControllerStopEvent",
     "ControllerSwitchEvent",
+    "ControllerV1Role",
     "ControllerVolumeEvent",
 ]

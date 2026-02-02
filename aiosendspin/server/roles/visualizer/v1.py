@@ -1,4 +1,4 @@
-"""VisualizerRole implementation (v1).
+"""VisualizerV1Role implementation (v1).
 
 This is a placeholder implementation. The role exists and registers with
 the group, but does not send any stream messages.
@@ -14,7 +14,7 @@ if TYPE_CHECKING:
     from aiosendspin.server.client import SendspinClient
 
 
-class VisualizerRole(Role):
+class VisualizerV1Role(Role):
     """Placeholder role implementation for visualizers.
 
     Currently does nothing. Real implementation would:
@@ -24,13 +24,13 @@ class VisualizerRole(Role):
     """
 
     def __init__(self, client: SendspinClient | None = None) -> None:
-        """Initialize VisualizerRole.
+        """Initialize VisualizerV1Role.
 
         Args:
             client: The owning SendspinClient.
         """
         if client is None:
-            msg = "VisualizerRole requires a client"
+            msg = "VisualizerV1Role requires a client"
             raise ValueError(msg)
         self._client = client
         self._has_transport = False

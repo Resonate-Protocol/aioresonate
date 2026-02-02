@@ -1,6 +1,6 @@
-"""PlayerRole implementation for audio playback (v1).
+"""PlayerV1Role implementation for audio playback (v1).
 
-This PlayerRole implementation uses hook-based streaming:
+This PlayerV1Role implementation uses hook-based streaming:
 - on_stream_start(): Send stream/start message
 - on_audio_chunk(): Pack and send binary audio
 - on_stream_clear(): Send stream/clear message
@@ -59,7 +59,7 @@ class PlayerPersistentState:
     buffer_reset_handle: object | None = None
 
 
-class PlayerRole(Role):
+class PlayerV1Role(Role):
     """Role implementation for audio playback.
 
     Hook-based streaming:
@@ -76,7 +76,7 @@ class PlayerRole(Role):
         preferred_format: AudioFormat | None = None,
         audio_requirements: AudioRequirements | None = None,
     ) -> None:
-        """Initialize PlayerRole.
+        """Initialize PlayerV1Role.
 
         Args:
             client: The owning SendspinClient.
@@ -84,7 +84,7 @@ class PlayerRole(Role):
             audio_requirements: Audio requirements for hook-based streaming.
         """
         if client is None:
-            msg = "PlayerRole requires a client"
+            msg = "PlayerV1Role requires a client"
             raise ValueError(msg)
         self._client = client
         self._preferred_format_override = preferred_format

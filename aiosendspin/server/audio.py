@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import importlib
 import logging
 import types
 from collections import deque
@@ -17,9 +18,7 @@ if TYPE_CHECKING:
 
 def _get_av() -> types.ModuleType:
     """Lazy import of av module to avoid slow startup."""
-    import av as _av  # noqa: PLC0415
-
-    return _av
+    return importlib.import_module("av")
 
 
 @dataclass(frozen=True)

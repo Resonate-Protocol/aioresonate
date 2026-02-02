@@ -1,4 +1,4 @@
-"""ArtworkRole implementation (v1).
+"""ArtworkV1Role implementation (v1).
 
 This role handles artwork binary streaming to display clients:
 - Sends stream/start with channel configs on connect
@@ -30,7 +30,7 @@ if TYPE_CHECKING:
     from aiosendspin.server.client import SendspinClient
 
 
-class ArtworkRole(Role):
+class ArtworkV1Role(Role):
     """Role implementation for artwork display.
 
     Manages artwork binary streaming. Unlike player, artwork streams are
@@ -38,13 +38,13 @@ class ArtworkRole(Role):
     """
 
     def __init__(self, client: SendspinClient | None = None) -> None:
-        """Initialize ArtworkRole.
+        """Initialize ArtworkV1Role.
 
         Args:
             client: The owning SendspinClient.
         """
         if client is None:
-            msg = "ArtworkRole requires a client"
+            msg = "ArtworkV1Role requires a client"
             raise ValueError(msg)
         self._client = client
         self._has_transport = False
@@ -202,16 +202,14 @@ class ArtworkRole(Role):
         self._channel_configs[request.channel] = updated
         self._send_stream_start()
 
-        if updated.source != ArtworkSource.NONE and self._group_role is not None:
-            from aiosendspin.server.roles.artwork.group import ArtworkGroupRole  # noqa: PLC0415
+        if updated.source != ArtworkSource.NONE and isinstance(self._group_role, ArtworkGroupRole):
+            group_role = self._group_role
+            if updated.source == ArtworkSource.ALBUM:
+                artwork = group_role.get_album_artwork()
+            else:
+                artwork = group_role.get_artist_artwork()
 
-            if isinstance(self._group_role, ArtworkGroupRole):
-                if updated.source == ArtworkSource.ALBUM:
-                    artwork = self._group_role.get_album_artwork()
-                else:
-                    artwork = self._group_role.get_artist_artwork()
-
-                if artwork is not None:
-                    self._group_role._schedule_send_artwork(  # noqa: SLF001
-                        self, artwork, request.channel, updated
-                    )
+            if artwork is not None:
+                group_role._schedule_send_artwork(  # noqa: SLF001
+                    self, artwork, request.channel, updated
+                )
