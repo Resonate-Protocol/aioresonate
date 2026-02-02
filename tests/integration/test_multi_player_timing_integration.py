@@ -477,6 +477,11 @@ async def _add_client_and_track(
     conn: _CaptureConnection,
     joins: _JoinTracker,
 ) -> None:
+    if player in group.clients:
+        return
+    role = player.role("player@v1")
+    if role is not None:
+        role.get_join_delay_s = lambda: 0.0  # type: ignore[method-assign]
     joins.track(player.client_id, conn)
     await group.add_client(player)
 
@@ -816,11 +821,8 @@ async def test_production_gap_rebases_timeline() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.xfail(
-    reason="Cross-format late joiner catch-up requires PCM cache (removed in role migration)"
-)
-async def test_three_players_regroup_fast_start_and_sync() -> None:
-    """3 players (mixed formats): regroup/ungroup and stay synced within +/- 5ms."""
+async def test_four_players_regroup_fast_start_and_sync() -> None:  # noqa: PLR0915
+    """4 players (mixed formats): regroup/ungroup and stay synced within +/- 5ms."""
     loop = asyncio.get_running_loop()
     clock = ManualClock()
     server = _DummyServer(loop=loop, clock=clock)
@@ -854,9 +856,17 @@ async def test_three_players_regroup_fast_start_and_sync() -> None:
         # ~500ms @ 32kHz stereo s16: 0.5 * 32_000 * 2ch * 2 bytes ≈ 64_000 bytes
         buffer_capacity=64_000,
     )
+    player_d, _group_d, conn_d = _make_player(
+        server,
+        "pD",
+        supported_formats=[
+            SupportedAudioFormat(codec=AudioCodec.PCM, channels=2, sample_rate=32_000, bit_depth=16)
+        ],
+        buffer_capacity=64_000,
+    )
 
     router = ChannelRouter()
-    for player in (player_a, player_b, player_c):
+    for player in (player_a, player_b, player_c, player_d):
         router.set_channel(player.client_id, MAIN_CHANNEL)
 
     stream = group_a.start_stream(channel_router=router)
@@ -881,16 +891,34 @@ async def test_three_players_regroup_fast_start_and_sync() -> None:
     joins = _JoinTracker(clock)
     await _add_client_and_track(group_a, player=player_b, conn=conn_b, joins=joins)
 
-    actions: dict[int, Callable[[], Awaitable[None]]] = {
+    async def _safe_remove(client: SendspinClient) -> None:
+        if len(group_a.clients) > 2:
+            await group_a.remove_client(client)
+
+    single_actions: dict[int, Callable[[], Awaitable[None]]] = {
         2: partial(_add_client_and_track, group_a, player=player_c, conn=conn_c, joins=joins),
-        4: partial(group_a.remove_client, player_b),
+        3: partial(_add_client_and_track, group_a, player=player_d, conn=conn_d, joins=joins),
+        4: partial(_safe_remove, player_b),
+        5: partial(_safe_remove, player_d),
         6: partial(_add_client_and_track, group_a, player=player_b, conn=conn_b, joins=joins),
-        8: partial(group_a.remove_client, player_c),
-        10: partial(_add_client_and_track, group_a, player=player_c, conn=conn_c, joins=joins),
+        8: partial(_safe_remove, player_c),
+        14: partial(_add_client_and_track, group_a, player=player_c, conn=conn_c, joins=joins),
+        16: partial(_add_client_and_track, group_a, player=player_d, conn=conn_d, joins=joins),
+    }
+    burst_actions: dict[int, list[Callable[[], Awaitable[None]]]] = {
+        10: [
+            partial(_add_client_and_track, group_a, player=player_c, conn=conn_c, joins=joins),
+            partial(_add_client_and_track, group_a, player=player_d, conn=conn_d, joins=joins),
+            partial(_safe_remove, player_b),
+        ],
+        12: [
+            partial(_safe_remove, player_c),
+            partial(_add_client_and_track, group_a, player=player_b, conn=conn_b, joins=joins),
+        ],
     }
 
     # Run long enough after the final regroup so all players have a shared window.
-    for step in range(1, 22):
+    for step in range(1, 40):
         clock.advance_us(duration_us)
         play_start_us = await _commit_pcm_block(
             stream,
@@ -901,9 +929,13 @@ async def test_three_players_regroup_fast_start_and_sync() -> None:
         assert abs(play_start_us - next_play_start_us) <= 1_000
         next_play_start_us = play_start_us + duration_us
         joins.drain()
-        action = actions.get(step)
-        if action is not None:
-            await action()
+        single_action = single_actions.get(step)
+        if single_action is not None:
+            await single_action()
+        step_actions = burst_actions.get(step)
+        if step_actions is not None:
+            for action in step_actions:
+                await action()
 
     join_delays_us = joins.finalize()
     _assert_join_delays(join_delays_us, min_delay_us=0, max_delay_us=1_000_000)
@@ -913,14 +945,33 @@ async def test_three_players_regroup_fast_start_and_sync() -> None:
         conn_c=conn_c,
         max_skew_us=5_000,
     )
+    seg_a = _segments_from_events(conn_a.events)
+    seg_b = _segments_from_events(conn_b.events)
+    seg_c = _segments_from_events(conn_c.events)
+    seg_d = _segments_from_events(conn_d.events)
+    assert seg_d
+    window_duration_us = 500_000
+    window_start_us = _choose_common_window(
+        [seg_a, seg_b, seg_c, seg_d],
+        window_duration_us=window_duration_us,
+        warmup_us=500_000,
+    )
+    d_last = seg_d[-1]
+    frames_d = round(window_duration_us * d_last.sample_rate / 1_000_000)
+    rec_d = _samples_for_window(d_last, window_start_us, window_duration_us)
+    exp_d = _expected_left_for_window(
+        window_start_us, sample_rate=d_last.sample_rate, frame_count=frames_d
+    )
+    max_d = int(d_last.sample_rate * (5_000 / 1_000_000))
+    lag_d, score_d = _best_lag_samples(rec_d, exp_d, max_lag_samples=max_d)
+    lag_d_us = abs(lag_d) * 1_000_000 / d_last.sample_rate
+    assert lag_d_us <= 5_000
+    assert score_d >= 0.85
     _assert_pcm_chunks_continuous(conn_a.events, max_gap_us=6_000)
     _assert_pcm_chunks_continuous(conn_c.events, max_gap_us=6_000)
 
 
 @pytest.mark.asyncio
-@pytest.mark.xfail(
-    reason="Cross-format late joiner catch-up requires PCM cache (removed in role migration)"
-)
 async def test_first_time_join_unique_format_starts_under_1s_without_next_commit() -> None:
     """Late joiner with a unique format should start via PCM cache without waiting for commit."""
     loop = asyncio.get_running_loop()
@@ -959,6 +1010,7 @@ async def test_first_time_join_unique_format_starts_under_1s_without_next_commit
     duration_us = 100_000
     frame_count = 4800  # 100ms @ 48kHz
     next_play_start_us = clock.now_us() + 250_000
+    lead_commits = 5  # keep +500ms of extra lead time before join
     for i in range(30):  # 3s of scheduled audio
         play_start_us = await _commit_pcm_block(
             stream,
@@ -970,14 +1022,22 @@ async def test_first_time_join_unique_format_starts_under_1s_without_next_commit
         # Join should not rely on a *future* commit, but it may rely on already-scheduled
         # buffered audio. Do not advance time after the last commit so the stream still
         # has ample future lead time relative to "now".
-        if i < 29:
+        if i < 29 - lead_commits:
             clock.advance_us(duration_us)
 
     # Join B, but do not commit any further audio afterwards.
     join_idx = len(conn_b.events)
     join_now_us = clock.now_us()
+    role_b = player_b.role("player@v1")
+    assert role_b is not None
+    role_b.get_join_delay_s = lambda: 0.0  # type: ignore[method-assign]
     await group_a.add_client(player_b)
 
-    first_ts = _first_audio_timestamp_after(conn_b.events, start_index=join_idx)
+    first_ts = None
+    for _ in range(100):
+        first_ts = _first_audio_timestamp_after(conn_b.events, start_index=join_idx)
+        if first_ts is not None:
+            break
+        await asyncio.sleep(0.01)
     assert first_ts is not None, "expected immediate catch-up audio from PCM cache"
     assert first_ts - join_now_us <= 1_000_000
