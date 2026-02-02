@@ -1150,6 +1150,8 @@ class PushStream:
         encoder = req.transformer
 
         try:
+            if encoder is not None:
+                encoder.reset()
             pcm_chunks = list(self._pcm_chunk_cache.get(channel_int, []))
             now_us = self._clock.now_us()
             min_ts = now_us + LATE_JOINER_MIN_LEAD_US
