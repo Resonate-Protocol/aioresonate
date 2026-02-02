@@ -936,6 +936,15 @@ class PushStream:
         """Remove role-specific state so re-joins get fresh stream/start."""
         self._started_roles.discard(role)
         self._role_chunk_cursors.pop(role, None)
+        req = role.get_audio_requirements()
+        if req is not None:
+            channel_id = req.channel_id or MAIN_CHANNEL
+            tkey = self._build_transform_key(req, channel_id, role)
+            if not self._other_roles_use_transform_key(tkey, role):
+                self._role_chunk_cache.pop(tkey, None)
+                self._drop_role_chunk_cursors(tkey)
+                if req.transformer is not None:
+                    req.transformer.reset()
         for tkey in list(self._catchup_roles.keys()):
             roles = self._catchup_roles[tkey]
             roles.discard(role)
