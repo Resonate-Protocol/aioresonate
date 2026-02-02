@@ -37,7 +37,11 @@ from aiosendspin.server.roles.base import (
     Role,
     StreamRequirements,
 )
-from aiosendspin.server.roles.player.audio_transformers import FlacEncoder, PcmPassthrough
+from aiosendspin.server.roles.player.audio_transformers import (
+    FlacEncoder,
+    OpusEncoder,
+    PcmPassthrough,
+)
 from aiosendspin.server.roles.player.events import VolumeChangedEvent
 
 if TYPE_CHECKING:
@@ -250,7 +254,12 @@ class PlayerV1Role(Role):
         header_b64 = base64.b64encode(header).decode() if header else None
 
         # Determine codec from transformer type
-        codec = AudioCodec.FLAC if isinstance(transformer, FlacEncoder) else AudioCodec.PCM
+        if isinstance(transformer, FlacEncoder):
+            codec = AudioCodec.FLAC
+        elif isinstance(transformer, OpusEncoder):
+            codec = AudioCodec.OPUS
+        else:
+            codec = AudioCodec.PCM
 
         stream_start = StreamStartMessage(
             payload=StreamStartPayload(
@@ -594,10 +603,19 @@ class PlayerV1Role(Role):
         group = self._client.group
         frame_duration_us = 25_000
         channel_id = MAIN_CHANNEL
-        transformer: FlacEncoder | PcmPassthrough
+        transformer: FlacEncoder | OpusEncoder | PcmPassthrough
         if audio_codec == AudioCodec.FLAC:
             transformer = group.transformer_pool.get_or_create(
                 FlacEncoder,
+                channel_id=channel_id,
+                sample_rate=audio_format.sample_rate,
+                bit_depth=audio_format.bit_depth,
+                channels=audio_format.channels,
+                frame_duration_us=frame_duration_us,
+            )
+        elif audio_codec == AudioCodec.OPUS:
+            transformer = group.transformer_pool.get_or_create(
+                OpusEncoder,
                 channel_id=channel_id,
                 sample_rate=audio_format.sample_rate,
                 bit_depth=audio_format.bit_depth,
