@@ -43,6 +43,7 @@ from aiosendspin.server.roles.player.audio_transformers import (
 )
 from aiosendspin.server.roles.player.capabilities import can_encode_format, filter_encodable_formats
 from aiosendspin.server.roles.player.events import VolumeChangedEvent
+from aiosendspin.util import create_task
 
 if TYPE_CHECKING:
     from aiosendspin.server.client import SendspinClient
@@ -478,11 +479,7 @@ class PlayerV1Role(Role):
 
         # DEPRECATED(before-spec-pr-50): fall back to player.state for older clients.
         if payload.state is None and state.state is not None:
-            # TODO: use eager task
-            task = self._client._server.loop.create_task(  # noqa: SLF001
-                self._client.handle_state_transition(state.state)
-            )
-            task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
+            create_task(self._client.handle_state_transition(state.state))
 
         support = self._client.info.player_support
         changed = False

@@ -14,6 +14,7 @@ from aiosendspin.models.artwork import ArtworkChannel
 from aiosendspin.models.types import ArtworkSource, PictureFormat
 from aiosendspin.server.roles.artwork.types import ArtworkRoleProtocol
 from aiosendspin.server.roles.base import GroupRole, Role
+from aiosendspin.util import create_task
 
 if TYPE_CHECKING:
     from aiosendspin.server.group import SendspinGroup
@@ -63,11 +64,7 @@ class ArtworkGroupRole(GroupRole):
         channel_config: ArtworkChannel,
     ) -> None:
         """Schedule artwork send as a background task."""
-        # TODO: use eager task, adopt helper from sendspin-cli to prevent task GC
-        task = self._group._server.loop.create_task(  # noqa: SLF001
-            self._send_artwork_to_role_channel(role, image, channel, channel_config)
-        )
-        task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
+        create_task(self._send_artwork_to_role_channel(role, image, channel, channel_config))
 
     async def _send_artwork_to_role_channel(
         self,

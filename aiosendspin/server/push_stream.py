@@ -17,6 +17,7 @@ from aiosendspin.server.audio import AudioFormat, _get_av, _resolve_audio_format
 from aiosendspin.server.channels import MAIN_CHANNEL
 from aiosendspin.server.roles import AudioChunk
 from aiosendspin.server.transform_keys import TransformKey, normalize_options
+from aiosendspin.util import create_task
 
 if TYPE_CHECKING:
     import av
@@ -1015,11 +1016,9 @@ class PushStream:
             ):
                 self._catchup_state[cache_key] = "catching_up"
                 self._catchup_roles[cache_key] = {role}
-                # TODO: use eager task
-                task = asyncio.create_task(
+                self._catchup_tasks[cache_key] = create_task(
                     self._start_catchup_encoding(role, req, channel_id, cache_key)
                 )
-                self._catchup_tasks[cache_key] = task
                 return
 
             if self._channel_timing:

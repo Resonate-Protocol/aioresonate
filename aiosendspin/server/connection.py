@@ -41,6 +41,7 @@ from aiosendspin.models.types import (
     ServerMessage,
     negotiate_active_roles,
 )
+from aiosendspin.util import create_task
 
 from .client import SendspinClient
 
@@ -246,9 +247,7 @@ class SendspinConnection:
         if self._queue_size >= MAX_PENDING_MSG:
             if not self._disconnecting:
                 self._logger.error("Message queue full, client too slow - disconnecting")
-                # TODO: use eager task
-                task = self._server.loop.create_task(self.disconnect(retry_connection=True))
-                task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
+                create_task(self.disconnect(retry_connection=True))
             return
 
         seq = self._queue_sequence
@@ -299,9 +298,7 @@ class SendspinConnection:
         if self._queue_size >= MAX_PENDING_MSG:
             if not self._disconnecting:
                 self._logger.error("Message queue full, client too slow - disconnecting")
-                # TODO: use eager task
-                task = self._server.loop.create_task(self.disconnect(retry_connection=True))
-                task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
+                create_task(self.disconnect(retry_connection=True))
             return
         self._queue_sequence += 1
         self._priority_messages.append(message)
@@ -363,8 +360,7 @@ class SendspinConnection:
 
         # Start writer task for both client-initiated and server-initiated connections.
         self._logger.info("Connection established")
-        # TODO: use eager task
-        self._writer_task = self._server.loop.create_task(self._writer())
+        self._writer_task = create_task(self._writer())
 
     async def _cleanup_connection(self) -> None:
         wsock = self._wsock_client or self._wsock_server
@@ -930,8 +926,7 @@ class SendspinConnection:
         """Run the complete websocket connection lifecycle (internal)."""
         try:
             await self._setup_connection()
-            # TODO: use eager task
-            self._message_loop_task = self._server.loop.create_task(self._run_message_loop())
+            self._message_loop_task = create_task(self._run_message_loop())
             await self._message_loop_task
         finally:
             await self._cleanup_connection()

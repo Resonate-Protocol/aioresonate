@@ -24,6 +24,7 @@ from aiosendspin.models.types import (
 from aiosendspin.server.roles import GroupRole
 from aiosendspin.server.roles.controller.group import ControllerGroupRole
 from aiosendspin.server.roles.registry import create_group_roles
+from aiosendspin.util import create_task
 
 from .audio_transformers import TransformerPool
 from .channels import ChannelResolver, default_channel_resolver
@@ -270,9 +271,7 @@ class SendspinGroup:
                     self._scheduled_stop_handle = None
 
         def _schedule_stop() -> None:
-            # TODO: use eager task
-            task = self._server.loop.create_task(_delayed_stop())
-            task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
+            create_task(_delayed_stop())
 
         self._scheduled_stop_handle = self._server.loop.call_later(delay, _schedule_stop)
         return True

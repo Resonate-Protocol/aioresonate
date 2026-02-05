@@ -21,6 +21,7 @@ from aiosendspin.models.types import (
     has_role_family,
 )
 from aiosendspin.server.roles.base import Role
+from aiosendspin.util import create_task
 
 if TYPE_CHECKING:
     from aiosendspin.models.core import ClientCommandPayload
@@ -126,9 +127,7 @@ class ControllerV1Role(Role):
             return
 
         if controller_cmd.command == MediaCommand.SWITCH:
-            # TODO: use eager task
-            task = asyncio.create_task(self._handle_switch_command())
-            task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
+            create_task(self._handle_switch_command())
             return
 
         # Forward other commands to group role

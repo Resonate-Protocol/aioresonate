@@ -27,7 +27,7 @@ from zeroconf import (
 from zeroconf.asyncio import AsyncServiceBrowser, AsyncServiceInfo, AsyncZeroconf
 
 from aiosendspin.models.types import ConnectionReason
-from aiosendspin.util import get_local_ip
+from aiosendspin.util import create_task, get_local_ip
 
 from .client import SendspinClient
 from .clock import Clock, LoopClock
@@ -211,8 +211,7 @@ class SendspinServer:
             return
 
         self._retry_events[url] = asyncio.Event()
-        # TODO: use eager task
-        self._connection_tasks[url] = self._loop.create_task(self._handle_client_connection(url))
+        self._connection_tasks[url] = create_task(self._handle_client_connection(url))
 
     def get_connection_reason(self, url: str) -> ConnectionReason:
         """Get the connection reason for a URL (for use by SendspinConnection)."""
@@ -384,9 +383,8 @@ class SendspinServer:
         for client in self._clients.values():
             if client.connection is None:
                 continue
-            # TODO: use eager task
             disconnect_tasks.append(
-                self._loop.create_task(client.connection.disconnect(retry_connection=False))
+                create_task(client.connection.disconnect(retry_connection=False))
             )
         if disconnect_tasks:
             await asyncio.gather(*disconnect_tasks, return_exceptions=True)
@@ -438,11 +436,7 @@ class SendspinServer:
         if state_change in (ServiceStateChange.Added, ServiceStateChange.Updated):
 
             def _schedule_add() -> None:
-                # TODO: use eager task
-                task = self._loop.create_task(
-                    self._handle_service_added(zeroconf, service_type, name)
-                )
-                task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
+                create_task(self._handle_service_added(zeroconf, service_type, name))
 
             self._loop.call_soon_threadsafe(_schedule_add)
         elif state_change is ServiceStateChange.Removed:

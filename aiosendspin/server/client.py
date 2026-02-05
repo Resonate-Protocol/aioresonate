@@ -25,6 +25,7 @@ from aiosendspin.models.types import (
     Roles,
     has_role,
 )
+from aiosendspin.util import create_task
 
 from .events import ClientEvent, ClientGroupChangedEvent
 from .roles import Role
@@ -216,13 +217,7 @@ class SendspinClient:
         if self._connection is not None and self._connection is not connection:
             # Replace an existing connection for the same device.
             self._logger.debug("Replacing existing connection for %s", self._client_id)
-            # TODO: seams like a race condition, we definitely need a eager task here
-            # TODO: disconnect calls detach_connection after a couple of awaits, so
-            # it yields, is that a problem?
-            task = self._server.loop.create_task(
-                self._connection.disconnect(retry_connection=False)
-            )
-            task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
+            create_task(self._connection.disconnect(retry_connection=False))
 
         self._connection = connection
         self._connected = False  # set True once initial state is received (spec)
@@ -307,9 +302,7 @@ class SendspinClient:
             # Client reconnected, don't clean up
             return
         self._logger.debug("Cleaning up client from registry")
-        # TODO: use eager task
-        task = self._server.loop.create_task(self._server.remove_client(self._client_id))
-        task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
+        create_task(self._server.remove_client(self._client_id))
 
     # ---- Messaging (delegates to connection) ----
 
