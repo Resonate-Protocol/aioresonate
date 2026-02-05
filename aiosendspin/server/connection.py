@@ -54,8 +54,6 @@ logger = logging.getLogger(__name__)
 
 # TODO: should we make this per role instead? i mean its still max.
 MAX_PENDING_MSG = 4096  # Should be more than enough for ~1 minute of buffering
-# TODO: remove again if ws timeout is enough, we have buffer overfill handling
-SEND_TIMEOUT_S = 5.0  # Max time to wait for a single send before disconnecting
 
 
 @dataclass(frozen=True, slots=True)
@@ -605,8 +603,7 @@ class SendspinConnection:
                     server_transmitted=self._server.clock.now_us(),
                 )
             )
-        async with asyncio.timeout(SEND_TIMEOUT_S):
-            await wsock.send_str(message.to_json())
+        await wsock.send_str(message.to_json())
 
     async def _send_binary_frame(
         self,
@@ -616,8 +613,7 @@ class SendspinConnection:
     ) -> None:
         """Send a binary frame with buffer tracking."""
         start_s = time.monotonic()
-        async with asyncio.timeout(SEND_TIMEOUT_S):
-            await wsock.send_bytes(item.data)
+        await wsock.send_bytes(item.data)
         elapsed_ms = (time.monotonic() - start_s) * 1000
         if elapsed_ms >= 50.0:
             self._logger.error(
@@ -934,11 +930,6 @@ class SendspinConnection:
                 iterations_since_yield = 0
         except asyncio.CancelledError:
             self._logger.debug("Writer cancelled")
-        except TimeoutError:
-            self._logger.warning("Send timed out - client too slow, disconnecting")
-            if not wsock.closed:
-                with suppress(Exception):
-                    await wsock.close()
         except Exception:
             self._logger.exception("Writer failed")
             # Close the websocket to signal the message loop to exit
