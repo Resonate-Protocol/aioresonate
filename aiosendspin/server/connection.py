@@ -1,6 +1,29 @@
-"""WebSocket connection handling for a Sendspin client."""
+"""WebSocket connection handling for a Sendspin client.
 
-# TODO: this is a complicated file, please add comments so nobody gets lost in the message sending
+Message Sending Architecture
+----------------------------
+This module implements a priority-based message queue with timestamp ordering for audio sync.
+
+**Queue Structure:**
+- Priority messages: ServerHello, time sync - sent immediately (FIFO deque)
+- Normal messages: JSON control messages - sent in arrival order (FIFO deque)
+- Binary messages: Audio/artwork data - ordered by playback timestamp (per-family min-heaps)
+
+**Binary Message Ordering:**
+Binary messages are grouped by "role family" (e.g., player, artwork). Within each family,
+messages are ordered by their playback timestamp to ensure correct sequencing even when
+chunks are encoded out-of-order. The writer loop picks the family head with the earliest
+timestamp.
+
+**Epoch-Based Invalidation:**
+Each role family has an epoch counter. When a stream is cleared or ends, the epoch
+increments, causing any queued frames from the old epoch to be silently discarded.
+This avoids sending stale audio after track changes.
+
+**Backpressure:**
+Families can be "blocked" until a future time (e.g., waiting for client buffer space).
+Blocked families are tracked in a separate heap and promoted back when ready.
+"""
 
 from __future__ import annotations
 
@@ -59,21 +82,29 @@ MAX_PENDING_MSG = 4096  # Should be more than enough for ~1 minute of buffering
 
 @dataclass(frozen=True, slots=True)
 class _BinaryFrame:
-    """Binary payload with an epoch for droppable queue semantics."""
+    """Binary payload with epoch for invalidation and metadata for buffer tracking."""
 
-    # TODO: document fields
+    # Epoch at enqueue time; frame is discarded if it doesn't match current epoch
     epoch_family: int
+    # Role family identifier (e.g., "player", "artwork") for queue routing
     role_family: str
+    # Raw binary payload including protocol header
     data: bytes
-    timestamp_us: int  # playback timestamp from header (cached to avoid unpacking)
-    message_type: int  # binary message type for role lookup (cached)
+    # Playback timestamp from header (cached to avoid re-unpacking)
+    timestamp_us: int
+    # Binary message type for role lookup (cached)
+    message_type: int
+    # End timestamp for buffer tracking (optional)
     buffer_end_time_us: int | None = None
+    # Byte count for buffer tracking (optional)
     buffer_byte_count: int | None = None
+    # Duration for buffer tracking (optional)
     duration_us: int | None = None
 
 
-# Max timestamp value used to ensure FIFO ordering for JSON messages
-# (they sort after all timestamped binary frames at the same priority)
+# Sentinel timestamp for non-timestamped messages (sorts after all real timestamps).
+# Used for JSON messages and hypothetical non-timestamped binary. In practice, all
+# binary messages (audio, artwork) have playback timestamps.
 _FIFO_TIMESTAMP = 2**62
 
 
@@ -210,9 +241,9 @@ class SendspinConnection:
 
         seq = self._queue_sequence
         self._queue_sequence += 1
-        # Use timestamp for ordering if present, otherwise FIFO
-        # TODO: does this mean if both timestamped and non-timestamped binary messages are sent,
-        # that non-timestamped ones are always delayed?
+        # Sort by playback timestamp for correct ordering. All current binary message types
+        # (audio, artwork) have timestamps. The _FIFO_TIMESTAMP fallback exists for potential
+        # future non-timestamped binary types, which would sort after timestamped messages.
         sort_ts = timestamp_us if timestamp_us > 0 else _FIFO_TIMESTAMP
         family_queue = self._binary_queues[role_family]
         heapq.heappush(family_queue, (sort_ts, seq, frame))
@@ -537,11 +568,15 @@ class SendspinConnection:
             await self.disconnect(retry_connection=retry)
             return
 
-    # TODO: explain me this method
     def _check_late_binary(
         self, handling: BinaryHandling | None, role: Role | None, timestamp_us: int
     ) -> bool:
-        """Check if binary message is late and should be dropped. Returns True to drop."""
+        """Check if a binary message's playback time has passed and should be dropped.
+
+        Compares the message's playback timestamp against the current clock. During the
+        grace period (configurable per-role), late messages are allowed through to give
+        clients time to build their initial buffer.
+        """
         # timestamp_us=0 means "no playback semantics" - skip late detection
         if handling is None or role is None or not handling.drop_late or timestamp_us == 0:
             return False
