@@ -402,9 +402,13 @@ class SendspinConnection:
                 )
             else:
                 # Loop exited normally (iterator exhausted) - connection closed
-                self._logger.error(
-                    "WebSocket iterator exhausted, close_code=%s close_message=%s",
-                    wsock.close_code,
+                close_code = wsock.close_code
+                log_func = (
+                    self._logger.debug if close_code in (1000, 1001) else self._logger.warning
+                )
+                log_func(
+                    "WebSocket closed, close_code=%s close_message=%s",
+                    close_code,
                     getattr(wsock, "close_message", None),
                 )
         except asyncio.CancelledError:
