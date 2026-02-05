@@ -377,7 +377,7 @@ class PushStream:
         """
         self._channel_buffers[channel_id] = (pcm, audio_format)
 
-    async def commit_audio(self) -> int:
+    async def commit_audio(self, *, play_start_us: int | None = None) -> int:
         """
         Encode and send all prepared audio to players.
 
@@ -385,6 +385,11 @@ class PushStream:
         1. Encodes prepared PCM for each required format
         2. Assigns timestamps to encoded chunks
         3. Sends chunks to connected players via role hooks
+
+        Args:
+            play_start_us: If provided, use this timestamp directly for all channels
+                instead of auto-calculating from clock. Useful for multi-server sync
+                where all servers share a clock and need identical timestamps.
 
         Returns:
             The earliest play_start_us timestamp across all channels.
@@ -412,26 +417,35 @@ class PushStream:
         durations_us = self._calculate_channel_durations(prepared)
         self._warn_duration_misalignment(durations_us)
 
-        # Initialize timing for new channels
-        now_us = self._clock.now_us()
-        for channel_id in prepared:
-            if channel_id not in self._channel_timing:
-                self._channel_timing[channel_id] = now_us + DEFAULT_INITIAL_DELAY_US
-
-        # If audio production stalls (e.g., the upstream source blocks), the scheduled
-        # play timeline can drift into the past. Rebase the timeline so new audio is
-        # always scheduled with at least the default initial delay from "now".
-        min_timing_us = min(self._channel_timing.values())
-        target_min_us = now_us + DEFAULT_INITIAL_DELAY_US
-        if min_timing_us < target_min_us:
-            shift_us = target_min_us - min_timing_us
-            for channel_id in self._channel_timing:
-                self._channel_timing[channel_id] += shift_us
-
-        # Capture play_start_us for each channel before advancing
+        # Capture play_start_us for each channel
         channel_play_start: dict[UUID, int] = {}
-        for channel_id in prepared:
-            channel_play_start[channel_id] = self._channel_timing[channel_id]
+
+        if play_start_us is not None:
+            # Explicit timestamp mode: use provided timestamp directly
+            for channel_id in prepared:
+                channel_play_start[channel_id] = play_start_us
+                # Initialize timing if not yet set
+                if channel_id not in self._channel_timing:
+                    self._channel_timing[channel_id] = play_start_us
+        else:
+            # Auto-calculate mode (existing behavior)
+            now_us = self._clock.now_us()
+            for channel_id in prepared:
+                if channel_id not in self._channel_timing:
+                    self._channel_timing[channel_id] = now_us + DEFAULT_INITIAL_DELAY_US
+
+            # If audio production stalls (e.g., the upstream source blocks), the scheduled
+            # play timeline can drift into the past. Rebase the timeline so new audio is
+            # always scheduled with at least the default initial delay from "now".
+            min_timing_us = min(self._channel_timing.values())
+            target_min_us = now_us + DEFAULT_INITIAL_DELAY_US
+            if min_timing_us < target_min_us:
+                shift_us = target_min_us - min_timing_us
+                for channel_id in self._channel_timing:
+                    self._channel_timing[channel_id] += shift_us
+
+            for channel_id in prepared:
+                channel_play_start[channel_id] = self._channel_timing[channel_id]
 
         # Advance each channel's timing by its duration
         for channel_id, duration_us in durations_us.items():
