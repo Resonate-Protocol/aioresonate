@@ -284,10 +284,11 @@ class PlayerV1Role(Role):
             )
         )
         self.send_message(stream_start)
+        is_initial = not self._stream_started
         self._stream_started = True
 
-        # Allow client to process stream/start before first binary audio.
-        if self._buffer_tracker is not None:
+        # Allow client to process stream/start before first binary audio (initial only).
+        if is_initial and self._buffer_tracker is not None:
             self._buffer_tracker.set_send_blocked(200_000)
 
     def on_audio_chunk(self, chunk: AudioChunk) -> bool:
@@ -561,23 +562,21 @@ class PlayerV1Role(Role):
         self.preferred_format = requested_format
         self.preferred_codec = requested_codec
 
+        state = self._state()
+
         if stream_active is None:
             stream_active = self._client.group.has_active_stream
-        if not stream_active:
-            stream_start = StreamStartPayload(
-                player=StreamStartPlayer(
-                    codec=requested_codec,
-                    sample_rate=requested_format.sample_rate,
-                    channels=requested_format.channels,
-                    bit_depth=requested_format.bit_depth,
-                    codec_header=None,
-                )
-            )
-            self._client._logger.debug(  # noqa: SLF001
-                "Sending stream/start to client %s for player format change",
-                self._client.client_id,
-            )
-            self.send_message(StreamStartMessage(stream_start))
+        if stream_active:
+            # Mid-stream format change: rebuild requirements and defer stream/start
+            # until the next audio chunk (which provides the codec header).
+            self._ensure_audio_requirements(state, force=True)
+            self._pending_stream_start = True
+            self._client.group.on_role_format_changed(self)
+        else:
+            # No active stream: also defer stream/start via _pending_stream_start
+            # so codec header is included when the first chunk arrives.
+            self._ensure_audio_requirements(state, force=True)
+            self._pending_stream_start = True
 
     # ---- Internal helpers ----
 

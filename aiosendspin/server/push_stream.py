@@ -670,7 +670,7 @@ class PushStream:
     def _build_transform_key(
         self, req: AudioRequirements, channel_id: UUID, role: Role | None = None
     ) -> TransformKey:
-        # Cache by (role_id, channel_id_int) since AudioRequirements don't change during streaming
+        # Cache by (role_id, channel_id_int); invalidated by on_role_format_changed()
         if role is not None:
             cache_key = (id(role), channel_id.int)
             cached = self._transform_key_cache.get(cache_key)
@@ -971,6 +971,33 @@ class PushStream:
         for cache_key in list(self._transform_key_cache.keys()):
             if cache_key[0] == role_id:
                 self._transform_key_cache.pop(cache_key, None)
+
+    def on_role_format_changed(self, role: Role) -> None:
+        """Invalidate caches after a role's audio format changed mid-stream.
+
+        Unlike on_role_leave(), this does NOT touch _started_roles or epoch.
+        The role stays active; only stale caches are cleared so the next
+        commit_audio() picks up the new AudioRequirements.
+        """
+        # Invalidate transform key cache entries for this role
+        role_id = id(role)
+        for cache_key in list(self._transform_key_cache.keys()):
+            if cache_key[0] == role_id:
+                self._transform_key_cache.pop(cache_key, None)
+
+        # Clear chunk cursors for this role (old TransformKey no longer valid)
+        self._role_chunk_cursors.pop(role, None)
+
+        # Clean up any catchup state referencing this role
+        for tkey in list(self._catchup_roles.keys()):
+            roles = self._catchup_roles[tkey]
+            roles.discard(role)
+            if not roles:
+                self._catchup_roles.pop(tkey, None)
+                self._catchup_state.pop(tkey, None)
+                task = self._catchup_tasks.pop(tkey, None)
+                if task is not None:
+                    task.cancel()
 
     def has_cached_chunks(self) -> bool:
         """Return True if there are cached chunks for late joiners."""

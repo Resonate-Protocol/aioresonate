@@ -11,8 +11,17 @@ from uuid import UUID
 import pytest
 
 from aiosendspin.models import unpack_binary_header
-from aiosendspin.models.core import StreamClearMessage, StreamEndMessage, StreamStartMessage
-from aiosendspin.models.player import ClientHelloPlayerSupport, SupportedAudioFormat
+from aiosendspin.models.core import (
+    StreamClearMessage,
+    StreamEndMessage,
+    StreamRequestFormatPayload,
+    StreamStartMessage,
+)
+from aiosendspin.models.player import (
+    ClientHelloPlayerSupport,
+    StreamRequestFormatPlayer,
+    SupportedAudioFormat,
+)
 from aiosendspin.models.types import AudioCodec, PlayerCommand, Roles
 from aiosendspin.server.audio import AudioFormat
 from aiosendspin.server.audio_transformers import PcmPassthrough, TransformerPool
@@ -35,6 +44,8 @@ class _DummyGroup:
     def __init__(self, clients: list[SendspinClient]) -> None:
         self.clients = clients
         self.transformer_pool = TransformerPool()
+        self._push_stream: PushStream | None = None
+        self.has_active_stream = False
 
     def on_client_connected(self, client: SendspinClient) -> None:  # noqa: ARG002
         return
@@ -44,6 +55,10 @@ class _DummyGroup:
 
     def get_channel_for_player(self, player_id: str) -> UUID:  # noqa: ARG002
         return MAIN_CHANNEL
+
+    def on_role_format_changed(self, role: Any) -> None:
+        if self._push_stream is not None and not self._push_stream.is_stopped:
+            self._push_stream.on_role_format_changed(role)
 
 
 class _FakeConnection:
@@ -637,3 +652,130 @@ async def test_transform_key_separates_channels(mock_loop: Any) -> None:
     await stream.commit_audio()
 
     assert CountingTransformer.calls == 2
+
+
+def _make_connected_player_multi_format(
+    mock_loop: Any,
+    group: _DummyGroup,
+    client_id: str,
+) -> tuple[SendspinClient, _FakeConnection]:
+    """Create a connected player client that supports PCM 48kHz and PCM 44.1kHz."""
+    server = _DummyServer(loop=mock_loop, clock=LoopClock(mock_loop))
+    client = SendspinClient(server, client_id=client_id)
+    client._group = group  # noqa: SLF001
+    group.clients.append(client)
+
+    conn = _FakeConnection()
+    hello = type("Hello", (), {})()
+    hello.client_id = client_id
+    hello.name = client_id
+    hello.player_support = ClientHelloPlayerSupport(
+        supported_formats=[
+            SupportedAudioFormat(
+                codec=AudioCodec.PCM,
+                channels=2,
+                sample_rate=48000,
+                bit_depth=16,
+            ),
+            SupportedAudioFormat(
+                codec=AudioCodec.PCM,
+                channels=2,
+                sample_rate=44100,
+                bit_depth=16,
+            ),
+        ],
+        buffer_capacity=200_000,
+        supported_commands=[PlayerCommand.VOLUME, PlayerCommand.MUTE],
+    )
+    hello.artwork_support = None
+    hello.visualizer_support = None
+
+    client.attach_connection(conn, client_info=hello, active_roles=[Roles.PLAYER.value])
+    client.mark_connected()
+
+    return client, conn
+
+
+@pytest.mark.asyncio
+async def test_format_change_during_active_stream(mock_loop: Any) -> None:
+    """Mid-stream format change sends stream/start (deferred) with no stream/clear.
+
+    Full PushStream flow:
+    1. Create player with PCM 48kHz, start PushStream
+    2. Commit audio N times
+    3. Trigger format change via on_stream_request_format with stream_active=True
+    4. Commit more audio
+    5. Assert: StreamStartMessage (with new format) in sent_json, NO StreamClearMessage
+    6. Binary audio continues after format change
+    7. Gap between last pre-change chunk and first post-change chunk ≤ 100ms
+    """
+    group = _DummyGroup(clients=[])
+    client, conn = _make_connected_player_multi_format(mock_loop, group, "p1")
+    clock = LoopClock(mock_loop)
+
+    stream = PushStream(loop=mock_loop, clock=clock, group=group)
+    group._push_stream = stream  # noqa: SLF001
+
+    # Commit several chunks at 48kHz PCM
+    for _ in range(3):
+        stream.prepare_audio(
+            bytes(4800),
+            AudioFormat(sample_rate=48000, bit_depth=16, channels=2),
+        )
+        await stream.commit_audio()
+
+    pre_change_binary_count = len(conn.sent_binary)
+    assert pre_change_binary_count > 0
+
+    # Record the last pre-change chunk's end timestamp
+    last_pre_header = unpack_binary_header(conn.sent_binary[-1])
+    # Duration of a 4800-byte PCM chunk at 48kHz stereo 16bit = 25ms = 25000us
+    pre_change_end_us = last_pre_header.timestamp_us + 25_000
+
+    # Clear sent_json to isolate format change messages
+    conn.sent_json.clear()
+
+    # Trigger mid-stream format change: PCM 48kHz -> PCM 44.1kHz
+    request = StreamRequestFormatPayload(
+        player=StreamRequestFormatPlayer(
+            codec=AudioCodec.PCM,
+            sample_rate=44100,
+            channels=2,
+            bit_depth=16,
+        )
+    )
+    role = client.role("player@v1")
+    assert role is not None
+    role.on_stream_request_format(request, stream_active=True)
+
+    # No immediate stream/start or stream/clear
+    assert not any(isinstance(msg, StreamStartMessage) for msg in conn.sent_json)
+    assert not any(isinstance(msg, StreamClearMessage) for msg in conn.sent_json)
+
+    # Commit audio at the new format (44.1kHz)
+    # 1102 samples * 2 bytes * 2 channels = 4408 bytes (~24.99ms)
+    stream.prepare_audio(
+        bytes(4408),
+        AudioFormat(sample_rate=44100, bit_depth=16, channels=2),
+    )
+    await stream.commit_audio()
+
+    # Stream/start should now be sent (deferred until first chunk)
+    stream_starts = [msg for msg in conn.sent_json if isinstance(msg, StreamStartMessage)]
+    assert len(stream_starts) == 1
+    start_msg = stream_starts[0]
+    assert start_msg.payload.player is not None
+    assert start_msg.payload.player.sample_rate == 44100
+    assert start_msg.payload.player.codec == AudioCodec.PCM
+
+    # No stream/clear should have been sent
+    assert not any(isinstance(msg, StreamClearMessage) for msg in conn.sent_json)
+
+    # Binary audio continued after the format change
+    assert len(conn.sent_binary) > pre_change_binary_count
+
+    # Check the gap: first post-change chunk start vs last pre-change chunk end
+    post_change_binary = conn.sent_binary[pre_change_binary_count:]
+    first_post_header = unpack_binary_header(post_change_binary[0])
+    gap_us = first_post_header.timestamp_us - pre_change_end_us
+    assert gap_us <= 100_000, f"Gap between pre/post format change chunks is {gap_us}us (> 100ms)"

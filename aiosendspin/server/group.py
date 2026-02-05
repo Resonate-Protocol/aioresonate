@@ -32,6 +32,7 @@ from .push_stream import PushStream
 
 if TYPE_CHECKING:
     from .client import SendspinClient
+    from .roles import Role
     from .server import SendspinServer
 
 logger = logging.getLogger(__name__)
@@ -192,6 +193,11 @@ class SendspinGroup:
             # TODO: does this fully reset the stream state? should
             # we maybe delete it and recreate on next start?
             self._push_stream.stop()
+
+    def on_role_format_changed(self, role: Role) -> None:
+        """Notify PushStream that a role's audio format changed mid-stream."""
+        if self._push_stream is not None and not self._push_stream.is_stopped:
+            self._push_stream.on_role_format_changed(role)
 
     def _send_group_update_to_clients(self) -> None:
         """Send group/update messages to all clients."""

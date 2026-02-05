@@ -6,7 +6,11 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from aiosendspin.models.core import StreamRequestFormatPayload, StreamStartMessage
+from aiosendspin.models.core import (
+    StreamClearMessage,
+    StreamRequestFormatPayload,
+    StreamStartMessage,
+)
 from aiosendspin.models.player import (
     ClientHelloPlayerSupport,
     StreamRequestFormatPlayer,
@@ -16,6 +20,7 @@ from aiosendspin.models.types import AudioCodec, Roles
 from aiosendspin.server.client import SendspinClient
 from aiosendspin.server.clock import LoopClock
 from aiosendspin.server.group import SendspinGroup
+from aiosendspin.server.roles.player.v1 import PlayerV1Role
 
 
 class _FakeConnection:
@@ -90,14 +95,13 @@ def _make_player_client(
     return client, conn
 
 
-def test_player_format_request_does_not_send_stream_start_when_stream_active(
+def test_player_format_request_defers_stream_start_when_stream_active(
     mock_server: MagicMock,
 ) -> None:
-    """
-    When a PushStream is active, the server must not send stream/start(new) immediately.
+    """When a PushStream is active, stream/start is deferred (via _pending_stream_start).
 
-    Doing so is unsafe because old-format audio may still be in flight; binary audio chunks
-    do not self-describe their codec, so the client could interpret old bytes as new format.
+    No immediate stream/start or stream/clear is sent. The requirements
+    are rebuilt with the new format.
     """
     owner = MagicMock()
     owner.client_id = "owner"
@@ -117,18 +121,30 @@ def test_player_format_request_does_not_send_stream_start_when_stream_active(
         )
     )
 
-    # Broadcast to roles (as connection.py now does)
     for role in client.active_roles:
         role.on_stream_request_format(request, stream_active=group.has_active_stream)
 
-    # No immediate stream/start should be sent while streaming is active.
+    # No immediate stream/start or stream/clear should be sent.
     assert not any(isinstance(msg, StreamStartMessage) for msg in conn.sent)
+    assert not any(isinstance(msg, StreamClearMessage) for msg in conn.sent)
+
+    # _pending_stream_start should be set (deferred until first audio chunk).
+    player_role = client.role("player@v1")
+    assert isinstance(player_role, PlayerV1Role)
+    assert player_role._pending_stream_start is True  # noqa: SLF001
+
+    # AudioRequirements should be rebuilt with the new format.
+    req = player_role.get_audio_requirements()
+    assert req is not None
+    assert req.sample_rate == 48000
+    assert req.bit_depth == 16
+    assert req.channels == 2
 
 
-def test_player_format_request_sends_stream_start_when_no_stream_active(
+def test_player_format_request_defers_stream_start_when_no_stream_active(
     mock_server: MagicMock,
 ) -> None:
-    """When no PushStream is active, stream/request-format should be acked with stream/start."""
+    """When no PushStream is active, stream/start is also deferred via _pending_stream_start."""
     owner = MagicMock()
     owner.client_id = "owner"
     owner.name = "owner"
@@ -145,8 +161,13 @@ def test_player_format_request_sends_stream_start_when_no_stream_active(
         )
     )
 
-    # Broadcast to roles (as connection.py now does)
     for role in client.active_roles:
         role.on_stream_request_format(request, stream_active=group.has_active_stream)
 
-    assert any(isinstance(msg, StreamStartMessage) for msg in conn.sent)
+    # No immediate stream/start (deferred until first audio chunk).
+    assert not any(isinstance(msg, StreamStartMessage) for msg in conn.sent)
+
+    # _pending_stream_start should be set.
+    player_role = client.role("player@v1")
+    assert isinstance(player_role, PlayerV1Role)
+    assert player_role._pending_stream_start is True  # noqa: SLF001
