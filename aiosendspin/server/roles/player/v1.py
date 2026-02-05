@@ -104,7 +104,6 @@ class PlayerV1Role(Role):
         self._cached_state: PlayerPersistentState | None = None
         # Deferred stream start: set True by on_stream_start(), sent on first audio chunk
         self._pending_stream_start = False
-        self._stream_start_burst_until_us: int | None = None
 
     @property
     def role_id(self) -> str:
@@ -151,8 +150,6 @@ class PlayerV1Role(Role):
             return BinaryHandling(
                 drop_late=True,
                 grace_period_us=2_000_000,  # 2 seconds grace for initial buffering
-                rate_limit=True,
-                rate_limit_factor=1.1,  # Send at 1.1x real-time
                 buffer_track=True,
             )
         return None
@@ -291,11 +288,6 @@ class PlayerV1Role(Role):
         # Allow client to process stream/start before first binary audio.
         if self._buffer_tracker is not None:
             self._buffer_tracker.set_send_blocked(200_000)
-
-        # Allow initial burst to fill client buffer quickly (legacy behavior).
-        self._stream_start_burst_until_us = (
-            self._client._server.clock.now_us() + 5_000_000  # noqa: SLF001
-        )
 
     def on_audio_chunk(self, chunk: AudioChunk) -> bool:
         """Pack and send binary audio. Late audio is discarded by connection."""

@@ -32,12 +32,10 @@ def test_binary_handling_is_frozen_dataclass() -> None:
 
 
 def test_binary_handling_has_sensible_defaults() -> None:
-    """BinaryHandling should have safe defaults (no dropping, no rate limiting)."""
+    """BinaryHandling should have safe defaults (no dropping)."""
     handling = BinaryHandling()
     assert handling.drop_late is False
     assert handling.grace_period_us == 0
-    assert handling.rate_limit is False
-    assert handling.rate_limit_factor == 1.1
     assert handling.buffer_track is False
 
 
@@ -46,14 +44,10 @@ def test_binary_handling_stores_all_fields() -> None:
     handling = BinaryHandling(
         drop_late=True,
         grace_period_us=2_000_000,
-        rate_limit=True,
-        rate_limit_factor=1.5,
         buffer_track=True,
     )
     assert handling.drop_late is True
     assert handling.grace_period_us == 2_000_000
-    assert handling.rate_limit is True
-    assert handling.rate_limit_factor == 1.5
     assert handling.buffer_track is True
 
 

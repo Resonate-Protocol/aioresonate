@@ -1,6 +1,4 @@
 """WebSocket connection handling for a Sendspin client."""
-# TODO: how is rate limit handled/mentioned in this file?
-
 
 # TODO: this is a complicated file, please add comments so nobody gets lost in the message sending
 
@@ -616,7 +614,7 @@ class SendspinConnection:
         item: _BinaryFrame,
         buffer_tracker: BufferTracker | None,
     ) -> None:
-        """Send a binary frame with buffer tracking. Assumes rate limit already checked."""
+        """Send a binary frame with buffer tracking."""
         start_s = time.monotonic()
         async with asyncio.timeout(SEND_TIMEOUT_S):
             await wsock.send_bytes(item.data)
@@ -814,7 +812,6 @@ class SendspinConnection:
                     iterations_since_yield += 1
                     continue
 
-                # Check rate limit
                 wait_us = 0
                 buffer_tracker = None
                 # TODO: in this method there are a lot of these ifs,
@@ -826,21 +823,6 @@ class SendspinConnection:
                     # Stream-start delay (for clients that need a gap before first binary)
                     if buffer_tracker is not None:
                         wait_us = max(wait_us, buffer_tracker.time_until_unblocked())
-                    if handling.rate_limit and buffer_tracker is not None:
-                        duration_us = frame.duration_us or 0
-                        buffer_tracker.prune_consumed(now_us)
-                        buffer_depth_us = buffer_tracker.buffered_duration_us
-                        max_dur = buffer_tracker.max_duration_us
-                        if max_dur > 0 and duration_us > 0:
-                            # Allow burst during initial fill window
-                            burst_until = getattr(
-                                handling_role, "_stream_start_burst_until_us", None
-                            )
-                            if burst_until is None or now_us >= burst_until:
-                                effective_max = int(max_dur * handling.rate_limit_factor)
-                                projected = buffer_depth_us + duration_us
-                                if projected > effective_max:
-                                    wait_us = max(wait_us, projected - effective_max)
 
                 if wait_us > 0:
                     # TODO: explain me this

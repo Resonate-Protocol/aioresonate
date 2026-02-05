@@ -35,7 +35,7 @@ class BinaryHandling:
     """Policy for how binary messages should be handled by connection.
 
     Roles return this from get_binary_handling() to declare how the connection
-    should handle their binary messages (late detection, rate limiting, etc).
+    should handle their binary messages (late detection, etc).
     """
 
     drop_late: bool = False
@@ -43,12 +43,6 @@ class BinaryHandling:
 
     grace_period_us: int = 0
     """Grace period after stream start before dropping late messages."""
-
-    rate_limit: bool = False
-    """Rate-limit delivery based on duration_us to avoid bursty sends."""
-
-    rate_limit_factor: float = 1.1
-    """Send at this multiple of real-time (1.1 = 110% speed)."""
 
     buffer_track: bool = False
     """Track sent bytes in the role's buffer tracker."""
