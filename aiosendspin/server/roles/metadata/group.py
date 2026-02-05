@@ -40,6 +40,7 @@ class MetadataGroupRole(GroupRole):
 
     def _send_state_to_role(self, role: Role) -> None:
         """Send current metadata state to a single role."""
+        # TODO: refactor to guard clause: if metadata is None, send clear and return
         timestamp = self._group._server.clock.now_us()  # noqa: SLF001
 
         if self._current_metadata is not None:
@@ -121,6 +122,7 @@ class MetadataGroupRole(GroupRole):
             state_message = ServerStateMessage(ServerStatePayload(metadata=metadata_update))
             role.send_message(state_message)
 
+    # TODO: consider single method with optional kwargs instead of split methods
     def set_title(self, title: str | None) -> None:
         """Update title field."""
         self._update_field("title", title)
@@ -179,6 +181,7 @@ class MetadataGroupRole(GroupRole):
         )
         self.set_metadata(new_metadata)
 
+    # TODO: use SENTINEL pattern to support partial updates (see HA entity registry)
     def update(  # noqa: PLR0913
         self,
         *,

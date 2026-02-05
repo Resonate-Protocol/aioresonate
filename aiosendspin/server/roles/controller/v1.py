@@ -126,7 +126,7 @@ class ControllerV1Role(Role):
             return
 
         if controller_cmd.command == MediaCommand.SWITCH:
-            # Launch eager task for async group operations
+            # TODO: use eager task
             task = asyncio.create_task(self._handle_switch_command())
             task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
             return
@@ -308,6 +308,7 @@ class ControllerV1Role(Role):
                 "Rejoining previous group %s after external_source",
                 previous_group_id,
             )
+            # TODO: make add/remove_client sync (not await)
             await self._client.group.remove_client(self._client)
             await previous_group.add_client(self._client)
             return True

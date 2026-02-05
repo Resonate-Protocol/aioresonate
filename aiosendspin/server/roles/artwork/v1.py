@@ -79,6 +79,7 @@ class ArtworkV1Role(Role):
     def on_transport_attach(self) -> None:
         """Handle WebSocket connect/reconnect."""
         super().on_transport_attach()
+        # TODO: should we skip stream start if _group_role is None (nothing else happens)?
         if self._channel_configs:
             self._send_stream_start()
         if self._group_role is None:
@@ -97,6 +98,7 @@ class ArtworkV1Role(Role):
 
     def _send_stream_start(self) -> None:
         """Send stream/start message with artwork channel configs."""
+        # TODO: duplicate guard? on_transport_attach already checks _channel_configs
         if not self._channel_configs:
             return
 
@@ -130,6 +132,7 @@ class ArtworkV1Role(Role):
             image_data: Encoded image bytes.
             timestamp_us: Timestamp in microseconds.
         """
+        # TODO: should we raise instead of swallowing when no transport?
         if not self._has_transport:
             return
 
@@ -170,6 +173,7 @@ class ArtworkV1Role(Role):
         stream_active: bool | None = None,  # noqa: ARG002
     ) -> None:
         """Handle stream/request-format for artwork channels."""
+        # TODO: verify this is allowed by the spec
         artwork_request = payload.artwork
         if artwork_request is None:
             return
@@ -202,6 +206,7 @@ class ArtworkV1Role(Role):
         self._channel_configs[request.channel] = updated
         self._send_stream_start()
 
+        # TODO: refactor to guard clause: if source == NONE or _group_role is None: return
         if updated.source != ArtworkSource.NONE and isinstance(self._group_role, ArtworkGroupRole):
             group_role = self._group_role
             if updated.source == ArtworkSource.ALBUM:

@@ -1,5 +1,7 @@
 """Client event base types."""
 
+# TODO: delete this file and move to client.py
+
 from __future__ import annotations
 
 from dataclasses import dataclass

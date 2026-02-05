@@ -486,6 +486,7 @@ class PlayerV1Role(Role):
 
         # DEPRECATED(before-spec-pr-50): fall back to player.state for older clients.
         if payload.state is None and state.state is not None:
+            # TODO: use eager task
             task = self._client._server.loop.create_task(  # noqa: SLF001
                 self._client.handle_state_transition(state.state)
             )

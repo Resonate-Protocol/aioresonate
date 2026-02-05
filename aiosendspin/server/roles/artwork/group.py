@@ -63,6 +63,7 @@ class ArtworkGroupRole(GroupRole):
         channel_config: ArtworkChannel,
     ) -> None:
         """Schedule artwork send as a background task."""
+        # TODO: use eager task, adopt helper from sendspin-cli to prevent task GC
         task = self._group._server.loop.create_task(  # noqa: SLF001
             self._send_artwork_to_role_channel(role, image, channel, channel_config)
         )

@@ -29,6 +29,8 @@ class AudioTransformer(Protocol):
         """Duration of each output frame in microseconds."""
         ...
 
+    # TODO: why do we pass in the timestamp_us, but never retrieve it?
+    # TODO: maybe remove timestamp_us then?
     def process(self, pcm: bytes, timestamp_us: int, duration_us: int) -> list[bytes]:
         """Transform PCM chunk into output frames.
 
@@ -51,6 +53,7 @@ class AudioTransformer(Protocol):
         """
         ...
 
+    # TODO: remove this, this should be specific to each transformer
     def get_header(self) -> bytes | None:
         """Return codec header bytes, or None if not applicable.
 
@@ -80,6 +83,8 @@ class TransformerKey:
     options: tuple[tuple[str, str], ...]
 
 
+# TODO: just checking, do we have any issues re-using transformers, i mean they
+# TODO: can only handle one stream pushed per instance, 2 will get mixed up.
 class TransformerPool:
     """Manages shared transformer instances.
 
@@ -92,6 +97,8 @@ class TransformerPool:
         """Initialize an empty transformer pool."""
         self._transformers: dict[TransformerKey, AudioTransformer] = {}
 
+    # TODO: maybe generically pass in kwargs to the specific AudioTransformer?
+    # TODO: but still key it so we reuse existing instances
     def get_or_create(
         self,
         transformer_type: type[T],
@@ -129,6 +136,7 @@ class TransformerPool:
             transformer.reset()
 
 
+# TODO: delete this, no backwards compatibility needed
 # Re-export player-specific transformers for backwards compatibility
 from aiosendspin.server.roles.player.audio_transformers import (  # noqa: E402
     FlacEncoder,

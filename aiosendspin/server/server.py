@@ -211,6 +211,7 @@ class SendspinServer:
             return
 
         self._retry_events[url] = asyncio.Event()
+        # TODO: use eager task
         self._connection_tasks[url] = self._loop.create_task(self._handle_client_connection(url))
 
     def get_connection_reason(self, url: str) -> ConnectionReason:
@@ -263,6 +264,8 @@ class SendspinServer:
                         await conn._handle_client()  # noqa: SLF001
 
                     if self._client_session.closed:
+                        # TODO: check if still correct according to multi server support,
+                        # maybe check goodbye message?
                         break
 
                 except asyncio.CancelledError:
@@ -381,6 +384,7 @@ class SendspinServer:
         for client in self._clients.values():
             if client.connection is None:
                 continue
+            # TODO: use eager task
             disconnect_tasks.append(
                 self._loop.create_task(client.connection.disconnect(retry_connection=False))
             )
@@ -434,6 +438,7 @@ class SendspinServer:
         if state_change in (ServiceStateChange.Added, ServiceStateChange.Updated):
 
             def _schedule_add() -> None:
+                # TODO: use eager task
                 task = self._loop.create_task(
                     self._handle_service_added(zeroconf, service_type, name)
                 )

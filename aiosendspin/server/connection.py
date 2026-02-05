@@ -1,4 +1,8 @@
 """WebSocket connection handling for a Sendspin client."""
+# TODO: how is rate limit handled/mentioned in this file?
+
+
+# TODO: this is a complicated file, please add comments so nobody gets lost in the message sending
 
 from __future__ import annotations
 
@@ -50,7 +54,9 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# TODO: should we make this per role instead? i mean its still max.
 MAX_PENDING_MSG = 4096  # Should be more than enough for ~1 minute of buffering
+# TODO: remove again if ws timeout is enough, we have buffer overfill handling
 SEND_TIMEOUT_S = 5.0  # Max time to wait for a single send before disconnecting
 
 
@@ -58,6 +64,7 @@ SEND_TIMEOUT_S = 5.0  # Max time to wait for a single send before disconnecting
 class _BinaryFrame:
     """Binary payload with an epoch for droppable queue semantics."""
 
+    # TODO: document fields
     epoch_all: int
     epoch_family: int
     role_family: str
@@ -166,7 +173,7 @@ class SendspinConnection:
     def drop_pending_binary(self, roles: list[str] | None) -> None:
         """Drop queued binary payloads for the specified role families."""
         if roles is None:
-            self._binary_epoch_all += 1
+            self._binary_epoch_all += 1  # TODO: just have one by family instead?
             self._writer_wakeup.set()
             return
         for family in roles:
@@ -208,11 +215,13 @@ class SendspinConnection:
             duration_us=duration_us,
         )
         if self._queue_size >= MAX_PENDING_MSG:
-            return False
+            return False  # TODO: lets make max_pending_msg a hard limit, disconnect instead?
 
         seq = self._queue_sequence
         self._queue_sequence += 1
         # Use timestamp for ordering if present, otherwise FIFO
+        # TODO: does this mean if both timestamped and non-timestamped binary messages are sent,
+        # that non-timestamped ones are always delayed?
         sort_ts = timestamp_us if timestamp_us > 0 else _FIFO_TIMESTAMP
         family_queue = self._binary_queues[role_family]
         heapq.heappush(family_queue, (sort_ts, seq, frame))
@@ -247,6 +256,7 @@ class SendspinConnection:
         if self._queue_size >= MAX_PENDING_MSG:
             if not self._disconnecting:
                 self._logger.error("Message queue full, client too slow - disconnecting")
+                # TODO: use eager task
                 task = self._server.loop.create_task(self.disconnect(retry_connection=True))
                 task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
             return
@@ -266,6 +276,7 @@ class SendspinConnection:
         incoming: ServerMessage,
     ) -> ServerMessage | None:
         """Merge consecutive state-like messages where safe."""
+        # TODO: this hard codes roles, generically merge fields by name instead
         if isinstance(existing, ServerStateMessage) and isinstance(incoming, ServerStateMessage):
             metadata = incoming.payload.metadata or existing.payload.metadata
             controller = incoming.payload.controller or existing.payload.controller
@@ -298,6 +309,7 @@ class SendspinConnection:
         if self._queue_size >= MAX_PENDING_MSG:
             if not self._disconnecting:
                 self._logger.error("Message queue full, client too slow - disconnecting")
+                # TODO: use eager task
                 task = self._server.loop.create_task(self.disconnect(retry_connection=True))
                 task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
             return
@@ -361,6 +373,7 @@ class SendspinConnection:
 
         # Start writer task for both client-initiated and server-initiated connections.
         self._logger.info("Connection established")
+        # TODO: use eager task
         self._writer_task = self._server.loop.create_task(self._writer())
 
     async def _cleanup_connection(self) -> None:
@@ -517,6 +530,7 @@ class SendspinConnection:
                 return
             stream_active = self._client.group.has_active_stream
             for role in self._client.active_roles:
+                # TODO: why is stream_active passed here?
                 role.on_stream_request_format(message.payload, stream_active=stream_active)
             return
 
@@ -537,6 +551,7 @@ class SendspinConnection:
             await self.disconnect(retry_connection=retry)
             return
 
+    # TODO: explain me this method
     def _check_late_binary(
         self, handling: BinaryHandling | None, role: Role | None, timestamp_us: int
     ) -> bool:
@@ -627,6 +642,9 @@ class SendspinConnection:
                 item.duration_us or 0,
             )
 
+    # TODO: explain me all methods handling the heap, and _promote_ready_families as well
+    # also how drop_pending_binary exactly interacts with the writer loop
+
     def _schedule_family_head(self, role_family: str) -> None:
         if role_family in self._blocked_until_us:
             return
@@ -692,6 +710,7 @@ class SendspinConnection:
             while not wsock.closed and not self._closing:
                 # Periodic yield to prevent event loop starvation
                 if iterations_since_yield >= 50:
+                    # TODO: try removing this/adding logging to se if this is still required
                     await asyncio.sleep(0)
                     iterations_since_yield = 0
                     now_us = clock_now_us()
@@ -742,6 +761,7 @@ class SendspinConnection:
                 assert ready_binary is not None
                 role_family, frame, sort_ts, seq = ready_binary
 
+                # TODO: more explanation, dont understand this
                 # Compare with normal messages when timestamps are FIFO-equivalent
                 if normal_entry is not None and sort_ts == _FIFO_TIMESTAMP:
                     normal_seq, _ = normal_entry
@@ -761,11 +781,19 @@ class SendspinConnection:
                     iterations_since_yield += 1
                     continue
                 if frame.epoch_family != binary_epoch_by_family[role_family]:
+                    # TODO: if I understand correctly, this is activated on stream clear and
+                    # start, discarding all pending frames for the role family
+                    # Does this mean that after a new format is requested, audio data that wasn't
+                    # sent already is just dropped? and immediately after that message was passed
+                    # to send_message?
                     self._discard_family_head(role_family)
                     self._schedule_family_head(role_family)
                     iterations_since_yield += 1
                     continue
 
+                # TODO: delete the "(single lookup for rate limit + buffer tracking)"
+                # TODO: maybe directly unpack to handling and handling_role? no
+                # TODO: cached variable
                 # Get binary handling info (single lookup for rate limit + buffer tracking)
                 cached = (
                     self._client.get_binary_handling_cached(frame.message_type)
@@ -789,6 +817,9 @@ class SendspinConnection:
                 # Check rate limit
                 wait_us = 0
                 buffer_tracker = None
+                # TODO: in this method there are a lot of these ifs,
+                # hard to understand, add comments explaining each sections
+                # responsibility?
                 if handling is not None and handling_role is not None:
                     if handling.buffer_track:
                         buffer_tracker = handling_role.get_buffer_tracker()
@@ -812,11 +843,14 @@ class SendspinConnection:
                                     wait_us = max(wait_us, projected - effective_max)
 
                 if wait_us > 0:
+                    # TODO: explain me this
                     # Delay this frame - one per role family
                     self._block_family(role_family, now_us + wait_us)
                     iterations_since_yield += 1
                     continue
 
+                # TODO: put all debugging info behind the debug flag, and in a
+                # separate method
                 # Log timing info (only if debug enabled)
                 timestamp_us = frame.timestamp_us
                 last_send_us = last_send_us_by_family.get(role_family)
@@ -934,6 +968,7 @@ class SendspinConnection:
         """Run the complete websocket connection lifecycle (internal)."""
         try:
             await self._setup_connection()
+            # TODO: use eager task
             self._message_loop_task = self._server.loop.create_task(self._run_message_loop())
             await self._message_loop_task
         finally:

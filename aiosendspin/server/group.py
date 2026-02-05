@@ -188,6 +188,8 @@ class SendspinGroup:
         Does nothing if no stream is active.
         """
         if self._push_stream is not None:
+            # TODO: does this fully reset the stream state? should
+            # we maybe delete it and recreate on next start?
             self._push_stream.stop()
 
     def _send_group_update_to_clients(self) -> None:
@@ -221,6 +223,7 @@ class SendspinGroup:
                 if role.get_audio_requirements() is not None:
                     self._push_stream.on_role_join(role)
 
+    # TODO: why do we need this at all? why isn't it handled by roles themselves?
     def _send_stream_end_msg(self, client: SendspinClient, roles: list[str] | None = None) -> None:
         """Send a stream end message to a client.
 
@@ -231,6 +234,7 @@ class SendspinGroup:
         logger.debug("ending stream for %s (%s), roles=%s", client.name, client.client_id, roles)
         client.send_message(StreamEndMessage(payload=StreamEndPayload(roles=roles)))
 
+    # TODO: potentially delete with stop() discussion/todo
     def _schedule_delayed_stop(self, stop_time_us: int, active: bool, needs_cleanup: bool) -> bool:  # noqa: FBT001
         """Schedule a delayed stop at the specified timestamp.
 
@@ -266,6 +270,7 @@ class SendspinGroup:
                     self._scheduled_stop_handle = None
 
         def _schedule_stop() -> None:
+            # TODO: use eager task
             task = self._server.loop.create_task(_delayed_stop())
             task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
 
@@ -284,6 +289,10 @@ class SendspinGroup:
         for client in self._clients:
             client.send_message(group_message)
 
+    # TODO: any reason why stop_time_us is useful?
+    # TODO: looks like _schedule_delayed_stop is not used anywhere
+    # TODO: except for here? and is potentially not precise enough
+    # TODO: to avoid race conditions?
     async def stop(self, stop_time_us: int | None = None) -> bool:
         """
         Stop playback for the group and clean up resources.
@@ -367,6 +376,7 @@ class SendspinGroup:
         """Get the GroupRole for a role family."""
         return self._group_roles.get(family)
 
+    # TODO: unused?
     def register_group_role(self, group_role: GroupRole) -> None:
         """Register a GroupRole (called during group initialization)."""
         self._group_roles[group_role.role_family] = group_role
@@ -423,6 +433,8 @@ class SendspinGroup:
         """Current playback state of the group."""
         return self._current_state
 
+    # TODO: delete volume/mute controls from here!
+    # they instead should use the player group role
     @property
     def volume(self) -> int:
         """Return current group volume (0-100), delegated to group roles."""
@@ -451,6 +463,7 @@ class SendspinGroup:
             if role.set_group_muted(muted) is not None:
                 break
 
+    # TODO: delete, controller group role should handle this
     def set_supported_commands(self, commands: list[MediaCommand]) -> None:
         """
         Set the media commands supported by the application.
@@ -486,6 +499,7 @@ class SendspinGroup:
             self._clients = []
         else:
             self._clients.remove(client)
+            # TODO: do we need to manually handle this? any alternative?
             # End the stream for the removed client via role hooks
             handled = False
             for role in client.active_roles:
@@ -544,6 +558,7 @@ class SendspinGroup:
         # while still being listed in _clients (e.g., solo client disconnect)
         stale_client = next((c for c in self._clients if c.client_id == client.client_id), None)
         if stale_client is not None:
+            # TODO: is there any case where this could run at all?
             logger.debug(
                 "Removing stale client %s (object %s) before adding new client (object %s)",
                 stale_client.client_id,
@@ -565,6 +580,7 @@ class SendspinGroup:
         # Handle player joining/reconnecting with active PushStream
         if self._push_stream is not None and not self._push_stream.is_stopped:
             if not client.is_connected:
+                # TODO: same here, could this every be actually hit?
                 # Client is disconnected but joining a group with active playback.
                 # Try to reclaim it (multi-server support).
                 self._server.reclaim_client_for_playback(client.client_id)
@@ -584,6 +600,3 @@ class SendspinGroup:
         )
         logger.debug("Sending group update to new client %s", client.client_id)
         client.send_message(group_message)
-
-        # Note: Role-specific state (controller, metadata, artwork) is sent
-        # via respective GroupRole.on_member_join() methods

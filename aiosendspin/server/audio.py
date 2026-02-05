@@ -234,6 +234,7 @@ class BufferTracker:
         duration_wait = self.time_until_duration_capacity(duration_needed_us)
         return max(byte_wait, duration_wait)
 
+    # TODO: if unused delete
     async def wait_for_capacity(self, bytes_needed: int) -> None:
         """Block until the device buffer can accept bytes_needed more bytes."""
         if sleep_time_us := self.time_until_capacity(bytes_needed):
@@ -285,6 +286,7 @@ class BufferTracker:
         return self.blocked_until_us - now_us
 
 
+# TODO: maybe move to AudioFormat? as a helper method?
 def _resolve_audio_format(audio_format: AudioFormat) -> tuple[int, str, str]:
     """Resolve helper data for an audio format.
 

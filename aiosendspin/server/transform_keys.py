@@ -1,11 +1,14 @@
 """Transform key helpers for deterministic transformer reuse."""
 
+# TODO: could we move this to push_stream? or audio_transformers?
+
 from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
 
 
+# TODO: wait, duplicate in audio_transformers.py?
 @dataclass(frozen=True, slots=True)
 class TransformKey:
     """Stable identity for transformed output.

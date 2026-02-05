@@ -43,6 +43,8 @@ logger = logging.getLogger(__name__)
 
 _T = TypeVar("_T")
 
+# TODO: does this mean clients disconnected with ANOTHER_SERVER also are cleaned up after
+# TODO: 30s?
 # Cleanup delay for non-immediate disconnect reasons (seconds)
 CLIENT_CLEANUP_DELAY = 30.0
 
@@ -100,6 +102,7 @@ class SendspinClient:
         # Role-owned persistent state (per role family).
         self._role_state: dict[str, object] = {}
 
+        # TODO: dont mention O(1) here, cache is fine
         # Cache for binary handling lookup: message_type -> (BinaryHandling, Role)
         # Built when roles are attached for O(1) lookup in _send_binary_frame().
         self._binary_handling_cache: dict[int, tuple[BinaryHandling, Role]] = {}
@@ -151,6 +154,7 @@ class SendspinClient:
         """Store persistent role state for a family."""
         self._role_state[family] = state
 
+    # TODO: bad name, what ensure?
     def ensure_role_state(self, family: str, cls: type[_T]) -> _T:
         """Return persistent role state, creating a default if missing."""
         existing = self.get_role_state(family, cls)
@@ -212,6 +216,9 @@ class SendspinClient:
         if self._connection is not None and self._connection is not connection:
             # Replace an existing connection for the same device.
             self._logger.debug("Replacing existing connection for %s", self._client_id)
+            # TODO: seams like a race condition, we definitely need a eager task here
+            # TODO: disconnect calls detach_connection after a couple of awaits, so
+            # it yields, is that a problem?
             task = self._server.loop.create_task(
                 self._connection.disconnect(retry_connection=False)
             )
@@ -235,6 +242,8 @@ class SendspinClient:
             if role is None:
                 continue
             role.on_connect()
+            # TODO: in what case is on_transport_attached is called without on_connect?
+            # TODO: seems like we can remove on_transport_attach then? and doc it for roles?
             role.on_transport_attach()
             self._roles[role.role_id] = role
 
@@ -263,6 +272,7 @@ class SendspinClient:
 
         # Notify all roles about detachment
         for role in self._roles.values():
+            # TODO: maybe just having on_disconnect is enough for roles? any reason to have both?
             role.on_transport_detach(goodbye_reason)
             role.on_disconnect()
         self._roles.clear()
@@ -297,6 +307,7 @@ class SendspinClient:
             # Client reconnected, don't clean up
             return
         self._logger.debug("Cleaning up client from registry")
+        # TODO: use eager task
         task = self._server.loop.create_task(self._server.remove_client(self._client_id))
         task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
 
@@ -339,6 +350,7 @@ class SendspinClient:
         """All active roles for iteration."""
         return list(self._roles.values())
 
+    # TODO: rename this method and docstring so O(1) is not mentioned
     def get_binary_handling_cached(self, message_type: int) -> tuple[BinaryHandling, Role] | None:
         """O(1) lookup for binary handling by message type."""
         return self._binary_handling_cache.get(message_type)

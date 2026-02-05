@@ -29,6 +29,7 @@ if TYPE_CHECKING:
 
 _LOGGER = logging.getLogger(__name__)
 
+# TODO: test if still required, since I fixed double stream start messages
 # Default initial delay before first audio plays (microseconds)
 DEFAULT_INITIAL_DELAY_US = 250_000  # 250ms
 
@@ -1014,6 +1015,7 @@ class PushStream:
             ):
                 self._catchup_state[cache_key] = "catching_up"
                 self._catchup_roles[cache_key] = {role}
+                # TODO: use eager task
                 task = asyncio.create_task(
                     self._start_catchup_encoding(role, req, channel_id, cache_key)
                 )
