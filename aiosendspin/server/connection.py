@@ -61,7 +61,6 @@ class _BinaryFrame:
     """Binary payload with an epoch for droppable queue semantics."""
 
     # TODO: document fields
-    epoch_all: int
     epoch_family: int
     role_family: str
     data: bytes
@@ -139,7 +138,6 @@ class SendspinConnection:
         self._initial_state_timeout_handle: asyncio.TimerHandle | None = None
 
         self._last_goodbye_reason: GoodbyeReason | None = None
-        self._binary_epoch_all = 0
         self._binary_epoch_by_family: defaultdict[str, int] = defaultdict(int)
 
         # Timing tracking for binary frame logging (per role family)
@@ -168,11 +166,8 @@ class SendspinConnection:
 
     def drop_pending_binary(self, roles: list[str] | None) -> None:
         """Drop queued binary payloads for the specified role families."""
-        if roles is None:
-            self._binary_epoch_all += 1  # TODO: just have one by family instead?
-            self._writer_wakeup.set()
-            return
-        for family in roles:
+        families = list(self._binary_epoch_by_family.keys()) if roles is None else roles
+        for family in families:
             self._binary_epoch_by_family[family] += 1
         self._writer_wakeup.set()
 
@@ -200,7 +195,6 @@ class SendspinConnection:
         """
         epoch_family = self._binary_epoch_by_family[role_family]
         frame = _BinaryFrame(
-            epoch_all=self._binary_epoch_all,
             epoch_family=epoch_family,
             role_family=role_family,
             data=data,
@@ -769,11 +763,6 @@ class SendspinConnection:
                         continue
 
                 # Check epoch - frame may have been invalidated
-                if frame.epoch_all != self._binary_epoch_all:
-                    self._discard_family_head(role_family)
-                    self._schedule_family_head(role_family)
-                    iterations_since_yield += 1
-                    continue
                 if frame.epoch_family != binary_epoch_by_family[role_family]:
                     # TODO: if I understand correctly, this is activated on stream clear and
                     # start, discarding all pending frames for the role family

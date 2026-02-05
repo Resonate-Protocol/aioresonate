@@ -34,7 +34,6 @@ class _DummyServer:
 def test_binary_frame_supports_buffer_registration_metadata() -> None:
     """_BinaryFrame should optionally carry buffer registration info."""
     frame_simple = _BinaryFrame(
-        epoch_all=1,
         epoch_family=1,
         role_family="player",
         data=b"test",
@@ -45,7 +44,6 @@ def test_binary_frame_supports_buffer_registration_metadata() -> None:
     assert frame_simple.buffer_byte_count is None
 
     frame_with_meta = _BinaryFrame(
-        epoch_all=1,
         epoch_family=1,
         role_family="player",
         data=b"test",
