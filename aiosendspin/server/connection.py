@@ -241,6 +241,7 @@ class SendspinConnection:
 
         seq = self._queue_sequence
         self._queue_sequence += 1
+        # TODO: non timestamped ones should be sent before, not after everything else
         # Sort by playback timestamp for correct ordering. All current binary message types
         # (audio, artwork) have timestamps. The _FIFO_TIMESTAMP fallback exists for potential
         # future non-timestamped binary types, which would sort after timestamped messages.
@@ -681,6 +682,9 @@ class SendspinConnection:
             self._binary_queues.pop(role_family, None)
 
     def _peek_ready_binary(self) -> tuple[str, _BinaryFrame, int, int] | None:
+        # TODO: any reason why a peek method does a full pop and push operation?
+        # TODO: or is it most of the time not pushing back? i mean does this peek
+        # TODO: mutate anything or not?
         while self._ready_families:
             sort_ts, seq, role_family = heapq.heappop(self._ready_families)
             if role_family in self._blocked_until_us:
@@ -746,11 +750,13 @@ class SendspinConnection:
                 now_us = clock_now_us()
                 self._promote_ready_families(now_us)
 
+                # TODO: rename normal messages to json_messages
                 ready_binary = self._peek_ready_binary()
                 normal_entry = self._normal_messages[0] if self._normal_messages else None
 
                 if ready_binary is None and normal_entry is None:
                     # No immediate work; wait for new items or next delayed family
+                    # TODO: any chance for a race condition here?
                     self._writer_wakeup.clear()
                     if self._priority_messages or self._normal_messages or self._ready_families:
                         continue
@@ -782,6 +788,10 @@ class SendspinConnection:
 
                 # TODO: more explanation, dont understand this
                 # Compare with normal messages when timestamps are FIFO-equivalent
+                # TODO: how about making normal/json messages without timestamps also
+                # TODO: sent before all timed once, we can then remove the priority message
+                # TODO: concept entirely, since non timestamped ones will automatically
+                # TODO: be prioritized
                 if normal_entry is not None and sort_ts == _FIFO_TIMESTAMP:
                     normal_seq, _ = normal_entry
                     if normal_seq < seq:
