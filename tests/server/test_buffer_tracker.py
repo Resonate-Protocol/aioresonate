@@ -203,3 +203,22 @@ def test_time_until_duration_capacity_prunes_first() -> None:
 
     # Now only 500ms buffered, should have space for 400ms
     assert tracker.time_until_duration_capacity(400_000) == 0
+
+
+def test_buffered_horizon_us_tracks_furthest_end_from_now() -> None:
+    """buffered_horizon_us() should report furthest scheduled end minus now."""
+    clock = _FakeClock(now_us=0)
+    tracker = BufferTracker(
+        clock=clock,
+        client_id="test",
+        capacity_bytes=10000,
+    )
+
+    tracker.register(end_time_us=200_000, byte_count=1000, duration_us=100_000)
+    tracker.register(end_time_us=500_000, byte_count=1000, duration_us=100_000)
+
+    assert tracker.buffered_horizon_us() == 500_000
+
+    clock.set_now(250_000)
+    # First chunk is pruned; horizon is from now to the second chunk's end.
+    assert tracker.buffered_horizon_us() == 250_000

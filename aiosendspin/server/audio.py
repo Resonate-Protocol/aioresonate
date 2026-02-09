@@ -96,6 +96,13 @@ class BufferTracker:
         self.buffered_duration_us = max(self.buffered_duration_us, 0)
         return now_us
 
+    def buffered_horizon_us(self, now_us: int | None = None) -> int:
+        """Return buffer horizon from now until the furthest scheduled end time."""
+        now_us = self.prune_consumed(now_us)
+        if not self.buffered_chunks:
+            return 0
+        return max(self.buffered_chunks[-1].end_time_us - now_us, 0)
+
     def has_capacity_now(self, bytes_needed: int) -> bool:
         """
         Check if buffer can accept bytes_needed without waiting.
