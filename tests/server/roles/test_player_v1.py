@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from unittest.mock import MagicMock
+from uuid import uuid4
 
 from aiosendspin.models import AudioCodec, unpack_binary_header
 from aiosendspin.models.core import StreamClearMessage, StreamEndMessage, StreamStartMessage
@@ -84,6 +85,41 @@ def test_player_role_get_audio_requirements_returns_none_when_not_set() -> None:
     client = _make_client_stub()
     role = PlayerV1Role(client=client)
     assert role.get_audio_requirements() is None
+
+
+def test_player_role_get_audio_requirements_refreshes_when_channel_changes() -> None:
+    """PlayerV1Role refreshes cached requirements if resolver channel changed."""
+    client = _make_client_stub()
+    cached_channel = uuid4()
+    refreshed_channel = uuid4()
+    client.group.get_channel_for_player.return_value = refreshed_channel
+
+    audio_req = AudioRequirements(
+        sample_rate=48000,
+        bit_depth=16,
+        channels=2,
+        transformer=PcmPassthrough(sample_rate=48000, bit_depth=16, channels=2),
+        channel_id=cached_channel,
+    )
+    role = PlayerV1Role(client=client, audio_requirements=audio_req)
+    refreshed_req = AudioRequirements(
+        sample_rate=48000,
+        bit_depth=16,
+        channels=2,
+        transformer=PcmPassthrough(sample_rate=48000, bit_depth=16, channels=2),
+        channel_id=refreshed_channel,
+    )
+
+    def _refresh(_state: object, *, force: bool = False) -> None:
+        assert force is True
+        role._audio_requirements = refreshed_req  # noqa: SLF001
+
+    role._ensure_audio_requirements = MagicMock(side_effect=_refresh)  # type: ignore[method-assign]  # noqa: SLF001
+
+    req = role.get_audio_requirements()
+
+    role._ensure_audio_requirements.assert_called_once()  # type: ignore[attr-defined]  # noqa: SLF001
+    assert req is refreshed_req
 
 
 # --- BinaryHandling ---
@@ -470,3 +506,23 @@ def test_player_role_on_stream_end_noop_without_transport() -> None:
     role.on_stream_end()
 
     client.send_role_message.assert_not_called()
+
+
+def test_player_role_on_group_changed_resets_buffer_and_timing() -> None:
+    """on_group_changed() should reset stale buffer/timing state from old group."""
+    client = _make_client_stub()
+    role = PlayerV1Role(client=client)
+
+    state = role._state()  # noqa: SLF001
+    buffer_tracker = MagicMock()
+    state.buffer_tracker = buffer_tracker
+    role._stream_started = True  # noqa: SLF001
+    role._pending_stream_start = True  # noqa: SLF001
+    role._stream_start_time_us = 12345  # noqa: SLF001
+
+    role.on_group_changed(object())
+
+    buffer_tracker.reset.assert_called_once()
+    assert role._stream_started is False  # noqa: SLF001
+    assert role._pending_stream_start is False  # noqa: SLF001
+    assert role._stream_start_time_us is None  # noqa: SLF001

@@ -59,7 +59,7 @@ class PlayerPersistentState:
     preferred_codec: AudioCodec | None = None
     buffer_tracker: BufferTracker | None = None
     buffer_capacity_scale: float = 1.0
-    max_duration_us: int = 10_000_000
+    max_duration_us: int = 30_000_000
     disconnect_time_us: int | None = None
     buffer_reset_handle: object | None = None
 
@@ -143,6 +143,22 @@ class PlayerV1Role(Role):
 
     def get_audio_requirements(self) -> AudioRequirements | None:
         """Return audio requirements for hook-based streaming."""
+        req = self._audio_requirements
+        if req is None:
+            return None
+
+        # Legacy/manually-injected requirements may omit channel assignment.
+        # In that case, preserve existing behavior.
+        if req.channel_id is None:
+            return req
+
+        # Channel routing may change at stream start when a custom channel_resolver
+        # is installed. Refresh cached requirements if the resolved channel changed.
+        channel_id = self._client.group.get_channel_for_player(self._client.client_id)
+
+        if channel_id != req.channel_id:
+            self._ensure_audio_requirements(self._state(), force=True)
+
         return self._audio_requirements
 
     def get_binary_handling(self, message_type: int) -> BinaryHandling | None:
@@ -232,7 +248,16 @@ class PlayerV1Role(Role):
     def on_group_changed(self, group: object) -> None:
         """Refresh transformer selection when group changes."""
         super().on_group_changed(group)
-        self._ensure_audio_requirements(self._state(), force=True)
+        state = self._state()
+        self._ensure_buffer_tracker(state)
+        if state.buffer_tracker is not None:
+            # Group switches imply a stream boundary for this player; any previously
+            # tracked buffered audio belongs to the old group timeline.
+            state.buffer_tracker.reset()
+        self._stream_started = False
+        self._pending_stream_start = False
+        self.reset_binary_timing()
+        self._ensure_audio_requirements(state, force=True)
 
     # --- Stream lifecycle hooks ---
 
