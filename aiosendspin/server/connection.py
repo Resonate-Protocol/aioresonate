@@ -884,7 +884,14 @@ class SendspinConnection:
                     if handling.buffer_track:
                         buffer_tracker = handling_role.get_buffer_tracker()
                     if buffer_tracker is not None:
+                        buffer_tracker.prune_consumed(now_us)
                         wait_us = max(wait_us, buffer_tracker.time_until_unblocked())
+                        bytes_needed = entry.binary.buffer_byte_count or 0
+                        duration_needed_us = entry.binary.duration_us or 0
+                        wait_us = max(
+                            wait_us,
+                            buffer_tracker.time_until_ready(bytes_needed, duration_needed_us),
+                        )
 
                 if wait_us > 0:
                     # Block this role until buffer has space
@@ -931,7 +938,7 @@ class SendspinConnection:
                     stats["ts_gap_min_ms"] = min(stats["ts_gap_min_ms"], ts_gap_ms)
                     stats["ts_gap_max_ms"] = max(stats["ts_gap_max_ms"], ts_gap_ms)
                     if buffer_tracker is not None:
-                        buf_ms = buffer_tracker.buffered_duration_us / 1000
+                        buf_ms = buffer_tracker.buffered_horizon_us(now_us) / 1000
                         stats["buf_count"] += 1
                         stats["buf_sum_ms"] += buf_ms
                         stats["buf_min_ms"] = min(stats["buf_min_ms"], buf_ms)

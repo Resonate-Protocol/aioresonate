@@ -104,6 +104,7 @@ async def test_writer_registers_buffer_after_send() -> None:
     mock_buffer_tracker = MagicMock()
     mock_buffer_tracker.time_until_duration_capacity.return_value = 0
     mock_buffer_tracker.time_until_unblocked.return_value = 0
+    mock_buffer_tracker.time_until_ready.return_value = 0
     mock_role.get_buffer_tracker.return_value = mock_buffer_tracker
     mock_role._stream_start_time_us = None  # noqa: SLF001
     mock_role._last_late_log_s = 0.0  # noqa: SLF001
@@ -137,6 +138,7 @@ async def test_writer_registers_buffer_after_send() -> None:
         await asyncio.sleep(0)
 
     assert wsock.send_bytes.call_count == 1
+    mock_buffer_tracker.time_until_ready.assert_called()
     mock_buffer_tracker.register.assert_called_once_with(1_000_000, 100, 50_000)
 
     await conn.disconnect(retry_connection=False)
@@ -161,6 +163,7 @@ async def test_writer_does_not_register_without_metadata() -> None:
     mock_buffer_tracker = MagicMock()
     mock_buffer_tracker.time_until_duration_capacity.return_value = 0
     mock_buffer_tracker.time_until_unblocked.return_value = 0
+    mock_buffer_tracker.time_until_ready.return_value = 0
     mock_role.get_buffer_tracker.return_value = mock_buffer_tracker
     mock_role._stream_start_time_us = None  # noqa: SLF001
     mock_role._last_late_log_s = 0.0  # noqa: SLF001
@@ -185,6 +188,57 @@ async def test_writer_does_not_register_without_metadata() -> None:
 
     assert wsock.send_bytes.call_count == 1
     mock_buffer_tracker.register.assert_not_called()
+
+    await conn.disconnect(retry_connection=False)
+
+
+@pytest.mark.asyncio
+async def test_writer_blocks_on_buffer_tracker_capacity() -> None:
+    """Writer should defer sending when buffer tracker reports no capacity."""
+    loop = asyncio.get_running_loop()
+    server = _DummyServer(loop=loop, clock=LoopClock(loop))
+
+    wsock = MagicMock()
+    wsock.closed = False
+    wsock.send_str = AsyncMock()
+    wsock.send_bytes = AsyncMock()
+
+    conn = SendspinConnection(server, wsock_client=wsock)
+    await conn._setup_connection()  # noqa: SLF001
+
+    mock_role = MagicMock()
+    mock_buffer_tracker = MagicMock()
+    mock_buffer_tracker.time_until_unblocked.return_value = 0
+    mock_buffer_tracker.time_until_ready.return_value = 1_000_000
+    mock_role.get_buffer_tracker.return_value = mock_buffer_tracker
+    mock_role._stream_start_time_us = None  # noqa: SLF001
+    mock_role._last_late_log_s = 0.0  # noqa: SLF001
+    mock_role._late_skips_since_log = 0  # noqa: SLF001
+
+    mock_client = MagicMock()
+    binary_handling = BinaryHandling(drop_late=False, buffer_track=True)
+    mock_client.get_binary_handling_cached.return_value = (binary_handling, mock_role)
+    conn._client = mock_client  # noqa: SLF001
+
+    payload = b"audio_data"
+    message_type = BinaryMessageType.AUDIO_CHUNK.value
+    packed = pack_binary_header_raw(message_type, 0) + payload
+    conn.try_send_binary(
+        packed,
+        role="player",
+        timestamp_us=0,
+        message_type=message_type,
+        buffer_end_time_us=1_000_000,
+        buffer_byte_count=100,
+        duration_us=50_000,
+    )
+
+    # Give writer a chance to process and apply blocking.
+    for _ in range(10):
+        await asyncio.sleep(0)
+
+    assert wsock.send_bytes.call_count == 0
+    mock_buffer_tracker.time_until_ready.assert_called_with(100, 50_000)
 
     await conn.disconnect(retry_connection=False)
 
