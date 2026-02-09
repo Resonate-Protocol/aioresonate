@@ -28,7 +28,7 @@ from aiosendspin.server.audio_transformers import PcmPassthrough, TransformerPoo
 from aiosendspin.server.channels import MAIN_CHANNEL
 from aiosendspin.server.client import SendspinClient
 from aiosendspin.server.clock import LoopClock
-from aiosendspin.server.push_stream import PushStream
+from aiosendspin.server.push_stream import CachedChunk, PushStream
 from aiosendspin.server.roles import AudioChunk, AudioRequirements
 
 
@@ -533,6 +533,46 @@ async def test_late_join_uses_cached_chunks_across_role_recreation(mock_loop: An
 
     assert role2.started == 1
     assert role2.received
+
+
+@pytest.mark.asyncio
+async def test_send_cached_chunks_keeps_chunk_overlapping_now(mock_loop: Any) -> None:
+    """Cached replay should keep/send chunks that overlap now, not only future chunks."""
+    group = _DummyGroup(clients=[])
+    role = _DummyRole(
+        AudioRequirements(
+            sample_rate=48000,
+            bit_depth=16,
+            channels=2,
+            transformer=PcmPassthrough(sample_rate=48000, bit_depth=16, channels=2),
+            channel_id=MAIN_CHANNEL,
+            frame_duration_us=25_000,
+        )
+    )
+    group.clients.append(_DummyClient([role]))
+    stream = PushStream(loop=mock_loop, clock=LoopClock(mock_loop), group=group)
+
+    now_us = stream._clock.now_us()  # noqa: SLF001
+    overlapping = CachedChunk(
+        timestamp_us=now_us - 500_000,
+        duration_us=1_000_000,
+        payload=b"a",
+        byte_count=1,
+    )
+    future = CachedChunk(
+        timestamp_us=now_us + 100_000,
+        duration_us=25_000,
+        payload=b"b",
+        byte_count=1,
+    )
+
+    sent = stream._send_cached_chunks_to_role(  # noqa: SLF001
+        role, [overlapping, future], now_us
+    )
+
+    assert sent == 2
+    assert len(role.received) == 2
+    assert role.received[0].timestamp_us == overlapping.timestamp_us
 
 
 @pytest.mark.asyncio

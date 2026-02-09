@@ -164,6 +164,7 @@ async def test_late_joiner_receives_catchup_for_uncached_codec() -> None:
     _, conn2 = _make_connected_player(server, group, "pcm-client", codec=AudioCodec.PCM)
     role2 = group.clients[-1].role("player@v1")
     assert role2 is not None
+    role2.get_join_delay_s = lambda: 0.0  # type: ignore[method-assign]
     stream.on_role_join(role2)
     stream.prepare_audio(
         bytes(19_200),

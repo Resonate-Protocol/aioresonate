@@ -196,9 +196,6 @@ def _resample_pcm_standalone(
 # stream may have no chunks whose *start* timestamp is >= now + DEFAULT_INITIAL_DELAY_US.
 LATE_JOINER_MIN_LEAD_US = 100_000  # 100ms
 
-# Max chunks to pump per role before yielding to the event loop
-_PUMP_BATCH_SIZE = 20
-
 
 @dataclass(frozen=True)
 class CachedChunk:
@@ -278,11 +275,8 @@ class PushStream:
         self._catchup_tasks: dict[TransformKey, asyncio.Task[None]] = {}
         # TransformKey cache by (role_id, channel_id_int) - avoids rebuilding keys each frame
         self._transform_key_cache: dict[tuple[int, int], TransformKey] = {}
-        # Per-role chunk cursor for cache delivery.
-        self._role_chunk_cursors: weakref.WeakKeyDictionary[Role, dict[TransformKey, int]] = (
-            weakref.WeakKeyDictionary()
-        )
-        self._cache_pump_handle: asyncio.Handle | None = None
+        # Roles awaiting delayed join; excluded from live delivery until join executes.
+        self._pending_join_roles: weakref.WeakSet[Role] = weakref.WeakSet()
 
     @property
     def is_stopped(self) -> bool:
@@ -299,6 +293,7 @@ class PushStream:
                 (client, role)
                 for role in client.active_roles
                 if role.get_audio_requirements() is not None
+                and role not in self._pending_join_roles
             )
         return result
 
@@ -384,7 +379,6 @@ class PushStream:
         if not self._channel_buffers:
             now_us = self._clock.now_us()
             if not self._channel_timing:
-                # Initialize MAIN_CHANNEL timing if nothing exists
                 self._channel_timing[MAIN_CHANNEL] = now_us + DEFAULT_INITIAL_DELAY_US
             return min(self._channel_timing.values())
 
@@ -453,9 +447,6 @@ class PushStream:
 
         # Prune old chunks from cache
         self._prune_role_chunk_cache()
-
-        # Deliver cached chunks to roles up to their buffer capacity
-        self._trigger_cache_pump()
 
         # Return earliest play_start_us
         return min(channel_play_start.values())
@@ -603,12 +594,13 @@ class PushStream:
         ],
         resampled_pcm: dict[tuple[UUID, int, int, int], tuple[bytes, int]],
     ) -> dict[TransformKey, list[CachedChunk]]:
-        """Transform PCM and deliver to roles. Returns cache results.
+        """Transform PCM, deliver live chunks to roles, and return cache results.
 
         Encoding is parallelized across unique TransformKeys via a thread pool.
         """
         # Collect unique encoding tasks: tkey -> (transformer, pcm_data, output_ts, duration_us)
         encode_tasks: dict[TransformKey, tuple[AudioTransformer | None, bytes, int, int]] = {}
+        roles_by_transform: defaultdict[TransformKey, list[Role]] = defaultdict(list)
 
         for pcm_key, roles_list in roles_by_pcm.items():
             channel_id, rate, depth, channels = pcm_key
@@ -627,6 +619,7 @@ class PushStream:
                 grouped_by_key[tkey].append((client, role, req))
 
             for tkey, grouped in grouped_by_key.items():
+                roles_by_transform[tkey].extend(role for _client, role, _req in grouped)
                 if self._catchup_state.get(tkey) == "catching_up":
                     continue
                 if tkey in encode_tasks:
@@ -654,11 +647,29 @@ class PushStream:
         cache_results: defaultdict[TransformKey, list[CachedChunk]] = defaultdict(list)
 
         for tkey, frame_list in transformed.items():
+            cached_for_key: list[CachedChunk] = []
             for data, ts, dur in frame_list:
                 cached = CachedChunk(
                     timestamp_us=ts, duration_us=dur, payload=data, byte_count=len(data)
                 )
-                cache_results[tkey].append(cached)
+                cached_for_key.append(cached)
+            if not cached_for_key:
+                continue
+            cache_results[tkey].extend(cached_for_key)
+
+            # Deliver live chunks directly; connection layer enforces late-drop/backpressure.
+            roles = roles_by_transform.get(tkey, [])
+            for role in roles:
+                self._ensure_role_started(role)
+                for cached_chunk in cached_for_key:
+                    role.on_audio_chunk(
+                        AudioChunk(
+                            data=cached_chunk.payload,
+                            timestamp_us=cached_chunk.timestamp_us,
+                            duration_us=cached_chunk.duration_us,
+                            byte_count=cached_chunk.byte_count,
+                        )
+                    )
 
         return cache_results
 
@@ -693,58 +704,22 @@ class PushStream:
             chunks = self._role_chunk_cache[key]
             prune_count = 0
             for chunk in chunks:
-                if chunk.timestamp_us >= now_us:
+                if chunk.timestamp_us + chunk.duration_us > now_us:
                     break
                 prune_count += 1
 
             if prune_count:
                 self._role_chunk_cache[key] = chunks[prune_count:]
-                self._adjust_role_chunk_cursors(key, prune_count)
 
             if not self._role_chunk_cache[key]:
                 del self._role_chunk_cache[key]
-                self._drop_role_chunk_cursors(key)
 
         for channel_int in list(self._pcm_chunk_cache.keys()):
             pcm_chunks = self._pcm_chunk_cache[channel_int]
-            while pcm_chunks and pcm_chunks[0].timestamp_us < now_us:
+            while pcm_chunks and (pcm_chunks[0].timestamp_us + pcm_chunks[0].duration_us <= now_us):
                 pcm_chunks.popleft()
             if not pcm_chunks:
                 self._pcm_chunk_cache.pop(channel_int, None)
-
-    def _adjust_role_chunk_cursors(self, tkey: TransformKey, removed: int) -> None:
-        if removed <= 0:
-            return
-        for role, cursors in list(self._role_chunk_cursors.items()):
-            if tkey not in cursors:
-                continue
-            cursors[tkey] = max(cursors[tkey] - removed, 0)
-            if cursors[tkey] == 0 and not self._role_chunk_cache.get(tkey):
-                cursors.pop(tkey, None)
-            if not cursors:
-                self._role_chunk_cursors.pop(role, None)
-
-    def _drop_role_chunk_cursors(self, tkey: TransformKey) -> None:
-        for role, cursors in list(self._role_chunk_cursors.items()):
-            if tkey in cursors:
-                cursors.pop(tkey, None)
-            if not cursors:
-                self._role_chunk_cursors.pop(role, None)
-
-    def _get_roles_by_transform(
-        self,
-    ) -> defaultdict[TransformKey, list[tuple[SendspinClient, Role, AudioRequirements]]]:
-        roles_by_transform: defaultdict[
-            TransformKey, list[tuple[SendspinClient, Role, AudioRequirements]]
-        ] = defaultdict(list)
-        for client, role in self._get_audio_roles():
-            req = role.get_audio_requirements()
-            if req is None:
-                continue
-            channel_id = req.channel_id or MAIN_CHANNEL
-            tkey = self._build_transform_key(req, channel_id, role)
-            roles_by_transform[tkey].append((client, role, req))
-        return roles_by_transform
 
     def _ensure_role_started(self, role: Role) -> None:
         if role in self._started_roles:
@@ -752,27 +727,18 @@ class PushStream:
         role.on_stream_start()
         self._started_roles.add(role)
 
-    def _pump_role_cache(
+    def _send_cached_chunks_to_role(
         self,
         role: Role,
-        tkey: TransformKey,
-        cached: list[CachedChunk],
+        cached_chunks: list[CachedChunk],
         now_us: int,
-    ) -> bool:
-        """Pump cached chunks to a role, up to _PUMP_BATCH_SIZE at a time.
-
-        Returns True if more work remains (batch yielding), False if done.
-        """
-        role_cursors = self._role_chunk_cursors.setdefault(role, {})
-        cursor = role_cursors.get(tkey, 0)
+    ) -> int:
+        """Send cached chunks to a role, skipping chunks that are already late."""
         skipped_late = 0
-        chunks_sent = 0
-
-        while cursor < len(cached):
-            cached_chunk = cached[cursor]
-            if cached_chunk.timestamp_us < now_us:
+        sent = 0
+        for cached_chunk in cached_chunks:
+            if cached_chunk.timestamp_us + cached_chunk.duration_us <= now_us:
                 skipped_late += 1
-                cursor += 1
                 continue
 
             self._ensure_role_started(role)
@@ -784,64 +750,27 @@ class PushStream:
                 byte_count=cached_chunk.byte_count,
             )
             role.on_audio_chunk(chunk)
-            cursor += 1
-            chunks_sent += 1
-
-            # Yield to event loop after batch to prevent stalling
-            if chunks_sent >= _PUMP_BATCH_SIZE:
-                break
+            sent += 1
 
         if skipped_late > 0:
             _LOGGER.debug(
-                "Pump skipped %s late chunk(s) for role %s (ts < now_us=%s)",
+                "Skipped %s late cached chunk(s) for role %s (ts < now_us=%s)",
                 skipped_late,
                 role.role_family,
                 now_us,
             )
-
-        role_cursors[tkey] = cursor
-        return cursor < len(cached)
-
-    def _pump_cached_chunks(self) -> None:
-        """Pump cached chunks to all roles, yielding to event loop between batches."""
-        if self._is_stopped:
-            return
-        self._cache_pump_handle = None
-
-        now_us = self._clock.now_us()
-        roles_by_transform = self._get_roles_by_transform()
-        has_more_work = False
-
-        for tkey, roles in roles_by_transform.items():
-            cached = self._role_chunk_cache.get(tkey)
-            if not cached:
-                continue
-            for _client, role, _req in roles:
-                more = self._pump_role_cache(role, tkey, cached, now_us)
-                if more:
-                    has_more_work = True
-
-        # Schedule immediate continuation if more work remains (batch yielding)
-        if has_more_work and not self._is_stopped:
-            self._cache_pump_handle = self._loop.call_soon(self._pump_cached_chunks)
-
-    def _trigger_cache_pump(self) -> None:
-        if self._cache_pump_handle is not None:
-            self._cache_pump_handle.cancel()
-            self._cache_pump_handle = None
-        self._pump_cached_chunks()
+        return sent
 
     def on_role_leave(self, role: Role) -> None:
         """Remove role-specific state so re-joins get fresh stream/start."""
         self._started_roles.discard(role)
-        self._role_chunk_cursors.pop(role, None)
+        self._pending_join_roles.discard(role)
         req = role.get_audio_requirements()
         if req is not None:
             channel_id = req.channel_id or MAIN_CHANNEL
             tkey = self._build_transform_key(req, channel_id, role)
             if not self._other_roles_use_transform_key(tkey, role):
                 self._role_chunk_cache.pop(tkey, None)
-                self._drop_role_chunk_cursors(tkey)
                 if req.transformer is not None:
                     req.transformer.reset()
         for tkey in list(self._catchup_roles.keys()):
@@ -872,9 +801,6 @@ class PushStream:
             if cache_key[0] == role_id:
                 self._transform_key_cache.pop(cache_key, None)
 
-        # Clear chunk cursors for this role (old TransformKey no longer valid)
-        self._role_chunk_cursors.pop(role, None)
-
         # Clean up any catchup state referencing this role
         for tkey in list(self._catchup_roles.keys()):
             roles = self._catchup_roles[tkey]
@@ -900,14 +826,13 @@ class PushStream:
         Args:
             role: The role that joined.
         """
-        delay_s = role.get_join_delay_s()
-        if delay_s > 0:
-            self._loop.call_later(delay_s, self._do_role_join, role)
-            return
+        # Join immediately so replay anchors to the current shared timeline.
+        # Deferring by wall-clock time can desynchronize grouped players.
         self._do_role_join(role)
 
     def _do_role_join(self, role: Role) -> None:
         """Execute role join with cached chunk replay."""
+        self._pending_join_roles.discard(role)
         if self._is_stopped:
             return
         req = role.get_audio_requirements()
@@ -944,7 +869,7 @@ class PushStream:
 
         start_index = 0
         for chunk in cached:
-            if chunk.timestamp_us >= min_timestamp_us:
+            if chunk.timestamp_us + chunk.duration_us > min_timestamp_us:
                 break
             start_index += 1
 
@@ -952,10 +877,6 @@ class PushStream:
             if self._channel_timing:
                 self._ensure_role_started(role)
             return
-
-        role_cursors = self._role_chunk_cursors.setdefault(role, {})
-        if role_cursors.get(cache_key, 0) < start_index:
-            role_cursors[cache_key] = start_index
 
         if _LOGGER.isEnabledFor(logging.DEBUG):
             first_ts = cached[start_index].timestamp_us
@@ -967,11 +888,7 @@ class PushStream:
                 last_ts,
             )
 
-        if self._channel_timing:
-            self._ensure_role_started(role)
-        has_more = self._pump_role_cache(role, cache_key, cached, now_us)
-        if has_more and self._cache_pump_handle is None:
-            self._cache_pump_handle = self._loop.call_soon(self._pump_cached_chunks)
+        self._send_cached_chunks_to_role(role, cached[start_index:], now_us)
 
     def _other_roles_use_transform_key(self, cache_key: TransformKey, exclude_role: Role) -> bool:
         """Check if any other connected role uses the same TransformKey."""
@@ -1094,7 +1011,9 @@ class PushStream:
             pcm_chunks = list(self._pcm_chunk_cache.get(channel_int, []))
             now_us = self._clock.now_us()
             target_ts = now_us + LATE_JOINER_MIN_LEAD_US
-            eligible = [chunk for chunk in pcm_chunks if chunk.timestamp_us >= target_ts]
+            eligible = [
+                chunk for chunk in pcm_chunks if chunk.timestamp_us + chunk.duration_us > target_ts
+            ]
 
             if not eligible:
                 if self._channel_timing:
@@ -1155,12 +1074,12 @@ class PushStream:
                     self._role_chunk_cache[cache_key].extend(new_encoded)
                     last_encoded_end_us = new_encoded[-1].timestamp_us + new_encoded[-1].duration_us
 
+            now_us = self._clock.now_us()
+            encoded_cache = self._role_chunk_cache.get(cache_key, [])
             for r in self._catchup_roles.get(cache_key, {role}):
-                self._role_chunk_cursors.setdefault(r, {})[cache_key] = 0
-                self._ensure_role_started(r)
+                self._send_cached_chunks_to_role(r, encoded_cache, now_us)
 
             self._catchup_state[cache_key] = "live"
-            self._trigger_cache_pump()
         finally:
             if self._catchup_state.get(cache_key) != "live":
                 self._catchup_state.pop(cache_key, None)
@@ -1185,9 +1104,6 @@ class PushStream:
         if self._is_stopped:
             return
         self._is_stopped = True
-        if self._cache_pump_handle is not None:
-            self._cache_pump_handle.cancel()
-            self._cache_pump_handle = None
 
         # Flush remaining audio from transformers and reset them
         roles_by_transform: defaultdict[TransformKey, list[Role]] = defaultdict(list)
@@ -1221,7 +1137,7 @@ class PushStream:
 
         # Clear role tracking state
         self._started_roles.clear()
-        self._role_chunk_cursors.clear()
+        self._pending_join_roles.clear()
         self._cancel_catchup_tasks()
         self._pcm_chunk_cache.clear()
 
@@ -1240,12 +1156,9 @@ class PushStream:
 
         # Clear chunk cache
         self._role_chunk_cache.clear()
-        self._role_chunk_cursors.clear()
+        self._pending_join_roles.clear()
         self._pcm_chunk_cache.clear()
         self._cancel_catchup_tasks()
-        if self._cache_pump_handle is not None:
-            self._cache_pump_handle.cancel()
-            self._cache_pump_handle = None
 
         # Reset inline resamplers
         self._resamplers.clear()
