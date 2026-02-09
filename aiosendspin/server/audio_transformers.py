@@ -83,7 +83,7 @@ class TransformerKey:
     options: tuple[tuple[str, str], ...]
 
 
-# TODO: just checking, do we have any issues re-using transformers, i mean they
+# TODO: just checking, do we have any issues reusing transformers, i mean they
 # TODO: can only handle one stream pushed per instance, 2 will get mixed up.
 class TransformerPool:
     """Manages shared transformer instances.

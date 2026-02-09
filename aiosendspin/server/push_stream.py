@@ -4,11 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
-import threading
 import weakref
 from collections import defaultdict, deque
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal, NamedTuple
 from uuid import UUID
@@ -33,26 +30,6 @@ _LOGGER = logging.getLogger(__name__)
 # TODO: test if still required, since I fixed double stream start messages
 # Default initial delay before first audio plays (microseconds)
 DEFAULT_INITIAL_DELAY_US = 250_000  # 250ms
-
-
-# Thread pool for parallel encoding
-class _ExecutorHolder:
-    """Holds the shared encoding thread pool (avoids global statement)."""
-
-    executor: ThreadPoolExecutor | None = None
-    lock = threading.Lock()
-
-
-def _get_encode_executor() -> ThreadPoolExecutor:
-    """Get or create the shared encoding thread pool."""
-    if _ExecutorHolder.executor is None:
-        with _ExecutorHolder.lock:
-            if _ExecutorHolder.executor is None:
-                _ExecutorHolder.executor = ThreadPoolExecutor(
-                    max_workers=min(4, (os.cpu_count() or 1)),
-                    thread_name_prefix="sendspin-encode-",
-                )
-    return _ExecutorHolder.executor
 
 
 def _encode_for_transform_key(
@@ -549,21 +526,14 @@ class PushStream:
     ) -> dict[tuple[UUID, int, int, int], tuple[bytes, int]]:
         """Resample PCM once per unique PCM key. Returns (channel, rate, depth, ch) -> (pcm, ts).
 
-        Both resampler creation and resampling run in the thread pool to avoid
-        blocking the event loop.
+        Resampler state (PyAV objects) is cached and must stay on a single thread.
+        Running cached resamplers across a worker pool can deadlock depending on
+        thread scheduling, so resampling runs synchronously on the loop thread.
         """
         if not roles_by_pcm:
             return {}
 
-        executor = _get_encode_executor()
-        running_loop = asyncio.get_running_loop()
-
-        # Collect info for each pcm_key
-        pcm_key_info: dict[
-            tuple[UUID, int, int, int],
-            tuple[_ResamplerKey, AudioFormat, AudioFormat, bytes, int],
-        ] = {}
-
+        results: dict[tuple[UUID, int, int, int], tuple[bytes, int]] = {}
         for pcm_key in roles_by_pcm:
             channel_id, target_sample_rate, target_bit_depth, target_channels = pcm_key
             source_pcm, source_format = prepared[channel_id]
@@ -583,82 +553,15 @@ class PushStream:
                 target_bit_depth=target_bit_depth,
             )
 
-            pcm_key_info[pcm_key] = (
-                resampler_key,
-                source_format,
-                target_format,
-                source_pcm,
-                input_timestamp_us,
-            )
-
-        # Separate cached vs new resamplers
-        cached_states: dict[tuple[UUID, int, int, int], _ResamplerState] = {}
-        keys_needing_creation: list[
-            tuple[tuple[UUID, int, int, int], _ResamplerKey, AudioFormat, AudioFormat]
-        ] = []
-
-        for pcm_key, (rkey, src_fmt, tgt_fmt, _pcm, _ts) in pcm_key_info.items():
-            cached = self._get_cached_resampler(rkey)
-            if cached is not None:
-                cached_states[pcm_key] = cached
-            else:
-                keys_needing_creation.append((pcm_key, rkey, src_fmt, tgt_fmt))
-
-        # Create new resamplers in thread pool
-        if keys_needing_creation:
-
-            async def create_resampler(
-                pcm_key: tuple[UUID, int, int, int],
-                rkey: _ResamplerKey,
-                src_fmt: AudioFormat,
-                tgt_fmt: AudioFormat,
-            ) -> tuple[tuple[UUID, int, int, int], _ResamplerState]:
-                state = await running_loop.run_in_executor(
-                    executor, _create_resampler_state, rkey, src_fmt, tgt_fmt
-                )
-                return (pcm_key, state)
-
-            creation_tasks = [
-                create_resampler(pcm_key, rkey, src_fmt, tgt_fmt)
-                for pcm_key, rkey, src_fmt, tgt_fmt in keys_needing_creation
-            ]
-            creation_results = await asyncio.gather(*creation_tasks)
-
-            # Cache newly created resamplers
-            for pcm_key, state in creation_results:
+            state = self._get_cached_resampler(resampler_key)
+            if state is None:
+                state = _create_resampler_state(resampler_key, source_format, target_format)
                 self._cache_resampler(state)
-                cached_states[pcm_key] = state
 
-        # Now run resampling in thread pool
-        async def run_resample(
-            pcm_key: tuple[UUID, int, int, int],
-            resampler_state: _ResamplerState,
-            source_pcm: bytes,
-            source_format: AudioFormat,
-            input_timestamp_us: int,
-        ) -> tuple[tuple[UUID, int, int, int], tuple[bytes, int]]:
-            result = await running_loop.run_in_executor(
-                executor,
-                _resample_pcm_standalone,
-                resampler_state,
-                source_pcm,
-                source_format,
-                input_timestamp_us,
+            results[pcm_key] = _resample_pcm_standalone(
+                state, source_pcm, source_format, input_timestamp_us
             )
-            return (pcm_key, result)
-
-        resample_tasks = [
-            run_resample(
-                pcm_key,
-                cached_states[pcm_key],
-                pcm_key_info[pcm_key][3],  # source_pcm
-                pcm_key_info[pcm_key][1],  # source_format
-                pcm_key_info[pcm_key][4],  # input_timestamp_us
-            )
-            for pcm_key in pcm_key_info
-        ]
-        results = await asyncio.gather(*resample_tasks)
-        return dict(results)
+        return results
 
     def _resolve_frame_duration_us(self, req: AudioRequirements) -> int:
         if req.frame_duration_us is not None:
@@ -735,34 +638,18 @@ class PushStream:
         transformed: dict[TransformKey, list[tuple[bytes, int, int]]] = {}
 
         if encode_tasks:
-            # Multiple encoders: run in parallel via thread pool
-            executor = _get_encode_executor()
-            # Use the real running loop for run_in_executor (self._loop may be mocked)
-            running_loop = asyncio.get_running_loop()
-
-            async def run_encode(
-                tkey: TransformKey,
-                transformer: AudioTransformer | None,
-                pcm_data: bytes,
-                output_ts: int,
-                duration_us: int,
-            ) -> tuple[TransformKey, list[tuple[bytes, int, int]]]:
-                result = await running_loop.run_in_executor(
-                    executor,
-                    _encode_for_transform_key,
+            for processed, (tkey, (transformer, pcm_data, output_ts, duration_us)) in enumerate(
+                encode_tasks.items(), start=1
+            ):
+                transformed[tkey] = _encode_for_transform_key(
                     transformer,
                     pcm_data,
                     output_ts,
                     duration_us,
                 )
-                return (tkey, result)
-
-            tasks = [
-                run_encode(tkey, transformer, pcm_data, output_ts, duration_us)
-                for tkey, (transformer, pcm_data, output_ts, duration_us) in encode_tasks.items()
-            ]
-            results = await asyncio.gather(*tasks)
-            transformed = dict(results)
+                if processed % 2 == 0:
+                    # Keep the loop responsive during large multi-role commits.
+                    await asyncio.sleep(0)
 
         cache_results: defaultdict[TransformKey, list[CachedChunk]] = defaultdict(list)
 
@@ -1176,6 +1063,20 @@ class PushStream:
 
         return cached
 
+    async def _encode_catchup_sequence(
+        self,
+        pcm_chunks: list[CachedPCMChunk],
+        encoder: AudioTransformer | None,
+        req: AudioRequirements,
+        channel_id: UUID,
+    ) -> list[CachedChunk]:
+        return self._encode_pcm_sequence(
+            pcm_chunks,
+            encoder,
+            req,
+            channel_id,
+        )
+
     async def _start_catchup_encoding(
         self,
         role: Role,
@@ -1192,8 +1093,8 @@ class PushStream:
                 encoder.reset()
             pcm_chunks = list(self._pcm_chunk_cache.get(channel_int, []))
             now_us = self._clock.now_us()
-            min_ts = now_us + LATE_JOINER_MIN_LEAD_US
-            eligible = [chunk for chunk in pcm_chunks if chunk.timestamp_us >= min_ts]
+            target_ts = now_us + LATE_JOINER_MIN_LEAD_US
+            eligible = [chunk for chunk in pcm_chunks if chunk.timestamp_us >= target_ts]
 
             if not eligible:
                 if self._channel_timing:
@@ -1201,9 +1102,7 @@ class PushStream:
                         self._ensure_role_started(r)
                 return
 
-            encoded = await self._loop.run_in_executor(
-                _get_encode_executor(),
-                self._encode_pcm_sequence,
+            encoded = await self._encode_catchup_sequence(
                 eligible,
                 encoder,
                 req,
@@ -1213,31 +1112,39 @@ class PushStream:
             if encoded:
                 self._role_chunk_cache[cache_key].extend(encoded)
 
-            if encoded:
-                last_encoded_end_us = encoded[-1].timestamp_us + encoded[-1].duration_us
-            else:
-                last_encoded_end_us = eligible[-1].timestamp_us + eligible[-1].duration_us
+            last_encoded_end_us = (
+                encoded[-1].timestamp_us + encoded[-1].duration_us if encoded else 0
+            )
+            # Track source PCM progress separately from encoded progress. Some
+            # codecs buffer input and may emit no packets for a given chunk.
+            last_source_end_us = eligible[-1].timestamp_us + eligible[-1].duration_us
+            idle_loops = 0
+            max_idle_loops = 50  # ~500ms at 10ms sleep
 
-            while True:
+            while last_encoded_end_us < target_ts:
                 await asyncio.sleep(0)
-
-                now_us = self._clock.now_us()
-                target_ts = now_us + LATE_JOINER_MIN_LEAD_US
-                if last_encoded_end_us >= target_ts:
-                    break
 
                 new_pcm = [
                     chunk
                     for chunk in self._pcm_chunk_cache.get(channel_int, [])
-                    if chunk.timestamp_us >= last_encoded_end_us
+                    if chunk.timestamp_us >= last_source_end_us
                 ]
                 if not new_pcm:
+                    idle_loops += 1
+                    if idle_loops >= max_idle_loops:
+                        _LOGGER.debug(
+                            "Catch-up idle timeout for %s (encoded_end=%s target=%s)",
+                            cache_key,
+                            last_encoded_end_us,
+                            target_ts,
+                        )
+                        break
                     await asyncio.sleep(0.01)
                     continue
+                idle_loops = 0
+                last_source_end_us = new_pcm[-1].timestamp_us + new_pcm[-1].duration_us
 
-                new_encoded = await self._loop.run_in_executor(
-                    _get_encode_executor(),
-                    self._encode_pcm_sequence,
+                new_encoded = await self._encode_catchup_sequence(
                     new_pcm,
                     encoder,
                     req,
