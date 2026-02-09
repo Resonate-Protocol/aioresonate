@@ -327,7 +327,7 @@ class TestRoleBaseClass:
         role = TestRole(mock_client)
 
         role.send_message({"type": "test"})
-        mock_client.send_message.assert_not_called()
+        mock_client.send_role_message.assert_not_called()
 
     def test_send_message_forwards_to_client_with_transport(self) -> None:
         """send_message() forwards to client when transport attached."""
@@ -356,7 +356,7 @@ class TestRoleBaseClass:
 
         msg = {"type": "test"}
         role.send_message(msg)
-        mock_client.send_message.assert_called_once_with(msg)
+        mock_client.send_role_message.assert_called_once_with("test", msg)
 
 
 class TestAudioChunk:

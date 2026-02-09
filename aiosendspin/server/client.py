@@ -314,6 +314,22 @@ class SendspinClient:
             self._logger.info("Sending stream/start: %s", message.payload)
         self._connection.send_message(message)
 
+    def send_role_message(self, role: str, message: ServerMessage) -> None:
+        """Send a role-scoped message if connected; otherwise no-op.
+
+        Falls back to send_message() for test doubles that do not expose
+        send_role_message().
+        """
+        if self._connection is None:
+            return
+        if isinstance(message, StreamStartMessage):
+            self._logger.info("Sending stream/start: %s", message.payload)
+        sender = getattr(self._connection, "send_role_message", None)
+        if callable(sender):
+            sender(role, message)
+            return
+        self._connection.send_message(message)
+
     def try_send_binary(
         self,
         data: bytes,
@@ -330,7 +346,7 @@ class SendspinClient:
             return False
         return self._connection.try_send_binary(
             data,
-            role_family=role_family,
+            role=role_family,
             timestamp_us=timestamp_us,
             message_type=message_type,
             buffer_end_time_us=buffer_end_time_us,

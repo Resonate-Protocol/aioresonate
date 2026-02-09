@@ -61,7 +61,7 @@ class _CaptureConnection:
         self,
         data: bytes,
         *,
-        role_family: str,  # noqa: ARG002
+        role: str,  # noqa: ARG002
         timestamp_us: int,  # noqa: ARG002
         message_type: int,  # noqa: ARG002
         buffer_end_time_us: int | None = None,

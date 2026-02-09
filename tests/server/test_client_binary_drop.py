@@ -48,11 +48,11 @@ async def test_stream_end_drops_queued_binary_before_sending() -> None:
         # Queue a binary payload, then a stream/end message.
         assert conn.try_send_binary(
             b"\x04" + b"\x00" * 8 + b"audio",
-            role_family="player",
+            role="player",
             timestamp_us=0,
             message_type=4,
         )
-        conn.send_message(StreamEndMessage(payload=StreamEndPayload(roles=None)))
+        conn.send_role_message("player", StreamEndMessage(payload=StreamEndPayload(roles=None)))
 
         # Wait until stream/end is sent.
         for _ in range(50):
@@ -85,11 +85,14 @@ async def test_stream_clear_drops_queued_binary_before_sending() -> None:
     try:
         assert conn.try_send_binary(
             b"\x04" + b"\x00" * 8 + b"audio",
-            role_family="player",
+            role="player",
             timestamp_us=0,
             message_type=4,
         )
-        conn.send_message(StreamClearMessage(payload=StreamClearPayload(roles=["player"])))
+        conn.send_role_message(
+            "player",
+            StreamClearMessage(payload=StreamClearPayload(roles=["player"])),
+        )
 
         for _ in range(50):
             if wsock.send_str.called:

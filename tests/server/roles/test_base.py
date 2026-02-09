@@ -256,7 +256,7 @@ def test_role_send_message_drops_without_transport() -> None:
     message: ServerMessage = MagicMock()
     role.send_message(message)
 
-    client.send_message.assert_not_called()
+    client.send_role_message.assert_not_called()
 
 
 def test_role_send_message_forwards_with_transport() -> None:
@@ -269,7 +269,7 @@ def test_role_send_message_forwards_with_transport() -> None:
     message: ServerMessage = MagicMock()
     role.send_message(message)
 
-    client.send_message.assert_called_once_with(message)
+    client.send_role_message.assert_called_once_with(role.role_family, message)
 
 
 def test_role_on_transport_attach_sets_flag() -> None:

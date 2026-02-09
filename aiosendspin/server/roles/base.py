@@ -289,7 +289,7 @@ class Role(ABC):
         """Send JSON message to the client. Drop silently if no transport."""
         if not self._has_transport:
             return
-        self._client.send_message(message)
+        self._client.send_role_message(self.role_family, message)
 
     # --- Stream lifecycle hooks (optional) ---
 

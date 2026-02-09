@@ -13,10 +13,13 @@ from aiosendspin.models import pack_binary_header_raw
 from aiosendspin.models.core import (
     ServerTimeMessage,
     ServerTimePayload,
+    StreamStartMessage,
+    StreamStartPayload,
 )
-from aiosendspin.models.types import BinaryMessageType
+from aiosendspin.models.player import StreamStartPlayer
+from aiosendspin.models.types import AudioCodec, BinaryMessageType
 from aiosendspin.server.clock import LoopClock
-from aiosendspin.server.connection import SendspinConnection, _BinaryFrame
+from aiosendspin.server.connection import SendspinConnection, _BinaryData, _RoleQueueEntry
 from aiosendspin.server.roles.base import BinaryHandling
 
 
@@ -31,29 +34,24 @@ class _DummyServer:
         raise AssertionError(f"unexpected get_or_create_client({client_id}) in this test")
 
 
-def test_binary_frame_supports_buffer_registration_metadata() -> None:
-    """_BinaryFrame should optionally carry buffer registration info."""
-    frame_simple = _BinaryFrame(
-        epoch_family=1,
-        role_family="player",
-        data=b"test",
-        timestamp_us=0,
-        message_type=4,
-    )
-    assert frame_simple.buffer_end_time_us is None
-    assert frame_simple.buffer_byte_count is None
+def test_binary_data_supports_buffer_registration_metadata() -> None:
+    """_BinaryData should optionally carry buffer registration info."""
+    simple = _BinaryData(data=b"test", message_type=4)
+    assert simple.buffer_end_time_us is None
+    assert simple.buffer_byte_count is None
 
-    frame_with_meta = _BinaryFrame(
-        epoch_family=1,
-        role_family="player",
+    with_meta = _BinaryData(
         data=b"test",
-        timestamp_us=0,
         message_type=4,
         buffer_end_time_us=1_000_000,
         buffer_byte_count=1234,
     )
-    assert frame_with_meta.buffer_end_time_us == 1_000_000
-    assert frame_with_meta.buffer_byte_count == 1234
+    assert with_meta.buffer_end_time_us == 1_000_000
+    assert with_meta.buffer_byte_count == 1234
+
+    entry = _RoleQueueEntry(epoch=1, timestamp_us=0, binary=with_meta)
+    assert entry.binary is not None
+    assert entry.binary.buffer_end_time_us == 1_000_000
 
 
 @pytest.mark.asyncio
@@ -69,7 +67,7 @@ async def test_try_send_binary_accepts_buffer_metadata() -> None:
 
     result = conn.try_send_binary(
         b"audio_data",
-        role_family="player",
+        role="player",
         timestamp_us=0,
         message_type=BinaryMessageType.AUDIO_CHUNK.value,
         buffer_end_time_us=1_000_000,
@@ -77,13 +75,14 @@ async def test_try_send_binary_accepts_buffer_metadata() -> None:
     )
     assert result is True
 
-    # Access the per-family binary queue
-    family_queue = conn._binary_queues.get("player")  # noqa: SLF001
-    assert family_queue is not None
-    assert len(family_queue) == 1
-    _, _, frame = family_queue[0]
-    assert frame.buffer_end_time_us == 1_000_000
-    assert frame.buffer_byte_count == 100
+    # Access the per-role queue
+    role_queue = conn._role_queues.get("player")  # noqa: SLF001
+    assert role_queue is not None
+    assert len(role_queue) == 1
+    _, _, entry = role_queue[0]
+    assert entry.binary is not None
+    assert entry.binary.buffer_end_time_us == 1_000_000
+    assert entry.binary.buffer_byte_count == 100
 
 
 @pytest.mark.asyncio
@@ -124,7 +123,7 @@ async def test_writer_registers_buffer_after_send() -> None:
     packed = pack_binary_header_raw(message_type, 0) + payload
     conn.try_send_binary(
         packed,
-        role_family="player",
+        role="player",
         timestamp_us=0,
         message_type=message_type,
         buffer_end_time_us=1_000_000,
@@ -176,7 +175,7 @@ async def test_writer_does_not_register_without_metadata() -> None:
     message_type = BinaryMessageType.AUDIO_CHUNK.value
     packed = pack_binary_header_raw(message_type, 0) + payload
     conn.try_send_binary(
-        packed, role_family="player", timestamp_us=0, message_type=message_type
+        packed, role="player", timestamp_us=0, message_type=message_type
     )  # No buffer metadata
 
     for _ in range(50):
@@ -221,5 +220,58 @@ async def test_server_initiated_connection_starts_writer_task() -> None:
         await asyncio.sleep(0)
 
     assert wsock.send_str.call_count == 1
+
+    await conn.disconnect(retry_connection=False)
+
+
+@pytest.mark.asyncio
+async def test_role_stream_start_is_sent_before_binary_for_same_role() -> None:
+    """Role-scoped stream/start must not be overtaken by timed binary for that role."""
+    loop = asyncio.get_running_loop()
+    server = _DummyServer(loop=loop, clock=LoopClock(loop))
+
+    send_order: list[str] = []
+
+    async def _record_json(_payload: str) -> None:
+        send_order.append("json")
+
+    async def _record_binary(_payload: bytes) -> None:
+        send_order.append("binary")
+
+    wsock = MagicMock()
+    wsock.closed = False
+    wsock.send_str = AsyncMock(side_effect=_record_json)
+    wsock.send_bytes = AsyncMock(side_effect=_record_binary)
+
+    conn = SendspinConnection(server, wsock_client=wsock)
+    await conn._setup_connection()  # noqa: SLF001
+
+    conn.send_role_message(
+        "player",
+        StreamStartMessage(
+            payload=StreamStartPayload(
+                player=StreamStartPlayer(
+                    codec=AudioCodec.PCM,
+                    sample_rate=44_100,
+                    channels=2,
+                    bit_depth=16,
+                    codec_header=None,
+                )
+            )
+        ),
+    )
+    conn.try_send_binary(
+        pack_binary_header_raw(BinaryMessageType.AUDIO_CHUNK.value, 123_456) + b"audio",
+        role="player",
+        timestamp_us=123_456,
+        message_type=BinaryMessageType.AUDIO_CHUNK.value,
+    )
+
+    for _ in range(50):
+        if len(send_order) >= 2:
+            break
+        await asyncio.sleep(0)
+
+    assert send_order[:2] == ["json", "binary"]
 
     await conn.disconnect(retry_connection=False)

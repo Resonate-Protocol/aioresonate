@@ -14,14 +14,14 @@ from aiosendspin.server.roles import AudioChunk, AudioRequirements, PlayerV1Role
 def test_player_role_on_stream_clear_uses_role_family() -> None:
     """PlayerV1Role.on_stream_clear() sends stream/clear with unversioned role family."""
     client = MagicMock()
-    client.send_message = MagicMock()
+    client.send_role_message = MagicMock()
 
     role = PlayerV1Role(client=client)
     role._has_transport = True  # noqa: SLF001
     role._buffer_tracker = None  # noqa: SLF001
     role.on_stream_clear()
 
-    msg = client.send_message.call_args.args[0]
+    _role, msg = client.send_role_message.call_args.args
     assert isinstance(msg, StreamClearMessage)
     assert msg.payload.roles == ["player"]
 
@@ -29,14 +29,14 @@ def test_player_role_on_stream_clear_uses_role_family() -> None:
 def test_player_role_on_stream_end_uses_role_family() -> None:
     """PlayerV1Role.on_stream_end() omits roles (end all streams)."""
     client = MagicMock()
-    client.send_message = MagicMock()
+    client.send_role_message = MagicMock()
 
     role = PlayerV1Role(client=client)
     role._has_transport = True  # noqa: SLF001
     role._buffer_tracker = None  # noqa: SLF001
     role.on_stream_end()
 
-    msg = client.send_message.call_args.args[0]
+    _role, msg = client.send_role_message.call_args.args
     assert isinstance(msg, StreamEndMessage)
     assert msg.payload.roles is None
 
@@ -75,7 +75,7 @@ def test_player_role_on_audio_chunk_packs_header_and_tracks_duration() -> None:
         return True
 
     client.try_send_binary = MagicMock(side_effect=_try_send_binary)
-    client.send_message = MagicMock()
+    client.send_role_message = MagicMock()
 
     role = PlayerV1Role(client=client)
     payload = b"\x01\x02\x03"
@@ -100,7 +100,7 @@ def test_player_role_on_audio_chunk_packs_header_and_tracks_duration() -> None:
 def test_player_role_on_stream_start_drops_without_transport() -> None:
     """on_stream_start() is a no-op when no transport attached."""
     client = MagicMock()
-    client.send_message = MagicMock()
+    client.send_role_message = MagicMock()
 
     role = PlayerV1Role(client=client)
     role._has_transport = False  # noqa: SLF001
@@ -113,33 +113,33 @@ def test_player_role_on_stream_start_drops_without_transport() -> None:
 
     role.on_stream_start()
 
-    client.send_message.assert_not_called()
+    client.send_role_message.assert_not_called()
 
 
 def test_player_role_on_stream_clear_drops_without_transport() -> None:
     """on_stream_clear() is a no-op for JSON message when no transport attached."""
     client = MagicMock()
-    client.send_message = MagicMock()
+    client.send_role_message = MagicMock()
 
     role = PlayerV1Role(client=client)
     role._has_transport = False  # noqa: SLF001
 
     role.on_stream_clear()
 
-    client.send_message.assert_not_called()
+    client.send_role_message.assert_not_called()
 
 
 def test_player_role_on_stream_end_drops_without_transport() -> None:
     """on_stream_end() is a no-op for JSON message when no transport attached."""
     client = MagicMock()
-    client.send_message = MagicMock()
+    client.send_role_message = MagicMock()
 
     role = PlayerV1Role(client=client)
     role._has_transport = False  # noqa: SLF001
 
     role.on_stream_end()
 
-    client.send_message.assert_not_called()
+    client.send_role_message.assert_not_called()
 
 
 # --- Tests for hook-based streaming methods ---
@@ -148,7 +148,7 @@ def test_player_role_on_stream_end_drops_without_transport() -> None:
 def test_player_role_on_stream_start_sets_pending_flag() -> None:
     """on_stream_start() sets pending flag, message sent on first chunk."""
     client = MagicMock()
-    client.send_message = MagicMock()
+    client.send_role_message = MagicMock()
     client.try_send_binary = MagicMock(return_value=True)
 
     role = PlayerV1Role(client=client)
@@ -163,15 +163,15 @@ def test_player_role_on_stream_start_sets_pending_flag() -> None:
     role.on_stream_start()
 
     # Message is deferred until first chunk
-    client.send_message.assert_not_called()
+    client.send_role_message.assert_not_called()
     assert role._pending_stream_start is True  # noqa: SLF001
 
     # First chunk triggers the stream/start message
     chunk = AudioChunk(data=b"\x00" * 100, timestamp_us=0, duration_us=25000, byte_count=100)
     role.on_audio_chunk(chunk)
 
-    client.send_message.assert_called_once()
-    msg = client.send_message.call_args.args[0]
+    client.send_role_message.assert_called_once()
+    _role, msg = client.send_role_message.call_args.args
     assert isinstance(msg, StreamStartMessage)
     assert msg.payload.player.sample_rate == 48000
     assert msg.payload.player.codec == AudioCodec.PCM

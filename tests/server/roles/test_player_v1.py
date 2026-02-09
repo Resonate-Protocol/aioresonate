@@ -31,6 +31,7 @@ def _make_client_stub() -> MagicMock:
     client._logger = MagicMock()  # noqa: SLF001
     client.client_id = "test-client"
     client.connection = None
+    client.send_role_message = MagicMock()
     return client
 
 
@@ -152,7 +153,7 @@ def test_player_role_on_stream_start_sets_pending_flag() -> None:
     role.on_stream_start()
 
     # Message is deferred until first audio chunk
-    client.send_message.assert_not_called()
+    client.send_role_message.assert_not_called()
     assert role._pending_stream_start is True  # noqa: SLF001
 
 
@@ -175,8 +176,8 @@ def test_player_role_on_audio_chunk_sends_deferred_stream_start_with_pcm() -> No
     chunk = AudioChunk(data=b"\x00" * 100, timestamp_us=0, duration_us=25000, byte_count=100)
     role.on_audio_chunk(chunk)
 
-    client.send_message.assert_called_once()
-    msg = client.send_message.call_args.args[0]
+    client.send_role_message.assert_called_once()
+    _role, msg = client.send_role_message.call_args.args
     assert isinstance(msg, StreamStartMessage)
     assert msg.payload.player.sample_rate == 48000
     assert msg.payload.player.bit_depth == 16
@@ -205,8 +206,8 @@ def test_player_role_on_audio_chunk_sends_deferred_stream_start_with_flac() -> N
     chunk = AudioChunk(data=b"\x00" * 100, timestamp_us=0, duration_us=25000, byte_count=100)
     role.on_audio_chunk(chunk)
 
-    client.send_message.assert_called_once()
-    msg = client.send_message.call_args.args[0]
+    client.send_role_message.assert_called_once()
+    _role, msg = client.send_role_message.call_args.args
     assert isinstance(msg, StreamStartMessage)
     assert msg.payload.player.codec == AudioCodec.FLAC
     assert msg.payload.player.codec_header is not None  # FLAC has header
@@ -249,7 +250,7 @@ def test_player_role_on_stream_start_noop_without_audio_requirements() -> None:
 
     role.on_stream_start()
 
-    client.send_message.assert_not_called()
+    client.send_role_message.assert_not_called()
 
 
 def test_player_role_on_stream_start_noop_without_transport() -> None:
@@ -268,7 +269,7 @@ def test_player_role_on_stream_start_noop_without_transport() -> None:
 
     role.on_stream_start()
 
-    client.send_message.assert_not_called()
+    client.send_role_message.assert_not_called()
 
 
 # --- on_audio_chunk ---
@@ -358,8 +359,8 @@ def test_player_role_on_stream_clear_sends_message() -> None:
 
     role.on_stream_clear()
 
-    client.send_message.assert_called_once()
-    msg = client.send_message.call_args.args[0]
+    client.send_role_message.assert_called_once()
+    _role, msg = client.send_role_message.call_args.args
     assert isinstance(msg, StreamClearMessage)
     assert msg.payload.roles == ["player"]
 
@@ -404,7 +405,7 @@ def test_player_role_on_stream_clear_noop_without_transport() -> None:
 
     role.on_stream_clear()
 
-    client.send_message.assert_not_called()
+    client.send_role_message.assert_not_called()
 
 
 # --- on_stream_end ---
@@ -421,8 +422,8 @@ def test_player_role_on_stream_end_sends_message() -> None:
 
     role.on_stream_end()
 
-    client.send_message.assert_called_once()
-    msg = client.send_message.call_args.args[0]
+    client.send_role_message.assert_called_once()
+    _role, msg = client.send_role_message.call_args.args
     assert isinstance(msg, StreamEndMessage)
     # stream/end omits roles (ends all streams)
     assert msg.payload.roles is None
@@ -468,4 +469,4 @@ def test_player_role_on_stream_end_noop_without_transport() -> None:
 
     role.on_stream_end()
 
-    client.send_message.assert_not_called()
+    client.send_role_message.assert_not_called()

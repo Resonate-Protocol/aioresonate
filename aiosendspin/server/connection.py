@@ -2,27 +2,30 @@
 
 Message Sending Architecture
 ----------------------------
-This module implements a priority-based message queue with timestamp ordering for audio sync.
+This module implements a priority-based message queue with timestamp ordering for sync.
 
 **Queue Structure:**
 - Priority messages: ServerHello, time sync - sent immediately (FIFO deque)
-- Normal messages: JSON control messages - sent in arrival order (FIFO deque)
-- Binary messages: Audio/artwork data - ordered by playback timestamp (per-family min-heaps)
+- Normal messages: Non-role JSON control messages - sent in FIFO order (deque)
+- Role queues: Per-role min-heaps holding both binary and JSON messages, sorted by
+  (timestamp, sequence). Binary messages use their playback timestamp; JSON messages
+  inherit the timestamp of the previous message in that role's queue.
 
-**Binary Message Ordering:**
-Binary messages are grouped by "role family" (e.g., player, artwork). Within each family,
-messages are ordered by their playback timestamp to ensure correct sequencing even when
-chunks are encoded out-of-order. The writer loop picks the family head with the earliest
-timestamp.
+**Message Ordering:**
+Messages are grouped by role (e.g., player, artwork). Within each role, binary and
+JSON messages share the same min-heap, ensuring strict ordering. Binary messages sort
+by playback timestamp for correct sequencing even when chunks are encoded out-of-order.
+JSON messages inherit the previous message's timestamp so they stay in position relative
+to surrounding binary data.
 
 **Epoch-Based Invalidation:**
-Each role family has an epoch counter. When a stream is cleared or ends, the epoch
-increments, causing any queued frames from the old epoch to be silently discarded.
-This avoids sending stale audio after track changes.
+Each role has an epoch counter. When a stream is cleared or ends, the epoch increments,
+causing binary entries with the old epoch to be silently discarded. JSON entries in the
+same queue are NOT affected - they skip epoch validation and are always delivered.
 
 **Backpressure:**
-Families can be "blocked" until a future time (e.g., waiting for client buffer space).
-Blocked families are tracked in a separate heap and promoted back when ready.
+Roles can be "blocked" until a future time (e.g., waiting for client buffer space).
+Blocked roles are tracked in a separate heap and promoted back when ready.
 """
 
 from __future__ import annotations
@@ -81,31 +84,31 @@ MAX_PENDING_MSG = 4096  # Should be more than enough for ~1 minute of buffering
 
 
 @dataclass(frozen=True, slots=True)
-class _BinaryFrame:
-    """Binary payload with epoch for invalidation and metadata for buffer tracking."""
+class _BinaryData:
+    """Binary payload metadata for buffer tracking."""
 
-    # Epoch at enqueue time; frame is discarded if it doesn't match current epoch
-    epoch_family: int
-    # Role family identifier (e.g., "player", "artwork") for queue routing
-    role_family: str
-    # Raw binary payload including protocol header
     data: bytes
-    # Playback timestamp from header (cached to avoid re-unpacking)
-    timestamp_us: int
-    # Binary message type for role lookup (cached)
     message_type: int
-    # End timestamp for buffer tracking (optional)
     buffer_end_time_us: int | None = None
-    # Byte count for buffer tracking (optional)
     buffer_byte_count: int | None = None
-    # Duration for buffer tracking (optional)
     duration_us: int | None = None
 
 
-# Sentinel timestamp for non-timestamped messages (sorts after all real timestamps).
-# Used for JSON messages and hypothetical non-timestamped binary. In practice, all
-# binary messages (audio, artwork) have playback timestamps.
-_FIFO_TIMESTAMP = 2**62
+@dataclass(frozen=True, slots=True)
+class _RoleQueueEntry:
+    """Unified queue entry for binary or JSON messages within a role.
+
+    Both binary and JSON messages for a role go through the same min-heap,
+    sorted by (timestamp, sequence). JSON messages inherit the timestamp of the
+    previous message in the role queue, ensuring they maintain their position
+    relative to surrounding timed binary. If no previous message exists, timestamp is 0.
+    """
+
+    epoch: int
+    timestamp_us: int
+    # Exactly one of these is set
+    binary: _BinaryData | None = None
+    json_message: ServerMessage | None = None
 
 
 class SendspinConnection:
@@ -145,12 +148,15 @@ class SendspinConnection:
         self._queue_size: int = 0
         # Outgoing message queues
         self._priority_messages: deque[ServerMessage] = deque()
-        self._normal_messages: deque[tuple[int, ServerMessage]] = deque()
-        # Binary queues: per role family min-heap of (sort_ts, seq, frame)
-        self._binary_queues: dict[str, list[tuple[int, int, _BinaryFrame]]] = defaultdict(list)
-        # Global scheduler heaps for binary families
-        self._ready_families: list[tuple[int, int, str]] = []
-        self._delayed_families: list[tuple[int, int, str]] = []
+        self._normal_messages: deque[ServerMessage] = deque()
+        # Role queues: per role min-heap of (sort_ts, seq, entry)
+        # Both binary and JSON messages for a role go through the same heap.
+        self._role_queues: dict[str, list[tuple[int, int, _RoleQueueEntry]]] = defaultdict(list)
+        # Last timestamp per role for JSON inheritance (JSON gets previous message's timestamp)
+        self._last_enqueued_ts_by_role: dict[str, int] = {}
+        # Global scheduler heaps for families
+        self._ready_roles: list[tuple[int, int, str]] = []
+        self._delayed_roles: list[tuple[int, int, str]] = []
         self._blocked_until_us: dict[str, int] = {}
         self._block_generation: defaultdict[str, int] = defaultdict(int)
         self._writer_wakeup = asyncio.Event()
@@ -170,12 +176,12 @@ class SendspinConnection:
         self._initial_state_timeout_handle: asyncio.TimerHandle | None = None
 
         self._last_goodbye_reason: GoodbyeReason | None = None
-        self._binary_epoch_by_family: defaultdict[str, int] = defaultdict(int)
+        self._epoch_by_role: defaultdict[str, int] = defaultdict(int)
 
-        # Timing tracking for binary frame logging (per role family)
-        self._last_send_time_us_by_family: dict[str, int] = {}
-        self._last_timestamp_us_by_family: dict[str, int] = {}
-        self._send_stats_by_family: dict[str, dict[str, float | int]] = {}
+        # Timing tracking for binary frame logging (per role)
+        self._last_send_time_us_by_role: dict[str, int] = {}
+        self._last_timestamp_us_by_role: dict[str, int] = {}
+        self._send_stats_by_role: dict[str, dict[str, float | int]] = {}
         self._send_summary_last_log_s = time.monotonic()
 
     @property
@@ -197,17 +203,22 @@ class SendspinConnection:
         return any(role.requires_initial_state() for role in self._client.active_roles)
 
     def drop_pending_binary(self, roles: list[str] | None) -> None:
-        """Drop queued binary payloads for the specified role families."""
-        families = list(self._binary_epoch_by_family.keys()) if roles is None else roles
-        for family in families:
-            self._binary_epoch_by_family[family] += 1
+        """Drop queued binary payloads for the specified roles.
+
+        Uses epoch-based lazy invalidation: increments the epoch counter for each role,
+        causing the writer loop to discard binary entries with the old epoch.
+        JSON entries in the same queue are NOT affected (they skip epoch validation).
+        """
+        roles_to_drop = list(self._epoch_by_role.keys()) if roles is None else roles
+        for role in roles_to_drop:
+            self._epoch_by_role[role] += 1
         self._writer_wakeup.set()
 
     def try_send_binary(
         self,
         data: bytes,
         *,
-        role_family: str,
+        role: str,
         timestamp_us: int,
         message_type: int,
         buffer_end_time_us: int | None = None,
@@ -218,63 +229,60 @@ class SendspinConnection:
 
         Args:
             data: Binary data to send.
-            role_family: Role family for epoch tracking.
+            role: Role for epoch tracking and queue routing.
             timestamp_us: Playback timestamp from binary header (cached to avoid unpacking).
             message_type: Binary message type for role lookup (cached).
             buffer_end_time_us: End timestamp for buffer tracking.
             buffer_byte_count: Byte count for buffer tracking.
             duration_us: Duration for buffer tracking.
         """
-        epoch_family = self._binary_epoch_by_family[role_family]
-        frame = _BinaryFrame(
-            epoch_family=epoch_family,
-            role_family=role_family,
-            data=data,
-            timestamp_us=timestamp_us,
-            message_type=message_type,
-            buffer_end_time_us=buffer_end_time_us,
-            buffer_byte_count=buffer_byte_count,
-            duration_us=duration_us,
-        )
         if self._queue_size >= MAX_PENDING_MSG:
             return False  # TODO: lets make max_pending_msg a hard limit, disconnect instead?
 
-        seq = self._queue_sequence
-        self._queue_sequence += 1
-        # TODO: non timestamped ones should be sent before, not after everything else
-        # Sort by playback timestamp for correct ordering. All current binary message types
-        # (audio, artwork) have timestamps. The _FIFO_TIMESTAMP fallback exists for potential
-        # future non-timestamped binary types, which would sort after timestamped messages.
-        sort_ts = timestamp_us if timestamp_us > 0 else _FIFO_TIMESTAMP
-        family_queue = self._binary_queues[role_family]
-        heapq.heappush(family_queue, (sort_ts, seq, frame))
-        self._queue_size += 1
-
-        # If family not blocked and this is the head, schedule it
-        if role_family not in self._blocked_until_us:
-            head_sort_ts, head_seq, _ = family_queue[0]
-            if head_sort_ts == sort_ts and head_seq == seq:
-                heapq.heappush(self._ready_families, (head_sort_ts, head_seq, role_family))
-
-        self._writer_wakeup.set()
+        sort_ts = max(0, timestamp_us)
+        entry = _RoleQueueEntry(
+            epoch=self._epoch_by_role[role],
+            timestamp_us=timestamp_us,
+            binary=_BinaryData(
+                data=data,
+                message_type=message_type,
+                buffer_end_time_us=buffer_end_time_us,
+                buffer_byte_count=buffer_byte_count,
+                duration_us=duration_us,
+            ),
+        )
+        self._last_enqueued_ts_by_role[role] = sort_ts
+        self._enqueue_role_entry(role, sort_ts, entry)
         return True
 
     def queue_status(self) -> tuple[int, int]:
         """Return (qsize, maxsize) for the outgoing queue."""
         return self._queue_size, MAX_PENDING_MSG
 
-    def send_message(self, message: ServerMessage) -> None:
-        """Enqueue a JSON message to be sent to the client."""
+    def _enqueue_role_entry(self, role: str, sort_ts: int, entry: _RoleQueueEntry) -> None:
+        """Push an entry into a role's heap and schedule it if it becomes the new head."""
+        seq = self._queue_sequence
+        self._queue_sequence += 1
+        role_queue = self._role_queues[role]
+        heapq.heappush(role_queue, (sort_ts, seq, entry))
+        self._queue_size += 1
+
+        if role not in self._blocked_until_us:
+            head_sort_ts, head_seq, _ = role_queue[0]
+            if head_sort_ts == sort_ts and head_seq == seq:
+                heapq.heappush(self._ready_roles, (head_sort_ts, head_seq, role))
+
+        self._writer_wakeup.set()
+
+    def send_role_message(self, role: str, message: ServerMessage) -> None:
+        """Enqueue a JSON message into a role's queue with inherited timestamp.
+
+        The message inherits the timestamp of the last message enqueued for this role,
+        so it maintains its position relative to surrounding timed binary. If no previous
+        message exists, it uses timestamp 0 (sent before any timed binary).
+        """
         if isinstance(message, StreamClearMessage | StreamEndMessage):
             self.drop_pending_binary(message.payload.roles)
-
-        # Coalesce consecutive state-like messages to avoid client-side clearing on omitted fields.
-        if self._normal_messages:
-            last_seq, last_message = self._normal_messages[-1]
-            merged = self._merge_state_messages(last_message, message)
-            if merged is not None:
-                self._normal_messages[-1] = (last_seq, merged)
-                return
 
         if self._queue_size >= MAX_PENDING_MSG:
             if not self._disconnecting:
@@ -282,9 +290,29 @@ class SendspinConnection:
                 create_task(self.disconnect(retry_connection=True))
             return
 
-        seq = self._queue_sequence
-        self._queue_sequence += 1
-        self._normal_messages.append((seq, message))
+        sort_ts = self._last_enqueued_ts_by_role.get(role, 0)
+        entry = _RoleQueueEntry(
+            epoch=self._epoch_by_role[role],
+            timestamp_us=sort_ts,
+            json_message=message,
+        )
+        self._enqueue_role_entry(role, sort_ts, entry)
+
+        if not isinstance(message, ServerTimeMessage):
+            self._logger.debug("Enqueueing role message: %s", type(message).__name__)
+
+    def send_message(self, message: ServerMessage) -> None:
+        """Enqueue a non-role JSON message (sent in FIFO order, not tied to any role)."""
+        if isinstance(message, StreamClearMessage | StreamEndMessage):
+            self.drop_pending_binary(message.payload.roles)
+
+        if self._queue_size >= MAX_PENDING_MSG:
+            if not self._disconnecting:
+                self._logger.error("Message queue full, client too slow - disconnecting")
+                create_task(self.disconnect(retry_connection=True))
+            return
+
+        self._normal_messages.append(message)
         self._queue_size += 1
         self._writer_wakeup.set()
 
@@ -631,90 +659,98 @@ class SendspinConnection:
             )
         await wsock.send_str(message.to_json())
 
-    async def _send_binary_frame(
+    async def _send_binary_data(
         self,
         wsock: web.WebSocketResponse | ClientWebSocketResponse,
-        item: _BinaryFrame,
+        role: str,
+        entry: _RoleQueueEntry,
         buffer_tracker: BufferTracker | None,
     ) -> None:
         """Send a binary frame with buffer tracking."""
+        assert entry.binary is not None
+        binary = entry.binary
         start_s = time.monotonic()
-        await wsock.send_bytes(item.data)
+        await wsock.send_bytes(binary.data)
         elapsed_ms = (time.monotonic() - start_s) * 1000
         if elapsed_ms >= 50.0:
             self._logger.error(
                 "Slow send_bytes: %.1fms size=%s ts_us=%s role=%s",
                 elapsed_ms,
-                len(item.data),
-                item.timestamp_us,
-                item.role_family,
+                len(binary.data),
+                entry.timestamp_us,
+                role,
             )
 
         # Buffer tracking via role's tracker (framework-managed)
         if (
             buffer_tracker is not None
-            and item.buffer_end_time_us is not None
-            and item.buffer_byte_count is not None
+            and binary.buffer_end_time_us is not None
+            and binary.buffer_byte_count is not None
         ):
             buffer_tracker.register(
-                item.buffer_end_time_us,
-                item.buffer_byte_count,
-                item.duration_us or 0,
+                binary.buffer_end_time_us,
+                binary.buffer_byte_count,
+                binary.duration_us or 0,
             )
 
-    # TODO: explain me all methods handling the heap, and _promote_ready_families as well
-    # also how drop_pending_binary exactly interacts with the writer loop
+    #### Role Queue Heap Management ####
+    #
+    # Two-level heap: per-role min-heaps hold entries sorted by (timestamp, seq).
+    # A global _ready_roles heap tracks which role has the earliest head entry.
+    # _delayed_roles tracks roles blocked by backpressure until a future time;
+    # _promote_ready_roles moves them back to _ready_roles when their time comes.
+    # Generation counters prevent stale delayed entries from unblocking a re-blocked role.
 
-    def _schedule_family_head(self, role_family: str) -> None:
-        if role_family in self._blocked_until_us:
+    def _schedule_role_head(self, role: str) -> None:
+        if role in self._blocked_until_us:
             return
-        if family_queue := self._binary_queues.get(role_family):
-            head_sort_ts, head_seq, _ = family_queue[0]
-            heapq.heappush(self._ready_families, (head_sort_ts, head_seq, role_family))
+        if role_queue := self._role_queues.get(role):
+            head_sort_ts, head_seq, _ = role_queue[0]
+            heapq.heappush(self._ready_roles, (head_sort_ts, head_seq, role))
 
-    def _discard_family_head(self, role_family: str) -> None:
-        family_queue = self._binary_queues.get(role_family)
-        if not family_queue:
+    def _discard_role_head(self, role: str) -> None:
+        role_queue = self._role_queues.get(role)
+        if not role_queue:
             return
-        heapq.heappop(family_queue)
+        heapq.heappop(role_queue)
         self._queue_size = max(self._queue_size - 1, 0)
-        if not family_queue:
-            self._binary_queues.pop(role_family, None)
+        if not role_queue:
+            self._role_queues.pop(role, None)
 
-    def _peek_ready_binary(self) -> tuple[str, _BinaryFrame, int, int] | None:
+    def _peek_ready_entry(self) -> tuple[str, _RoleQueueEntry, int, int] | None:
         # TODO: any reason why a peek method does a full pop and push operation?
         # TODO: or is it most of the time not pushing back? i mean does this peek
         # TODO: mutate anything or not?
-        while self._ready_families:
-            sort_ts, seq, role_family = heapq.heappop(self._ready_families)
-            if role_family in self._blocked_until_us:
+        while self._ready_roles:
+            sort_ts, seq, role = heapq.heappop(self._ready_roles)
+            if role in self._blocked_until_us:
                 continue
-            family_queue = self._binary_queues.get(role_family)
-            if not family_queue:
+            role_queue = self._role_queues.get(role)
+            if not role_queue:
                 continue
-            head_sort_ts, head_seq, head_frame = family_queue[0]
+            head_sort_ts, head_seq, head_entry = role_queue[0]
             if head_sort_ts != sort_ts or head_seq != seq:
-                heapq.heappush(self._ready_families, (head_sort_ts, head_seq, role_family))
+                heapq.heappush(self._ready_roles, (head_sort_ts, head_seq, role))
                 continue
-            return role_family, head_frame, head_sort_ts, head_seq
+            return role, head_entry, head_sort_ts, head_seq
         return None
 
-    def _block_family(self, role_family: str, ready_at_us: int) -> None:
-        self._blocked_until_us[role_family] = ready_at_us
-        generation = self._block_generation[role_family] + 1
-        self._block_generation[role_family] = generation
-        heapq.heappush(self._delayed_families, (ready_at_us, generation, role_family))
+    def _block_role(self, role: str, ready_at_us: int) -> None:
+        self._blocked_until_us[role] = ready_at_us
+        generation = self._block_generation[role] + 1
+        self._block_generation[role] = generation
+        heapq.heappush(self._delayed_roles, (ready_at_us, generation, role))
 
-    def _promote_ready_families(self, now_us: int) -> None:
-        while self._delayed_families and self._delayed_families[0][0] <= now_us:
-            ready_at_us, generation, role_family = heapq.heappop(self._delayed_families)
-            if self._block_generation.get(role_family, 0) != generation:
+    def _promote_ready_roles(self, now_us: int) -> None:
+        while self._delayed_roles and self._delayed_roles[0][0] <= now_us:
+            ready_at_us, generation, role = heapq.heappop(self._delayed_roles)
+            if self._block_generation.get(role, 0) != generation:
                 continue
-            blocked_until = self._blocked_until_us.get(role_family)
+            blocked_until = self._blocked_until_us.get(role)
             if blocked_until is None or blocked_until != ready_at_us:
                 continue
-            self._blocked_until_us.pop(role_family, None)
-            self._schedule_family_head(role_family)
+            self._blocked_until_us.pop(role, None)
+            self._schedule_role_head(role)
 
     async def _writer(self) -> None:  # noqa: C901, PLR0912, PLR0915
         wsock = self._wsock_server or self._wsock_client
@@ -722,9 +758,9 @@ class SendspinConnection:
 
         # Cache hot attributes as locals to avoid repeated attribute lookups
         clock_now_us = self._server.clock.now_us
-        binary_epoch_by_family = self._binary_epoch_by_family
-        last_send_us_by_family = self._last_send_time_us_by_family
-        last_ts_us_by_family = self._last_timestamp_us_by_family
+        epoch_by_role = self._epoch_by_role
+        last_send_us_by_role = self._last_send_time_us_by_role
+        last_ts_us_by_role = self._last_timestamp_us_by_role
 
         iterations_since_yield = 0
         now_us = clock_now_us()
@@ -733,12 +769,12 @@ class SendspinConnection:
             while not wsock.closed and not self._closing:
                 # Periodic yield to prevent event loop starvation
                 if iterations_since_yield >= 50:
-                    # TODO: try removing this/adding logging to se if this is still required
+                    # TODO: try removing this/adding logging to see if this is still required
                     await asyncio.sleep(0)
                     iterations_since_yield = 0
                     now_us = clock_now_us()
 
-                # Priority messages always go first
+                #### Priority Messages ####
                 if self._priority_messages:
                     message = self._priority_messages.popleft()
                     self._queue_size = max(self._queue_size - 1, 0)
@@ -748,22 +784,21 @@ class SendspinConnection:
                     continue
 
                 now_us = clock_now_us()
-                self._promote_ready_families(now_us)
+                self._promote_ready_roles(now_us)
 
-                # TODO: rename normal messages to json_messages
-                ready_binary = self._peek_ready_binary()
-                normal_entry = self._normal_messages[0] if self._normal_messages else None
+                #### Pick Next Entry ####
+                ready_entry = self._peek_ready_entry()
+                has_normal = bool(self._normal_messages)
 
-                if ready_binary is None and normal_entry is None:
-                    # No immediate work; wait for new items or next delayed family
-                    # TODO: any chance for a race condition here?
+                if ready_entry is None and not has_normal:
+                    # No immediate work; sleep until wakeup or next delayed role
                     self._writer_wakeup.clear()
-                    if self._priority_messages or self._normal_messages or self._ready_families:
+                    if self._priority_messages or self._normal_messages or self._ready_roles:
                         continue
 
                     sleep_s = None
-                    if self._delayed_families:
-                        next_ready_us = self._delayed_families[0][0]
+                    if self._delayed_roles:
+                        next_ready_us = self._delayed_roles[0][0]
                         sleep_s = max((next_ready_us - now_us) / 1_000_000, 0.0)
 
                     try:
@@ -775,52 +810,56 @@ class SendspinConnection:
                         pass
                     continue
 
-                if ready_binary is None and normal_entry is not None:
-                    _, message = self._normal_messages.popleft()
+                #### Non-Role Messages (when no role entry ready) ####
+                if ready_entry is None and has_normal:
+                    message = self._normal_messages.popleft()
                     self._queue_size = max(self._queue_size - 1, 0)
                     await self._send_message(wsock, message)
                     now_us = clock_now_us()
                     iterations_since_yield = 0
                     continue
 
-                assert ready_binary is not None
-                role_family, frame, sort_ts, seq = ready_binary
+                assert ready_entry is not None
+                role, entry, _sort_ts, _seq = ready_entry
 
-                # TODO: more explanation, dont understand this
-                # Compare with normal messages when timestamps are FIFO-equivalent
-                # TODO: how about making normal/json messages without timestamps also
-                # TODO: sent before all timed once, we can then remove the priority message
-                # TODO: concept entirely, since non timestamped ones will automatically
-                # TODO: be prioritized
-                if normal_entry is not None and sort_ts == _FIFO_TIMESTAMP:
-                    normal_seq, _ = normal_entry
-                    if normal_seq < seq:
-                        heapq.heappush(self._ready_families, (sort_ts, seq, role_family))
-                        _, message = self._normal_messages.popleft()
-                        self._queue_size = max(self._queue_size - 1, 0)
-                        await self._send_message(wsock, message)
-                        now_us = clock_now_us()
-                        iterations_since_yield = 0
-                        continue
-
-                # Check epoch - frame may have been invalidated
-                if frame.epoch_family != binary_epoch_by_family[role_family]:
-                    # TODO: if I understand correctly, this is activated on stream clear and
-                    # start, discarding all pending frames for the role family
-                    # Does this mean that after a new format is requested, audio data that wasn't
-                    # sent already is just dropped? and immediately after that message was passed
-                    # to send_message?
-                    self._discard_family_head(role_family)
-                    self._schedule_family_head(role_family)
+                #### Epoch Check (binary only) ####
+                # Binary entries with a stale epoch are discarded (stream was cleared/ended).
+                # JSON entries skip this check - they are always delivered.
+                if entry.binary is not None and entry.epoch != epoch_by_role[role]:
+                    self._discard_role_head(role)
+                    self._schedule_role_head(role)
                     iterations_since_yield += 1
                     continue
 
-                # TODO: delete the "(single lookup for rate limit + buffer tracking)"
-                # TODO: maybe directly unpack to handling and handling_role? no
-                # TODO: cached variable
-                # Get binary handling info (single lookup for rate limit + buffer tracking)
+                #### JSON Entry ####
+                if entry.json_message is not None:
+                    self._discard_role_head(role)
+                    # Merge consecutive state-like messages at send time
+                    message = entry.json_message
+                    while True:
+                        role_queue = self._role_queues.get(role)
+                        if not role_queue:
+                            break
+                        _, _, next_entry = role_queue[0]
+                        if next_entry.json_message is None:
+                            break
+                        merged = self._merge_state_messages(message, next_entry.json_message)
+                        if merged is None:
+                            break
+                        message = merged
+                        self._discard_role_head(role)
+                    await self._send_message(wsock, message)
+                    self._schedule_role_head(role)
+                    now_us = clock_now_us()
+                    iterations_since_yield = 0
+                    continue
+
+                #### Binary Entry ####
+                assert entry.binary is not None
+
+                # Look up handling info for late detection + buffer tracking
                 cached = (
-                    self._client.get_binary_handling_cached(frame.message_type)
+                    self._client.get_binary_handling_cached(entry.binary.message_type)
                     if self._client
                     else None
                 )
@@ -831,48 +870,44 @@ class SendspinConnection:
                 if (
                     handling is not None
                     and handling_role is not None
-                    and self._check_late_binary(handling, handling_role, frame.timestamp_us)
+                    and self._check_late_binary(handling, handling_role, entry.timestamp_us)
                 ):
-                    self._discard_family_head(role_family)
-                    self._schedule_family_head(role_family)
+                    self._discard_role_head(role)
+                    self._schedule_role_head(role)
                     iterations_since_yield += 1
                     continue
 
+                # Check backpressure from buffer tracker
                 wait_us = 0
                 buffer_tracker = None
-                # TODO: in this method there are a lot of these ifs,
-                # hard to understand, add comments explaining each sections
-                # responsibility?
                 if handling is not None and handling_role is not None:
                     if handling.buffer_track:
                         buffer_tracker = handling_role.get_buffer_tracker()
-                    # Stream-start delay (for clients that need a gap before first binary)
                     if buffer_tracker is not None:
                         wait_us = max(wait_us, buffer_tracker.time_until_unblocked())
 
                 if wait_us > 0:
-                    # TODO: explain me this
-                    # Delay this frame - one per role family
-                    self._block_family(role_family, now_us + wait_us)
+                    # Block this role until buffer has space
+                    self._block_role(role, now_us + wait_us)
                     iterations_since_yield += 1
                     continue
 
                 # TODO: put all debugging info behind the debug flag, and in a
                 # separate method
-                # Log timing info (only if debug enabled)
-                timestamp_us = frame.timestamp_us
-                last_send_us = last_send_us_by_family.get(role_family)
-                last_ts_us = last_ts_us_by_family.get(role_family)
+                # Log timing info
+                timestamp_us = entry.timestamp_us
+                last_send_us = last_send_us_by_role.get(role)
+                last_ts_us = last_ts_us_by_role.get(role)
                 send_gap_ms = (now_us - last_send_us) / 1000 if last_send_us is not None else 0
                 ts_gap_ms = (timestamp_us - last_ts_us) / 1000 if last_ts_us is not None else 0
-                last_send_us_by_family[role_family] = now_us
-                last_ts_us_by_family[role_family] = timestamp_us
+                last_send_us_by_role[role] = now_us
+                last_ts_us_by_role[role] = timestamp_us
 
-                # Send immediately
-                self._discard_family_head(role_family)
-                await self._send_binary_frame(wsock, frame, buffer_tracker)
-                stats = self._send_stats_by_family.setdefault(
-                    role_family,
+                # Send binary
+                self._discard_role_head(role)
+                await self._send_binary_data(wsock, role, entry, buffer_tracker)
+                stats = self._send_stats_by_role.setdefault(
+                    role,
                     {
                         "count": 0,
                         "send_gap_sum_ms": 0.0,
@@ -905,57 +940,57 @@ class SendspinConnection:
                 now_s = time.monotonic()
                 if now_s - self._send_summary_last_log_s >= 5.0:
                     self._send_summary_last_log_s = now_s
-                    for fam, fam_stats in self._send_stats_by_family.items():
-                        count = int(fam_stats["count"])
+                    for role_name, role_stats in self._send_stats_by_role.items():
+                        count = int(role_stats["count"])
                         if count <= 0:
                             continue
-                        avg_send = fam_stats["send_gap_sum_ms"] / count
-                        avg_ts = fam_stats["ts_gap_sum_ms"] / count
-                        if fam_stats["buf_count"] > 0:
-                            avg_buf = fam_stats["buf_sum_ms"] / fam_stats["buf_count"]
+                        avg_send = role_stats["send_gap_sum_ms"] / count
+                        avg_ts = role_stats["ts_gap_sum_ms"] / count
+                        if role_stats["buf_count"] > 0:
+                            avg_buf = role_stats["buf_sum_ms"] / role_stats["buf_count"]
                             self._logger.info(
                                 "Send summary role=%s samples=%s "
                                 "send_gap_ms(avg=%.1f min=%.1f max=%.1f) "
                                 "ts_gap_ms(avg=%.1f min=%.1f max=%.1f) "
                                 "buf_ms(avg=%.1f min=%.1f max=%.1f)",
-                                fam,
+                                role_name,
                                 count,
                                 avg_send,
-                                fam_stats["send_gap_min_ms"],
-                                fam_stats["send_gap_max_ms"],
+                                role_stats["send_gap_min_ms"],
+                                role_stats["send_gap_max_ms"],
                                 avg_ts,
-                                fam_stats["ts_gap_min_ms"],
-                                fam_stats["ts_gap_max_ms"],
+                                role_stats["ts_gap_min_ms"],
+                                role_stats["ts_gap_max_ms"],
                                 avg_buf,
-                                fam_stats["buf_min_ms"],
-                                fam_stats["buf_max_ms"],
+                                role_stats["buf_min_ms"],
+                                role_stats["buf_max_ms"],
                             )
                         else:
                             self._logger.info(
                                 "Send summary role=%s samples=%s "
                                 "send_gap_ms(avg=%.1f min=%.1f max=%.1f) "
                                 "ts_gap_ms(avg=%.1f min=%.1f max=%.1f)",
-                                fam,
+                                role_name,
                                 count,
                                 avg_send,
-                                fam_stats["send_gap_min_ms"],
-                                fam_stats["send_gap_max_ms"],
+                                role_stats["send_gap_min_ms"],
+                                role_stats["send_gap_max_ms"],
                                 avg_ts,
-                                fam_stats["ts_gap_min_ms"],
-                                fam_stats["ts_gap_max_ms"],
+                                role_stats["ts_gap_min_ms"],
+                                role_stats["ts_gap_max_ms"],
                             )
-                        fam_stats["count"] = 0
-                        fam_stats["send_gap_sum_ms"] = 0.0
-                        fam_stats["send_gap_min_ms"] = 1e9
-                        fam_stats["send_gap_max_ms"] = 0.0
-                        fam_stats["ts_gap_sum_ms"] = 0.0
-                        fam_stats["ts_gap_min_ms"] = 1e9
-                        fam_stats["ts_gap_max_ms"] = 0.0
-                        fam_stats["buf_count"] = 0
-                        fam_stats["buf_sum_ms"] = 0.0
-                        fam_stats["buf_min_ms"] = 1e9
-                        fam_stats["buf_max_ms"] = 0.0
-                self._schedule_family_head(role_family)
+                        role_stats["count"] = 0
+                        role_stats["send_gap_sum_ms"] = 0.0
+                        role_stats["send_gap_min_ms"] = 1e9
+                        role_stats["send_gap_max_ms"] = 0.0
+                        role_stats["ts_gap_sum_ms"] = 0.0
+                        role_stats["ts_gap_min_ms"] = 1e9
+                        role_stats["ts_gap_max_ms"] = 0.0
+                        role_stats["buf_count"] = 0
+                        role_stats["buf_sum_ms"] = 0.0
+                        role_stats["buf_min_ms"] = 1e9
+                        role_stats["buf_max_ms"] = 0.0
+                self._schedule_role_head(role)
                 now_us = clock_now_us()
                 iterations_since_yield = 0
         except asyncio.CancelledError:

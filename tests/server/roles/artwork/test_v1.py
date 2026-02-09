@@ -20,6 +20,7 @@ def _make_client_stub() -> MagicMock:
     client.info = MagicMock()
     client.info.artwork_support = None
     client.send_message = MagicMock()
+    client.send_role_message = MagicMock()
     client.try_send_binary = MagicMock(return_value=True)
     client._logger = MagicMock()  # noqa: SLF001
     return client
@@ -118,8 +119,8 @@ def test_artwork_role_sends_stream_start_on_connect_with_transport() -> None:
     role._has_transport = True  # noqa: SLF001
     role.on_connect()
 
-    client.send_message.assert_called()
-    msg = client.send_message.call_args.args[0]
+    client.send_role_message.assert_called()
+    _role, msg = client.send_role_message.call_args.args
     assert isinstance(msg, StreamStartMessage)
     assert msg.payload.artwork is not None
     assert len(msg.payload.artwork.channels) == 1
