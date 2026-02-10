@@ -71,6 +71,8 @@ class SendspinServer:
     """Sendspin Server implementation to connect to and manage many Sendspin clients."""
 
     API_PATH = "/sendspin"  # Fixed by protocol
+    _pending_connections: set[SendspinConnection]
+    """Incoming connections that have not finished their handshake/message loop yet."""
 
     def __init__(
         self,
@@ -101,6 +103,7 @@ class SendspinServer:
         self._retry_events: dict[str, asyncio.Event] = {}
         self._connection_reasons: dict[str, ConnectionReason] = {}  # url → reason
         self._client_urls: dict[str, str] = {}  # client_id → url
+        self._pending_connections = set()
 
         self._mdns_client_urls: dict[str, str] = {}
         self._app: web.Application | None = None
@@ -193,7 +196,11 @@ class SendspinServer:
         logger.debug("Incoming client connection from %s", request.remote)
 
         conn = SendspinConnection(self, request=request)
-        await conn._handle_client()  # noqa: SLF001
+        self._pending_connections.add(conn)
+        try:
+            await conn._handle_client()  # noqa: SLF001
+        finally:
+            self._pending_connections.discard(conn)
 
         websocket = conn.websocket_connection
         assert isinstance(websocket, web.WebSocketResponse)
@@ -378,6 +385,18 @@ class SendspinServer:
         """Close the server and disconnect all active connections."""
         for task in self._connection_tasks.values():
             task.cancel()
+
+        # Close pending incoming connections so their handlers can exit promptly.
+        for conn in list(self._pending_connections):
+            wsock = conn.websocket_connection
+            if wsock.closed:
+                continue
+            logger.debug("Closing pending client connection")
+            try:
+                async with asyncio.timeout(1.0):
+                    await wsock.close()
+            except TimeoutError:
+                logger.debug("Timeout while closing pending client websocket")
 
         disconnect_tasks: list[asyncio.Task[None]] = []
         for client in self._clients.values():
