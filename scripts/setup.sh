@@ -17,9 +17,9 @@ fi
 echo "Activating virtual environment..."
 source .venv/bin/activate
 
-echo "Installing development dependencies..."
+echo "Installing development and optional dependencies..."
 
 pip install --upgrade pip
 pip install --upgrade uv
-uv pip install -e ".[test]"
+uv pip install -e ".[test,numpy]"
 pre-commit install
