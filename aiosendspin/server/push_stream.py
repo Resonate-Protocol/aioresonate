@@ -316,6 +316,8 @@ class PushStream:
         self._transform_key_cache: dict[tuple[int, int], TransformKey] = {}
         # Roles awaiting delayed join; excluded from live delivery until join executes.
         self._pending_join_roles: weakref.WeakSet[Role] = weakref.WeakSet()
+        # Historical audio buffers: channel_id -> list of (pcm_bytes, audio_format)
+        self._historical_buffers: dict[UUID, list[tuple[bytes, AudioFormat]]] = {}
 
     @property
     def is_stopped(self) -> bool:
@@ -369,6 +371,19 @@ class PushStream:
         """Return the pending audio buffers (for testing/inspection)."""
         return self._channel_buffers
 
+    async def sleep_to_limit_buffer(self, max_buffer_us: int) -> None:
+        """Sleep until the furthest-ahead channel is at most max_buffer_us ahead of now.
+
+        :param max_buffer_us: Maximum allowed buffer depth in microseconds.
+        """
+        if not self._channel_timing:
+            return
+        max_timing_us = max(self._channel_timing.values())
+        now_us = self._clock.now_us()
+        ahead_us = max_timing_us - now_us
+        if ahead_us > max_buffer_us:
+            await asyncio.sleep(min((ahead_us - max_buffer_us) / 1_000_000, 1.0))
+
     def prepare_audio(
         self,
         pcm: bytes,
@@ -389,6 +404,47 @@ class PushStream:
             channel_id: Channel to prepare audio for (default: MAIN_CHANNEL).
         """
         self._channel_buffers[channel_id] = (pcm, audio_format)
+
+    def prepare_historical_audio(
+        self,
+        pcm: bytes,
+        audio_format: AudioFormat,
+        *,
+        channel_id: UUID = MAIN_CHANNEL,
+    ) -> None:
+        """Queue historical PCM audio for a new channel.
+
+        Called multiple times to accumulate historical chunks (oldest first).
+        On commit_audio(), timestamps are assigned so historical chunks play
+        consecutively starting at "now + lead_time", and the live chunk
+        (from prepare_audio) continues seamlessly after.
+
+        :param pcm: Raw PCM audio data.
+        :param audio_format: Format of the PCM data.
+        :param channel_id: Channel to inject historical audio into.
+
+        Raises:
+            ValueError: If the channel already has active timing.
+        """
+        if channel_id in self._channel_timing:
+            raise ValueError(
+                f"Cannot add historical audio to channel {channel_id} - "
+                "channel already has active timing"
+            )
+        self._historical_buffers.setdefault(channel_id, []).append((pcm, audio_format))
+
+    def get_cached_pcm_chunks(self, channel_id: UUID = MAIN_CHANNEL) -> list[CachedPCMChunk]:
+        """Retrieve cached PCM chunks for a channel.
+
+        :param channel_id: Channel to retrieve cache from.
+
+        Returns:
+            List of CachedPCMChunk objects in chronological order.
+        """
+        channel_int = channel_id.int
+        if channel_int not in self._pcm_chunk_cache:
+            return []
+        return list(self._pcm_chunk_cache[channel_int])
 
     async def commit_audio(self, *, play_start_us: int | None = None) -> int:
         """
@@ -414,16 +470,31 @@ class PushStream:
         if self._is_stopped:
             raise StreamStoppedError("Cannot commit audio on a stopped stream")
 
-        # If no pending audio, return earliest channel timing (or initialize)
-        if not self._channel_buffers:
+        # Drain historical buffers
+        historical = dict(self._historical_buffers)
+        self._historical_buffers.clear()
+
+        # If no pending audio (live or historical), return earliest channel timing
+        if not self._channel_buffers and not historical:
             now_us = self._clock.now_us()
             if not self._channel_timing:
                 self._channel_timing[MAIN_CHANNEL] = now_us + DEFAULT_INITIAL_DELAY_US
             return min(self._channel_timing.values())
 
-        # Drain channel buffers
+        # Process historical buffers first: assign timestamps and inject into caches.
+        # This initializes _channel_timing for historical channels so the live chunk
+        # (if any) continues seamlessly after.
+        if historical:
+            await self._process_historical_buffers(historical)
+
+        # Drain live channel buffers
         prepared = dict(self._channel_buffers)
         self._channel_buffers.clear()
+
+        if not prepared:
+            # Historical-only commit: cache is updated by _process_historical_buffers().
+            self._prune_role_chunk_cache()
+            return min(self._channel_timing.values())
 
         # Calculate duration for each channel and warn on misalignment
         durations_us = self._calculate_channel_durations(prepared)
@@ -463,6 +534,22 @@ class PushStream:
         for channel_id, duration_us in durations_us.items():
             self._channel_timing[channel_id] += duration_us
 
+        # Keep non-prepared active channels on the shared timeline.
+        #
+        # This avoids channel drift when an upstream channel (e.g., per-device DSP)
+        # times out and we commit only a subset of channels for one or more cycles.
+        # Those channels skip audio for this commit but should remain clock-aligned
+        # when they resume.
+        reference_duration_us = max(durations_us.values(), default=0)
+        if reference_duration_us > 0:
+            base_start_us = min(channel_play_start.values())
+            for channel_id in self._get_active_audio_channels():
+                if channel_id in prepared:
+                    continue
+                if channel_id not in self._channel_timing:
+                    self._channel_timing[channel_id] = base_start_us
+                self._channel_timing[channel_id] += reference_duration_us
+
         # Cache PCM chunks before encoding (if enabled)
         for channel_id, (pcm_bytes, fmt) in prepared.items():
             channel_int = channel_id.int
@@ -489,6 +576,58 @@ class PushStream:
 
         # Return earliest play_start_us
         return min(channel_play_start.values())
+
+    async def _process_historical_buffers(
+        self,
+        historical: dict[UUID, list[tuple[bytes, AudioFormat]]],
+    ) -> None:
+        """Process historical audio buffers, assigning timestamps consecutively.
+
+        For each channel with historical data:
+        1. Initialize timing at now + DEFAULT_INITIAL_DELAY_US
+        2. Assign timestamps so chunks play consecutively
+        3. Cache PCM and encode for active roles
+        4. Advance channel timing to end of last historical chunk
+
+        :param historical: Channel ID -> list of (pcm, format) chunks (oldest first).
+        """
+        now_us = self._clock.now_us()
+
+        for channel_id, chunks in historical.items():
+            if channel_id not in self._channel_timing:
+                self._channel_timing[channel_id] = now_us + DEFAULT_INITIAL_DELAY_US
+
+            for pcm_bytes, fmt in chunks:
+                chunk_start_us = self._channel_timing[channel_id]
+
+                # Calculate duration
+                bytes_per_sample = fmt.bit_depth // 8
+                frame_stride = bytes_per_sample * fmt.channels
+                sample_count = len(pcm_bytes) // frame_stride
+                duration_us = int(sample_count * 1_000_000 / fmt.sample_rate)
+
+                # Cache PCM (if enabled)
+                channel_int = channel_id.int
+                if channel_int in self._pcm_cache_enabled_channels:
+                    pcm_chunk = CachedPCMChunk(
+                        timestamp_us=chunk_start_us,
+                        duration_us=duration_us,
+                        pcm_data=pcm_bytes,
+                        sample_rate=fmt.sample_rate,
+                        bit_depth=fmt.bit_depth,
+                        channels=fmt.channels,
+                    )
+                    self._pcm_chunk_cache.setdefault(channel_int, deque()).append(pcm_chunk)
+
+                # Encode and deliver to roles
+                prepared = {channel_id: (pcm_bytes, fmt)}
+                play_start = {channel_id: chunk_start_us}
+                role_cache_results = await self._deliver_audio_to_roles(prepared, play_start)
+                for cache_key, cached_chunks in role_cache_results.items():
+                    self._role_chunk_cache[cache_key].extend(cached_chunks)
+
+                # Advance timing
+                self._channel_timing[channel_id] += duration_us
 
     def _calculate_channel_durations(
         self,
@@ -545,6 +684,16 @@ class PushStream:
             roles_by_pcm[pcm_key].append((client, role, req))
 
         return roles_by_pcm
+
+    def _get_active_audio_channels(self) -> set[UUID]:
+        """Return channels currently used by connected audio roles."""
+        channels: set[UUID] = set()
+        for _client, role in self._get_audio_roles():
+            req = role.get_audio_requirements()
+            if req is None:
+                continue
+            channels.add(req.channel_id or MAIN_CHANNEL)
+        return channels
 
     async def _resample_for_roles(
         self,
@@ -1193,6 +1342,7 @@ class PushStream:
         self._pending_join_roles.clear()
         self._cancel_catchup_tasks()
         self._pcm_chunk_cache.clear()
+        self._historical_buffers.clear()
 
     def clear(self) -> None:
         """
@@ -1203,6 +1353,7 @@ class PushStream:
         """
         # Clear pending audio
         self._channel_buffers.clear()
+        self._historical_buffers.clear()
 
         # Reset per-channel timing
         self._channel_timing.clear()
