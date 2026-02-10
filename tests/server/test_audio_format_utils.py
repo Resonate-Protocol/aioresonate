@@ -4,7 +4,16 @@ import sys
 
 import pytest
 
+from aiosendspin.server import audio as audio_module
 from aiosendspin.server.audio import AudioFormat, _convert_s32_to_s24, _resolve_audio_format
+
+S32_SAMPLES = bytes([0x01, 0x11, 0x21, 0x31, 0x02, 0x12, 0x22, 0x32])
+
+
+def _expected_s24_samples() -> bytes:
+    if sys.byteorder == "little":
+        return bytes([0x11, 0x21, 0x31, 0x12, 0x22, 0x32])
+    return bytes([0x01, 0x11, 0x21, 0x02, 0x12, 0x22])
 
 
 def test_resolve_audio_format_24_bit_uses_s32_in_pyav() -> None:
@@ -29,15 +38,23 @@ def test_resolve_audio_format_32_bit_is_supported() -> None:
     assert av_bytes == 4
 
 
-def test_convert_s32_to_s24_drops_least_significant_byte() -> None:
-    """s32->s24 conversion should drop the LSB byte per sample."""
-    # Two s32 samples with distinct bytes to verify byte order behavior.
-    samples = bytes([0x01, 0x11, 0x21, 0x31, 0x02, 0x12, 0x22, 0x32])
-    converted = _convert_s32_to_s24(samples)
-    if sys.byteorder == "little":
-        assert converted == bytes([0x11, 0x21, 0x31, 0x12, 0x22, 0x32])
-    else:
-        assert converted == bytes([0x01, 0x11, 0x21, 0x02, 0x12, 0x22])
+def test_convert_s32_to_s24_drops_least_significant_byte_python_impl(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """s32->s24 conversion should drop the LSB byte per sample in fallback path."""
+    monkeypatch.setattr(audio_module, "_get_numpy", lambda: None)
+    converted = _convert_s32_to_s24(S32_SAMPLES)
+    assert converted == _expected_s24_samples()
+
+
+def test_convert_s32_to_s24_drops_least_significant_byte_numpy_impl(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """s32->s24 conversion should drop the LSB byte per sample in NumPy path."""
+    np = pytest.importorskip("numpy")
+    monkeypatch.setattr(audio_module, "_get_numpy", lambda: np)
+    converted = _convert_s32_to_s24(S32_SAMPLES)
+    assert converted == _expected_s24_samples()
 
 
 def test_convert_s32_to_s24_rejects_invalid_length() -> None:
