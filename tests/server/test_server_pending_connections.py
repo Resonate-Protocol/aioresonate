@@ -91,7 +91,12 @@ async def test_on_client_connect_cleans_pending_set_on_handler_failure(
     class _FailingConnection:
         """Connection double whose handler fails immediately."""
 
-        def __init__(self, _server: SendspinServer, *, _request: web.Request) -> None:
+        def __init__(
+            self,
+            _server: SendspinServer,
+            *,
+            request: web.Request,  # noqa: ARG002
+        ) -> None:
             self.websocket_connection = web.WebSocketResponse()
 
         async def _handle_client(self) -> None:

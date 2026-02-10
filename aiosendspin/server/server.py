@@ -101,6 +101,8 @@ class SendspinServer:
 
         self._connection_tasks: dict[str, asyncio.Task[None]] = {}
         self._retry_events: dict[str, asyncio.Event] = {}
+        self._initial_connect_waiters: dict[str, list[asyncio.Future[None]]] = {}
+        self._initial_connect_succeeded: set[str] = set()
         self._connection_reasons: dict[str, ConnectionReason] = {}  # url → reason
         self._client_urls: dict[str, str] = {}  # client_id → url
         self._pending_connections = set()
@@ -209,7 +211,11 @@ class SendspinServer:
     def connect_to_client(
         self, url: str, *, connection_reason: ConnectionReason = ConnectionReason.DISCOVERY
     ) -> None:
-        """Connect to a Sendspin client at the given URL with automatic retries."""
+        """Start a background connection attempt to a client URL.
+
+        Initial connection failures are logged and stop the background task.
+        Automatic retries only happen after at least one successful connection.
+        """
         self._connection_reasons[url] = connection_reason
         prev_task = self._connection_tasks.get(url)
         if prev_task is not None:
@@ -217,8 +223,44 @@ class SendspinServer:
                 retry_event.set()
             return
 
+        self._initial_connect_succeeded.discard(url)
         self._retry_events[url] = asyncio.Event()
-        self._connection_tasks[url] = create_task(self._handle_client_connection(url))
+        self._connection_tasks[url] = create_task(
+            self._handle_client_connection(url),
+            eager_start=False,
+        )
+
+    async def connect_to_client_and_wait(
+        self, url: str, *, connection_reason: ConnectionReason = ConnectionReason.DISCOVERY
+    ) -> None:
+        """Connect to a client and wait for the initial connection attempt.
+
+        Raises:
+            ClientConnectionError: If the initial connection to the client fails.
+            ClientResponseError: If the client responds with an error HTTP status.
+            TimeoutError: If the initial connection attempt times out.
+            Exception: Other unexpected errors during the initial connection attempt.
+        """
+        self._connection_reasons[url] = connection_reason
+        if url in self._initial_connect_succeeded:
+            return
+
+        waiter: asyncio.Future[None] = self._loop.create_future()
+        self._initial_connect_waiters.setdefault(url, []).append(waiter)
+
+        prev_task = self._connection_tasks.get(url)
+        if prev_task is not None:
+            if retry_event := self._retry_events.get(url):
+                retry_event.set()
+        else:
+            self._initial_connect_succeeded.discard(url)
+            self._retry_events[url] = asyncio.Event()
+            self._connection_tasks[url] = create_task(
+                self._handle_client_connection(url),
+                eager_start=False,
+            )
+
+        await waiter
 
     def get_connection_reason(self, url: str) -> ConnectionReason:
         """Get the connection reason for a URL (for use by SendspinConnection)."""
@@ -251,10 +293,22 @@ class SendspinServer:
         if connection_task is not None:
             connection_task.cancel()
 
-    async def _handle_client_connection(self, url: str) -> None:
+    def _resolve_initial_connect_waiters(self, url: str, err: BaseException | None = None) -> None:
+        """Resolve or fail waiters for an initial connection attempt."""
+        waiters = self._initial_connect_waiters.pop(url, [])
+        for waiter in waiters:
+            if waiter.done():
+                continue
+            if err is None:
+                waiter.set_result(None)
+            else:
+                waiter.set_exception(err)
+
+    async def _handle_client_connection(self, url: str) -> None:  # noqa: PLR0915
         """Handle a server-initiated WebSocket connection task."""
         backoff = 1.0
         max_backoff = 300.0
+        first_connection_succeeded = False
 
         try:
             while True:
@@ -265,6 +319,10 @@ class SendspinServer:
                         heartbeat=30,
                         timeout=ClientWSTimeout(ws_close=10, ws_receive=60),  # pyright: ignore[reportCallIssue]
                     ) as wsock:
+                        if not first_connection_succeeded:
+                            first_connection_succeeded = True
+                            self._initial_connect_succeeded.add(url)
+                            self._resolve_initial_connect_waiters(url)
                         backoff = 1.0
                         conn = SendspinConnection(self, wsock_client=wsock, url=url)
                         await conn._handle_client()  # noqa: SLF001
@@ -275,10 +333,20 @@ class SendspinServer:
                         break
 
                 except asyncio.CancelledError:
+                    if not first_connection_succeeded:
+                        self._resolve_initial_connect_waiters(url, asyncio.CancelledError())
                     break
                 except TimeoutError:
+                    if not first_connection_succeeded:
+                        logger.debug("Initial connection to %s timed out", url)
+                        self._resolve_initial_connect_waiters(url, TimeoutError())
+                        return
                     logger.debug("Connection task for %s timed out", url)
                 except (ClientConnectionError, ClientResponseError) as err:
+                    if not first_connection_succeeded:
+                        logger.debug("Initial connection to %s failed: %s", url, err)
+                        self._resolve_initial_connect_waiters(url, err)
+                        return
                     logger.debug("Connection task for %s failed: %s", url, err)
 
                 if backoff >= max_backoff:
@@ -295,12 +363,16 @@ class SendspinServer:
                     await asyncio.sleep(backoff)
                 backoff *= 2
         except asyncio.CancelledError:
-            pass
-        except Exception:
+            if not first_connection_succeeded:
+                self._resolve_initial_connect_waiters(url, asyncio.CancelledError())
+        except Exception as err:
+            if not first_connection_succeeded:
+                self._resolve_initial_connect_waiters(url, err)
             logger.exception("Unexpected error occurred")
         finally:
             self._connection_tasks.pop(url, None)
             self._retry_events.pop(url, None)
+            self._initial_connect_succeeded.discard(url)
 
     async def start_server(
         self,
