@@ -14,7 +14,7 @@ from aiosendspin.util import get_local_ip
 logger = logging.getLogger(__name__)
 
 # Default recommended port per spec
-DEFAULT_PORT = 8927
+DEFAULT_PORT = 8928
 DEFAULT_PATH = "/sendspin"
 DEFAULT_HOST = "0.0.0.0"
 
@@ -66,7 +66,7 @@ class ClientListener:
                 The callback receives the WebSocketResponse and should handle
                 the full connection lifecycle (attach to SendspinClient, wait
                 for disconnect, etc.).
-            port: Port to listen on (default: 8927).
+            port: Port to listen on (default: 8928).
             path: WebSocket endpoint path (default: /sendspin).
             host: Host/IP address to bind to (default: 0.0.0.0). Use "127.0.0.1"
                 for local-only access.
