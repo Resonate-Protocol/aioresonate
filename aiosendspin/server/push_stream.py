@@ -318,6 +318,8 @@ class PushStream:
         self._pending_join_roles: weakref.WeakSet[Role] = weakref.WeakSet()
         # Historical audio buffers: channel_id -> list of (pcm_bytes, audio_format)
         self._historical_buffers: dict[UUID, list[tuple[bytes, AudioFormat]]] = {}
+        # Optional start timestamps for historical channels (set on first historical chunk).
+        self._historical_start_us: dict[UUID, int] = {}
 
     @property
     def is_stopped(self) -> bool:
@@ -411,6 +413,7 @@ class PushStream:
         audio_format: AudioFormat,
         *,
         channel_id: UUID = MAIN_CHANNEL,
+        start_time_us: int | None = None,
     ) -> None:
         """Queue historical PCM audio for a new channel.
 
@@ -422,6 +425,8 @@ class PushStream:
         :param pcm: Raw PCM audio data.
         :param audio_format: Format of the PCM data.
         :param channel_id: Channel to inject historical audio into.
+        :param start_time_us: Optional explicit timestamp for the first historical
+            chunk on this channel. If omitted, commit_audio() uses now+initial_delay.
 
         Raises:
             ValueError: If the channel already has active timing.
@@ -431,6 +436,8 @@ class PushStream:
                 f"Cannot add historical audio to channel {channel_id} - "
                 "channel already has active timing"
             )
+        if start_time_us is not None and channel_id not in self._historical_start_us:
+            self._historical_start_us[channel_id] = start_time_us
         self._historical_buffers.setdefault(channel_id, []).append((pcm, audio_format))
 
     def get_cached_pcm_chunks(self, channel_id: UUID = MAIN_CHANNEL) -> list[CachedPCMChunk]:
@@ -445,6 +452,10 @@ class PushStream:
         if channel_int not in self._pcm_chunk_cache:
             return []
         return list(self._pcm_chunk_cache[channel_int])
+
+    def get_late_join_target_timestamp_us(self, *, min_lead_us: int = LATE_JOINER_MIN_LEAD_US) -> int:
+        """Return a safe minimum playback timestamp for late-join replay."""
+        return self._clock.now_us() + max(0, min_lead_us)
 
     async def commit_audio(self, *, play_start_us: int | None = None) -> int:
         """
@@ -473,6 +484,8 @@ class PushStream:
         # Drain historical buffers
         historical = dict(self._historical_buffers)
         self._historical_buffers.clear()
+        historical_start_us = dict(self._historical_start_us)
+        self._historical_start_us.clear()
 
         # If no pending audio (live or historical), return earliest channel timing
         if not self._channel_buffers and not historical:
@@ -485,7 +498,7 @@ class PushStream:
         # This initializes _channel_timing for historical channels so the live chunk
         # (if any) continues seamlessly after.
         if historical:
-            await self._process_historical_buffers(historical)
+            await self._process_historical_buffers(historical, historical_start_us)
 
         # Drain live channel buffers
         prepared = dict(self._channel_buffers)
@@ -580,6 +593,7 @@ class PushStream:
     async def _process_historical_buffers(
         self,
         historical: dict[UUID, list[tuple[bytes, AudioFormat]]],
+        historical_start_us: dict[UUID, int] | None = None,
     ) -> None:
         """Process historical audio buffers, assigning timestamps consecutively.
 
@@ -595,7 +609,10 @@ class PushStream:
 
         for channel_id, chunks in historical.items():
             if channel_id not in self._channel_timing:
-                self._channel_timing[channel_id] = now_us + DEFAULT_INITIAL_DELAY_US
+                if historical_start_us is not None and channel_id in historical_start_us:
+                    self._channel_timing[channel_id] = historical_start_us[channel_id]
+                else:
+                    self._channel_timing[channel_id] = now_us + DEFAULT_INITIAL_DELAY_US
 
             for pcm_bytes, fmt in chunks:
                 chunk_start_us = self._channel_timing[channel_id]
@@ -1343,6 +1360,7 @@ class PushStream:
         self._cancel_catchup_tasks()
         self._pcm_chunk_cache.clear()
         self._historical_buffers.clear()
+        self._historical_start_us.clear()
 
     def clear(self) -> None:
         """
@@ -1354,6 +1372,7 @@ class PushStream:
         # Clear pending audio
         self._channel_buffers.clear()
         self._historical_buffers.clear()
+        self._historical_start_us.clear()
 
         # Reset per-channel timing
         self._channel_timing.clear()

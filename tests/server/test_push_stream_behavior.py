@@ -849,6 +849,44 @@ async def test_historical_audio_raises_on_active_channel(mock_loop: Any) -> None
 
 
 @pytest.mark.asyncio
+async def test_historical_audio_respects_explicit_start_time() -> None:
+    """Historical audio can be anchored to an explicit start timestamp."""
+    group = _DummyGroup(clients=[])
+    channel = UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
+    role = _DummyRole(
+        AudioRequirements(
+            sample_rate=48000,
+            bit_depth=16,
+            channels=2,
+            transformer=None,
+            channel_id=channel,
+            frame_duration_us=25_000,
+        )
+    )
+    group.clients.append(_DummyClient([role]))
+
+    loop = asyncio.get_running_loop()
+    clock = ManualClock()
+    stream = PushStream(loop=loop, clock=clock, group=group)
+
+    fmt = AudioFormat(sample_rate=48000, bit_depth=16, channels=2)
+    explicit_start_us = 5_000_000
+    stream.prepare_historical_audio(
+        bytes(4800),
+        fmt,
+        channel_id=channel,
+        start_time_us=explicit_start_us,
+    )
+    stream.prepare_historical_audio(bytes(4800), fmt, channel_id=channel)
+
+    await stream.commit_audio()
+
+    assert role.received
+    assert role.received[0].timestamp_us == explicit_start_us
+    assert role.received[1].timestamp_us == explicit_start_us + role.received[0].duration_us
+
+
+@pytest.mark.asyncio
 async def test_historical_audio_only_no_live() -> None:
     """Historical-only commit (no prepare_audio) bootstraps channel with correct timing."""
     group = _DummyGroup(clients=[])
