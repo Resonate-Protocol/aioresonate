@@ -10,7 +10,13 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal, NamedTuple
 from uuid import UUID
 
-from aiosendspin.server.audio import AudioFormat, _get_av, _resolve_audio_format
+from aiosendspin.server.audio import (
+    AudioFormat,
+    _convert_s32_to_s24,
+    _get_av,
+    _resolve_audio_format,
+)
+from aiosendspin.server.audio_transformers import PcmPassthrough
 from aiosendspin.server.channels import MAIN_CHANNEL
 from aiosendspin.server.roles import AudioChunk
 from aiosendspin.server.transform_keys import TransformKey, normalize_options
@@ -87,10 +93,24 @@ class _ResamplerState:
     """PyAV format string for target (after resampling)."""
     target_layout: str
     """PyAV channel layout for target."""
-    target_frame_stride: int
-    """Bytes per frame in target format."""
+    target_wire_frame_stride: int
+    """Bytes per frame for wire PCM representation."""
+    target_av_frame_stride: int
+    """Bytes per frame in PyAV representation."""
+    needs_s32_to_s24_conversion: bool
+    """True when resampler output is s32 but wire PCM is packed s24."""
     pending_timestamp_us: int | None = None
     """Timestamp of the earliest audio sample not yet emitted by this resampler."""
+
+
+@dataclass(frozen=True)
+class _ResampledPCM:
+    """Resampler output with timestamp and sample metadata."""
+
+    pcm_data: bytes
+    output_start_ts: int
+    sample_count: int
+    needs_s32_to_s24_conversion: bool
 
 
 def _create_resampler_state(
@@ -101,8 +121,12 @@ def _create_resampler_state(
     """Create a new resampler state. Thread-safe (no shared state)."""
     av = _get_av()
 
-    _source_bytes_per_sample, source_av_format, source_layout = _resolve_audio_format(source_format)
-    target_bytes_per_sample, target_av_format, target_layout = _resolve_audio_format(target_format)
+    _source_wire_bytes, source_av_format, source_layout, _source_av_bytes = _resolve_audio_format(
+        source_format
+    )
+    target_wire_bytes, target_av_format, target_layout, target_av_bytes = _resolve_audio_format(
+        target_format
+    )
 
     resampler = av.AudioResampler(
         format=target_av_format,
@@ -117,7 +141,11 @@ def _create_resampler_state(
         source_av_layout=source_layout,
         target_av_format=target_av_format,
         target_layout=target_layout,
-        target_frame_stride=target_bytes_per_sample * target_format.channels,
+        target_wire_frame_stride=target_wire_bytes * target_format.channels,
+        target_av_frame_stride=target_av_bytes * target_format.channels,
+        needs_s32_to_s24_conversion=(
+            target_format.bit_depth == 24 and target_av_bytes != target_wire_bytes
+        ),
     )
 
 
@@ -126,7 +154,7 @@ def _resample_pcm_standalone(
     source_pcm: bytes,
     source_format: AudioFormat,
     input_timestamp_us: int,
-) -> tuple[bytes, int]:
+) -> _ResampledPCM:
     """Resample PCM data to the target format.
 
     Thread-safe per resampler_state instance (each call should use its own state).
@@ -138,7 +166,7 @@ def _resample_pcm_standalone(
         input_timestamp_us: Timestamp for the input audio.
 
     Returns:
-        Tuple of (resampled_pcm_bytes, output_start_timestamp_us).
+        Resampled PCM with timestamp and sample metadata.
     """
     av = _get_av()
 
@@ -162,7 +190,12 @@ def _resample_pcm_standalone(
     sample_count = len(source_pcm) // frame_stride
 
     if sample_count == 0:
-        return b"", resampler_state.pending_timestamp_us
+        return _ResampledPCM(
+            pcm_data=b"",
+            output_start_ts=resampler_state.pending_timestamp_us,
+            sample_count=0,
+            needs_s32_to_s24_conversion=resampler_state.needs_s32_to_s24_conversion,
+        )
 
     # Create input frame
     frame = av.AudioFrame(
@@ -176,19 +209,25 @@ def _resample_pcm_standalone(
     # Resample
     out_frames = resampler_state.resampler.resample(frame)
     out_pcm = bytearray()
+    output_sample_count = 0
     for out_frame in out_frames:
-        expected = resampler_state.target_frame_stride * out_frame.samples
+        expected = resampler_state.target_av_frame_stride * out_frame.samples
         pcm_bytes = bytes(out_frame.planes[0])[:expected]
         out_pcm.extend(pcm_bytes)
+        output_sample_count += out_frame.samples
 
     output_start_ts = resampler_state.pending_timestamp_us
 
     # Update pending timestamp based on output samples
-    output_sample_count = len(out_pcm) // resampler_state.target_frame_stride
     duration_us = int(output_sample_count * 1_000_000 / resampler_state.key.target_sample_rate)
     resampler_state.pending_timestamp_us += duration_us
 
-    return bytes(out_pcm), output_start_ts
+    return _ResampledPCM(
+        pcm_data=bytes(out_pcm),
+        output_start_ts=output_start_ts,
+        sample_count=output_sample_count,
+        needs_s32_to_s24_conversion=resampler_state.needs_s32_to_s24_conversion,
+    )
 
 
 # Minimum lead time (from now) for sending catch-up audio to late joiners.
@@ -514,7 +553,7 @@ class PushStream:
         ],
         prepared: dict[UUID, tuple[bytes, AudioFormat]],
         channel_play_start: dict[UUID, int],
-    ) -> dict[tuple[UUID, int, int, int], tuple[bytes, int]]:
+    ) -> dict[tuple[UUID, int, int, int], _ResampledPCM]:
         """Resample PCM once per unique PCM key. Returns (channel, rate, depth, ch) -> (pcm, ts).
 
         Resampler state (PyAV objects) is cached and must stay on a single thread.
@@ -524,7 +563,7 @@ class PushStream:
         if not roles_by_pcm:
             return {}
 
-        results: dict[tuple[UUID, int, int, int], tuple[bytes, int]] = {}
+        results: dict[tuple[UUID, int, int, int], _ResampledPCM] = {}
         for pcm_key in roles_by_pcm:
             channel_id, target_sample_rate, target_bit_depth, target_channels = pcm_key
             source_pcm, source_format = prepared[channel_id]
@@ -592,7 +631,7 @@ class PushStream:
         roles_by_pcm: dict[
             tuple[UUID, int, int, int], list[tuple[SendspinClient, Role, AudioRequirements]]
         ],
-        resampled_pcm: dict[tuple[UUID, int, int, int], tuple[bytes, int]],
+        resampled_pcm: dict[tuple[UUID, int, int, int], _ResampledPCM],
     ) -> dict[TransformKey, list[CachedChunk]]:
         """Transform PCM, deliver live chunks to roles, and return cache results.
 
@@ -603,13 +642,11 @@ class PushStream:
         roles_by_transform: defaultdict[TransformKey, list[Role]] = defaultdict(list)
 
         for pcm_key, roles_list in roles_by_pcm.items():
-            channel_id, rate, depth, channels = pcm_key
-            pcm_data, output_ts = resampled_pcm[pcm_key]
-
-            # Calculate duration for passthrough (no transformer)
-            frame_stride = (depth // 8) * channels
-            sample_count = len(pcm_data) // frame_stride if frame_stride > 0 else 0
-            duration_us = int(sample_count * 1_000_000 / rate) if rate > 0 else 0
+            channel_id, rate, depth, _channels = pcm_key
+            resampled = resampled_pcm[pcm_key]
+            pcm_data = resampled.pcm_data
+            output_ts = resampled.output_start_ts
+            duration_us = int(resampled.sample_count * 1_000_000 / rate) if rate > 0 else 0
 
             grouped_by_key: defaultdict[
                 TransformKey, list[tuple[SendspinClient, Role, AudioRequirements]]
@@ -625,7 +662,14 @@ class PushStream:
                 if tkey in encode_tasks:
                     continue
                 transformer = grouped[0][2].transformer
-                encode_tasks[tkey] = (transformer, pcm_data, output_ts, duration_us)
+                transformed_pcm = pcm_data
+                if (
+                    resampled.needs_s32_to_s24_conversion
+                    and depth == 24
+                    and isinstance(transformer, PcmPassthrough)
+                ):
+                    transformed_pcm = _convert_s32_to_s24(transformed_pcm)
+                encode_tasks[tkey] = (transformer, transformed_pcm, output_ts, duration_us)
 
         # TransformKey -> list of (data, timestamp_us, duration_us)
         transformed: dict[TransformKey, list[tuple[bytes, int, int]]] = {}
@@ -949,23 +993,32 @@ class PushStream:
                 )
                 resampler_source_format = source_format
 
-            resampled_pcm, output_ts = _resample_pcm_standalone(
+            resampled = _resample_pcm_standalone(
                 resampler_state,
                 chunk.pcm_data,
                 source_format,
                 chunk.timestamp_us,
             )
-            if not resampled_pcm:
+            if not resampled.pcm_data:
                 continue
 
-            frame_stride = (req.bit_depth // 8) * req.channels
-            sample_count = len(resampled_pcm) // frame_stride if frame_stride > 0 else 0
-            duration_us = int(sample_count * 1_000_000 / req.sample_rate) if sample_count > 0 else 0
+            resampled_pcm = resampled.pcm_data
+            if (
+                resampled.needs_s32_to_s24_conversion
+                and req.bit_depth == 24
+                and isinstance(encoder, PcmPassthrough)
+            ):
+                resampled_pcm = _convert_s32_to_s24(resampled_pcm)
+            duration_us = (
+                int(resampled.sample_count * 1_000_000 / req.sample_rate)
+                if resampled.sample_count > 0
+                else 0
+            )
 
             encoded_frames = _encode_for_transform_key(
                 encoder,
                 resampled_pcm,
-                output_ts,
+                resampled.output_start_ts,
                 duration_us,
             )
             for data, ts, dur in encoded_frames:

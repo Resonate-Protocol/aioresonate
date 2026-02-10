@@ -548,11 +548,15 @@ class PlayerV1Role(Role):
                 "but has no player support"
             )
 
-        supported = support.supported_formats
-        preferred_supported = next(
-            (fmt for fmt in supported if fmt.codec == AudioCodec.OPUS),
-            supported[0],
-        )
+        supported = filter_encodable_formats(support.supported_formats)
+        if not supported:
+            self._client._logger.warning(  # noqa: SLF001
+                "Client %s requested format change but has no server-compatible formats",
+                self._client.client_id,
+            )
+            return
+
+        preferred_supported = supported[0]
         base_format = self.preferred_format or AudioFormat(
             sample_rate=preferred_supported.sample_rate,
             bit_depth=preferred_supported.bit_depth,

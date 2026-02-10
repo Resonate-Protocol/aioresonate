@@ -189,7 +189,10 @@ class FlacEncoder:
             bit_depth=self._bit_depth,
             channels=self._channels,
         )
-        _, self._av_format, self._av_layout = _resolve_audio_format(audio_format)
+        _, self._av_format, self._av_layout, av_bytes_per_sample = _resolve_audio_format(
+            audio_format
+        )
+        self._frame_stride = av_bytes_per_sample * self._channels
 
         self._encoder = av.AudioCodecContext.create("flac", "w")
         self._encoder.sample_rate = self._sample_rate

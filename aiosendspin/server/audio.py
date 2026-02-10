@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import importlib
 import logging
+import sys
 import types
 from collections import deque
 from dataclasses import dataclass
@@ -21,6 +22,22 @@ def _get_av() -> types.ModuleType:
     return importlib.import_module("av")
 
 
+_numpy_unavailable = False
+
+
+def _get_numpy() -> types.ModuleType | None:
+    """Lazy import numpy to optimize s32->s24 conversion when available."""
+    global _numpy_unavailable  # noqa: PLW0603
+    if _numpy_unavailable:
+        return None
+    try:
+        import numpy as np  # noqa: PLC0415
+    except ImportError:
+        _numpy_unavailable = True
+        return None
+    return np  # type: ignore[no-any-return,unused-ignore]
+
+
 @dataclass(frozen=True)
 class AudioFormat:
     """PCM audio format descriptor.
@@ -32,7 +49,7 @@ class AudioFormat:
     sample_rate: int
     """Sample rate in Hz (e.g., 44100, 48000)."""
     bit_depth: int
-    """Bit depth in bits per sample (16 or 24)."""
+    """Bit depth in bits per sample (16, 24, or 32)."""
     channels: int
     """Number of audio channels (1 for mono, 2 for stereo)."""
 
@@ -294,29 +311,37 @@ class BufferTracker:
 
 
 # TODO: maybe move to AudioFormat? as a helper method?
-def _resolve_audio_format(audio_format: AudioFormat) -> tuple[int, str, str]:
+def _resolve_audio_format(audio_format: AudioFormat) -> tuple[int, str, str, int]:
     """Resolve helper data for an audio format.
 
     Args:
         audio_format: The audio format to resolve.
 
     Returns:
-        A tuple of (bytes_per_sample, av_format, layout) where:
-        - bytes_per_sample: Number of bytes per audio sample (2 for 16-bit, 3 for 24-bit)
-        - av_format: PyAV sample format string ("s16" or "s24")
+        A tuple of (wire_bytes_per_sample, av_format, layout, av_bytes_per_sample) where:
+        - wire_bytes_per_sample: Number of bytes per audio sample on the wire
+        - av_format: PyAV sample format string ("s16" or "s32")
         - layout: Channel layout string ("mono" or "stereo")
+        - av_bytes_per_sample: Number of bytes per sample produced/consumed by PyAV
 
     Raises:
-        ValueError: If bit_depth is not 16 or 24, or channels is not 1 or 2.
+        ValueError: If bit_depth is not 16/24/32, or channels is not 1 or 2.
     """
     if audio_format.bit_depth == 16:
-        bytes_per_sample = 2
+        wire_bytes_per_sample = 2
         av_format = "s16"
+        av_bytes_per_sample = 2
     elif audio_format.bit_depth == 24:
-        bytes_per_sample = 3
-        av_format = "s24"
+        # PyAV does not support packed s24 sample format; use s32 and convert if needed.
+        wire_bytes_per_sample = 3
+        av_format = "s32"
+        av_bytes_per_sample = 4
+    elif audio_format.bit_depth == 32:
+        wire_bytes_per_sample = 4
+        av_format = "s32"
+        av_bytes_per_sample = 4
     else:
-        raise ValueError("Only 16-bit and 24-bit PCM are supported")
+        raise ValueError("Only 16-bit, 24-bit, and 32-bit PCM are supported")
 
     if audio_format.channels == 1:
         layout = "mono"
@@ -325,10 +350,28 @@ def _resolve_audio_format(audio_format: AudioFormat) -> tuple[int, str, str]:
     else:
         raise ValueError("Only mono and stereo layouts are supported")
 
-    return bytes_per_sample, av_format, layout
+    return wire_bytes_per_sample, av_format, layout, av_bytes_per_sample
+
+
+def _convert_s32_to_s24(data: bytes) -> bytes:
+    """Convert 32-bit PCM samples to packed 24-bit samples."""
+    if len(data) % 4:
+        raise ValueError("s32 PCM buffer length must be a multiple of 4 bytes")
+
+    if np := _get_numpy():
+        if sys.byteorder == "little":
+            arr = np.frombuffer(data, dtype="<i4")
+            return bytes(arr.view(np.uint8).reshape(-1, 4)[:, 1:4].tobytes())
+        arr = np.frombuffer(data, dtype=">i4")
+        return bytes(arr.view(np.uint8).reshape(-1, 4)[:, 0:3].tobytes())
+
+    if sys.byteorder == "little":
+        return b"".join(data[i + 1 : i + 4] for i in range(0, len(data), 4))
+    return b"".join(data[i : i + 3] for i in range(0, len(data), 4))
 
 
 __all__ = [
     "AudioFormat",
     "BufferTracker",
+    "_convert_s32_to_s24",
 ]

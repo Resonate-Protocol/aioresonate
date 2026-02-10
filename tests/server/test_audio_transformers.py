@@ -337,6 +337,17 @@ class TestFlacEncoder:
             total_output.extend(result)
         assert len(total_output) > 0
 
+    def test_flac_encoder_supports_32_bit(self) -> None:
+        """FlacEncoder accepts 32-bit PCM input."""
+        encoder = FlacEncoder(sample_rate=48000, bit_depth=32, channels=2)
+        # 25ms at 48kHz stereo 32-bit: 1200 samples * 8 bytes = 9600 bytes.
+        pcm = bytes(9600)
+        total_output: list[bytes] = []
+        for i in range(4):
+            result = encoder.process(pcm, timestamp_us=i * 25_000, duration_us=25_000)
+            total_output.extend(result)
+        assert len(total_output) > 0
+
     def test_flac_encoder_has_header(self) -> None:
         """FlacEncoder produces fLaC header."""
         encoder = FlacEncoder(sample_rate=48000, bit_depth=16, channels=2)

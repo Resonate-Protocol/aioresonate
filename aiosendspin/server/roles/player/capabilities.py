@@ -10,7 +10,9 @@ from aiosendspin.models import AudioCodec
 from aiosendspin.models.player import SupportedAudioFormat
 from aiosendspin.server.roles.player.audio_transformers import OpusEncoder
 
-VALID_BIT_DEPTHS: frozenset[int] = frozenset({16, 24})
+PCM_BIT_DEPTHS: frozenset[int] = frozenset({16, 24, 32})
+FLAC_BIT_DEPTHS: frozenset[int] = frozenset({16, 24, 32})
+OPUS_BIT_DEPTHS: frozenset[int] = frozenset({16})
 VALID_CHANNELS: frozenset[int] = frozenset({1, 2})
 
 
@@ -18,7 +20,9 @@ def can_encode_format(fmt: SupportedAudioFormat) -> bool:
     """Check if the server can encode this format.
 
     Validates against server encoding constraints:
-    - Bit depth: 16 or 24
+    - PCM bit depth: 16, 24, or 32
+    - FLAC bit depth: 16, 24, or 32
+    - Opus bit depth: 16 only
     - Channels: 1 or 2
     - Opus: sample rate must be one of 8k, 12k, 16k, 24k, 48k
     - FLAC/PCM: any sample rate
@@ -29,13 +33,20 @@ def can_encode_format(fmt: SupportedAudioFormat) -> bool:
     Returns:
         True if the server can encode this format.
     """
-    if fmt.bit_depth not in VALID_BIT_DEPTHS:
+    if fmt.sample_rate <= 0:
         return False
     if fmt.channels not in VALID_CHANNELS:
         return False
-    if fmt.codec == AudioCodec.OPUS:
+    codec = fmt.codec.value
+    if codec == AudioCodec.OPUS.value:
+        if fmt.bit_depth not in OPUS_BIT_DEPTHS:
+            return False
         return fmt.sample_rate in OpusEncoder.VALID_SAMPLE_RATES
-    return True
+    if codec == AudioCodec.FLAC.value:
+        return fmt.bit_depth in FLAC_BIT_DEPTHS
+    if codec == AudioCodec.PCM.value:
+        return fmt.bit_depth in PCM_BIT_DEPTHS
+    return False
 
 
 def filter_encodable_formats(
