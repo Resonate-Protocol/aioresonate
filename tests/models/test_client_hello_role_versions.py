@@ -49,3 +49,25 @@ def test_player_support_accepted_for_player_v1() -> None:
         ),
     )
     assert payload.player_support is not None
+
+
+def test_player_support_serializes_with_spec_alias_name() -> None:
+    """Serialized payload should use player@v1_support instead of legacy player_support."""
+    payload = ClientHelloPayload(
+        client_id="c1",
+        name="Client",
+        version=1,
+        supported_roles=["player@v1"],
+        player_support=ClientHelloPlayerSupport(
+            supported_formats=[
+                SupportedAudioFormat(
+                    codec=AudioCodec.PCM, sample_rate=48000, bit_depth=16, channels=2
+                )
+            ],
+            buffer_capacity=100_000,
+            supported_commands=[],
+        ),
+    )
+    serialized = payload.to_dict()
+    assert "player@v1_support" in serialized
+    assert "player_support" not in serialized
