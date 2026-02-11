@@ -57,6 +57,9 @@ class _CaptureConnection:
     def send_message(self, message: object) -> None:
         self.events.append(_Event(kind="json", payload=message))
 
+    def send_role_message(self, role: str, message: object) -> None:  # noqa: ARG002
+        self.events.append(_Event(kind="json", payload=message))
+
     def try_send_binary(
         self,
         data: bytes,

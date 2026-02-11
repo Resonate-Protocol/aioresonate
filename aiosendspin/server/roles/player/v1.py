@@ -9,6 +9,7 @@ This PlayerV1Role implementation uses hook-based streaming:
 
 from __future__ import annotations
 
+import asyncio
 import base64
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
@@ -61,7 +62,7 @@ class PlayerPersistentState:
     buffer_capacity_scale: float = 1.0
     max_duration_us: int = 30_000_000
     disconnect_time_us: int | None = None
-    buffer_reset_handle: object | None = None
+    buffer_reset_handle: asyncio.TimerHandle | None = None
 
 
 class PlayerV1Role(Role):
@@ -187,10 +188,8 @@ class PlayerV1Role(Role):
         self._stream_started = False
         state = self._state()
         if state.buffer_reset_handle is not None:
-            handle = state.buffer_reset_handle
+            state.buffer_reset_handle.cancel()
             state.buffer_reset_handle = None
-            if hasattr(handle, "cancel"):
-                handle.cancel()
         state.disconnect_time_us = None
         self._ensure_buffer_tracker(state)
         # Reset buffer tracker on (re)connect - client buffer is empty after reconnect
@@ -238,9 +237,7 @@ class PlayerV1Role(Role):
 
         reset_after_s = 2.0
         if state.buffer_reset_handle is not None:
-            handle = state.buffer_reset_handle
-            if hasattr(handle, "cancel"):
-                handle.cancel()
+            state.buffer_reset_handle.cancel()
         state.buffer_reset_handle = self._client._server.loop.call_later(  # noqa: SLF001
             reset_after_s, _maybe_reset
         )

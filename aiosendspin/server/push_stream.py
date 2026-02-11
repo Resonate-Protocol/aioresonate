@@ -56,10 +56,9 @@ def _encode_for_transform_key(
 
     frame_dur = transformer.frame_duration_us
     base_ts = output_ts
-    if hasattr(transformer, "pending_timestamp_us"):
-        pending = transformer.pending_timestamp_us
-        if pending is not None:
-            base_ts = pending - (len(frames) * frame_dur)
+    pending = transformer.pending_timestamp_us
+    if pending is not None:
+        base_ts = pending - (len(frames) * frame_dur)
 
     return [(data, base_ts + i * frame_dur, frame_dur) for i, data in enumerate(frames)]
 

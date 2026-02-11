@@ -315,20 +315,12 @@ class SendspinClient:
         self._connection.send_message(message)
 
     def send_role_message(self, role: str, message: ServerMessage) -> None:
-        """Send a role-scoped message if connected; otherwise no-op.
-
-        Falls back to send_message() for test doubles that do not expose
-        send_role_message().
-        """
+        """Send a role-scoped message if connected; otherwise no-op."""
         if self._connection is None:
             return
         if isinstance(message, StreamStartMessage):
             self._logger.info("Sending stream/start: %s", message.payload)
-        sender = getattr(self._connection, "send_role_message", None)
-        if callable(sender):
-            sender(role, message)
-            return
-        self._connection.send_message(message)
+        self._connection.send_role_message(role, message)
 
     def try_send_binary(
         self,

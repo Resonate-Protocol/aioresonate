@@ -33,6 +33,9 @@ class _FakeConnection:
     def send_message(self, message: object) -> None:
         self.sent.append(message)
 
+    def send_role_message(self, role: str, message: object) -> None:  # noqa: ARG002
+        self.sent.append(message)
+
     def try_send_binary(
         self,
         data: bytes,  # noqa: ARG002

@@ -62,6 +62,11 @@ class AudioTransformer(Protocol):
         """
         ...
 
+    @property
+    def pending_timestamp_us(self) -> int | None:
+        """Timestamp of the earliest audio sample not yet emitted, or None."""
+        return None
+
     def reset(self) -> None:
         """Reset internal state.
 

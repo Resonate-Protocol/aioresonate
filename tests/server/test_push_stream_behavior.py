@@ -73,6 +73,9 @@ class _FakeConnection:
     def send_message(self, message: object) -> None:
         self.sent_json.append(message)
 
+    def send_role_message(self, role: str, message: object) -> None:  # noqa: ARG002
+        self.sent_json.append(message)
+
     def try_send_binary(
         self,
         data: bytes,
@@ -284,6 +287,8 @@ async def test_pcm_cache_catchup_for_uncached_codec() -> None:
     """PCM cache should enable catch-up when TransformKey cache is empty."""
 
     class TransformerA:
+        pending_timestamp_us: int | None = None
+
         @property
         def frame_duration_us(self) -> int:
             return 25_000
@@ -360,6 +365,7 @@ async def test_transform_dedup_uses_transform_key_not_instance(mock_loop: Any) -
 
     class CountingTransformer:
         calls = 0
+        pending_timestamp_us: int | None = None
 
         def __init__(self) -> None:
             self._frame_duration_us = 25_000
@@ -421,6 +427,7 @@ async def test_transform_key_separates_frame_duration(mock_loop: Any) -> None:
 
     class CountingTransformer:
         calls = 0
+        pending_timestamp_us: int | None = None
 
         def __init__(self, frame_duration_us: int) -> None:
             self._frame_duration_us = frame_duration_us
@@ -481,6 +488,8 @@ async def test_long_gap_reset_is_handled_in_push_stream() -> None:
     """PushStream resets transformer state after long production gaps."""
 
     class ResetTrackingTransformer:
+        pending_timestamp_us: int | None = None
+
         def __init__(self) -> None:
             self.reset_calls = 0
 
@@ -534,6 +543,8 @@ async def test_medium_gap_does_not_reset_transformer() -> None:
     """PushStream does not reset transformer state for medium gaps."""
 
     class ResetTrackingTransformer:
+        pending_timestamp_us: int | None = None
+
         def __init__(self) -> None:
             self.reset_calls = 0
 
@@ -587,6 +598,8 @@ async def test_late_join_uses_cached_chunks_across_role_recreation(mock_loop: An
     """Late join uses cache even if transformer instance changes."""
 
     class PassTransformer:
+        pending_timestamp_us: int | None = None
+
         @property
         def frame_duration_us(self) -> int:
             return 25_000
@@ -686,6 +699,8 @@ async def test_stop_flush_fans_out_to_all_roles(mock_loop: Any) -> None:
     """stop() flush frames to all roles sharing a TransformKey."""
 
     class FlushingTransformer:
+        pending_timestamp_us: int | None = None
+
         @property
         def frame_duration_us(self) -> int:
             return 25_000
@@ -738,6 +753,7 @@ async def test_transform_key_separates_channels(mock_loop: Any) -> None:
 
     class CountingTransformer:
         calls = 0
+        pending_timestamp_us: int | None = None
 
         def __init__(self) -> None:
             self._frame_duration_us = 25_000

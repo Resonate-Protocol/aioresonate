@@ -466,9 +466,8 @@ class SendspinConnection:
                     self._logger.debug if close_code in (1000, 1001) else self._logger.warning
                 )
                 log_func(
-                    "WebSocket closed, close_code=%s close_message=%s",
+                    "WebSocket closed, close_code=%s",
                     close_code,
-                    getattr(wsock, "close_message", None),
                 )
         except asyncio.CancelledError:
             self._logger.debug("Message loop cancelled")
@@ -752,6 +751,7 @@ class SendspinConnection:
             self._blocked_until_us.pop(role, None)
             self._schedule_role_head(role)
 
+    # TODO: simplify/refactor this
     async def _writer(self) -> None:  # noqa: C901, PLR0912, PLR0915
         wsock = self._wsock_server or self._wsock_client
         assert wsock is not None
