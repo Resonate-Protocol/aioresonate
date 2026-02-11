@@ -33,7 +33,6 @@ class VisualizerV1Role(Role):
             msg = "VisualizerV1Role requires a client"
             raise ValueError(msg)
         self._client = client
-        self._has_transport = False
         self._stream_started = False
         self._buffer_tracker = None
         self._group_role = None

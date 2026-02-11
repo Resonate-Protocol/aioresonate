@@ -59,7 +59,7 @@ class _CaptureConnection:
     def send_role_message(self, role: str, message: object) -> None:  # noqa: ARG002
         self.sent_json.append(message)
 
-    def try_send_binary(
+    def send_binary(
         self,
         data: bytes,
         *,

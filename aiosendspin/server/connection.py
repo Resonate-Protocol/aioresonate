@@ -210,7 +210,7 @@ class SendspinConnection:
             self._epoch_by_role[role] += 1
         self._writer_wakeup.set()
 
-    def try_send_binary(
+    def send_binary(
         self,
         data: bytes,
         *,
@@ -220,8 +220,8 @@ class SendspinConnection:
         buffer_end_time_us: int | None = None,
         buffer_byte_count: int | None = None,
         duration_us: int | None = None,
-    ) -> bool:
-        """Try to enqueue a binary message without disconnecting on queue overflow.
+    ) -> None:
+        """Enqueue a binary message.
 
         Args:
             data: Binary data to send.
@@ -233,7 +233,10 @@ class SendspinConnection:
             duration_us: Duration for buffer tracking.
         """
         if self._queue_size >= MAX_PENDING_MSG:
-            return False  # TODO: lets make max_pending_msg a hard limit, disconnect instead?
+            if not self._disconnecting:
+                self._logger.error("Message queue full, client too slow - disconnecting")
+                create_task(self.disconnect(retry_connection=True))
+            return
 
         sort_ts = max(0, timestamp_us)
         entry = _RoleQueueEntry(
@@ -249,7 +252,6 @@ class SendspinConnection:
         )
         self._last_enqueued_ts_by_role[role] = sort_ts
         self._enqueue_role_entry(role, sort_ts, entry)
-        return True
 
     def queue_status(self) -> tuple[int, int]:
         """Return (qsize, maxsize) for the outgoing queue."""

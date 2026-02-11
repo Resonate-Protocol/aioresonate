@@ -31,7 +31,7 @@ class _DummyConnection:
     def send_message(self, message: object) -> None:  # noqa: ARG002
         return
 
-    def try_send_binary(
+    def send_binary(
         self,
         data: bytes,  # noqa: ARG002
         *,
@@ -66,8 +66,8 @@ def _player_hello(client_id: str) -> ClientHelloPayload:
 
 
 @pytest.mark.asyncio
-async def test_goodbye_disconnect_resets_buffer_tracker() -> None:
-    """client/goodbye disconnect resets BufferTracker immediately."""
+async def test_goodbye_disconnect_delays_buffer_tracker_reset() -> None:
+    """Goodbye disconnect follows the same delayed reset policy."""
     loop = asyncio.get_running_loop()
     server = _DummyServer(loop=loop, clock=LoopClock(loop))
     client = SendspinClient(server, client_id="player-1")
@@ -87,6 +87,8 @@ async def test_goodbye_disconnect_resets_buffer_tracker() -> None:
     assert state.buffer_tracker.buffered_bytes == 1234
 
     client.detach_connection(GoodbyeReason.USER_REQUEST)
+    assert state.buffer_tracker.buffered_bytes == 1234
+    await asyncio.sleep(2.2)
     assert state.buffer_tracker.buffered_bytes == 0
 
 

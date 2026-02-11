@@ -7,7 +7,6 @@ import logging
 import uuid
 from collections.abc import Callable
 from contextlib import suppress
-from dataclasses import dataclass
 from typing import TYPE_CHECKING
 from uuid import UUID
 
@@ -18,6 +17,13 @@ from aiosendspin.models.core import (
     StreamEndPayload,
 )
 from aiosendspin.models.types import PlaybackStateType
+from aiosendspin.server.events import (
+    GroupDeletedEvent,
+    GroupEvent,
+    GroupMemberAddedEvent,
+    GroupMemberRemovedEvent,
+    GroupStateChangedEvent,
+)
 from aiosendspin.server.roles import GroupRole
 from aiosendspin.server.roles.registry import create_group_roles
 from aiosendspin.util import create_task
@@ -32,39 +38,6 @@ if TYPE_CHECKING:
     from .server import SendspinServer
 
 logger = logging.getLogger(__name__)
-
-
-class GroupEvent:
-    """Base event type used by SendspinGroup.add_event_listener()."""
-
-
-@dataclass
-class GroupStateChangedEvent(GroupEvent):
-    """Group state has changed."""
-
-    state: PlaybackStateType
-    """The new group state."""
-
-
-@dataclass
-class GroupMemberAddedEvent(GroupEvent):
-    """A client was added to the group."""
-
-    client_id: str
-    """The ID of the client that was added."""
-
-
-@dataclass
-class GroupMemberRemovedEvent(GroupEvent):
-    """A client was removed from the group."""
-
-    client_id: str
-    """The ID of the client that was removed."""
-
-
-@dataclass
-class GroupDeletedEvent(GroupEvent):
-    """This group has no more members and has been deleted."""
 
 
 class SendspinGroup:

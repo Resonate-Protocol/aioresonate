@@ -55,8 +55,8 @@ def test_binary_data_supports_buffer_registration_metadata() -> None:
 
 
 @pytest.mark.asyncio
-async def test_try_send_binary_accepts_buffer_metadata() -> None:
-    """try_send_binary should accept optional buffer registration parameters."""
+async def test_send_binary_accepts_buffer_metadata() -> None:
+    """send_binary should accept optional buffer registration parameters."""
     loop = asyncio.get_running_loop()
     server = _DummyServer(loop=loop, clock=LoopClock(loop))
 
@@ -65,7 +65,7 @@ async def test_try_send_binary_accepts_buffer_metadata() -> None:
 
     conn = SendspinConnection(server, wsock_client=wsock)
 
-    result = conn.try_send_binary(
+    conn.send_binary(
         b"audio_data",
         role="player",
         timestamp_us=0,
@@ -73,7 +73,6 @@ async def test_try_send_binary_accepts_buffer_metadata() -> None:
         buffer_end_time_us=1_000_000,
         buffer_byte_count=100,
     )
-    assert result is True
 
     # Access the per-role queue
     role_queue = conn._role_queues.get("player")  # noqa: SLF001
@@ -122,7 +121,7 @@ async def test_writer_registers_buffer_after_send() -> None:
     payload = b"audio_data"
     message_type = BinaryMessageType.AUDIO_CHUNK.value
     packed = pack_binary_header_raw(message_type, 0) + payload
-    conn.try_send_binary(
+    conn.send_binary(
         packed,
         role="player",
         timestamp_us=0,
@@ -177,7 +176,7 @@ async def test_writer_does_not_register_without_metadata() -> None:
     payload = b"audio_data"
     message_type = BinaryMessageType.AUDIO_CHUNK.value
     packed = pack_binary_header_raw(message_type, 0) + payload
-    conn.try_send_binary(
+    conn.send_binary(
         packed, role="player", timestamp_us=0, message_type=message_type
     )  # No buffer metadata
 
@@ -223,7 +222,7 @@ async def test_writer_blocks_on_buffer_tracker_capacity() -> None:
     payload = b"audio_data"
     message_type = BinaryMessageType.AUDIO_CHUNK.value
     packed = pack_binary_header_raw(message_type, 0) + payload
-    conn.try_send_binary(
+    conn.send_binary(
         packed,
         role="player",
         timestamp_us=0,
@@ -314,7 +313,7 @@ async def test_role_stream_start_is_sent_before_binary_for_same_role() -> None:
             )
         ),
     )
-    conn.try_send_binary(
+    conn.send_binary(
         pack_binary_header_raw(BinaryMessageType.AUDIO_CHUNK.value, 123_456) + b"audio",
         role="player",
         timestamp_us=123_456,

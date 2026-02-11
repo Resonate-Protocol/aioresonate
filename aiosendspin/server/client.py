@@ -155,8 +155,7 @@ class SendspinClient:
         """Store persistent role state for a family."""
         self._role_state[family] = state
 
-    # TODO: bad name, what ensure?
-    def ensure_role_state(self, family: str, cls: type[_T]) -> _T:
+    def get_or_create_role_state(self, family: str, cls: type[_T]) -> _T:
         """Return persistent role state, creating a default if missing."""
         existing = self.get_role_state(family, cls)
         if existing is not None:
@@ -237,9 +236,6 @@ class SendspinClient:
             if role is None:
                 continue
             role.on_connect()
-            # TODO: in what case is on_transport_attached is called without on_connect?
-            # TODO: seems like we can remove on_transport_attach then? and doc it for roles?
-            role.on_transport_attach()
             self._roles[role.role_id] = role
 
         # Build binary handling cache for O(1) lookup
@@ -267,8 +263,6 @@ class SendspinClient:
 
         # Notify all roles about detachment
         for role in self._roles.values():
-            # TODO: maybe just having on_disconnect is enough for roles? any reason to have both?
-            role.on_transport_detach(goodbye_reason)
             role.on_disconnect()
         self._roles.clear()
         self._binary_handling_cache.clear()
@@ -322,7 +316,7 @@ class SendspinClient:
             self._logger.info("Sending stream/start: %s", message.payload)
         self._connection.send_role_message(role, message)
 
-    def try_send_binary(
+    def send_binary(
         self,
         data: bytes,
         *,
@@ -332,11 +326,11 @@ class SendspinClient:
         buffer_end_time_us: int | None = None,
         buffer_byte_count: int | None = None,
         duration_us: int | None = None,
-    ) -> bool:
-        """Try to enqueue a droppable binary payload for this client."""
+    ) -> None:
+        """Enqueue a binary payload for this client, or no-op when disconnected."""
         if self._connection is None:
-            return False
-        return self._connection.try_send_binary(
+            return
+        self._connection.send_binary(
             data,
             role=role_family,
             timestamp_us=timestamp_us,
@@ -361,7 +355,13 @@ class SendspinClient:
     def add_event_listener(
         self, callback: Callable[[SendspinClient, ClientEvent], None]
     ) -> Callable[[], None]:
-        """Register a callback for client-scoped events and return an unsubscribe callable."""
+        """Register a callback for client-scoped events.
+
+        The second callback argument is ``ClientEvent`` to cover both client-core
+        events and role-emitted client events.
+
+        Returns an unsubscribe callable.
+        """
         self._event_cbs.append(callback)
 
         def _remove() -> None:

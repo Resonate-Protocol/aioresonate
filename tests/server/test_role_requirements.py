@@ -232,8 +232,8 @@ class TestRoleBaseClass:
         role = TestRole()
         role.on_stream_end()  # Should not raise
 
-    def test_on_audio_chunk_returns_true_by_default(self) -> None:
-        """Roles that don't override on_audio_chunk() return True."""
+    def test_on_audio_chunk_is_noop_by_default(self) -> None:
+        """Roles that don't override on_audio_chunk() are no-op."""
 
         class TestRole(Role):
             @property
@@ -253,53 +253,7 @@ class TestRoleBaseClass:
         role = TestRole()
         chunk = AudioChunk(data=b"test", timestamp_us=0, duration_us=1000, byte_count=4)
         result = role.on_audio_chunk(chunk)
-        assert result is True
-
-    def test_on_transport_attach_sets_has_transport(self) -> None:
-        """on_transport_attach() sets _has_transport to True."""
-
-        class TestRole(Role):
-            @property
-            def role_id(self) -> str:
-                return "test@v1"
-
-            @property
-            def role_family(self) -> str:
-                return "test"
-
-            def on_connect(self) -> None:
-                pass
-
-            def on_disconnect(self) -> None:
-                pass
-
-        role = TestRole()
-        assert not role._has_transport  # noqa: SLF001
-        role.on_transport_attach()
-        assert role._has_transport  # noqa: SLF001
-
-    def test_on_transport_detach_clears_has_transport(self) -> None:
-        """on_transport_detach() sets _has_transport to False."""
-
-        class TestRole(Role):
-            @property
-            def role_id(self) -> str:
-                return "test@v1"
-
-            @property
-            def role_family(self) -> str:
-                return "test"
-
-            def on_connect(self) -> None:
-                pass
-
-            def on_disconnect(self) -> None:
-                pass
-
-        role = TestRole()
-        role._has_transport = True  # noqa: SLF001
-        role.on_transport_detach()
-        assert not role._has_transport  # noqa: SLF001
+        assert result is None
 
     def test_send_message_drops_silently_without_transport(self) -> None:
         """send_message() is a no-op when no transport attached."""
@@ -307,7 +261,7 @@ class TestRoleBaseClass:
         class TestRole(Role):
             def __init__(self, client: MagicMock) -> None:
                 self._client = client
-                self._has_transport = False
+                self._client.connection = None
 
             @property
             def role_id(self) -> str:
@@ -335,7 +289,7 @@ class TestRoleBaseClass:
         class TestRole(Role):
             def __init__(self, client: MagicMock) -> None:
                 self._client = client
-                self._has_transport = True
+                self._client.connection = MagicMock()
 
             @property
             def role_id(self) -> str:

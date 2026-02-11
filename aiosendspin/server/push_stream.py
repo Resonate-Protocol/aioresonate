@@ -16,10 +16,10 @@ from aiosendspin.server.audio import (
     _get_av,
     _resolve_audio_format,
 )
+from aiosendspin.server.audio_transformers import TransformKey, normalize_options
 from aiosendspin.server.channels import MAIN_CHANNEL
 from aiosendspin.server.roles import AudioChunk
 from aiosendspin.server.roles.player.audio_transformers import PcmPassthrough
-from aiosendspin.server.transform_keys import TransformKey, normalize_options
 from aiosendspin.util import create_task
 
 if TYPE_CHECKING:
@@ -1008,10 +1008,9 @@ class PushStream:
         role: Role,
         cached_chunks: list[CachedChunk],
         now_us: int,
-    ) -> int:
+    ) -> None:
         """Send cached chunks to a role, skipping chunks that are already late."""
         skipped_late = 0
-        sent = 0
         for cached_chunk in cached_chunks:
             if cached_chunk.timestamp_us + cached_chunk.duration_us <= now_us:
                 skipped_late += 1
@@ -1026,7 +1025,6 @@ class PushStream:
                 byte_count=cached_chunk.byte_count,
             )
             role.on_audio_chunk(chunk)
-            sent += 1
 
         if skipped_late > 0:
             _LOGGER.debug(
@@ -1035,7 +1033,6 @@ class PushStream:
                 role.role_family,
                 now_us,
             )
-        return sent
 
     def on_role_leave(self, role: Role) -> None:
         """Remove role-specific state so re-joins get fresh stream/start."""

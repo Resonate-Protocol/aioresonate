@@ -47,7 +47,6 @@ class ArtworkV1Role(Role):
             msg = "ArtworkV1Role requires a client"
             raise ValueError(msg)
         self._client = client
-        self._has_transport = False
         self._stream_started = False
         self._buffer_tracker = None
         self._group_role: ArtworkGroupRole | None = None
@@ -67,25 +66,18 @@ class ArtworkV1Role(Role):
         """Initialize channel configs from client hello and subscribe to group."""
         self._init_channel_configs()
         self._subscribe_to_group_role()
-        if self._has_transport:
+        if self._channel_configs:
+            # Reannounce stream config first so follow-up artwork snapshot is interpretable.
             self._send_stream_start()
+        if isinstance(self._group_role, ArtworkGroupRole):
+            # Push current artwork immediately on (re)connect; do not wait for next change.
+            self._group_role._send_artwork_to_role(self)  # noqa: SLF001
 
     def on_disconnect(self) -> None:
         """Unsubscribe from ArtworkGroupRole."""
         self._unsubscribe_from_group_role()
         self._channel_configs.clear()
         self._stream_started = False
-
-    def on_transport_attach(self) -> None:
-        """Handle WebSocket connect/reconnect."""
-        super().on_transport_attach()
-        # TODO: should we skip stream start if _group_role is None (nothing else happens)?
-        if self._channel_configs:
-            self._send_stream_start()
-        if self._group_role is None:
-            return
-        if isinstance(self._group_role, ArtworkGroupRole):
-            self._group_role._send_artwork_to_role(self)  # noqa: SLF001
 
     def _init_channel_configs(self) -> None:
         """Initialize channel configs from client hello artwork support."""
@@ -98,7 +90,7 @@ class ArtworkV1Role(Role):
 
     def _send_stream_start(self) -> None:
         """Send stream/start message with artwork channel configs."""
-        # TODO: duplicate guard? on_transport_attach already checks _channel_configs
+        # TODO: duplicate guard? on_connect already checks _channel_configs
         if not self._channel_configs:
             return
 
@@ -133,13 +125,13 @@ class ArtworkV1Role(Role):
             timestamp_us: Timestamp in microseconds.
         """
         # TODO: should we raise instead of swallowing when no transport?
-        if not self._has_transport:
+        if not self.has_connection():
             return
 
         message_type = BinaryMessageType.ARTWORK_CHANNEL_0.value + channel
         header = pack_binary_header_raw(message_type, timestamp_us)
 
-        self._client.try_send_binary(
+        self._client.send_binary(
             header + image_data,
             role_family=self.role_family,
             timestamp_us=timestamp_us,
@@ -153,13 +145,13 @@ class ArtworkV1Role(Role):
             channel: Channel number (0-3).
             timestamp_us: Timestamp in microseconds.
         """
-        if not self._has_transport:
+        if not self.has_connection():
             return
 
         message_type = BinaryMessageType.ARTWORK_CHANNEL_0.value + channel
         header = pack_binary_header_raw(message_type, timestamp_us)
 
-        self._client.try_send_binary(
+        self._client.send_binary(
             header,
             role_family=self.role_family,
             timestamp_us=timestamp_us,

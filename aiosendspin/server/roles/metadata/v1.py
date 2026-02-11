@@ -31,7 +31,6 @@ class MetadataV1Role(Role):
             msg = "MetadataV1Role requires a client"
             raise ValueError(msg)
         self._client = client
-        self._has_transport = False
         self._stream_started = False
         self._buffer_tracker = None
         self._group_role = None
@@ -46,19 +45,11 @@ class MetadataV1Role(Role):
         """Role family name for protocol messages."""
         return "metadata"
 
-    def on_transport_attach(self) -> None:
-        """Handle WebSocket connect/reconnect."""
-        super().on_transport_attach()
-        if self._group_role is None:
-            self._subscribe_to_group_role()
-        if self._group_role is None:
-            return
-        if isinstance(self._group_role, MetadataGroupRole):
-            self._group_role._send_state_to_role(self)  # noqa: SLF001
-
     def on_connect(self) -> None:
         """Subscribe to MetadataGroupRole for state updates."""
         self._subscribe_to_group_role()
+        if isinstance(self._group_role, MetadataGroupRole):
+            self._group_role._send_state_to_role(self)  # noqa: SLF001
 
     def on_disconnect(self) -> None:
         """Unsubscribe from MetadataGroupRole."""

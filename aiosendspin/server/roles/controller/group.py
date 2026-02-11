@@ -222,12 +222,13 @@ class ControllerGroupRole(GroupRole):
         return _remove
 
     def _signal_event(self, event: ControllerEvent) -> None:
-        """Signal an event to all registered listeners."""
+        """Signal an event to all registered listeners and group listeners."""
         for cb in self._event_cbs:
             try:
                 cb(event)
             except Exception:
                 logger.exception("Error in controller event listener")
+        self.emit_group_event(event)
 
     # --- Client added/removed hooks ---
 

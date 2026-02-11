@@ -81,34 +81,34 @@ def test_metadata_group_role_clear_metadata() -> None:
     member.send_message.assert_called_once()
 
 
-def test_metadata_group_role_set_title() -> None:
-    """set_title() updates only the title field."""
+def test_metadata_group_role_update_title() -> None:
+    """update() updates only the title field."""
     group = _make_group_stub()
     mgr = MetadataGroupRole(group)
 
-    mgr.set_title("New Title")
+    mgr.update(title="New Title")
 
     assert mgr.metadata is not None
     assert mgr.metadata.title == "New Title"
 
 
-def test_metadata_group_role_set_artist() -> None:
-    """set_artist() updates only the artist field."""
+def test_metadata_group_role_update_artist() -> None:
+    """update() updates only the artist field."""
     group = _make_group_stub()
     mgr = MetadataGroupRole(group)
 
-    mgr.set_artist("New Artist")
+    mgr.update(artist="New Artist")
 
     assert mgr.metadata is not None
     assert mgr.metadata.artist == "New Artist"
 
 
-def test_metadata_group_role_set_progress() -> None:
-    """set_progress() updates progress fields."""
+def test_metadata_group_role_update_progress() -> None:
+    """update() updates progress fields."""
     group = _make_group_stub()
     mgr = MetadataGroupRole(group)
 
-    mgr.set_progress(30000, 180000, 1000)
+    mgr.update(track_progress=30000, track_duration=180000, playback_speed=1000)
 
     assert mgr.metadata is not None
     assert mgr.metadata.track_progress == 30000
@@ -116,23 +116,23 @@ def test_metadata_group_role_set_progress() -> None:
     assert mgr.metadata.playback_speed == 1000
 
 
-def test_metadata_group_role_set_repeat() -> None:
-    """set_repeat() updates repeat mode."""
+def test_metadata_group_role_update_repeat() -> None:
+    """update() updates repeat mode."""
     group = _make_group_stub()
     mgr = MetadataGroupRole(group)
 
-    mgr.set_repeat(RepeatMode.ALL)
+    mgr.update(repeat=RepeatMode.ALL)
 
     assert mgr.metadata is not None
     assert mgr.metadata.repeat == RepeatMode.ALL
 
 
-def test_metadata_group_role_set_shuffle() -> None:
-    """set_shuffle() updates shuffle state."""
+def test_metadata_group_role_update_shuffle() -> None:
+    """update() updates shuffle state."""
     group = _make_group_stub()
     mgr = MetadataGroupRole(group)
 
-    mgr.set_shuffle(True)
+    mgr.update(shuffle=True)
 
     assert mgr.metadata is not None
     assert mgr.metadata.shuffle is True
@@ -149,6 +149,19 @@ def test_metadata_group_role_update_batch() -> None:
     assert mgr.metadata.title == "Song"
     assert mgr.metadata.artist == "Artist"
     assert mgr.metadata.year == 2024
+
+
+def test_metadata_group_role_update_can_clear_field_with_none() -> None:
+    """update() should allow clearing a field via explicit None."""
+    group = _make_group_stub()
+    mgr = MetadataGroupRole(group)
+    mgr.set_metadata(Metadata(title="Song", artist="Artist"))
+
+    mgr.update(title=None)
+
+    assert mgr.metadata is not None
+    assert mgr.metadata.title is None
+    assert mgr.metadata.artist == "Artist"
 
 
 def test_metadata_group_role_on_member_join_sends_current_state() -> None:

@@ -20,11 +20,11 @@ def _make_client_stub() -> MagicMock:
     client = MagicMock()
     state_store: dict[str, object] = {}
 
-    def ensure_role_state(family: str, cls: type[object]) -> object:
+    def get_or_create_role_state(family: str, cls: type[object]) -> object:
         state_store.setdefault(family, cls())
         return state_store[family]
 
-    client.ensure_role_state.side_effect = ensure_role_state
+    client.get_or_create_role_state.side_effect = get_or_create_role_state
     client.info = MagicMock()
     client.info.player_support = None
     client.group = MagicMock()
@@ -184,7 +184,7 @@ def test_player_role_on_stream_start_sets_pending_flag() -> None:
         transformer=PcmPassthrough(sample_rate=48000, bit_depth=16, channels=2),
     )
     role = PlayerV1Role(client=client, audio_requirements=audio_req)
-    role._has_transport = True  # noqa: SLF001
+    role._client.connection = MagicMock()  # noqa: SLF001
 
     role.on_stream_start()
 
@@ -197,7 +197,7 @@ def test_player_role_on_audio_chunk_sends_deferred_stream_start_with_pcm() -> No
     """on_audio_chunk() sends deferred stream/start with PCM codec."""
     client = _make_client_stub()
     client.send_message = MagicMock()
-    client.try_send_binary = MagicMock(return_value=True)
+    client.send_binary = MagicMock(return_value=True)
 
     audio_req = AudioRequirements(
         sample_rate=48000,
@@ -206,7 +206,7 @@ def test_player_role_on_audio_chunk_sends_deferred_stream_start_with_pcm() -> No
         transformer=PcmPassthrough(sample_rate=48000, bit_depth=16, channels=2),
     )
     role = PlayerV1Role(client=client, audio_requirements=audio_req)
-    role._has_transport = True  # noqa: SLF001
+    role._client.connection = MagicMock()  # noqa: SLF001
     role._pending_stream_start = True  # noqa: SLF001
 
     chunk = AudioChunk(data=b"\x00" * 100, timestamp_us=0, duration_us=25000, byte_count=100)
@@ -228,7 +228,7 @@ def test_player_role_on_audio_chunk_sends_deferred_stream_start_with_flac() -> N
     """on_audio_chunk() sends deferred stream/start with FLAC codec and header."""
     client = _make_client_stub()
     client.send_message = MagicMock()
-    client.try_send_binary = MagicMock(return_value=True)
+    client.send_binary = MagicMock(return_value=True)
 
     encoder = FlacEncoder(sample_rate=48000, bit_depth=16, channels=2)
     # Force encoder to initialize so we get a header
@@ -236,7 +236,7 @@ def test_player_role_on_audio_chunk_sends_deferred_stream_start_with_flac() -> N
 
     audio_req = AudioRequirements(sample_rate=48000, bit_depth=16, channels=2, transformer=encoder)
     role = PlayerV1Role(client=client, audio_requirements=audio_req)
-    role._has_transport = True  # noqa: SLF001
+    role._client.connection = MagicMock()  # noqa: SLF001
     role._pending_stream_start = True  # noqa: SLF001
 
     chunk = AudioChunk(data=b"\x00" * 100, timestamp_us=0, duration_us=25000, byte_count=100)
@@ -255,7 +255,7 @@ def test_player_role_on_stream_start_sets_stream_started_flag_on_first_chunk() -
     """_stream_started is set to True when stream/start is sent on first chunk."""
     client = _make_client_stub()
     client.send_message = MagicMock()
-    client.try_send_binary = MagicMock(return_value=True)
+    client.send_binary = MagicMock(return_value=True)
 
     audio_req = AudioRequirements(
         sample_rate=48000,
@@ -264,7 +264,7 @@ def test_player_role_on_stream_start_sets_stream_started_flag_on_first_chunk() -
         transformer=PcmPassthrough(sample_rate=48000, bit_depth=16, channels=2),
     )
     role = PlayerV1Role(client=client, audio_requirements=audio_req)
-    role._has_transport = True  # noqa: SLF001
+    role._client.connection = MagicMock()  # noqa: SLF001
     role._stream_started = False  # noqa: SLF001
 
     role.on_stream_start()
@@ -282,7 +282,7 @@ def test_player_role_on_stream_start_noop_without_audio_requirements() -> None:
     client.send_message = MagicMock()
 
     role = PlayerV1Role(client=client)
-    role._has_transport = True  # noqa: SLF001
+    role._client.connection = MagicMock()  # noqa: SLF001
 
     role.on_stream_start()
 
@@ -301,7 +301,7 @@ def test_player_role_on_stream_start_noop_without_transport() -> None:
         transformer=PcmPassthrough(sample_rate=48000, bit_depth=16, channels=2),
     )
     role = PlayerV1Role(client=client, audio_requirements=audio_req)
-    role._has_transport = False  # noqa: SLF001
+    role._client.connection = None  # noqa: SLF001
 
     role.on_stream_start()
 
@@ -311,19 +311,19 @@ def test_player_role_on_stream_start_noop_without_transport() -> None:
 # --- on_audio_chunk ---
 
 
-def test_player_role_on_audio_chunk_returns_true_on_success() -> None:
-    """on_audio_chunk() returns True when chunk sent successfully."""
+def test_player_role_on_audio_chunk_sends_on_success() -> None:
+    """on_audio_chunk() sends chunk when connected."""
     client = MagicMock()
-    client.try_send_binary.return_value = True
+    client.send_binary.return_value = True
 
     role = PlayerV1Role(client=client)
-    role._has_transport = True  # noqa: SLF001
+    role._client.connection = MagicMock()  # noqa: SLF001
 
     chunk = AudioChunk(data=b"audio", timestamp_us=1000, duration_us=25000, byte_count=5)
     result = role.on_audio_chunk(chunk)
 
-    assert result is True
-    client.try_send_binary.assert_called_once()
+    assert result is None
+    client.send_binary.assert_called_once()
 
 
 def test_player_role_on_audio_chunk_packs_binary_header() -> None:
@@ -335,10 +335,10 @@ def test_player_role_on_audio_chunk_packs_binary_header() -> None:
         sent_data.append(data)
         return True
 
-    client.try_send_binary.side_effect = capture_send
+    client.send_binary.side_effect = capture_send
 
     role = PlayerV1Role(client=client)
-    role._has_transport = True  # noqa: SLF001
+    role._client.connection = MagicMock()  # noqa: SLF001
 
     chunk = AudioChunk(data=b"\x01\x02\x03", timestamp_us=123_456, duration_us=25000, byte_count=3)
     role.on_audio_chunk(chunk)
@@ -351,34 +351,34 @@ def test_player_role_on_audio_chunk_packs_binary_header() -> None:
 
 
 def test_player_role_on_audio_chunk_passes_buffer_metadata() -> None:
-    """on_audio_chunk() passes buffer tracking metadata to try_send_binary."""
+    """on_audio_chunk() passes buffer tracking metadata to send_binary."""
     client = MagicMock()
-    client.try_send_binary.return_value = True
+    client.send_binary.return_value = True
 
     role = PlayerV1Role(client=client)
-    role._has_transport = True  # noqa: SLF001
+    role._client.connection = MagicMock()  # noqa: SLF001
 
     chunk = AudioChunk(data=b"audio", timestamp_us=1000, duration_us=25000, byte_count=100)
     role.on_audio_chunk(chunk)
 
-    call_kwargs = client.try_send_binary.call_args.kwargs
+    call_kwargs = client.send_binary.call_args.kwargs
     assert call_kwargs["buffer_end_time_us"] == 1000 + 25000
     assert call_kwargs["buffer_byte_count"] == 100
     assert call_kwargs["duration_us"] == 25000
 
 
-def test_player_role_on_audio_chunk_returns_false_on_send_failure() -> None:
-    """on_audio_chunk() returns False when try_send_binary fails."""
+def test_player_role_on_audio_chunk_ignores_send_return_value() -> None:
+    """on_audio_chunk() is fire-and-forget and ignores send return values."""
     client = MagicMock()
-    client.try_send_binary.return_value = False  # Send failed
+    client.send_binary.return_value = None
 
     role = PlayerV1Role(client=client)
-    role._has_transport = True  # noqa: SLF001
+    role._client.connection = MagicMock()  # noqa: SLF001
 
     chunk = AudioChunk(data=b"audio", timestamp_us=1000, duration_us=25000, byte_count=5)
     result = role.on_audio_chunk(chunk)
 
-    assert result is False
+    assert result is None
 
 
 # --- on_stream_clear ---
@@ -390,7 +390,7 @@ def test_player_role_on_stream_clear_sends_message() -> None:
     client.send_message = MagicMock()
 
     role = PlayerV1Role(client=client)
-    role._has_transport = True  # noqa: SLF001
+    role._client.connection = MagicMock()  # noqa: SLF001
     role._buffer_tracker = None  # noqa: SLF001
 
     role.on_stream_clear()
@@ -407,7 +407,7 @@ def test_player_role_on_stream_clear_resets_stream_started() -> None:
     client.send_message = MagicMock()
 
     role = PlayerV1Role(client=client)
-    role._has_transport = True  # noqa: SLF001
+    role._client.connection = MagicMock()  # noqa: SLF001
     role._stream_started = True  # noqa: SLF001
     role._buffer_tracker = None  # noqa: SLF001
 
@@ -423,7 +423,7 @@ def test_player_role_on_stream_clear_resets_buffer_tracker() -> None:
     buffer_tracker = MagicMock()
 
     role = PlayerV1Role(client=client)
-    role._has_transport = True  # noqa: SLF001
+    role._client.connection = MagicMock()  # noqa: SLF001
     role._buffer_tracker = buffer_tracker  # noqa: SLF001
 
     role.on_stream_clear()
@@ -437,7 +437,7 @@ def test_player_role_on_stream_clear_noop_without_transport() -> None:
     client.send_message = MagicMock()
 
     role = PlayerV1Role(client=client)
-    role._has_transport = False  # noqa: SLF001
+    role._client.connection = None  # noqa: SLF001
 
     role.on_stream_clear()
 
@@ -453,7 +453,7 @@ def test_player_role_on_stream_end_sends_message() -> None:
     client.send_message = MagicMock()
 
     role = PlayerV1Role(client=client)
-    role._has_transport = True  # noqa: SLF001
+    role._client.connection = MagicMock()  # noqa: SLF001
     role._buffer_tracker = None  # noqa: SLF001
 
     role.on_stream_end()
@@ -471,7 +471,7 @@ def test_player_role_on_stream_end_resets_stream_started() -> None:
     client.send_message = MagicMock()
 
     role = PlayerV1Role(client=client)
-    role._has_transport = True  # noqa: SLF001
+    role._client.connection = MagicMock()  # noqa: SLF001
     role._stream_started = True  # noqa: SLF001
     role._buffer_tracker = None  # noqa: SLF001
 
@@ -487,7 +487,7 @@ def test_player_role_on_stream_end_resets_buffer_tracker() -> None:
     buffer_tracker = MagicMock()
 
     role = PlayerV1Role(client=client)
-    role._has_transport = True  # noqa: SLF001
+    role._client.connection = MagicMock()  # noqa: SLF001
     role._buffer_tracker = buffer_tracker  # noqa: SLF001
 
     role.on_stream_end()
@@ -501,7 +501,7 @@ def test_player_role_on_stream_end_noop_without_transport() -> None:
     client.send_message = MagicMock()
 
     role = PlayerV1Role(client=client)
-    role._has_transport = False  # noqa: SLF001
+    role._client.connection = None  # noqa: SLF001
 
     role.on_stream_end()
 

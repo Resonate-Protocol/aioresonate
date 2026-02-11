@@ -61,7 +61,6 @@ class ControllerV1Role(Role):
             msg = "ControllerV1Role requires a client"
             raise ValueError(msg)
         self._client = client
-        self._has_transport = False
         self._stream_started = False
         self._buffer_tracker = None
         self._group_role: ControllerGroupRole | None = None
@@ -147,7 +146,7 @@ class ControllerV1Role(Role):
 
     def _get_state(self) -> ControllerRoleState:
         """Get or create persistent state for this role."""
-        return self._client.ensure_role_state(self.role_family, ControllerRoleState)
+        return self._client.get_or_create_role_state(self.role_family, ControllerRoleState)
 
     async def _handle_switch_command(self) -> None:
         """Handle the switch command to cycle through groups."""
@@ -307,7 +306,6 @@ class ControllerV1Role(Role):
                 "Rejoining previous group %s after external_source",
                 previous_group_id,
             )
-            # TODO: make add/remove_client sync (not await)
             await self._client.group.remove_client(self._client)
             await previous_group.add_client(self._client)
             return True

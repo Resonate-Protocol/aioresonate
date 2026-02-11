@@ -115,7 +115,7 @@ async def test_buffer_tracker_does_not_backpressure_until_send() -> None:
     try:
         # Use the hook-based on_audio_chunk method
         sent = role.on_audio_chunk(chunk)
-        assert sent is True
+        assert sent is None
 
         # Regression assertion: queued-but-not-sent data must not cause backpressure.
         assert buffer_tracker.buffered_bytes == 0

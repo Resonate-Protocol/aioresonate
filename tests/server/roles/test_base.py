@@ -251,7 +251,7 @@ def test_role_send_message_drops_without_transport() -> None:
     client = MagicMock()
     role = ConcreteRole()
     role._client = client  # noqa: SLF001
-    role._has_transport = False  # noqa: SLF001
+    role._client.connection = None  # noqa: SLF001
 
     message: ServerMessage = MagicMock()
     role.send_message(message)
@@ -264,28 +264,12 @@ def test_role_send_message_forwards_with_transport() -> None:
     client = MagicMock()
     role = ConcreteRole()
     role._client = client  # noqa: SLF001
-    role._has_transport = True  # noqa: SLF001
+    role._client.connection = MagicMock()  # noqa: SLF001
 
     message: ServerMessage = MagicMock()
     role.send_message(message)
 
     client.send_role_message.assert_called_once_with(role.role_family, message)
-
-
-def test_role_on_transport_attach_sets_flag() -> None:
-    """Role.on_transport_attach() sets _has_transport to True."""
-    role = ConcreteRole()
-    role._has_transport = False  # noqa: SLF001
-    role.on_transport_attach()
-    assert role._has_transport is True  # noqa: SLF001
-
-
-def test_role_on_transport_detach_clears_flag() -> None:
-    """Role.on_transport_detach() sets _has_transport to False."""
-    role = ConcreteRole()
-    role._has_transport = True  # noqa: SLF001
-    role.on_transport_detach()
-    assert role._has_transport is False  # noqa: SLF001
 
 
 def test_role_on_stream_start_is_noop_by_default() -> None:
@@ -294,12 +278,12 @@ def test_role_on_stream_start_is_noop_by_default() -> None:
     role.on_stream_start()  # Should not raise
 
 
-def test_role_on_audio_chunk_returns_true_by_default() -> None:
-    """Role.on_audio_chunk() returns True by default (accepts all chunks)."""
+def test_role_on_audio_chunk_is_noop_by_default() -> None:
+    """Role.on_audio_chunk() is a no-op by default."""
     role = ConcreteRole()
     chunk = AudioChunk(data=b"audio", timestamp_us=1000, duration_us=25000, byte_count=5)
     result = role.on_audio_chunk(chunk)
-    assert result is True
+    assert result is None
 
 
 def test_role_on_stream_clear_is_noop_by_default() -> None:

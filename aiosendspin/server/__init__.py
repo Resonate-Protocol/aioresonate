@@ -13,11 +13,13 @@ __all__ = [
     "ClientEvent",
     "ClientGroupChangedEvent",
     "ClientRemovedEvent",
+    "ClientRoleEvent",
     "DisconnectBehaviour",
     "GroupDeletedEvent",
     "GroupEvent",
     "GroupMemberAddedEvent",
     "GroupMemberRemovedEvent",
+    "GroupRoleEvent",
     "GroupStateChangedEvent",
     "SendspinClient",
     "SendspinEvent",
@@ -30,13 +32,18 @@ from aiosendspin.models.types import AudioCodec
 
 from .audio import AudioFormat
 from .client import DisconnectBehaviour, SendspinClient
-from .events import ClientEvent, ClientGroupChangedEvent
-from .group import (
+from .events import (
+    ClientEvent,
+    ClientGroupChangedEvent,
+    ClientRoleEvent,
     GroupDeletedEvent,
     GroupEvent,
     GroupMemberAddedEvent,
     GroupMemberRemovedEvent,
+    GroupRoleEvent,
     GroupStateChangedEvent,
+)
+from .group import (
     SendspinGroup,
 )
 from .roles.player.events import VolumeChangedEvent

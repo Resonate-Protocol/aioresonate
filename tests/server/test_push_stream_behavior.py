@@ -77,7 +77,7 @@ class _FakeConnection:
     def send_role_message(self, role: str, message: object) -> None:  # noqa: ARG002
         self.sent_json.append(message)
 
-    def try_send_binary(
+    def send_binary(
         self,
         data: bytes,
         *,
@@ -113,9 +113,8 @@ class _DummyRole:
     def on_stream_start(self) -> None:
         self.started += 1
 
-    def on_audio_chunk(self, chunk: AudioChunk) -> bool:
+    def on_audio_chunk(self, chunk: AudioChunk) -> None:
         self.received.append(chunk)
-        return True
 
     def on_stream_end(self) -> None:
         return
@@ -686,11 +685,9 @@ async def test_send_cached_chunks_keeps_chunk_overlapping_now(mock_loop: Any) ->
         byte_count=1,
     )
 
-    sent = stream._send_cached_chunks_to_role(  # noqa: SLF001
+    stream._send_cached_chunks_to_role(  # noqa: SLF001
         role, [overlapping, future], now_us
     )
-
-    assert sent == 2
     assert len(role.received) == 2
     assert role.received[0].timestamp_us == overlapping.timestamp_us
 

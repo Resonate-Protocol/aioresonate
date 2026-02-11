@@ -7,9 +7,8 @@ They are managed by TransformerPool for deduplication across roles.
 from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import Protocol, TypeVar, runtime_checkable
-
-from aiosendspin.server.transform_keys import TransformKey, normalize_options
 
 T = TypeVar("T", bound="AudioTransformer")
 
@@ -60,6 +59,26 @@ class AudioTransformer(Protocol):
         Called on stream/clear to discard buffered state.
         """
         ...
+
+
+@dataclass(frozen=True, slots=True)
+class TransformKey:
+    """Stable identity for transformed output."""
+
+    channel_id: int
+    transformer_type: type
+    sample_rate: int
+    bit_depth: int
+    channels: int
+    frame_duration_us: int
+    options: tuple[tuple[str, str], ...]
+
+
+def normalize_options(options: Mapping[str, str] | None) -> tuple[tuple[str, str], ...]:
+    """Normalize options mapping into a deterministic, hashable tuple."""
+    if not options:
+        return ()
+    return tuple(sorted(((key, value) for key, value in options.items()), key=lambda kv: kv[0]))
 
 
 # TODO: just checking, do we have any issues reusing transformers, i mean they
@@ -117,5 +136,7 @@ class TransformerPool:
 
 __all__ = [
     "AudioTransformer",
+    "TransformKey",
     "TransformerPool",
+    "normalize_options",
 ]

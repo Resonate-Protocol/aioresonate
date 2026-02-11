@@ -21,7 +21,7 @@ def _make_client_stub() -> MagicMock:
     client.info.artwork_support = None
     client.send_message = MagicMock()
     client.send_role_message = MagicMock()
-    client.try_send_binary = MagicMock(return_value=True)
+    client.send_binary = MagicMock(return_value=True)
     client._logger = MagicMock()  # noqa: SLF001
     return client
 
@@ -116,7 +116,7 @@ def test_artwork_role_sends_stream_start_on_connect_with_transport() -> None:
     client.info.artwork_support = support
 
     role = ArtworkV1Role(client=client)
-    role._has_transport = True  # noqa: SLF001
+    role._client.connection = MagicMock()  # noqa: SLF001
     role.on_connect()
 
     client.send_role_message.assert_called()
@@ -130,12 +130,12 @@ def test_artwork_role_send_artwork() -> None:
     """send_artwork() sends binary message with header and image data."""
     client = _make_client_stub()
     role = ArtworkV1Role(client=client)
-    role._has_transport = True  # noqa: SLF001
+    role._client.connection = MagicMock()  # noqa: SLF001
 
     role.send_artwork(channel=0, image_data=b"image", timestamp_us=1000)
 
-    client.try_send_binary.assert_called_once()
-    kwargs = client.try_send_binary.call_args.kwargs
+    client.send_binary.assert_called_once()
+    kwargs = client.send_binary.call_args.kwargs
     assert kwargs["role_family"] == "artwork"
     assert kwargs["timestamp_us"] == 1000
     assert kwargs["message_type"] == 8  # ARTWORK_CHANNEL_0
@@ -145,12 +145,12 @@ def test_artwork_role_send_artwork_cleared() -> None:
     """send_artwork_cleared() sends empty binary message."""
     client = _make_client_stub()
     role = ArtworkV1Role(client=client)
-    role._has_transport = True  # noqa: SLF001
+    role._client.connection = MagicMock()  # noqa: SLF001
 
     role.send_artwork_cleared(channel=1, timestamp_us=2000)
 
-    client.try_send_binary.assert_called_once()
-    kwargs = client.try_send_binary.call_args.kwargs
+    client.send_binary.assert_called_once()
+    kwargs = client.send_binary.call_args.kwargs
     assert kwargs["message_type"] == 9  # ARTWORK_CHANNEL_1
 
 
@@ -158,11 +158,11 @@ def test_artwork_role_send_artwork_noop_without_transport() -> None:
     """send_artwork() is a no-op when no transport."""
     client = _make_client_stub()
     role = ArtworkV1Role(client=client)
-    role._has_transport = False  # noqa: SLF001
+    role._client.connection = None  # noqa: SLF001
 
     role.send_artwork(channel=0, image_data=b"image", timestamp_us=1000)
 
-    client.try_send_binary.assert_not_called()
+    client.send_binary.assert_not_called()
 
 
 def test_artwork_role_has_no_audio_requirements() -> None:

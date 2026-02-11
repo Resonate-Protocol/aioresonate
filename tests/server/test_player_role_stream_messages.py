@@ -17,7 +17,7 @@ def test_player_role_on_stream_clear_uses_role_family() -> None:
     client.send_role_message = MagicMock()
 
     role = PlayerV1Role(client=client)
-    role._has_transport = True  # noqa: SLF001
+    role._client.connection = MagicMock()  # noqa: SLF001
     role._buffer_tracker = None  # noqa: SLF001
     role.on_stream_clear()
 
@@ -32,7 +32,7 @@ def test_player_role_on_stream_end_uses_role_family() -> None:
     client.send_role_message = MagicMock()
 
     role = PlayerV1Role(client=client)
-    role._has_transport = True  # noqa: SLF001
+    role._client.connection = MagicMock()  # noqa: SLF001
     role._buffer_tracker = None  # noqa: SLF001
     role.on_stream_end()
 
@@ -59,7 +59,7 @@ def test_player_role_on_audio_chunk_packs_header_and_tracks_duration() -> None:
     sent: list[bytes] = []
     client = MagicMock()
 
-    def _try_send_binary(
+    def _send_binary(
         data: bytes,
         *,
         role_family: str,  # noqa: ARG001
@@ -74,7 +74,7 @@ def test_player_role_on_audio_chunk_packs_header_and_tracks_duration() -> None:
             tracker.register(buffer_end_time_us, buffer_byte_count)
         return True
 
-    client.try_send_binary = MagicMock(side_effect=_try_send_binary)
+    client.send_binary = MagicMock(side_effect=_send_binary)
     client.send_role_message = MagicMock()
 
     role = PlayerV1Role(client=client)
@@ -86,7 +86,7 @@ def test_player_role_on_audio_chunk_packs_header_and_tracks_duration() -> None:
     chunk = AudioChunk(
         data=payload, timestamp_us=timestamp_us, duration_us=duration_us, byte_count=byte_count
     )
-    assert role.on_audio_chunk(chunk)
+    assert role.on_audio_chunk(chunk) is None
     assert sent, "Expected a binary send"
 
     header = unpack_binary_header(sent[0])
@@ -103,7 +103,7 @@ def test_player_role_on_stream_start_drops_without_transport() -> None:
     client.send_role_message = MagicMock()
 
     role = PlayerV1Role(client=client)
-    role._has_transport = False  # noqa: SLF001
+    role._client.connection = None  # noqa: SLF001
     role._audio_requirements = AudioRequirements(  # noqa: SLF001
         sample_rate=48000,
         bit_depth=16,
@@ -122,7 +122,7 @@ def test_player_role_on_stream_clear_drops_without_transport() -> None:
     client.send_role_message = MagicMock()
 
     role = PlayerV1Role(client=client)
-    role._has_transport = False  # noqa: SLF001
+    role._client.connection = None  # noqa: SLF001
 
     role.on_stream_clear()
 
@@ -135,7 +135,7 @@ def test_player_role_on_stream_end_drops_without_transport() -> None:
     client.send_role_message = MagicMock()
 
     role = PlayerV1Role(client=client)
-    role._has_transport = False  # noqa: SLF001
+    role._client.connection = None  # noqa: SLF001
 
     role.on_stream_end()
 
@@ -149,10 +149,10 @@ def test_player_role_on_stream_start_sets_pending_flag() -> None:
     """on_stream_start() sets pending flag, message sent on first chunk."""
     client = MagicMock()
     client.send_role_message = MagicMock()
-    client.try_send_binary = MagicMock(return_value=True)
+    client.send_binary = MagicMock(return_value=True)
 
     role = PlayerV1Role(client=client)
-    role._has_transport = True  # noqa: SLF001
+    role._client.connection = MagicMock()  # noqa: SLF001
     role._audio_requirements = AudioRequirements(  # noqa: SLF001
         sample_rate=48000,
         bit_depth=16,
@@ -178,16 +178,16 @@ def test_player_role_on_stream_start_sets_pending_flag() -> None:
     assert role._pending_stream_start is False  # noqa: SLF001
 
 
-def test_player_role_on_audio_chunk_returns_true() -> None:
-    """on_audio_chunk() returns True when chunk sent successfully."""
+def test_player_role_on_audio_chunk_sends_binary() -> None:
+    """on_audio_chunk() sends a chunk when connection is present."""
     client = MagicMock()
-    client.try_send_binary.return_value = True
+    client.send_binary.return_value = True
 
     role = PlayerV1Role(client=client)
-    role._has_transport = True  # noqa: SLF001
+    role._client.connection = MagicMock()  # noqa: SLF001
 
     chunk = AudioChunk(data=b"audio", timestamp_us=1000, duration_us=25000, byte_count=5)
     result = role.on_audio_chunk(chunk)
 
-    assert result is True
-    client.try_send_binary.assert_called_once()
+    assert result is None
+    client.send_binary.assert_called_once()

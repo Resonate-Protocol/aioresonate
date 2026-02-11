@@ -8,9 +8,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from aiosendspin.models.types import RepeatMode
+from aiosendspin.server.events import GroupRoleEvent
 
 
-class ControllerEvent:
+class ControllerEvent(GroupRoleEvent):
     """Base event type for controller commands."""
 
 

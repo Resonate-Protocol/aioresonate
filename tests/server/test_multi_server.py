@@ -72,7 +72,7 @@ class _DummyConnection:
     def send_role_message(self, role: str, message: ServerMessage) -> None:  # noqa: ARG002
         self.sent_messages.append(message)
 
-    def try_send_binary(
+    def send_binary(
         self,
         data: bytes,  # noqa: ARG002
         *,

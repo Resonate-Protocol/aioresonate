@@ -14,6 +14,8 @@ from aiosendspin.server.roles.metadata.state import Metadata
 if TYPE_CHECKING:
     from aiosendspin.server.group import SendspinGroup
 
+_UNSET = object()
+
 
 class MetadataGroupRole(GroupRole):
     """Coordinate metadata across a group.
@@ -122,111 +124,59 @@ class MetadataGroupRole(GroupRole):
             state_message = ServerStateMessage(ServerStatePayload(metadata=metadata_update))
             role.send_message(state_message)
 
-    # TODO: consider single method with optional kwargs instead of split methods
-    def set_title(self, title: str | None) -> None:
-        """Update title field."""
-        self._update_field("title", title)
-
-    def set_artist(self, artist: str | None) -> None:
-        """Update artist field."""
-        self._update_field("artist", artist)
-
-    def set_album_artist(self, album_artist: str | None) -> None:
-        """Update album_artist field."""
-        self._update_field("album_artist", album_artist)
-
-    def set_album(self, album: str | None) -> None:
-        """Update album field."""
-        self._update_field("album", album)
-
-    def set_artwork_url(self, url: str | None) -> None:
-        """Update artwork_url field."""
-        self._update_field("artwork_url", url)
-
-    def set_year(self, year: int | None) -> None:
-        """Update year field."""
-        self._update_field("year", year)
-
-    def set_track(self, track: int | None) -> None:
-        """Update track field."""
-        self._update_field("track", track)
-
-    def set_repeat(self, mode: RepeatMode | None) -> None:
-        """Update repeat mode."""
-        self._update_field("repeat", mode)
-
-    def set_shuffle(self, shuffle: bool | None) -> None:  # noqa: FBT001
-        """Update shuffle state."""
-        self._update_field("shuffle", shuffle)
-
-    def set_progress(
-        self,
-        track_progress_ms: int,
-        track_duration_ms: int,
-        playback_speed: int = 1000,
-    ) -> None:
-        """Update progress fields.
-
-        Args:
-            track_progress_ms: Current track progress in milliseconds.
-            track_duration_ms: Track duration in milliseconds (0 for live streams).
-            playback_speed: Playback speed * 1000 (e.g., 1000 = 1x, 1500 = 1.5x, 0 = paused).
-        """
-        current = self._current_metadata or Metadata()
-        new_metadata = replace(
-            current,
-            track_progress=track_progress_ms,
-            track_duration=track_duration_ms,
-            playback_speed=playback_speed,
-        )
-        self.set_metadata(new_metadata)
-
-    # TODO: use SENTINEL pattern to support partial updates (see HA entity registry)
     def update(  # noqa: PLR0913
         self,
         *,
-        title: str | None = None,
-        artist: str | None = None,
-        album_artist: str | None = None,
-        album: str | None = None,
-        artwork_url: str | None = None,
-        year: int | None = None,
-        track: int | None = None,
-        repeat: RepeatMode | None = None,
-        shuffle: bool | None = None,
-        track_progress: int | None = None,
-        track_duration: int | None = None,
-        playback_speed: int | None = None,
+        title: str | None | object = _UNSET,
+        artist: str | None | object = _UNSET,
+        album_artist: str | None | object = _UNSET,
+        album: str | None | object = _UNSET,
+        artwork_url: str | None | object = _UNSET,
+        year: int | None | object = _UNSET,
+        track: int | None | object = _UNSET,
+        repeat: RepeatMode | None | object = _UNSET,
+        shuffle: bool | None | object = _UNSET,
+        track_progress: int | None | object = _UNSET,
+        track_duration: int | None | object = _UNSET,
+        playback_speed: int | None | object = _UNSET,
     ) -> None:
         """Batch update multiple metadata fields.
 
-        Only fields with non-None values will be updated.
+        Fields set to `_UNSET` are left unchanged. Passing `None` clears a field.
         """
         current = self._current_metadata or Metadata()
-        new_metadata = Metadata(
-            title=title if title is not None else current.title,
-            artist=artist if artist is not None else current.artist,
-            album_artist=album_artist if album_artist is not None else current.album_artist,
-            album=album if album is not None else current.album,
-            artwork_url=artwork_url if artwork_url is not None else current.artwork_url,
-            year=year if year is not None else current.year,
-            track=track if track is not None else current.track,
-            repeat=repeat if repeat is not None else current.repeat,
-            shuffle=shuffle if shuffle is not None else current.shuffle,
-            track_progress=track_progress if track_progress is not None else current.track_progress,
-            track_duration=track_duration if track_duration is not None else current.track_duration,
-            playback_speed=playback_speed if playback_speed is not None else current.playback_speed,
-        )
+        kwargs: dict[str, object] = {}
+        if title is not _UNSET:
+            kwargs["title"] = title
+        if artist is not _UNSET:
+            kwargs["artist"] = artist
+        if album_artist is not _UNSET:
+            kwargs["album_artist"] = album_artist
+        if album is not _UNSET:
+            kwargs["album"] = album
+        if artwork_url is not _UNSET:
+            kwargs["artwork_url"] = artwork_url
+        if year is not _UNSET:
+            kwargs["year"] = year
+        if track is not _UNSET:
+            kwargs["track"] = track
+        if repeat is not _UNSET:
+            kwargs["repeat"] = repeat
+        if shuffle is not _UNSET:
+            kwargs["shuffle"] = shuffle
+        if track_progress is not _UNSET:
+            kwargs["track_progress"] = track_progress
+        if track_duration is not _UNSET:
+            kwargs["track_duration"] = track_duration
+        if playback_speed is not _UNSET:
+            kwargs["playback_speed"] = playback_speed
+
+        if not kwargs:
+            return
+
+        new_metadata = replace(current, **kwargs)  # type: ignore[arg-type]
         self.set_metadata(new_metadata)
 
     def clear(self) -> None:
         """Clear all metadata."""
         self.set_metadata(None)
-
-    def _update_field(self, field: str, value: object) -> None:
-        """Update a single metadata field."""
-        current = self._current_metadata or Metadata()
-        # Use explicit field mapping to satisfy type checker
-        kwargs: dict[str, object] = {field: value}
-        new_metadata = replace(current, **kwargs)  # type: ignore[arg-type]
-        self.set_metadata(new_metadata)

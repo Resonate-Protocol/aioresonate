@@ -26,7 +26,7 @@ def _make_artwork_client_stub() -> MagicMock:
     client.info = MagicMock()
     client.info.artwork_support = None
     client.send_message = MagicMock()
-    client.try_send_binary = MagicMock(return_value=True)
+    client.send_binary = MagicMock(return_value=True)
     client._logger = MagicMock()  # noqa: SLF001
     return client
 
@@ -35,11 +35,11 @@ def _make_player_client_stub() -> MagicMock:
     client = MagicMock()
     state_store: dict[str, object] = {}
 
-    def ensure_role_state(family: str, cls: type[object]) -> object:
+    def get_or_create_role_state(family: str, cls: type[object]) -> object:
         state_store.setdefault(family, cls())
         return state_store[family]
 
-    client.ensure_role_state.side_effect = ensure_role_state
+    client.get_or_create_role_state.side_effect = get_or_create_role_state
     client.info = MagicMock()
     client.info.player_support = None
     client.group = MagicMock()

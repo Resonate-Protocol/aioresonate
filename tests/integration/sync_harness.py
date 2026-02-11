@@ -58,7 +58,7 @@ class CaptureConnection:
         """Record outbound role-scoped JSON messages."""
         self.events.append(Event(kind="json", payload=message))
 
-    def try_send_binary(
+    def send_binary(
         self,
         data: bytes,
         *,

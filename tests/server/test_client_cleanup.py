@@ -35,7 +35,7 @@ class _DummyConnection:
     def send_message(self, message: object) -> None:  # noqa: ARG002
         return
 
-    def try_send_binary(
+    def send_binary(
         self,
         data: bytes,  # noqa: ARG002
         *,

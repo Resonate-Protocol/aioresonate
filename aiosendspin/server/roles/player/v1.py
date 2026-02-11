@@ -28,7 +28,7 @@ from aiosendspin.models.core import (
     StreamStartPayload,
 )
 from aiosendspin.models.player import PlayerCommandPayload, StreamStartPlayer, SupportedAudioFormat
-from aiosendspin.models.types import GoodbyeReason, PlayerCommand
+from aiosendspin.models.types import PlayerCommand
 from aiosendspin.server.audio import AudioFormat, BufferTracker
 from aiosendspin.server.roles.base import (
     AudioChunk,
@@ -95,7 +95,6 @@ class PlayerV1Role(Role):
         self._client = client
         self._preferred_format_override = preferred_format
         self._audio_requirements = audio_requirements
-        self._has_transport = False
         self._stream_started = False
         self._buffer_tracker = None
         # Initialize timing state for binary handling
@@ -199,28 +198,13 @@ class PlayerV1Role(Role):
         self._ensure_audio_requirements(state)
 
     def on_disconnect(self) -> None:
-        """Clean up and unsubscribe from PlayerGroupRole."""
+        """Clean up, apply delayed buffer reset policy, and unsubscribe from PlayerGroupRole."""
         self._unsubscribe_from_group_role()
         self._stream_started = False
-
-    def requires_initial_state(self) -> bool:
-        """Player role requires initial state with volume/mute info."""
-        return True
-
-    def on_transport_detach(self, goodbye_reason: GoodbyeReason | None = None) -> None:
-        """Handle transport detach with buffer reset policy."""
-        super().on_transport_detach(goodbye_reason)
 
         state = self._state()
         state.disconnect_time_us = self._client._server.clock.now_us()  # noqa: SLF001
         if state.buffer_tracker is None:
-            return
-
-        # Policy:
-        # - client/goodbye => reset immediately
-        # - ungraceful disconnect => delayed reset to tolerate brief blips
-        if goodbye_reason is not None:
-            state.buffer_tracker.reset()
             return
 
         disconnect_time_us = state.disconnect_time_us
@@ -241,6 +225,10 @@ class PlayerV1Role(Role):
         state.buffer_reset_handle = self._client._server.loop.call_later(  # noqa: SLF001
             reset_after_s, _maybe_reset
         )
+
+    def requires_initial_state(self) -> bool:
+        """Player role requires initial state with volume/mute info."""
+        return True
 
     def on_group_changed(self, group: object) -> None:
         """Refresh transformer selection when group changes."""
@@ -271,7 +259,7 @@ class PlayerV1Role(Role):
         if req is None:
             return
 
-        if not self._has_transport:
+        if not self.has_connection():
             return
 
         self._pending_stream_start = True
@@ -279,7 +267,7 @@ class PlayerV1Role(Role):
     def _send_stream_start_message(self) -> None:
         """Send stream/start message with codec header from transformer."""
         req = self.get_audio_requirements()
-        if req is None or not self._has_transport:
+        if req is None or not self.has_connection():
             return
 
         transformer = req.transformer
@@ -313,7 +301,7 @@ class PlayerV1Role(Role):
         if is_initial and self._buffer_tracker is not None:
             self._buffer_tracker.set_send_blocked(200_000)
 
-    def on_audio_chunk(self, chunk: AudioChunk) -> bool:
+    def on_audio_chunk(self, chunk: AudioChunk) -> None:
         """Pack and send binary audio. Late audio is discarded by connection."""
         # Send deferred stream/start on first chunk (ensures encoder header is available)
         if self._pending_stream_start:
@@ -326,7 +314,7 @@ class PlayerV1Role(Role):
         packed_data = header + chunk.data
         chunk_end_us = chunk.timestamp_us + chunk.duration_us
 
-        return self._client.try_send_binary(
+        self._client.send_binary(
             packed_data,
             role_family=self.role_family,
             timestamp_us=chunk.timestamp_us,
@@ -338,7 +326,7 @@ class PlayerV1Role(Role):
 
     def on_stream_clear(self) -> None:
         """Send stream/clear and reset state."""
-        if not self._has_transport:
+        if not self.has_connection():
             return
 
         stream_clear = StreamClearMessage(payload=StreamClearPayload(roles=["player"]))
@@ -352,7 +340,7 @@ class PlayerV1Role(Role):
 
     def on_stream_end(self) -> None:
         """Send stream/end and reset state."""
-        if not self._has_transport:
+        if not self.has_connection():
             return
 
         # End all streams (roles omitted) for best client compatibility.
@@ -608,7 +596,9 @@ class PlayerV1Role(Role):
 
     def _state(self) -> PlayerPersistentState:
         if self._cached_state is None:
-            self._cached_state = self._client.ensure_role_state("player", PlayerPersistentState)
+            self._cached_state = self._client.get_or_create_role_state(
+                "player", PlayerPersistentState
+            )
         return self._cached_state
 
     def _ensure_buffer_tracker(self, state: PlayerPersistentState) -> None:

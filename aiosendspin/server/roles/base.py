@@ -23,10 +23,11 @@ if TYPE_CHECKING:
         ClientStatePayload,
         StreamRequestFormatPayload,
     )
-    from aiosendspin.models.types import ClientStateType, GoodbyeReason, ServerMessage
+    from aiosendspin.models.types import ClientStateType, ServerMessage
     from aiosendspin.server.audio import BufferTracker
     from aiosendspin.server.audio_transformers import AudioTransformer
     from aiosendspin.server.client import SendspinClient
+    from aiosendspin.server.events import GroupRoleEvent
     from aiosendspin.server.group import SendspinGroup
 
 
@@ -123,6 +124,10 @@ class GroupRole(ABC):
     def on_client_removed(self, client: SendspinClient) -> None:  # noqa: B027
         """Handle a client being removed from this group."""
 
+    def emit_group_event(self, event: GroupRoleEvent) -> None:
+        """Emit a GroupRole event on the owning group's event stream."""
+        self._group._signal_event(event)  # noqa: SLF001
+
     def get_group_volume(self) -> int | None:
         """Return group volume (0-100) if supported."""
         return None
@@ -186,9 +191,6 @@ class Role(ABC):
 
     _stream_started: bool = False
     """Whether stream/start has been sent for this role."""
-
-    _has_transport: bool = False
-    """Whether this role has an active WebSocket transport."""
 
     _group_role: GroupRole | None = None
     """Reference to the subscribed GroupRole, if any."""
@@ -285,9 +287,13 @@ class Role(ABC):
 
     # --- Framework-provided send methods ---
 
+    def has_connection(self) -> bool:
+        """Return True when the client currently has an active transport."""
+        return self._client.connection is not None
+
     def send_message(self, message: ServerMessage) -> None:
         """Send JSON message to the client. Drop silently if no transport."""
-        if not self._has_transport:
+        if not self.has_connection():
             return
         self._client.send_role_message(self.role_family, message)
 
@@ -296,9 +302,8 @@ class Role(ABC):
     def on_stream_start(self) -> None:  # noqa: B027
         """Handle stream start before first audio chunk."""
 
-    def on_audio_chunk(self, chunk: AudioChunk) -> bool:  # noqa: ARG002
-        """Receive audio chunk. Return True if accepted, False for backpressure."""
-        return True
+    def on_audio_chunk(self, chunk: AudioChunk) -> None:  # noqa: B027
+        """Receive audio chunk."""
 
     def on_stream_clear(self) -> None:  # noqa: B027
         """Handle seek/clear by discarding buffered audio."""
@@ -307,14 +312,6 @@ class Role(ABC):
         """Handle stream stop."""
 
     # --- Lifecycle hooks ---
-
-    def on_transport_attach(self) -> None:
-        """Handle WebSocket connect/reconnect."""
-        self._has_transport = True
-
-    def on_transport_detach(self, _goodbye_reason: GoodbyeReason | None = None) -> None:
-        """Handle WebSocket disconnect."""
-        self._has_transport = False
 
     @abstractmethod
     def on_connect(self) -> None:
