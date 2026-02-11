@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import TYPE_CHECKING
 
-from aiosendspin.server.audio import AudioFormat, _get_av, _resolve_audio_format
+from aiosendspin.server.audio import AudioFormat, _get_av
 
 if TYPE_CHECKING:
     import av
@@ -189,9 +189,7 @@ class FlacEncoder:
             bit_depth=self._bit_depth,
             channels=self._channels,
         )
-        _, self._av_format, self._av_layout, av_bytes_per_sample = _resolve_audio_format(
-            audio_format
-        )
+        _, self._av_format, self._av_layout, av_bytes_per_sample = audio_format.resolve_av_format()
         self._frame_stride = av_bytes_per_sample * self._channels
 
         self._encoder = av.AudioCodecContext.create("flac", "w")

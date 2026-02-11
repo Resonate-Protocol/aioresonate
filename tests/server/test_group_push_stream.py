@@ -91,6 +91,33 @@ class TestGroupStartStream:
 
         assert stream.is_stopped
 
+    def test_group_stop_stream_clears_stream_reference(
+        self,
+        mock_server: MagicMock,
+        mock_client: MagicMock,
+    ) -> None:
+        """stop_stream() should clear the group's PushStream reference."""
+        group = SendspinGroup(mock_server, mock_client)
+        group.start_stream()
+
+        group.stop_stream()
+
+        assert group._push_stream is None  # noqa: SLF001
+
+    @pytest.mark.asyncio
+    async def test_group_stop_clears_stream_reference(
+        self,
+        mock_server: MagicMock,
+        mock_client: MagicMock,
+    ) -> None:
+        """stop() should clear the group's PushStream reference."""
+        group = SendspinGroup(mock_server, mock_client)
+        group.start_stream()
+
+        await group.stop()
+
+        assert group._push_stream is None  # noqa: SLF001
+
     def test_multiple_start_stream_returns_new_instances(
         self,
         mock_server: MagicMock,
@@ -251,6 +278,25 @@ class TestRoleJoinWithActiveStream:
             await group.add_client(mock_player_client)
 
             mock_on_role_join.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_remove_client_uses_role_stream_end_hook(
+        self,
+        mock_server: MagicMock,
+        mock_owner_client: MagicMock,
+        mock_player_client: MagicMock,
+    ) -> None:
+        """remove_client() should call role.on_stream_end() for removed client roles."""
+        group = SendspinGroup(mock_server, mock_owner_client)
+        await group.add_client(mock_player_client)
+        group.start_stream()
+
+        role = mock_player_client.active_roles[0]
+        role.on_stream_end.reset_mock()
+
+        await group.remove_client(mock_player_client)
+
+        role.on_stream_end.assert_called_once()
 
 
 class TestGroupTransformerPool:

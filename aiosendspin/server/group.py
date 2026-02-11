@@ -13,8 +13,6 @@ from uuid import UUID
 from aiosendspin.models.core import (
     GroupUpdateServerMessage,
     GroupUpdateServerPayload,
-    StreamEndMessage,
-    StreamEndPayload,
 )
 from aiosendspin.models.types import PlaybackStateType
 from aiosendspin.server.events import (
@@ -159,9 +157,8 @@ class SendspinGroup:
         Does nothing if no stream is active.
         """
         if self._push_stream is not None:
-            # TODO: does this fully reset the stream state? should
-            # we maybe delete it and recreate on next start?
             self._push_stream.stop()
+            self._push_stream = None
 
     def on_role_format_changed(self, role: Role) -> None:
         """Notify PushStream that a role's audio format changed mid-stream."""
@@ -198,17 +195,6 @@ class SendspinGroup:
             for role in client.active_roles:
                 if role.get_audio_requirements() is not None:
                     self._push_stream.on_role_join(role)
-
-    # TODO: why do we need this at all? why isn't it handled by roles themselves?
-    def _send_stream_end_msg(self, client: SendspinClient, roles: list[str] | None = None) -> None:
-        """Send a stream end message to a client.
-
-        Args:
-            client: The client to send the message to.
-            roles: Optional list of roles to end streams for. If None, ends all streams.
-        """
-        logger.debug("ending stream for %s (%s), roles=%s", client.name, client.client_id, roles)
-        client.send_message(StreamEndMessage(payload=StreamEndPayload(roles=roles)))
 
     # TODO: potentially delete with stop() discussion/todo
     def _schedule_delayed_stop(self, stop_time_us: int, active: bool, needs_cleanup: bool) -> bool:  # noqa: FBT001
@@ -311,6 +297,7 @@ class SendspinGroup:
             # Stop the push stream if active
             if self._push_stream is not None:
                 self._push_stream.stop()
+                self._push_stream = None
 
             if self._current_state != PlaybackStateType.STOPPED:
                 self._signal_event(GroupStateChangedEvent(PlaybackStateType.STOPPED))
@@ -430,16 +417,11 @@ class SendspinGroup:
             self._clients = []
         else:
             self._clients.remove(client)
-            # TODO: do we need to manually handle this? any alternative?
             # End the stream for the removed client via role hooks
-            handled = False
             for role in client.active_roles:
                 role.on_stream_end()
                 if self._push_stream is not None and not self._push_stream.is_stopped:
                     self._push_stream.on_role_leave(role)
-                handled = True
-            if not handled:
-                self._send_stream_end_msg(client)
         if not self._clients:
             # Emit event for group deletion, no clients left
             self._signal_event(GroupDeletedEvent())

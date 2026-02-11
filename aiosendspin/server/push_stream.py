@@ -14,7 +14,6 @@ from aiosendspin.server.audio import (
     AudioFormat,
     _convert_s32_to_s24,
     _get_av,
-    _resolve_audio_format,
 )
 from aiosendspin.server.audio_transformers import TransformKey, normalize_options
 from aiosendspin.server.channels import MAIN_CHANNEL
@@ -122,11 +121,11 @@ def _create_resampler_state(
     """Create a new resampler state. Thread-safe (no shared state)."""
     av = _get_av()
 
-    _source_wire_bytes, source_av_format, source_layout, _source_av_bytes = _resolve_audio_format(
-        source_format
+    _source_wire_bytes, source_av_format, source_layout, _source_av_bytes = (
+        source_format.resolve_av_format()
     )
-    target_wire_bytes, target_av_format, target_layout, target_av_bytes = _resolve_audio_format(
-        target_format
+    target_wire_bytes, target_av_format, target_layout, target_av_bytes = (
+        target_format.resolve_av_format()
     )
 
     resampler = av.AudioResampler(

@@ -18,9 +18,9 @@ def _expected_s24_samples() -> bytes:
 
 def test_resolve_audio_format_24_bit_uses_s32_in_pyav() -> None:
     """24-bit wire format should map to s32 for PyAV processing."""
-    wire_bytes, av_format, layout, av_bytes = _resolve_audio_format(
-        AudioFormat(sample_rate=48_000, bit_depth=24, channels=2)
-    )
+    wire_bytes, av_format, layout, av_bytes = AudioFormat(
+        sample_rate=48_000, bit_depth=24, channels=2
+    ).resolve_av_format()
     assert wire_bytes == 3
     assert av_format == "s32"
     assert layout == "stereo"
@@ -29,13 +29,19 @@ def test_resolve_audio_format_24_bit_uses_s32_in_pyav() -> None:
 
 def test_resolve_audio_format_32_bit_is_supported() -> None:
     """32-bit PCM should be supported by resolver."""
-    wire_bytes, av_format, layout, av_bytes = _resolve_audio_format(
-        AudioFormat(sample_rate=44_100, bit_depth=32, channels=1)
-    )
+    wire_bytes, av_format, layout, av_bytes = AudioFormat(
+        sample_rate=44_100, bit_depth=32, channels=1
+    ).resolve_av_format()
     assert wire_bytes == 4
     assert av_format == "s32"
     assert layout == "mono"
     assert av_bytes == 4
+
+
+def test_resolve_audio_format_wrapper_delegates() -> None:
+    """Compatibility helper should delegate to AudioFormat.resolve_av_format()."""
+    audio_format = AudioFormat(sample_rate=44_100, bit_depth=16, channels=2)
+    assert _resolve_audio_format(audio_format) == audio_format.resolve_av_format()
 
 
 def test_convert_s32_to_s24_drops_least_significant_byte_python_impl(

@@ -240,6 +240,52 @@ class TestTransformerPool:
         )
         assert t1 is not t2
 
+    def test_get_or_create_reuses_instance_for_identical_kwargs(self) -> None:
+        """Pool reuses instances when constructor kwargs are identical."""
+        pool = TransformerPool()
+        t1 = pool.get_or_create(
+            PcmPassthrough,
+            channel_id=MAIN_CHANNEL.int,
+            sample_rate=48000,
+            bit_depth=16,
+            channels=2,
+            frame_duration_us=25_000,
+            options={"endianness": "little"},
+        )
+        t2 = pool.get_or_create(
+            PcmPassthrough,
+            channel_id=MAIN_CHANNEL.int,
+            sample_rate=48000,
+            bit_depth=16,
+            channels=2,
+            frame_duration_us=25_000,
+            options={"endianness": "little"},
+        )
+        assert t1 is t2
+
+    def test_get_or_create_uses_kwargs_in_pool_key(self) -> None:
+        """Pool creates distinct instances when constructor kwargs differ."""
+        pool = TransformerPool()
+        t1 = pool.get_or_create(
+            PcmPassthrough,
+            channel_id=MAIN_CHANNEL.int,
+            sample_rate=48000,
+            bit_depth=16,
+            channels=2,
+            frame_duration_us=25_000,
+            options={"endianness": "little"},
+        )
+        t2 = pool.get_or_create(
+            PcmPassthrough,
+            channel_id=MAIN_CHANNEL.int,
+            sample_rate=48000,
+            bit_depth=16,
+            channels=2,
+            frame_duration_us=25_000,
+            options={"endianness": "big"},
+        )
+        assert t1 is not t2
+
     def test_reset_all_calls_reset_on_all_transformers(self) -> None:
         """Pool reset_all calls reset on every transformer."""
         reset_counts: list[int] = []

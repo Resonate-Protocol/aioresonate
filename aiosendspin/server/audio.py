@@ -53,6 +53,44 @@ class AudioFormat:
     channels: int
     """Number of audio channels (1 for mono, 2 for stereo)."""
 
+    def resolve_av_format(self) -> tuple[int, str, str, int]:
+        """Resolve helper data for this audio format.
+
+        Returns:
+            A tuple of (wire_bytes_per_sample, av_format, layout, av_bytes_per_sample) where:
+            - wire_bytes_per_sample: Number of bytes per audio sample on the wire
+            - av_format: PyAV sample format string ("s16" or "s32")
+            - layout: Channel layout string ("mono" or "stereo")
+            - av_bytes_per_sample: Number of bytes per sample produced/consumed by PyAV
+
+        Raises:
+            ValueError: If bit_depth is not 16/24/32, or channels is not 1 or 2.
+        """
+        if self.bit_depth == 16:
+            wire_bytes_per_sample = 2
+            av_format = "s16"
+            av_bytes_per_sample = 2
+        elif self.bit_depth == 24:
+            # PyAV does not support packed s24 sample format; use s32 and convert if needed.
+            wire_bytes_per_sample = 3
+            av_format = "s32"
+            av_bytes_per_sample = 4
+        elif self.bit_depth == 32:
+            wire_bytes_per_sample = 4
+            av_format = "s32"
+            av_bytes_per_sample = 4
+        else:
+            raise ValueError("Only 16-bit, 24-bit, and 32-bit PCM are supported")
+
+        if self.channels == 1:
+            layout = "mono"
+        elif self.channels == 2:
+            layout = "stereo"
+        else:
+            raise ValueError("Only mono and stereo layouts are supported")
+
+        return wire_bytes_per_sample, av_format, layout, av_bytes_per_sample
+
 
 class BufferedChunk(NamedTuple):
     """Buffered chunk metadata tracked by BufferTracker for backpressure control."""
@@ -310,7 +348,6 @@ class BufferTracker:
         return self.blocked_until_us - now_us
 
 
-# TODO: maybe move to AudioFormat? as a helper method?
 def _resolve_audio_format(audio_format: AudioFormat) -> tuple[int, str, str, int]:
     """Resolve helper data for an audio format.
 
@@ -327,30 +364,7 @@ def _resolve_audio_format(audio_format: AudioFormat) -> tuple[int, str, str, int
     Raises:
         ValueError: If bit_depth is not 16/24/32, or channels is not 1 or 2.
     """
-    if audio_format.bit_depth == 16:
-        wire_bytes_per_sample = 2
-        av_format = "s16"
-        av_bytes_per_sample = 2
-    elif audio_format.bit_depth == 24:
-        # PyAV does not support packed s24 sample format; use s32 and convert if needed.
-        wire_bytes_per_sample = 3
-        av_format = "s32"
-        av_bytes_per_sample = 4
-    elif audio_format.bit_depth == 32:
-        wire_bytes_per_sample = 4
-        av_format = "s32"
-        av_bytes_per_sample = 4
-    else:
-        raise ValueError("Only 16-bit, 24-bit, and 32-bit PCM are supported")
-
-    if audio_format.channels == 1:
-        layout = "mono"
-    elif audio_format.channels == 2:
-        layout = "stereo"
-    else:
-        raise ValueError("Only mono and stereo layouts are supported")
-
-    return wire_bytes_per_sample, av_format, layout, av_bytes_per_sample
+    return audio_format.resolve_av_format()
 
 
 def _convert_s32_to_s24(data: bytes) -> bytes:
