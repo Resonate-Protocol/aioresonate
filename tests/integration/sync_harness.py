@@ -9,12 +9,12 @@ from uuid import UUID
 
 from aiosendspin.models.player import ClientHelloPlayerSupport, SupportedAudioFormat
 from aiosendspin.models.types import AudioCodec, PlayerCommand, Roles
-from aiosendspin.server.audio_transformers import FlacEncoder, PcmPassthrough
 from aiosendspin.server.channels import MAIN_CHANNEL, ChannelResolver
 from aiosendspin.server.client import SendspinClient
 from aiosendspin.server.clock import ManualClock
 from aiosendspin.server.group import SendspinGroup
 from aiosendspin.server.roles import AudioRequirements
+from aiosendspin.server.roles.player.audio_transformers import FlacEncoder, PcmPassthrough
 
 
 @dataclass(slots=True)

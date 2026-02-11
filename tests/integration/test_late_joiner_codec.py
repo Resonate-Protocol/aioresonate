@@ -12,12 +12,13 @@ from aiosendspin.models.core import StreamStartMessage
 from aiosendspin.models.player import ClientHelloPlayerSupport, SupportedAudioFormat
 from aiosendspin.models.types import AudioCodec, PlayerCommand, Roles
 from aiosendspin.server.audio import AudioFormat
-from aiosendspin.server.audio_transformers import FlacEncoder, PcmPassthrough, TransformerPool
+from aiosendspin.server.audio_transformers import TransformerPool
 from aiosendspin.server.channels import MAIN_CHANNEL
 from aiosendspin.server.client import SendspinClient
 from aiosendspin.server.clock import ManualClock
 from aiosendspin.server.push_stream import PushStream
 from aiosendspin.server.roles import AudioRequirements
+from aiosendspin.server.roles.player.audio_transformers import FlacEncoder, PcmPassthrough
 
 
 @dataclass(slots=True)
@@ -119,7 +120,7 @@ def _make_connected_player(
         if codec == AudioCodec.FLAC:
             transformer = group.transformer_pool.get_or_create(
                 FlacEncoder,
-                channel_id=MAIN_CHANNEL,
+                channel_id=MAIN_CHANNEL.int,
                 sample_rate=48000,
                 bit_depth=16,
                 channels=2,
@@ -128,7 +129,7 @@ def _make_connected_player(
         else:
             transformer = group.transformer_pool.get_or_create(
                 PcmPassthrough,
-                channel_id=MAIN_CHANNEL,
+                channel_id=MAIN_CHANNEL.int,
                 sample_rate=48000,
                 bit_depth=16,
                 channels=2,

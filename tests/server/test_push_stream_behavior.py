@@ -24,12 +24,13 @@ from aiosendspin.models.player import (
 )
 from aiosendspin.models.types import AudioCodec, PlayerCommand, Roles
 from aiosendspin.server.audio import AudioFormat
-from aiosendspin.server.audio_transformers import PcmPassthrough, TransformerPool
+from aiosendspin.server.audio_transformers import TransformerPool
 from aiosendspin.server.channels import MAIN_CHANNEL
 from aiosendspin.server.client import SendspinClient
 from aiosendspin.server.clock import LoopClock, ManualClock
 from aiosendspin.server.push_stream import CachedChunk, PushStream
 from aiosendspin.server.roles import AudioChunk, AudioRequirements
+from aiosendspin.server.roles.player.audio_transformers import PcmPassthrough
 
 
 @dataclass(slots=True)
@@ -176,7 +177,7 @@ def _make_connected_player(
     if role is not None:
         transformer = group.transformer_pool.get_or_create(
             PcmPassthrough,
-            channel_id=MAIN_CHANNEL,
+            channel_id=MAIN_CHANNEL.int,
             sample_rate=48000,
             bit_depth=16,
             channels=2,

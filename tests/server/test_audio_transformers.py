@@ -4,11 +4,10 @@ from __future__ import annotations
 
 from aiosendspin.server.audio_transformers import (
     AudioTransformer,
-    FlacEncoder,
-    PcmPassthrough,
     TransformerPool,
 )
 from aiosendspin.server.channels import MAIN_CHANNEL
+from aiosendspin.server.roles.player.audio_transformers import FlacEncoder, PcmPassthrough
 
 
 class TestAudioTransformerProtocol:
@@ -28,38 +27,12 @@ class TestAudioTransformerProtocol:
             def flush(self) -> list[bytes]:
                 return []
 
-            def get_header(self) -> bytes | None:
-                return None
-
             def reset(self) -> None:
                 pass
 
         # Should be recognized as implementing the protocol
         transformer: AudioTransformer = ValidTransformer()
         assert transformer.process(b"test", 0, 1000) == [b"test"]
-
-    def test_protocol_defines_get_header_method(self) -> None:
-        """AudioTransformer requires get_header() method."""
-
-        class TransformerWithHeader:
-            @property
-            def frame_duration_us(self) -> int:
-                return 25_000
-
-            def process(self, pcm: bytes, _timestamp_us: int, _duration_us: int) -> list[bytes]:
-                return [pcm]
-
-            def flush(self) -> list[bytes]:
-                return []
-
-            def get_header(self) -> bytes | None:
-                return b"header"
-
-            def reset(self) -> None:
-                pass
-
-        transformer: AudioTransformer = TransformerWithHeader()
-        assert transformer.get_header() == b"header"
 
     def test_protocol_defines_reset_method(self) -> None:
         """AudioTransformer requires reset() method."""
@@ -77,9 +50,6 @@ class TestAudioTransformerProtocol:
 
             def flush(self) -> list[bytes]:
                 return []
-
-            def get_header(self) -> bytes | None:
-                return None
 
             def reset(self) -> None:
                 self.reset_count += 1
@@ -102,9 +72,6 @@ class TestAudioTransformerProtocol:
             def flush(self) -> list[bytes]:
                 return []
 
-            def get_header(self) -> bytes | None:
-                return None
-
             def reset(self) -> None:
                 pass
 
@@ -124,9 +91,6 @@ class TestAudioTransformerProtocol:
 
             def flush(self) -> list[bytes]:
                 return [b"final"]
-
-            def get_header(self) -> bytes | None:
-                return None
 
             def reset(self) -> None:
                 pass
@@ -226,7 +190,7 @@ class TestTransformerPool:
         pool = TransformerPool()
         transformer = pool.get_or_create(
             PcmPassthrough,
-            channel_id=MAIN_CHANNEL,
+            channel_id=MAIN_CHANNEL.int,
             sample_rate=48000,
             bit_depth=16,
             channels=2,
@@ -239,7 +203,7 @@ class TestTransformerPool:
         pool = TransformerPool()
         t1 = pool.get_or_create(
             PcmPassthrough,
-            channel_id=MAIN_CHANNEL,
+            channel_id=MAIN_CHANNEL.int,
             sample_rate=48000,
             bit_depth=16,
             channels=2,
@@ -247,7 +211,7 @@ class TestTransformerPool:
         )
         t2 = pool.get_or_create(
             PcmPassthrough,
-            channel_id=MAIN_CHANNEL,
+            channel_id=MAIN_CHANNEL.int,
             sample_rate=48000,
             bit_depth=16,
             channels=2,
@@ -260,7 +224,7 @@ class TestTransformerPool:
         pool = TransformerPool()
         t1 = pool.get_or_create(
             PcmPassthrough,
-            channel_id=MAIN_CHANNEL,
+            channel_id=MAIN_CHANNEL.int,
             sample_rate=48000,
             bit_depth=16,
             channels=2,
@@ -268,7 +232,7 @@ class TestTransformerPool:
         )
         t2 = pool.get_or_create(
             PcmPassthrough,
-            channel_id=MAIN_CHANNEL,
+            channel_id=MAIN_CHANNEL.int,
             sample_rate=44100,
             bit_depth=16,
             channels=2,
@@ -304,7 +268,7 @@ class TestTransformerPool:
         pool = TransformerPool()
         pool.get_or_create(
             CountingTransformer,
-            channel_id=MAIN_CHANNEL,
+            channel_id=MAIN_CHANNEL.int,
             sample_rate=48000,
             bit_depth=16,
             channels=2,  # type: ignore[type-var]
@@ -312,7 +276,7 @@ class TestTransformerPool:
         )
         pool.get_or_create(
             CountingTransformer,
-            channel_id=MAIN_CHANNEL,
+            channel_id=MAIN_CHANNEL.int,
             sample_rate=44100,
             bit_depth=16,
             channels=2,  # type: ignore[type-var]

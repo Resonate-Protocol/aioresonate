@@ -283,7 +283,7 @@ class PlayerV1Role(Role):
             return
 
         transformer = req.transformer
-        header = transformer.get_header() if transformer else None
+        header = transformer.get_header() if isinstance(transformer, FlacEncoder) else None
         header_b64 = base64.b64encode(header).decode() if header else None
 
         # Determine codec from transformer type
@@ -692,11 +692,12 @@ class PlayerV1Role(Role):
         group = self._client.group
         frame_duration_us = 25_000
         channel_id = group.get_channel_for_player(self._client.client_id)
+        channel_id_int = channel_id.int
         transformer: FlacEncoder | OpusEncoder | PcmPassthrough
         if audio_codec == AudioCodec.FLAC:
             transformer = group.transformer_pool.get_or_create(
                 FlacEncoder,
-                channel_id=channel_id,
+                channel_id=channel_id_int,
                 sample_rate=audio_format.sample_rate,
                 bit_depth=audio_format.bit_depth,
                 channels=audio_format.channels,
@@ -705,7 +706,7 @@ class PlayerV1Role(Role):
         elif audio_codec == AudioCodec.OPUS:
             transformer = group.transformer_pool.get_or_create(
                 OpusEncoder,
-                channel_id=channel_id,
+                channel_id=channel_id_int,
                 sample_rate=audio_format.sample_rate,
                 bit_depth=audio_format.bit_depth,
                 channels=audio_format.channels,
@@ -714,7 +715,7 @@ class PlayerV1Role(Role):
         else:
             transformer = group.transformer_pool.get_or_create(
                 PcmPassthrough,
-                channel_id=channel_id,
+                channel_id=channel_id_int,
                 sample_rate=audio_format.sample_rate,
                 bit_depth=audio_format.bit_depth,
                 channels=audio_format.channels,

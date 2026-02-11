@@ -7,8 +7,8 @@ from unittest.mock import MagicMock
 from aiosendspin.models import AudioCodec, unpack_binary_header
 from aiosendspin.models.core import StreamClearMessage, StreamEndMessage, StreamStartMessage
 from aiosendspin.models.types import BinaryMessageType
-from aiosendspin.server.audio_transformers import PcmPassthrough
 from aiosendspin.server.roles import AudioChunk, AudioRequirements, PlayerV1Role
+from aiosendspin.server.roles.player.audio_transformers import PcmPassthrough
 
 
 def test_player_role_on_stream_clear_uses_role_family() -> None:

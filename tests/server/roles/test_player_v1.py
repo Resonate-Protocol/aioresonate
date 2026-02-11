@@ -9,9 +9,9 @@ from aiosendspin.models import AudioCodec, unpack_binary_header
 from aiosendspin.models.core import StreamClearMessage, StreamEndMessage, StreamStartMessage
 from aiosendspin.models.types import BinaryMessageType
 from aiosendspin.server.audio import AudioFormat
-from aiosendspin.server.audio_transformers import FlacEncoder, PcmPassthrough
 from aiosendspin.server.roles import PlayerV1Role
 from aiosendspin.server.roles.base import AudioChunk, AudioRequirements, StreamRequirements
+from aiosendspin.server.roles.player.audio_transformers import FlacEncoder, PcmPassthrough
 
 # --- Basic properties ---
 

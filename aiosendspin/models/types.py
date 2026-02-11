@@ -1,5 +1,7 @@
 """Models for enum types used by Sendspin."""
 
+from __future__ import annotations
+
 from dataclasses import dataclass
 from enum import Enum
 
@@ -22,6 +24,10 @@ class ClientMessage(DataClassORJSONMixin):
 @dataclass
 class ServerMessage(DataClassORJSONMixin):
     """Base class for server messages."""
+
+    def merge(self, _other: ServerMessage) -> ServerMessage | None:
+        """Merge two messages of the same type when safe, else return None."""
+        return None
 
     class Config(BaseConfig):
         """Config for parsing json messages."""

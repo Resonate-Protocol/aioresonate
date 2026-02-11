@@ -16,9 +16,9 @@ from aiosendspin.server.audio import (
     _get_av,
     _resolve_audio_format,
 )
-from aiosendspin.server.audio_transformers import PcmPassthrough
 from aiosendspin.server.channels import MAIN_CHANNEL
 from aiosendspin.server.roles import AudioChunk
+from aiosendspin.server.roles.player.audio_transformers import PcmPassthrough
 from aiosendspin.server.transform_keys import TransformKey, normalize_options
 from aiosendspin.util import create_task
 

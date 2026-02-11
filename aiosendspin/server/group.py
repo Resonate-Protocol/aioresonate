@@ -17,12 +17,8 @@ from aiosendspin.models.core import (
     StreamEndMessage,
     StreamEndPayload,
 )
-from aiosendspin.models.types import (
-    MediaCommand,
-    PlaybackStateType,
-)
+from aiosendspin.models.types import PlaybackStateType
 from aiosendspin.server.roles import GroupRole
-from aiosendspin.server.roles.controller.group import ControllerGroupRole
 from aiosendspin.server.roles.registry import create_group_roles
 from aiosendspin.util import create_task
 
@@ -437,49 +433,6 @@ class SendspinGroup:
     def state(self) -> PlaybackStateType:
         """Current playback state of the group."""
         return self._current_state
-
-    # TODO: delete volume/mute controls from here!
-    # they instead should use the player group role
-    @property
-    def volume(self) -> int:
-        """Return current group volume (0-100), delegated to group roles."""
-        for role in self._group_roles.values():
-            if (volume := role.get_group_volume()) is not None:
-                return volume
-        return 100
-
-    @property
-    def muted(self) -> bool:
-        """Return current group mute state, delegated to group roles."""
-        for role in self._group_roles.values():
-            if (muted := role.get_group_muted()) is not None:
-                return muted
-        return False
-
-    def set_volume(self, volume_level: int) -> None:
-        """Set group volume, delegated to group roles."""
-        for role in self._group_roles.values():
-            if role.set_group_volume(volume_level) is not None:
-                break
-
-    def set_mute(self, muted: bool) -> None:  # noqa: FBT001
-        """Set group mute state, delegated to group roles."""
-        for role in self._group_roles.values():
-            if role.set_group_muted(muted) is not None:
-                break
-
-    # TODO: delete, controller group role should handle this
-    def set_supported_commands(self, commands: list[MediaCommand]) -> None:
-        """
-        Set the media commands supported by the application.
-
-        Args:
-            commands: List of MediaCommand values that the application can handle.
-                Empty list means no commands are supported.
-        """
-        role = self._group_roles.get("controller")
-        if isinstance(role, ControllerGroupRole):
-            role.set_supported_commands(commands)
 
     async def remove_client(self, client: SendspinClient) -> None:
         """

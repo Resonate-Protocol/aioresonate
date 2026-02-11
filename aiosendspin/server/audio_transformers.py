@@ -7,11 +7,9 @@ They are managed by TransformerPool for deduplication across roles.
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
 from typing import Protocol, TypeVar, runtime_checkable
-from uuid import UUID
 
-from aiosendspin.server.transform_keys import normalize_options
+from aiosendspin.server.transform_keys import TransformKey, normalize_options
 
 T = TypeVar("T", bound="AudioTransformer")
 
@@ -29,8 +27,6 @@ class AudioTransformer(Protocol):
         """Duration of each output frame in microseconds."""
         ...
 
-    # TODO: why do we pass in the timestamp_us, but never retrieve it?
-    # TODO: maybe remove timestamp_us then?
     def process(self, pcm: bytes, timestamp_us: int, duration_us: int) -> list[bytes]:
         """Transform PCM chunk into output frames.
 
@@ -53,15 +49,6 @@ class AudioTransformer(Protocol):
         """
         ...
 
-    # TODO: remove this, this should be specific to each transformer
-    def get_header(self) -> bytes | None:
-        """Return codec header bytes, or None if not applicable.
-
-        For codecs like FLAC, this returns the streaminfo header.
-        For PCM or non-codec transformers, returns None.
-        """
-        ...
-
     @property
     def pending_timestamp_us(self) -> int | None:
         """Timestamp of the earliest audio sample not yet emitted, or None."""
@@ -73,19 +60,6 @@ class AudioTransformer(Protocol):
         Called on stream/clear to discard buffered state.
         """
         ...
-
-
-@dataclass(frozen=True)
-class TransformerKey:
-    """Unique identifier for a transformer configuration."""
-
-    channel_id: UUID
-    transformer_type: type
-    sample_rate: int
-    bit_depth: int
-    channels: int
-    frame_duration_us: int
-    options: tuple[tuple[str, str], ...]
 
 
 # TODO: just checking, do we have any issues reusing transformers, i mean they
@@ -100,7 +74,7 @@ class TransformerPool:
 
     def __init__(self) -> None:
         """Initialize an empty transformer pool."""
-        self._transformers: dict[TransformerKey, AudioTransformer] = {}
+        self._transformers: dict[TransformKey, AudioTransformer] = {}
 
     # TODO: maybe generically pass in kwargs to the specific AudioTransformer?
     # TODO: but still key it so we reuse existing instances
@@ -108,7 +82,7 @@ class TransformerPool:
         self,
         transformer_type: type[T],
         *,
-        channel_id: UUID,
+        channel_id: int,
         sample_rate: int,
         bit_depth: int,
         channels: int,
@@ -116,7 +90,7 @@ class TransformerPool:
         options: Mapping[str, str] | None = None,
     ) -> T:
         """Get existing transformer or create new one."""
-        key = TransformerKey(
+        key = TransformKey(
             channel_id=channel_id,
             transformer_type=transformer_type,
             sample_rate=sample_rate,
@@ -141,17 +115,7 @@ class TransformerPool:
             transformer.reset()
 
 
-# TODO: delete this, no backwards compatibility needed
-# Re-export player-specific transformers for backwards compatibility
-from aiosendspin.server.roles.player.audio_transformers import (  # noqa: E402
-    FlacEncoder,
-    PcmPassthrough,
-)
-
 __all__ = [
     "AudioTransformer",
-    "FlacEncoder",
-    "PcmPassthrough",
-    "TransformerKey",
     "TransformerPool",
 ]

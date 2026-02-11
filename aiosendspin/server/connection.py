@@ -48,12 +48,8 @@ from aiosendspin.models.core import (
     ClientHelloPayload,
     ClientStateMessage,
     ClientTimeMessage,
-    GroupUpdateServerMessage,
-    GroupUpdateServerPayload,
     ServerHelloMessage,
     ServerHelloPayload,
-    ServerStateMessage,
-    ServerStatePayload,
     ServerTimeMessage,
     ServerTimePayload,
     StreamClearMessage,
@@ -325,33 +321,7 @@ class SendspinConnection:
         incoming: ServerMessage,
     ) -> ServerMessage | None:
         """Merge consecutive state-like messages where safe."""
-        # TODO: this hard codes roles, generically merge fields by name instead
-        if isinstance(existing, ServerStateMessage) and isinstance(incoming, ServerStateMessage):
-            metadata = incoming.payload.metadata or existing.payload.metadata
-            controller = incoming.payload.controller or existing.payload.controller
-            return ServerStateMessage(ServerStatePayload(metadata=metadata, controller=controller))
-        if isinstance(existing, GroupUpdateServerMessage) and isinstance(
-            incoming, GroupUpdateServerMessage
-        ):
-            payload = GroupUpdateServerPayload(
-                playback_state=(
-                    incoming.payload.playback_state
-                    if incoming.payload.playback_state is not None
-                    else existing.payload.playback_state
-                ),
-                group_id=(
-                    incoming.payload.group_id
-                    if incoming.payload.group_id is not None
-                    else existing.payload.group_id
-                ),
-                group_name=(
-                    incoming.payload.group_name
-                    if incoming.payload.group_name is not None
-                    else existing.payload.group_name
-                ),
-            )
-            return GroupUpdateServerMessage(payload)
-        return None
+        return existing.merge(incoming)
 
     def send_priority_message(self, message: ServerMessage) -> None:
         """Enqueue a high-priority message (processed before regular queue)."""

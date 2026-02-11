@@ -9,7 +9,7 @@ synchronization, stream lifecycle management, and role-based state updates and c
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from typing import Annotated, Any, Literal
 
 from mashumaro.config import BaseConfig
@@ -45,6 +45,19 @@ from .visualizer import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _merge_optional_dataclass_fields(existing: Any, incoming: Any) -> Any:
+    """Merge dataclass instances by preferring non-None incoming field values."""
+    merged_values = {
+        field.name: (
+            incoming_value
+            if (incoming_value := getattr(incoming, field.name)) is not None
+            else getattr(existing, field.name)
+        )
+        for field in fields(existing)
+    }
+    return type(existing)(**merged_values)
 
 
 # This server implementation accidentally used incorrect field names (player_support, etc.)
@@ -324,6 +337,13 @@ class ServerStateMessage(ServerMessage):
     payload: ServerStatePayload
     type: Literal["server/state"] = "server/state"
 
+    def merge(self, other: ServerMessage) -> ServerMessage | None:
+        """Merge with another server/state message, preferring non-null incoming fields."""
+        if not isinstance(other, ServerStateMessage):
+            return None
+
+        return ServerStateMessage(_merge_optional_dataclass_fields(self.payload, other.payload))
+
 
 # Server -> Client: group/update
 @dataclass
@@ -349,6 +369,14 @@ class GroupUpdateServerMessage(ServerMessage):
 
     payload: GroupUpdateServerPayload
     type: Literal["group/update"] = "group/update"
+
+    def merge(self, other: ServerMessage) -> ServerMessage | None:
+        """Merge with another group/update message, preferring defined incoming fields."""
+        if not isinstance(other, GroupUpdateServerMessage):
+            return None
+
+        merged_payload = _merge_optional_dataclass_fields(self.payload, other.payload)
+        return GroupUpdateServerMessage(merged_payload)
 
 
 # Server -> Client: server/command
