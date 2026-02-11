@@ -731,16 +731,250 @@ class SendspinConnection:
             self._blocked_until_us.pop(role, None)
             self._schedule_role_head(role)
 
-    # TODO: simplify/refactor this
-    async def _writer(self) -> None:  # noqa: C901, PLR0912, PLR0915
+    async def _process_priority_messages(
+        self,
+        wsock: web.WebSocketResponse | ClientWebSocketResponse,
+    ) -> bool:
+        """Send one queued priority message if available."""
+        if not self._priority_messages:
+            return False
+        message = self._priority_messages.popleft()
+        self._queue_size = max(self._queue_size - 1, 0)
+        await self._send_message(wsock, message)
+        return True
+
+    async def _process_normal_messages(
+        self,
+        wsock: web.WebSocketResponse | ClientWebSocketResponse,
+        ready_entry: tuple[str, _RoleQueueEntry, int, int] | None,
+    ) -> bool:
+        """Send one queued non-role message when no role entry is ready."""
+        if ready_entry is not None or not self._normal_messages:
+            return False
+        message = self._normal_messages.popleft()
+        self._queue_size = max(self._queue_size - 1, 0)
+        await self._send_message(wsock, message)
+        return True
+
+    def _fresh_send_stats(self) -> dict[str, float | int]:
+        return {
+            "count": 0,
+            "send_gap_sum_ms": 0.0,
+            "send_gap_min_ms": 1e9,
+            "send_gap_max_ms": 0.0,
+            "ts_gap_sum_ms": 0.0,
+            "ts_gap_min_ms": 1e9,
+            "ts_gap_max_ms": 0.0,
+            "buf_count": 0,
+            "buf_sum_ms": 0.0,
+            "buf_min_ms": 1e9,
+            "buf_max_ms": 0.0,
+        }
+
+    def _update_send_stats(
+        self,
+        role: str,
+        *,
+        send_gap_ms: float,
+        ts_gap_ms: float,
+        buffer_tracker: BufferTracker | None,
+        now_us: int,
+    ) -> None:
+        stats = self._send_stats_by_role.setdefault(role, self._fresh_send_stats())
+        stats["count"] += 1
+        stats["send_gap_sum_ms"] += send_gap_ms
+        stats["send_gap_min_ms"] = min(stats["send_gap_min_ms"], send_gap_ms)
+        stats["send_gap_max_ms"] = max(stats["send_gap_max_ms"], send_gap_ms)
+        stats["ts_gap_sum_ms"] += ts_gap_ms
+        stats["ts_gap_min_ms"] = min(stats["ts_gap_min_ms"], ts_gap_ms)
+        stats["ts_gap_max_ms"] = max(stats["ts_gap_max_ms"], ts_gap_ms)
+        if buffer_tracker is not None:
+            buf_ms = buffer_tracker.buffered_horizon_us(now_us) / 1000
+            stats["buf_count"] += 1
+            stats["buf_sum_ms"] += buf_ms
+            stats["buf_min_ms"] = min(stats["buf_min_ms"], buf_ms)
+            stats["buf_max_ms"] = max(stats["buf_max_ms"], buf_ms)
+
+    def _log_send_summaries_if_due(self) -> None:
+        now_s = time.monotonic()
+        if now_s - self._send_summary_last_log_s < 5.0:
+            return
+        self._send_summary_last_log_s = now_s
+        for role_name, role_stats in self._send_stats_by_role.items():
+            count = int(role_stats["count"])
+            if count <= 0:
+                continue
+            avg_send = role_stats["send_gap_sum_ms"] / count
+            avg_ts = role_stats["ts_gap_sum_ms"] / count
+            if role_stats["buf_count"] > 0:
+                avg_buf = role_stats["buf_sum_ms"] / role_stats["buf_count"]
+                self._logger.info(
+                    "Send summary role=%s samples=%s "
+                    "send_gap_ms(avg=%.1f min=%.1f max=%.1f) "
+                    "ts_gap_ms(avg=%.1f min=%.1f max=%.1f) "
+                    "buf_ms(avg=%.1f min=%.1f max=%.1f)",
+                    role_name,
+                    count,
+                    avg_send,
+                    role_stats["send_gap_min_ms"],
+                    role_stats["send_gap_max_ms"],
+                    avg_ts,
+                    role_stats["ts_gap_min_ms"],
+                    role_stats["ts_gap_max_ms"],
+                    avg_buf,
+                    role_stats["buf_min_ms"],
+                    role_stats["buf_max_ms"],
+                )
+            else:
+                self._logger.info(
+                    "Send summary role=%s samples=%s "
+                    "send_gap_ms(avg=%.1f min=%.1f max=%.1f) "
+                    "ts_gap_ms(avg=%.1f min=%.1f max=%.1f)",
+                    role_name,
+                    count,
+                    avg_send,
+                    role_stats["send_gap_min_ms"],
+                    role_stats["send_gap_max_ms"],
+                    avg_ts,
+                    role_stats["ts_gap_min_ms"],
+                    role_stats["ts_gap_max_ms"],
+                )
+            self._send_stats_by_role[role_name] = self._fresh_send_stats()
+
+    async def _process_binary_role_messages(
+        self,
+        wsock: web.WebSocketResponse | ClientWebSocketResponse,
+        role: str,
+        entry: _RoleQueueEntry,
+        now_us: int,
+    ) -> tuple[bool, int]:
+        assert entry.binary is not None
+
+        # Look up handling info for late detection + buffer tracking
+        cached = None
+        if self._client is not None:
+            cached = self._client.get_binary_handling_cached(entry.binary.message_type)
+        handling = cached[0] if cached else None
+        handling_role = cached[1] if cached else None
+
+        # Drop late messages if role requests it
+        if (
+            handling is not None
+            and handling_role is not None
+            and self._check_late_binary(handling, handling_role, entry.timestamp_us)
+        ):
+            self._discard_role_head(role)
+            self._schedule_role_head(role)
+            return False, now_us
+
+        # Check backpressure from buffer tracker
+        wait_us = 0
+        buffer_tracker = None
+        if handling is not None and handling_role is not None:
+            if handling.buffer_track:
+                buffer_tracker = handling_role.get_buffer_tracker()
+            if buffer_tracker is not None:
+                buffer_tracker.prune_consumed(now_us)
+                wait_us = max(wait_us, buffer_tracker.time_until_unblocked())
+                bytes_needed = entry.binary.buffer_byte_count or 0
+                duration_needed_us = entry.binary.duration_us or 0
+                wait_us = max(
+                    wait_us,
+                    buffer_tracker.time_until_ready(bytes_needed, duration_needed_us),
+                )
+
+        if wait_us > 0:
+            # Block this role until buffer has space
+            self._block_role(role, now_us + wait_us)
+            return False, now_us
+
+        # TODO: put all debugging info behind the debug flag, and in a
+        # separate method
+        timestamp_us = entry.timestamp_us
+        last_send_us = self._last_send_time_us_by_role.get(role)
+        last_ts_us = self._last_timestamp_us_by_role.get(role)
+        send_gap_ms = (now_us - last_send_us) / 1000 if last_send_us is not None else 0
+        ts_gap_ms = (timestamp_us - last_ts_us) / 1000 if last_ts_us is not None else 0
+        self._last_send_time_us_by_role[role] = now_us
+        self._last_timestamp_us_by_role[role] = timestamp_us
+
+        self._discard_role_head(role)
+        await self._send_binary_data(wsock, role, entry, buffer_tracker)
+
+        if last_send_us is not None and last_ts_us is not None:
+            self._update_send_stats(
+                role,
+                send_gap_ms=send_gap_ms,
+                ts_gap_ms=ts_gap_ms,
+                buffer_tracker=buffer_tracker,
+                now_us=now_us,
+            )
+        self._log_send_summaries_if_due()
+        self._schedule_role_head(role)
+        return True, self._server.clock.now_us()
+
+    async def _process_role_messages(
+        self,
+        wsock: web.WebSocketResponse | ClientWebSocketResponse,
+        ready_entry: tuple[str, _RoleQueueEntry, int, int],
+        now_us: int,
+    ) -> tuple[bool, int]:
+        """Process one ready role entry."""
+        role, entry, _sort_ts, _seq = ready_entry
+
+        # Binary entries with a stale epoch are discarded (stream was cleared/ended).
+        # JSON entries skip this check - they are always delivered.
+        if entry.binary is not None and entry.epoch != self._epoch_by_role[role]:
+            self._discard_role_head(role)
+            self._schedule_role_head(role)
+            return False, now_us
+
+        if entry.json_message is not None:
+            self._discard_role_head(role)
+            # Merge consecutive state-like messages at send time.
+            message = entry.json_message
+            while True:
+                role_queue = self._role_queues.get(role)
+                if not role_queue:
+                    break
+                _, _, next_entry = role_queue[0]
+                if next_entry.json_message is None:
+                    break
+                merged = self._merge_state_messages(message, next_entry.json_message)
+                if merged is None:
+                    break
+                message = merged
+                self._discard_role_head(role)
+            await self._send_message(wsock, message)
+            self._schedule_role_head(role)
+            return True, self._server.clock.now_us()
+
+        return await self._process_binary_role_messages(wsock, role, entry, now_us)
+
+    async def _wait_for_writer_work(self, now_us: int) -> None:
+        """Sleep until new work arrives or next delayed role becomes ready."""
+        self._writer_wakeup.clear()
+        if self._priority_messages or self._normal_messages or self._ready_roles:
+            return
+
+        sleep_s = None
+        if self._delayed_roles:
+            next_ready_us = self._delayed_roles[0][0]
+            sleep_s = max((next_ready_us - now_us) / 1_000_000, 0.0)
+
+        try:
+            if sleep_s is None:
+                await self._writer_wakeup.wait()
+            else:
+                await asyncio.wait_for(self._writer_wakeup.wait(), timeout=sleep_s)
+        except TimeoutError:
+            pass
+
+    async def _writer(self) -> None:
         wsock = self._wsock_server or self._wsock_client
         assert wsock is not None
 
-        # Cache hot attributes as locals to avoid repeated attribute lookups
         clock_now_us = self._server.clock.now_us
-        epoch_by_role = self._epoch_by_role
-        last_send_us_by_role = self._last_send_time_us_by_role
-        last_ts_us_by_role = self._last_timestamp_us_by_role
 
         iterations_since_yield = 0
         now_us = clock_now_us()
@@ -749,16 +983,11 @@ class SendspinConnection:
             while not wsock.closed and not self._closing:
                 # Periodic yield to prevent event loop starvation
                 if iterations_since_yield >= 50:
-                    # TODO: try removing this/adding logging to see if this is still required
                     await asyncio.sleep(0)
                     iterations_since_yield = 0
                     now_us = clock_now_us()
 
-                #### Priority Messages ####
-                if self._priority_messages:
-                    message = self._priority_messages.popleft()
-                    self._queue_size = max(self._queue_size - 1, 0)
-                    await self._send_message(wsock, message)
+                if await self._process_priority_messages(wsock):
                     now_us = clock_now_us()
                     iterations_since_yield = 0
                     continue
@@ -766,220 +995,24 @@ class SendspinConnection:
                 now_us = clock_now_us()
                 self._promote_ready_roles(now_us)
 
-                #### Pick Next Entry ####
                 ready_entry = self._peek_ready_entry()
                 has_normal = bool(self._normal_messages)
 
                 if ready_entry is None and not has_normal:
-                    # No immediate work; sleep until wakeup or next delayed role
-                    self._writer_wakeup.clear()
-                    if self._priority_messages or self._normal_messages or self._ready_roles:
-                        continue
-
-                    sleep_s = None
-                    if self._delayed_roles:
-                        next_ready_us = self._delayed_roles[0][0]
-                        sleep_s = max((next_ready_us - now_us) / 1_000_000, 0.0)
-
-                    try:
-                        if sleep_s is None:
-                            await self._writer_wakeup.wait()
-                        else:
-                            await asyncio.wait_for(self._writer_wakeup.wait(), timeout=sleep_s)
-                    except TimeoutError:
-                        pass
+                    await self._wait_for_writer_work(now_us)
                     continue
 
-                #### Non-Role Messages (when no role entry ready) ####
-                if ready_entry is None and has_normal:
-                    message = self._normal_messages.popleft()
-                    self._queue_size = max(self._queue_size - 1, 0)
-                    await self._send_message(wsock, message)
+                if await self._process_normal_messages(wsock, ready_entry):
                     now_us = clock_now_us()
                     iterations_since_yield = 0
                     continue
 
                 assert ready_entry is not None
-                role, entry, _sort_ts, _seq = ready_entry
-
-                #### Epoch Check (binary only) ####
-                # Binary entries with a stale epoch are discarded (stream was cleared/ended).
-                # JSON entries skip this check - they are always delivered.
-                if entry.binary is not None and entry.epoch != epoch_by_role[role]:
-                    self._discard_role_head(role)
-                    self._schedule_role_head(role)
-                    iterations_since_yield += 1
-                    continue
-
-                #### JSON Entry ####
-                if entry.json_message is not None:
-                    self._discard_role_head(role)
-                    # Merge consecutive state-like messages at send time
-                    message = entry.json_message
-                    while True:
-                        role_queue = self._role_queues.get(role)
-                        if not role_queue:
-                            break
-                        _, _, next_entry = role_queue[0]
-                        if next_entry.json_message is None:
-                            break
-                        merged = self._merge_state_messages(message, next_entry.json_message)
-                        if merged is None:
-                            break
-                        message = merged
-                        self._discard_role_head(role)
-                    await self._send_message(wsock, message)
-                    self._schedule_role_head(role)
-                    now_us = clock_now_us()
+                sent, now_us = await self._process_role_messages(wsock, ready_entry, now_us)
+                if sent:
                     iterations_since_yield = 0
                     continue
-
-                #### Binary Entry ####
-                assert entry.binary is not None
-
-                # Look up handling info for late detection + buffer tracking
-                cached = (
-                    self._client.get_binary_handling_cached(entry.binary.message_type)
-                    if self._client
-                    else None
-                )
-                handling = cached[0] if cached else None
-                handling_role = cached[1] if cached else None
-
-                # Drop late messages if role requests it
-                if (
-                    handling is not None
-                    and handling_role is not None
-                    and self._check_late_binary(handling, handling_role, entry.timestamp_us)
-                ):
-                    self._discard_role_head(role)
-                    self._schedule_role_head(role)
-                    iterations_since_yield += 1
-                    continue
-
-                # Check backpressure from buffer tracker
-                wait_us = 0
-                buffer_tracker = None
-                if handling is not None and handling_role is not None:
-                    if handling.buffer_track:
-                        buffer_tracker = handling_role.get_buffer_tracker()
-                    if buffer_tracker is not None:
-                        buffer_tracker.prune_consumed(now_us)
-                        wait_us = max(wait_us, buffer_tracker.time_until_unblocked())
-                        bytes_needed = entry.binary.buffer_byte_count or 0
-                        duration_needed_us = entry.binary.duration_us or 0
-                        wait_us = max(
-                            wait_us,
-                            buffer_tracker.time_until_ready(bytes_needed, duration_needed_us),
-                        )
-
-                if wait_us > 0:
-                    # Block this role until buffer has space
-                    self._block_role(role, now_us + wait_us)
-                    iterations_since_yield += 1
-                    continue
-
-                # TODO: put all debugging info behind the debug flag, and in a
-                # separate method
-                # Log timing info
-                timestamp_us = entry.timestamp_us
-                last_send_us = last_send_us_by_role.get(role)
-                last_ts_us = last_ts_us_by_role.get(role)
-                send_gap_ms = (now_us - last_send_us) / 1000 if last_send_us is not None else 0
-                ts_gap_ms = (timestamp_us - last_ts_us) / 1000 if last_ts_us is not None else 0
-                last_send_us_by_role[role] = now_us
-                last_ts_us_by_role[role] = timestamp_us
-
-                # Send binary
-                self._discard_role_head(role)
-                await self._send_binary_data(wsock, role, entry, buffer_tracker)
-                stats = self._send_stats_by_role.setdefault(
-                    role,
-                    {
-                        "count": 0,
-                        "send_gap_sum_ms": 0.0,
-                        "send_gap_min_ms": 1e9,
-                        "send_gap_max_ms": 0.0,
-                        "ts_gap_sum_ms": 0.0,
-                        "ts_gap_min_ms": 1e9,
-                        "ts_gap_max_ms": 0.0,
-                        "buf_count": 0,
-                        "buf_sum_ms": 0.0,
-                        "buf_min_ms": 1e9,
-                        "buf_max_ms": 0.0,
-                    },
-                )
-                if last_send_us is not None and last_ts_us is not None:
-                    stats["count"] += 1
-                    stats["send_gap_sum_ms"] += send_gap_ms
-                    stats["send_gap_min_ms"] = min(stats["send_gap_min_ms"], send_gap_ms)
-                    stats["send_gap_max_ms"] = max(stats["send_gap_max_ms"], send_gap_ms)
-                    stats["ts_gap_sum_ms"] += ts_gap_ms
-                    stats["ts_gap_min_ms"] = min(stats["ts_gap_min_ms"], ts_gap_ms)
-                    stats["ts_gap_max_ms"] = max(stats["ts_gap_max_ms"], ts_gap_ms)
-                    if buffer_tracker is not None:
-                        buf_ms = buffer_tracker.buffered_horizon_us(now_us) / 1000
-                        stats["buf_count"] += 1
-                        stats["buf_sum_ms"] += buf_ms
-                        stats["buf_min_ms"] = min(stats["buf_min_ms"], buf_ms)
-                        stats["buf_max_ms"] = max(stats["buf_max_ms"], buf_ms)
-
-                now_s = time.monotonic()
-                if now_s - self._send_summary_last_log_s >= 5.0:
-                    self._send_summary_last_log_s = now_s
-                    for role_name, role_stats in self._send_stats_by_role.items():
-                        count = int(role_stats["count"])
-                        if count <= 0:
-                            continue
-                        avg_send = role_stats["send_gap_sum_ms"] / count
-                        avg_ts = role_stats["ts_gap_sum_ms"] / count
-                        if role_stats["buf_count"] > 0:
-                            avg_buf = role_stats["buf_sum_ms"] / role_stats["buf_count"]
-                            self._logger.info(
-                                "Send summary role=%s samples=%s "
-                                "send_gap_ms(avg=%.1f min=%.1f max=%.1f) "
-                                "ts_gap_ms(avg=%.1f min=%.1f max=%.1f) "
-                                "buf_ms(avg=%.1f min=%.1f max=%.1f)",
-                                role_name,
-                                count,
-                                avg_send,
-                                role_stats["send_gap_min_ms"],
-                                role_stats["send_gap_max_ms"],
-                                avg_ts,
-                                role_stats["ts_gap_min_ms"],
-                                role_stats["ts_gap_max_ms"],
-                                avg_buf,
-                                role_stats["buf_min_ms"],
-                                role_stats["buf_max_ms"],
-                            )
-                        else:
-                            self._logger.info(
-                                "Send summary role=%s samples=%s "
-                                "send_gap_ms(avg=%.1f min=%.1f max=%.1f) "
-                                "ts_gap_ms(avg=%.1f min=%.1f max=%.1f)",
-                                role_name,
-                                count,
-                                avg_send,
-                                role_stats["send_gap_min_ms"],
-                                role_stats["send_gap_max_ms"],
-                                avg_ts,
-                                role_stats["ts_gap_min_ms"],
-                                role_stats["ts_gap_max_ms"],
-                            )
-                        role_stats["count"] = 0
-                        role_stats["send_gap_sum_ms"] = 0.0
-                        role_stats["send_gap_min_ms"] = 1e9
-                        role_stats["send_gap_max_ms"] = 0.0
-                        role_stats["ts_gap_sum_ms"] = 0.0
-                        role_stats["ts_gap_min_ms"] = 1e9
-                        role_stats["ts_gap_max_ms"] = 0.0
-                        role_stats["buf_count"] = 0
-                        role_stats["buf_sum_ms"] = 0.0
-                        role_stats["buf_min_ms"] = 1e9
-                        role_stats["buf_max_ms"] = 0.0
-                self._schedule_role_head(role)
-                now_us = clock_now_us()
-                iterations_since_yield = 0
+                iterations_since_yield += 1
         except asyncio.CancelledError:
             self._logger.debug("Writer cancelled")
         except Exception:
