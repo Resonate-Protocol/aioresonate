@@ -75,8 +75,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# TODO: should we make this per role instead? i mean its still max.
-MAX_PENDING_MSG = 4096  # Should be more than enough for ~1 minute of buffering
+MAX_PENDING_MSG = 4096  # Default queue cap (per role queues, and global control queues)
 
 
 @dataclass(frozen=True, slots=True)
@@ -148,6 +147,7 @@ class SendspinConnection:
         # Role queues: per role min-heap of (sort_ts, seq, entry)
         # Both binary and JSON messages for a role go through the same heap.
         self._role_queues: dict[str, list[tuple[int, int, _RoleQueueEntry]]] = defaultdict(list)
+        self._max_pending_msg_by_role: defaultdict[str, int] = defaultdict(lambda: MAX_PENDING_MSG)
         # Last timestamp per role for JSON inheritance (JSON gets previous message's timestamp)
         self._last_enqueued_ts_by_role: dict[str, int] = {}
         # Global scheduler heaps for families
@@ -232,10 +232,11 @@ class SendspinConnection:
             buffer_byte_count: Byte count for buffer tracking.
             duration_us: Duration for buffer tracking.
         """
-        if self._queue_size >= MAX_PENDING_MSG:
-            if not self._disconnecting:
-                self._logger.error("Message queue full, client too slow - disconnecting")
-                create_task(self.disconnect(retry_connection=True))
+        if self._is_role_queue_full(role):
+            self._disconnect_due_to_queue_overflow(
+                f"Role queue full for {role} ({len(self._role_queues.get(role, []))}/"
+                f"{self._max_pending_msg_by_role[role]}), client too slow"
+            )
             return
 
         sort_ts = max(0, timestamp_us)
@@ -255,7 +256,17 @@ class SendspinConnection:
 
     def queue_status(self) -> tuple[int, int]:
         """Return (qsize, maxsize) for the outgoing queue."""
-        return self._queue_size, MAX_PENDING_MSG
+        maxsize = MAX_PENDING_MSG + (len(self._role_queues) * MAX_PENDING_MSG)
+        return self._queue_size, maxsize
+
+    def _disconnect_due_to_queue_overflow(self, message: str) -> None:
+        if self._disconnecting:
+            return
+        self._logger.error("%s - disconnecting", message)
+        create_task(self.disconnect(retry_connection=True))
+
+    def _is_role_queue_full(self, role: str) -> bool:
+        return len(self._role_queues.get(role, [])) >= self._max_pending_msg_by_role[role]
 
     def _enqueue_role_entry(self, role: str, sort_ts: int, entry: _RoleQueueEntry) -> None:
         """Push an entry into a role's heap and schedule it if it becomes the new head."""
@@ -282,10 +293,11 @@ class SendspinConnection:
         if isinstance(message, StreamClearMessage | StreamEndMessage):
             self.drop_pending_binary(message.payload.roles)
 
-        if self._queue_size >= MAX_PENDING_MSG:
-            if not self._disconnecting:
-                self._logger.error("Message queue full, client too slow - disconnecting")
-                create_task(self.disconnect(retry_connection=True))
+        if self._is_role_queue_full(role):
+            self._disconnect_due_to_queue_overflow(
+                f"Role queue full for {role} ({len(self._role_queues.get(role, []))}/"
+                f"{self._max_pending_msg_by_role[role]}), client too slow"
+            )
             return
 
         sort_ts = self._last_enqueued_ts_by_role.get(role, 0)
@@ -305,9 +317,7 @@ class SendspinConnection:
             self.drop_pending_binary(message.payload.roles)
 
         if self._queue_size >= MAX_PENDING_MSG:
-            if not self._disconnecting:
-                self._logger.error("Message queue full, client too slow - disconnecting")
-                create_task(self.disconnect(retry_connection=True))
+            self._disconnect_due_to_queue_overflow("Control message queue full, client too slow")
             return
 
         self._normal_messages.append(message)
@@ -328,9 +338,7 @@ class SendspinConnection:
     def send_priority_message(self, message: ServerMessage) -> None:
         """Enqueue a high-priority message (processed before regular queue)."""
         if self._queue_size >= MAX_PENDING_MSG:
-            if not self._disconnecting:
-                self._logger.error("Message queue full, client too slow - disconnecting")
-                create_task(self.disconnect(retry_connection=True))
+            self._disconnect_due_to_queue_overflow("Priority message queue full, client too slow")
             return
         self._queue_sequence += 1
         self._priority_messages.append(message)

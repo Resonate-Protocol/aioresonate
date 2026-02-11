@@ -328,3 +328,66 @@ async def test_role_stream_start_is_sent_before_binary_for_same_role() -> None:
     assert send_order[:2] == ["json", "binary"]
 
     await conn.disconnect(retry_connection=False)
+
+
+@pytest.mark.asyncio
+async def test_send_binary_disconnects_on_per_role_queue_overflow() -> None:
+    """Per-role queue overflow should trigger disconnect."""
+    loop = asyncio.get_running_loop()
+    server = _DummyServer(loop=loop, clock=LoopClock(loop))
+
+    wsock = MagicMock()
+    wsock.closed = False
+
+    conn = SendspinConnection(server, wsock_client=wsock)
+    conn._max_pending_msg_by_role["player"] = 1  # noqa: SLF001
+    conn.disconnect = AsyncMock()  # type: ignore[method-assign]
+
+    conn.send_binary(
+        b"frame-1",
+        role="player",
+        timestamp_us=0,
+        message_type=BinaryMessageType.AUDIO_CHUNK.value,
+    )
+    conn.send_binary(
+        b"frame-2",
+        role="player",
+        timestamp_us=25_000,
+        message_type=BinaryMessageType.AUDIO_CHUNK.value,
+    )
+
+    await asyncio.sleep(0)
+
+    assert conn.disconnect.call_count == 1  # type: ignore[attr-defined]
+
+
+def test_per_role_queue_limit_is_isolated_between_roles() -> None:
+    """One saturated role queue should not block enqueueing another role."""
+    loop = asyncio.new_event_loop()
+    try:
+        server = _DummyServer(loop=loop, clock=LoopClock(loop))
+        wsock = MagicMock()
+        wsock.closed = False
+        conn = SendspinConnection(server, wsock_client=wsock)
+        conn.disconnect = AsyncMock()  # type: ignore[method-assign]
+        conn._max_pending_msg_by_role["player"] = 1  # noqa: SLF001
+        conn._max_pending_msg_by_role["visualizer"] = 1  # noqa: SLF001
+
+        conn.send_binary(
+            b"player-frame",
+            role="player",
+            timestamp_us=0,
+            message_type=BinaryMessageType.AUDIO_CHUNK.value,
+        )
+        conn.send_binary(
+            b"visualizer-frame",
+            role="visualizer",
+            timestamp_us=0,
+            message_type=BinaryMessageType.AUDIO_CHUNK.value,
+        )
+
+        assert len(conn._role_queues["player"]) == 1  # noqa: SLF001
+        assert len(conn._role_queues["visualizer"]) == 1  # noqa: SLF001
+        assert conn.disconnect.call_count == 0  # type: ignore[attr-defined]
+    finally:
+        loop.close()
