@@ -477,6 +477,112 @@ async def test_transform_key_separates_frame_duration(mock_loop: Any) -> None:
 
 
 @pytest.mark.asyncio
+async def test_long_gap_reset_is_handled_in_push_stream() -> None:
+    """PushStream resets transformer state after long production gaps."""
+
+    class ResetTrackingTransformer:
+        def __init__(self) -> None:
+            self.reset_calls = 0
+
+        @property
+        def frame_duration_us(self) -> int:
+            return 25_000
+
+        def process(self, pcm: bytes, _ts: int, _dur: int) -> list[bytes]:
+            return [pcm]
+
+        def flush(self) -> list[bytes]:
+            return []
+
+        def get_header(self) -> bytes | None:
+            return None
+
+        def reset(self) -> None:
+            self.reset_calls += 1
+
+    transformer = ResetTrackingTransformer()
+    group = _DummyGroup(clients=[])
+    role = _DummyRole(
+        AudioRequirements(
+            sample_rate=48000,
+            bit_depth=16,
+            channels=2,
+            transformer=transformer,
+            channel_id=MAIN_CHANNEL,
+            frame_duration_us=25_000,
+        )
+    )
+    group.clients.append(_DummyClient([role]))
+
+    loop = asyncio.get_running_loop()
+    clock = ManualClock()
+    stream = PushStream(loop=loop, clock=clock, group=group)
+    fmt = AudioFormat(sample_rate=48000, bit_depth=16, channels=2)
+
+    stream.prepare_audio(bytes(4800), fmt)
+    await stream.commit_audio()
+    assert transformer.reset_calls == 0
+
+    clock.advance_us(2_000_000)
+    stream.prepare_audio(bytes(4800), fmt)
+    await stream.commit_audio()
+    assert transformer.reset_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_medium_gap_does_not_reset_transformer() -> None:
+    """PushStream does not reset transformer state for medium gaps."""
+
+    class ResetTrackingTransformer:
+        def __init__(self) -> None:
+            self.reset_calls = 0
+
+        @property
+        def frame_duration_us(self) -> int:
+            return 25_000
+
+        def process(self, pcm: bytes, _ts: int, _dur: int) -> list[bytes]:
+            return [pcm]
+
+        def flush(self) -> list[bytes]:
+            return []
+
+        def get_header(self) -> bytes | None:
+            return None
+
+        def reset(self) -> None:
+            self.reset_calls += 1
+
+    transformer = ResetTrackingTransformer()
+    group = _DummyGroup(clients=[])
+    role = _DummyRole(
+        AudioRequirements(
+            sample_rate=48000,
+            bit_depth=16,
+            channels=2,
+            transformer=transformer,
+            channel_id=MAIN_CHANNEL,
+            frame_duration_us=25_000,
+        )
+    )
+    group.clients.append(_DummyClient([role]))
+
+    loop = asyncio.get_running_loop()
+    clock = ManualClock()
+    stream = PushStream(loop=loop, clock=clock, group=group)
+    fmt = AudioFormat(sample_rate=48000, bit_depth=16, channels=2)
+
+    stream.prepare_audio(bytes(4800), fmt)
+    await stream.commit_audio()
+    assert transformer.reset_calls == 0
+
+    clock.advance_us(500_000)
+    stream.prepare_audio(bytes(4800), fmt)
+    await stream.commit_audio()
+    assert transformer.reset_calls == 0
+
+
+@pytest.mark.asyncio
 async def test_late_join_uses_cached_chunks_across_role_recreation(mock_loop: Any) -> None:
     """Late join uses cache even if transformer instance changes."""
 

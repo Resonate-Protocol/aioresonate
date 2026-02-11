@@ -36,6 +36,8 @@ _LOGGER = logging.getLogger(__name__)
 # TODO: test if still required, since I fixed double stream start messages
 # Default initial delay before first audio plays (microseconds)
 DEFAULT_INITIAL_DELAY_US = 250_000  # 250ms
+# Pre-roll amount for catch-up encoding to absorb codec startup delay.
+ENCODER_CATCHUP_WARMUP_US = 120_000
 
 
 def _encode_for_transform_key(
@@ -314,6 +316,8 @@ class PushStream:
         self._catchup_tasks: dict[TransformKey, asyncio.Task[None]] = {}
         # TransformKey cache by (role_id, channel_id_int) - avoids rebuilding keys each frame
         self._transform_key_cache: dict[tuple[int, int], TransformKey] = {}
+        # Last encoded input end timestamp per TransformKey for long-gap reset handling.
+        self._transform_last_input_end_us: dict[TransformKey, int] = {}
         # Roles awaiting delayed join; excluded from live delivery until join executes.
         self._pending_join_roles: weakref.WeakSet[Role] = weakref.WeakSet()
         # Historical audio buffers: channel_id -> list of (pcm_bytes, audio_format)
@@ -453,9 +457,21 @@ class PushStream:
             return []
         return list(self._pcm_chunk_cache[channel_int])
 
-    def get_late_join_target_timestamp_us(self, *, min_lead_us: int = LATE_JOINER_MIN_LEAD_US) -> int:
+    def get_late_join_target_timestamp_us(
+        self,
+        *,
+        channel_id: UUID | None = None,
+        align_to_channel_tail: bool = False,
+        min_lead_us: int = LATE_JOINER_MIN_LEAD_US,
+    ) -> int:
         """Return a safe minimum playback timestamp for late-join replay."""
-        return self._clock.now_us() + max(0, min_lead_us)
+        now_us = self._clock.now_us()
+        target_us = now_us + max(0, min_lead_us)
+        if align_to_channel_tail and channel_id is not None and channel_id in self._channel_timing:
+            # For channels that currently have no other subscribers, anchor catch-up
+            # to that channel's own live tail instead of forcing an extra lead offset.
+            return max(now_us, self._channel_timing[channel_id])
+        return target_us
 
     async def commit_audio(self, *, play_start_us: int | None = None) -> int:
         """
@@ -514,34 +530,10 @@ class PushStream:
         self._warn_duration_misalignment(durations_us)
 
         # Capture play_start_us for each channel
-        channel_play_start: dict[UUID, int] = {}
-
-        if play_start_us is not None:
-            # Explicit timestamp mode: use provided timestamp directly
-            for channel_id in prepared:
-                channel_play_start[channel_id] = play_start_us
-                # Initialize timing if not yet set
-                if channel_id not in self._channel_timing:
-                    self._channel_timing[channel_id] = play_start_us
-        else:
-            # Auto-calculate mode (existing behavior)
-            now_us = self._clock.now_us()
-            for channel_id in prepared:
-                if channel_id not in self._channel_timing:
-                    self._channel_timing[channel_id] = now_us + DEFAULT_INITIAL_DELAY_US
-
-            # If audio production stalls (e.g., the upstream source blocks), the scheduled
-            # play timeline can drift into the past. Rebase the timeline so new audio is
-            # always scheduled with at least the default initial delay from "now".
-            min_timing_us = min(self._channel_timing.values())
-            target_min_us = now_us + DEFAULT_INITIAL_DELAY_US
-            if min_timing_us < target_min_us:
-                shift_us = target_min_us - min_timing_us
-                for channel_id in self._channel_timing:
-                    self._channel_timing[channel_id] += shift_us
-
-            for channel_id in prepared:
-                channel_play_start[channel_id] = self._channel_timing[channel_id]
+        channel_play_start = self._resolve_channel_play_start(
+            prepared,
+            play_start_us=play_start_us,
+        )
 
         # Advance each channel's timing by its duration
         for channel_id, duration_us in durations_us.items():
@@ -590,6 +582,43 @@ class PushStream:
         # Return earliest play_start_us
         return min(channel_play_start.values())
 
+    def _resolve_channel_play_start(
+        self,
+        prepared: dict[UUID, tuple[bytes, AudioFormat]],
+        *,
+        play_start_us: int | None,
+    ) -> dict[UUID, int]:
+        """Resolve play-start timestamp per prepared channel and initialize timing."""
+        channel_play_start: dict[UUID, int] = {}
+
+        if play_start_us is not None:
+            # Explicit timestamp mode: use provided timestamp directly.
+            for channel_id in prepared:
+                channel_play_start[channel_id] = play_start_us
+                if channel_id not in self._channel_timing:
+                    self._channel_timing[channel_id] = play_start_us
+            return channel_play_start
+
+        # Auto-calculate mode (existing behavior).
+        now_us = self._clock.now_us()
+        for channel_id in prepared:
+            if channel_id not in self._channel_timing:
+                self._channel_timing[channel_id] = now_us + DEFAULT_INITIAL_DELAY_US
+
+        # If audio production stalls (e.g., the upstream source blocks), the scheduled
+        # play timeline can drift into the past. Rebase the timeline so new audio is
+        # always scheduled with at least the default initial delay from "now".
+        min_timing_us = min(self._channel_timing.values())
+        target_min_us = now_us + DEFAULT_INITIAL_DELAY_US
+        if min_timing_us < target_min_us:
+            shift_us = target_min_us - min_timing_us
+            for channel_id in self._channel_timing:
+                self._channel_timing[channel_id] += shift_us
+
+        for channel_id in prepared:
+            channel_play_start[channel_id] = self._channel_timing[channel_id]
+        return channel_play_start
+
     async def _process_historical_buffers(
         self,
         historical: dict[UUID, list[tuple[bytes, AudioFormat]]],
@@ -598,7 +627,7 @@ class PushStream:
         """Process historical audio buffers, assigning timestamps consecutively.
 
         For each channel with historical data:
-        1. Initialize timing at now + DEFAULT_INITIAL_DELAY_US
+        1. Initialize timing from explicit start, shared timeline alignment, or default delay
         2. Assign timestamps so chunks play consecutively
         3. Cache PCM and encode for active roles
         4. Advance channel timing to end of last historical chunk
@@ -611,6 +640,17 @@ class PushStream:
             if channel_id not in self._channel_timing:
                 if historical_start_us is not None and channel_id in historical_start_us:
                     self._channel_timing[channel_id] = historical_start_us[channel_id]
+                elif self._channel_timing:
+                    # Align injected history so it ends at the current shared timeline.
+                    # This avoids leaving newly injected channels permanently behind live.
+                    anchor_timing_us = min(self._channel_timing.values())
+                    total_duration_us = 0
+                    for pcm_bytes, fmt in chunks:
+                        bytes_per_sample = fmt.bit_depth // 8
+                        frame_stride = bytes_per_sample * fmt.channels
+                        sample_count = len(pcm_bytes) // frame_stride
+                        total_duration_us += int(sample_count * 1_000_000 / fmt.sample_rate)
+                    self._channel_timing[channel_id] = max(0, anchor_timing_us - total_duration_us)
                 else:
                     self._channel_timing[channel_id] = now_us + DEFAULT_INITIAL_DELAY_US
 
@@ -792,6 +832,32 @@ class PushStream:
 
         return tkey
 
+    def _encode_transform_for_key(
+        self,
+        tkey: TransformKey,
+        transformer: AudioTransformer | None,
+        pcm_data: bytes,
+        output_ts: int,
+        duration_us: int,
+    ) -> list[tuple[bytes, int, int]]:
+        """Encode PCM while resetting transformer state after long production gaps."""
+        last_input_end_us = self._transform_last_input_end_us.get(tkey)
+        if (
+            transformer is not None
+            and last_input_end_us is not None
+            and output_ts - last_input_end_us > 1_500_000
+        ):
+            transformer.reset()
+
+        encoded = _encode_for_transform_key(
+            transformer,
+            pcm_data,
+            output_ts,
+            duration_us,
+        )
+        self._transform_last_input_end_us[tkey] = output_ts + duration_us
+        return encoded
+
     async def _transform_and_deliver(
         self,
         roles_by_pcm: dict[
@@ -844,7 +910,8 @@ class PushStream:
             for processed, (tkey, (transformer, pcm_data, output_ts, duration_us)) in enumerate(
                 encode_tasks.items(), start=1
             ):
-                transformed[tkey] = _encode_for_transform_key(
+                transformed[tkey] = self._encode_transform_for_key(
+                    tkey,
                     transformer,
                     pcm_data,
                     output_ts,
@@ -981,6 +1048,7 @@ class PushStream:
             tkey = self._build_transform_key(req, channel_id, role)
             if not self._other_roles_use_transform_key(tkey, role):
                 self._role_chunk_cache.pop(tkey, None)
+                self._transform_last_input_end_us.pop(tkey, None)
                 if req.transformer is not None:
                     req.transformer.reset()
         for tkey in list(self._catchup_roles.keys()):
@@ -994,9 +1062,13 @@ class PushStream:
                     task.cancel()
         # Drop cached transform keys for this role to avoid stale lookups.
         role_id = id(role)
+        stale_transform_keys: set[TransformKey] = set()
         for cache_key in list(self._transform_key_cache.keys()):
             if cache_key[0] == role_id:
+                stale_transform_keys.add(self._transform_key_cache[cache_key])
                 self._transform_key_cache.pop(cache_key, None)
+        for stale_tkey in stale_transform_keys:
+            self._transform_last_input_end_us.pop(stale_tkey, None)
 
     def on_role_format_changed(self, role: Role) -> None:
         """Invalidate caches after a role's audio format changed mid-stream.
@@ -1007,9 +1079,13 @@ class PushStream:
         """
         # Invalidate transform key cache entries for this role
         role_id = id(role)
+        stale_transform_keys: set[TransformKey] = set()
         for cache_key in list(self._transform_key_cache.keys()):
             if cache_key[0] == role_id:
+                stale_transform_keys.add(self._transform_key_cache[cache_key])
                 self._transform_key_cache.pop(cache_key, None)
+        for stale_tkey in stale_transform_keys:
+            self._transform_last_input_end_us.pop(stale_tkey, None)
 
         # Clean up any catchup state referencing this role
         for tkey in list(self._catchup_roles.keys()):
@@ -1050,6 +1126,7 @@ class PushStream:
             return
 
         channel_id = req.channel_id or MAIN_CHANNEL
+        self._rebase_first_join_channel_timing(channel_id, role)
 
         # Get cached chunks for this transformer from the role-based cache
         cache_key = self._build_transform_key(req, channel_id, role)
@@ -1063,6 +1140,20 @@ class PushStream:
             if self._has_pcm_cache(channel_id) and not self._other_roles_use_transform_key(
                 cache_key, role
             ):
+                channel_pcm_cache = self._pcm_chunk_cache.get(channel_id.int)
+                if channel_pcm_cache:
+                    late_join_target_us = self.get_late_join_target_timestamp_us(
+                        channel_id=channel_id,
+                        align_to_channel_tail=(channel_id != MAIN_CHANNEL),
+                    )
+                    latest_cached_end_us = (
+                        channel_pcm_cache[-1].timestamp_us + channel_pcm_cache[-1].duration_us
+                    )
+                    if latest_cached_end_us <= late_join_target_us:
+                        if self._channel_timing:
+                            self._ensure_role_started(role)
+                        return
+
                 self._catchup_state[cache_key] = "catching_up"
                 self._catchup_roles[cache_key] = {role}
                 self._catchup_tasks[cache_key] = create_task(
@@ -1075,7 +1166,10 @@ class PushStream:
             return
 
         now_us = self._clock.now_us()
-        min_timestamp_us = now_us + LATE_JOINER_MIN_LEAD_US
+        min_timestamp_us = self.get_late_join_target_timestamp_us(
+            channel_id=channel_id,
+            align_to_channel_tail=False,
+        )
 
         start_index = 0
         for chunk in cached:
@@ -1117,6 +1211,38 @@ class PushStream:
                     return True
         return False
 
+    def _channel_has_other_audio_roles(self, channel_id: UUID, exclude_role: Role) -> bool:
+        """Check whether any other connected role is subscribed to the channel."""
+        for client in self._group.clients:
+            if not client.is_connected:
+                continue
+            for role in client.active_roles:
+                if role is exclude_role:
+                    continue
+                req = role.get_audio_requirements()
+                if req is None:
+                    continue
+                role_channel_id = req.channel_id or MAIN_CHANNEL
+                if role_channel_id == channel_id:
+                    return True
+        return False
+
+    def _rebase_first_join_channel_timing(self, channel_id: UUID, joining_role: Role) -> None:
+        """Rebase stale channel timing to the shared timeline for first joiners."""
+        if channel_id not in self._channel_timing or not self._channel_timing:
+            return
+        if self._channel_has_other_audio_roles(channel_id, joining_role):
+            return
+        other_channel_timings = [
+            timing_us for cid, timing_us in self._channel_timing.items() if cid != channel_id
+        ]
+        if not other_channel_timings:
+            return
+        reference_timing_us = min(other_channel_timings)
+        self._channel_timing[channel_id] = max(
+            self._channel_timing[channel_id], reference_timing_us
+        )
+
     def _encode_pcm_sequence(
         self,
         pcm_chunks: list[CachedPCMChunk],
@@ -1125,6 +1251,7 @@ class PushStream:
         channel_id: UUID,
     ) -> list[CachedChunk]:
         """Resample PCM chunks to the target format and encode them sequentially."""
+        tkey = self._build_transform_key(req, channel_id)
         target_format = AudioFormat(
             sample_rate=req.sample_rate,
             bit_depth=req.bit_depth,
@@ -1181,7 +1308,8 @@ class PushStream:
                 else 0
             )
 
-            encoded_frames = _encode_for_transform_key(
+            encoded_frames = self._encode_transform_for_key(
+                tkey,
                 encoder,
                 resampled_pcm,
                 resampled.output_start_ts,
@@ -1227,11 +1355,20 @@ class PushStream:
         try:
             if encoder is not None:
                 encoder.reset()
+            self._transform_last_input_end_us.pop(cache_key, None)
             pcm_chunks = list(self._pcm_chunk_cache.get(channel_int, []))
-            now_us = self._clock.now_us()
-            target_ts = now_us + LATE_JOINER_MIN_LEAD_US
+            align_to_channel_tail = channel_id != MAIN_CHANNEL
+            target_ts = self.get_late_join_target_timestamp_us(
+                channel_id=channel_id,
+                align_to_channel_tail=align_to_channel_tail,
+            )
+            encode_start_ts = target_ts
+            if encoder is not None and align_to_channel_tail:
+                encode_start_ts = max(0, target_ts - ENCODER_CATCHUP_WARMUP_US)
             eligible = [
-                chunk for chunk in pcm_chunks if chunk.timestamp_us + chunk.duration_us > target_ts
+                chunk
+                for chunk in pcm_chunks
+                if chunk.timestamp_us + chunk.duration_us > encode_start_ts
             ]
 
             if not eligible:
@@ -1361,6 +1498,7 @@ class PushStream:
         self._pcm_chunk_cache.clear()
         self._historical_buffers.clear()
         self._historical_start_us.clear()
+        self._transform_last_input_end_us.clear()
 
     def clear(self) -> None:
         """
@@ -1381,6 +1519,7 @@ class PushStream:
         self._role_chunk_cache.clear()
         self._pending_join_roles.clear()
         self._pcm_chunk_cache.clear()
+        self._transform_last_input_end_us.clear()
         self._cancel_catchup_tasks()
 
         # Reset inline resamplers

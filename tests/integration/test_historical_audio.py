@@ -8,6 +8,7 @@ from uuid import UUID
 
 import pytest
 
+from aiosendspin.models import unpack_binary_header
 from aiosendspin.models.core import StreamStartMessage
 from aiosendspin.models.player import ClientHelloPlayerSupport, SupportedAudioFormat
 from aiosendspin.models.types import AudioCodec, PlayerCommand, Roles
@@ -181,6 +182,7 @@ async def test_historical_injection_enables_seamless_late_join() -> None:
 
     # Step 3: Connect a client on the new channel
     _, conn_new = _make_connected_player(server, group, "new-player", channel_id=new_channel)
+    join_now_us = clock.now_us()
 
     # Step 4: Commit with both historical (new channel) and live (main channel)
     stream.prepare_audio(bytes(4800), fmt)
@@ -189,9 +191,9 @@ async def test_historical_injection_enables_seamless_late_join() -> None:
     # New channel client should have received stream/start and audio
     assert any(isinstance(m, StreamStartMessage) for m in conn_new.sent_json)
     assert conn_new.sent_binary, "New channel client should have received historical + live audio"
-    assert len(conn_new.sent_binary) >= len(cached_pcm), (
-        "New client should receive at least as many chunks as the historical cache"
-    )
+    first_chunk_ts = unpack_binary_header(conn_new.sent_binary[0]).timestamp_us
+    assert first_chunk_ts >= join_now_us
+    assert first_chunk_ts - join_now_us <= 1_000_000
 
 
 @pytest.mark.asyncio
