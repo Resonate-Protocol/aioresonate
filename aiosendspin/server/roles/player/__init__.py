@@ -1,7 +1,12 @@
 """Player role - client and group level."""
 
 from aiosendspin.server.roles.player.audio_transformers import FlacEncoder, PcmPassthrough
-from aiosendspin.server.roles.player.events import VolumeChangedEvent
+from aiosendspin.server.roles.player.events import (
+    PlayerGroupEvent,
+    PlayerGroupMuteChangedEvent,
+    PlayerGroupVolumeChangedEvent,
+    VolumeChangedEvent,
+)
 from aiosendspin.server.roles.player.group import PlayerGroupRole
 from aiosendspin.server.roles.player.types import PlayerRoleProtocol
 from aiosendspin.server.roles.player.v1 import PlayerV1Role
@@ -13,7 +18,10 @@ register_role("player@v1", lambda client: PlayerV1Role(client=client))
 __all__ = [
     "FlacEncoder",
     "PcmPassthrough",
+    "PlayerGroupEvent",
+    "PlayerGroupMuteChangedEvent",
     "PlayerGroupRole",
+    "PlayerGroupVolumeChangedEvent",
     "PlayerRoleProtocol",
     "PlayerV1Role",
     "VolumeChangedEvent",

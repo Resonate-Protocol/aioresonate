@@ -6,7 +6,7 @@ from unittest.mock import MagicMock
 
 from aiosendspin.models.core import ServerStateMessage
 from aiosendspin.models.types import RepeatMode
-from aiosendspin.server.roles.metadata import Metadata
+from aiosendspin.server.roles.metadata import Metadata, MetadataClearedEvent, MetadataUpdatedEvent
 from aiosendspin.server.roles.metadata.group import MetadataGroupRole
 
 
@@ -44,6 +44,11 @@ def test_metadata_group_role_set_metadata_stores_value() -> None:
     assert mgr.metadata is not None
     assert mgr.metadata.title == "Test Song"
     assert mgr.metadata.artist == "Test Artist"
+    group._signal_event.assert_called_once()  # noqa: SLF001
+    event = group._signal_event.call_args.args[0]  # noqa: SLF001
+    assert isinstance(event, MetadataUpdatedEvent)
+    assert event.metadata.title == "Test Song"
+    assert event.previous_metadata is None
 
 
 def test_metadata_group_role_set_metadata_sends_to_members() -> None:
@@ -79,6 +84,9 @@ def test_metadata_group_role_clear_metadata() -> None:
 
     assert mgr.metadata is None
     member.send_message.assert_called_once()
+    group._signal_event.assert_called()  # noqa: SLF001
+    event = group._signal_event.call_args.args[0]  # noqa: SLF001
+    assert isinstance(event, MetadataClearedEvent)
 
 
 def test_metadata_group_role_update_title() -> None:
@@ -213,3 +221,4 @@ def test_metadata_group_role_skips_unchanged() -> None:
 
     # Should not have sent again
     member.send_message.assert_not_called()
+    group._signal_event.assert_called_once()  # noqa: SLF001

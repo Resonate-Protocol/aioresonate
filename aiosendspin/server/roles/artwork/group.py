@@ -12,6 +12,7 @@ from PIL import Image
 from aiosendspin.models import BinaryMessageType, pack_binary_header_raw
 from aiosendspin.models.artwork import ArtworkChannel
 from aiosendspin.models.types import ArtworkSource, PictureFormat
+from aiosendspin.server.roles.artwork.events import ArtworkClearedEvent, ArtworkUpdatedEvent
 from aiosendspin.server.roles.artwork.types import ArtworkRoleProtocol
 from aiosendspin.server.roles.base import GroupRole, Role
 from aiosendspin.util import create_task
@@ -110,6 +111,7 @@ class ArtworkGroupRole(GroupRole):
 
     async def _set_artwork(self, source: ArtworkSource, image: Image.Image | None) -> None:
         """Set or clear artwork for a source type."""
+        event_timestamp_us = self._group._server.clock.now_us()  # noqa: SLF001
         if image is None:
             self._current_artwork.pop(source, None)
         else:
@@ -136,6 +138,20 @@ class ArtworkGroupRole(GroupRole):
 
         if send_tasks:
             await asyncio.gather(*send_tasks, return_exceptions=True)
+
+        if image is None:
+            self.emit_group_event(
+                ArtworkClearedEvent(source=source, timestamp_us=event_timestamp_us)
+            )
+            return
+        self.emit_group_event(
+            ArtworkUpdatedEvent(
+                source=source,
+                timestamp_us=event_timestamp_us,
+                width=image.width,
+                height=image.height,
+            )
+        )
 
     def _letterbox_image(
         self, image: Image.Image, target_width: int, target_height: int

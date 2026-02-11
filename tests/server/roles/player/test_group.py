@@ -4,6 +4,10 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock
 
+from aiosendspin.server.roles.player.events import (
+    PlayerGroupMuteChangedEvent,
+    PlayerGroupVolumeChangedEvent,
+)
 from aiosendspin.server.roles.player.group import PlayerGroupRole
 
 
@@ -112,12 +116,22 @@ def test_player_group_role_set_mute_propagates() -> None:
 
     p1 = MagicMock()
     p2 = MagicMock()
+    muted_state = {"p1": False, "p2": False}
+    p1.get_player_muted.side_effect = lambda: muted_state["p1"]
+    p2.get_player_muted.side_effect = lambda: muted_state["p2"]
+    p1.set_player_mute.side_effect = lambda muted: muted_state.__setitem__("p1", muted)
+    p2.set_player_mute.side_effect = lambda muted: muted_state.__setitem__("p2", muted)
     pgr._members = [p1, p2]  # noqa: SLF001
 
     pgr.set_mute(muted=True)
 
     p1.set_player_mute.assert_called_once_with(True)  # noqa: FBT003
     p2.set_player_mute.assert_called_once_with(True)  # noqa: FBT003
+    group._signal_event.assert_called_once()  # noqa: SLF001
+    event = group._signal_event.call_args.args[0]  # noqa: SLF001
+    assert isinstance(event, PlayerGroupMuteChangedEvent)
+    assert event.previous_muted is False
+    assert event.muted is True
 
 
 def test_player_group_role_set_volume_empty() -> None:
@@ -134,12 +148,19 @@ def test_player_group_role_set_volume_single_player() -> None:
     pgr = PlayerGroupRole(group)
 
     player = MagicMock()
-    player.get_player_volume.return_value = 100
+    state = {"volume": 100}
+    player.get_player_volume.side_effect = lambda: state["volume"]
+    player.set_player_volume.side_effect = lambda volume: state.__setitem__("volume", volume)
     pgr._members = [player]  # noqa: SLF001
 
     pgr.set_volume(50)
 
     player.set_player_volume.assert_called_once_with(50)
+    group._signal_event.assert_called_once()  # noqa: SLF001
+    event = group._signal_event.call_args.args[0]  # noqa: SLF001
+    assert isinstance(event, PlayerGroupVolumeChangedEvent)
+    assert event.previous_volume == 100
+    assert event.volume == 50
 
 
 def test_player_group_role_set_volume_redistributes() -> None:
@@ -203,3 +224,17 @@ def test_player_group_role_set_volume_skips_none() -> None:
 
     p1.set_player_volume.assert_called_once_with(75)
     p2.set_player_volume.assert_not_called()
+
+
+def test_player_group_role_set_volume_no_change_no_event() -> None:
+    """No event is emitted when effective group volume is unchanged."""
+    group = MagicMock()
+    pgr = PlayerGroupRole(group)
+
+    player = MagicMock()
+    player.get_player_volume.return_value = 50
+    pgr._members = [player]  # noqa: SLF001
+
+    pgr.set_volume(50)
+
+    group._signal_event.assert_not_called()  # noqa: SLF001

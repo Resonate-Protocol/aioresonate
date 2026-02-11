@@ -9,6 +9,7 @@ from aiosendspin.models.core import ServerStateMessage, ServerStatePayload
 from aiosendspin.models.metadata import Progress
 from aiosendspin.models.types import RepeatMode
 from aiosendspin.server.roles.base import GroupRole, Role
+from aiosendspin.server.roles.metadata.events import MetadataClearedEvent, MetadataUpdatedEvent
 from aiosendspin.server.roles.metadata.state import Metadata
 
 if TYPE_CHECKING:
@@ -123,6 +124,19 @@ class MetadataGroupRole(GroupRole):
         for role in self._members:
             state_message = ServerStateMessage(ServerStatePayload(metadata=metadata_update))
             role.send_message(state_message)
+
+        if metadata is None:
+            self.emit_group_event(
+                MetadataClearedEvent(previous_metadata=last_metadata, timestamp_us=timestamp)
+            )
+            return
+        self.emit_group_event(
+            MetadataUpdatedEvent(
+                metadata=metadata,
+                previous_metadata=last_metadata,
+                timestamp_us=timestamp,
+            )
+        )
 
     def update(  # noqa: PLR0913
         self,

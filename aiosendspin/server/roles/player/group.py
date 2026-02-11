@@ -5,6 +5,10 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from aiosendspin.server.roles.base import GroupRole
+from aiosendspin.server.roles.player.events import (
+    PlayerGroupMuteChangedEvent,
+    PlayerGroupVolumeChangedEvent,
+)
 from aiosendspin.server.roles.player.types import PlayerRoleProtocol
 
 if TYPE_CHECKING:
@@ -55,6 +59,7 @@ class PlayerGroupRole(GroupRole):
         players = self._player_roles()
         if not players:
             return True
+        previous_volume = self.get_group_volume()
 
         # Build mapping of player -> current volume (only players with volume support)
         player_volumes: dict[PlayerRoleProtocol, float] = {}
@@ -101,12 +106,26 @@ class PlayerGroupRole(GroupRole):
         # Apply to players
         for player, final_vol in player_volumes.items():
             player.set_player_volume(round(final_vol))
+        new_volume = self.get_group_volume()
+        if previous_volume is not None and new_volume is not None and previous_volume != new_volume:
+            self.emit_group_event(
+                PlayerGroupVolumeChangedEvent(
+                    previous_volume=previous_volume,
+                    volume=new_volume,
+                )
+            )
         return True
 
     def set_group_muted(self, muted: bool) -> bool | None:  # noqa: FBT001
         """Set mute state on all players."""
+        previous_muted = bool(self.get_group_muted())
         for player in self._player_roles():
             player.set_player_mute(muted)
+        new_muted = bool(self.get_group_muted())
+        if previous_muted != new_muted:
+            self.emit_group_event(
+                PlayerGroupMuteChangedEvent(previous_muted=previous_muted, muted=new_muted)
+            )
         return True
 
     @property

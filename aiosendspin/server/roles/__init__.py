@@ -17,7 +17,13 @@ from aiosendspin.server.roles import (
 )
 
 # Re-export role classes for convenience
-from aiosendspin.server.roles.artwork import ArtworkGroupRole, ArtworkV1Role
+from aiosendspin.server.roles.artwork import (
+    ArtworkClearedEvent,
+    ArtworkEvent,
+    ArtworkGroupRole,
+    ArtworkUpdatedEvent,
+    ArtworkV1Role,
+)
 from aiosendspin.server.roles.base import (
     AudioChunk,
     AudioRequirements,
@@ -40,12 +46,30 @@ from aiosendspin.server.roles.controller import (
     ControllerV1Role,
     ControllerVolumeEvent,
 )
-from aiosendspin.server.roles.metadata import MetadataGroupRole, MetadataV1Role
-from aiosendspin.server.roles.player import PlayerGroupRole, PlayerV1Role
-from aiosendspin.server.roles.visualizer import VisualizerGroupRole, VisualizerV1Role
+from aiosendspin.server.roles.metadata import (
+    MetadataClearedEvent,
+    MetadataEvent,
+    MetadataGroupRole,
+    MetadataUpdatedEvent,
+    MetadataV1Role,
+)
+from aiosendspin.server.roles.player import (
+    PlayerGroupEvent,
+    PlayerGroupMuteChangedEvent,
+    PlayerGroupRole,
+    PlayerGroupVolumeChangedEvent,
+    PlayerV1Role,
+)
+from aiosendspin.server.roles.visualizer import (
+    VisualizerGroupRole,
+    VisualizerV1Role,
+)
 
 __all__ = [
+    "ArtworkClearedEvent",
+    "ArtworkEvent",
     "ArtworkGroupRole",
+    "ArtworkUpdatedEvent",
     "ArtworkV1Role",
     "AudioChunk",
     "AudioRequirements",
@@ -63,9 +87,15 @@ __all__ = [
     "ControllerV1Role",
     "ControllerVolumeEvent",
     "GroupRole",
+    "MetadataClearedEvent",
+    "MetadataEvent",
     "MetadataGroupRole",
+    "MetadataUpdatedEvent",
     "MetadataV1Role",
+    "PlayerGroupEvent",
+    "PlayerGroupMuteChangedEvent",
     "PlayerGroupRole",
+    "PlayerGroupVolumeChangedEvent",
     "PlayerV1Role",
     "Role",
     "StreamRequirements",
