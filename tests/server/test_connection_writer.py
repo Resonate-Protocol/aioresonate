@@ -33,6 +33,9 @@ class _DummyServer:
     def get_or_create_client(self, client_id: str) -> Never:
         raise AssertionError(f"unexpected get_or_create_client({client_id}) in this test")
 
+    def is_external_player(self, client_id: str) -> bool:  # noqa: ARG002
+        return False
+
 
 def test_binary_data_supports_buffer_registration_metadata() -> None:
     """_BinaryData should optionally carry buffer registration info."""

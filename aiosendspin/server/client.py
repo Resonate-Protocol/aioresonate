@@ -24,6 +24,7 @@ from aiosendspin.models.types import (
     GoodbyeReason,
     Roles,
     has_role,
+    negotiate_active_roles,
 )
 from aiosendspin.util import create_task
 
@@ -254,6 +255,12 @@ class SendspinClient:
         if self._group is None:
             raise RuntimeError("SendspinClient.group must be initialized by the server")
 
+    def preload_hello(self, client_info: ClientHelloPayload) -> None:
+        """Seed persistent client identity/capabilities without an active connection."""
+        self._info = client_info
+        self._name = client_info.name
+        self._negotiated_roles = negotiate_active_roles(client_info.supported_roles)
+
     def mark_connected(self) -> None:
         """Mark this client as fully connected (after initial client/state if required)."""
         if self._connection is None:
@@ -278,6 +285,11 @@ class SendspinClient:
 
     def _schedule_cleanup(self, goodbye_reason: GoodbyeReason | None) -> None:
         """Schedule cleanup from server registry based on disconnect reason."""
+        if self._server.is_external_player(self._client_id):
+            self._logger.debug("Skipping cleanup scheduling for external player")
+            self._cleanup_on_mdns_removal = False
+            return
+
         if goodbye_reason == GoodbyeReason.ANOTHER_SERVER:
             self._logger.debug("Skipping cleanup scheduling (reason: %s)", goodbye_reason)
             self._cleanup_on_mdns_removal = True

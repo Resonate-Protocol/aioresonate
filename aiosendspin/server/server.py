@@ -26,6 +26,7 @@ from zeroconf import (
 )
 from zeroconf.asyncio import AsyncServiceBrowser, AsyncServiceInfo, AsyncZeroconf
 
+from aiosendspin.models.core import ClientHelloPayload
 from aiosendspin.models.types import ConnectionReason, GoodbyeReason
 from aiosendspin.util import create_task, get_local_ip
 
@@ -53,6 +54,18 @@ class ClientRemovedEvent(SendspinEvent):
     """A persistent client/device was removed from the server."""
 
     client_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class ExternalStreamStartRequest:
+    """Request payload for externally managed player connection on stream start."""
+
+    client_id: str
+    server: SendspinServer
+    connection_reason: ConnectionReason = ConnectionReason.PLAYBACK
+
+
+ExternalStreamStartCallback = Callable[[ExternalStreamStartRequest], None]
 
 
 def _get_first_valid_ip(addresses: list[str]) -> str | None:
@@ -105,6 +118,7 @@ class SendspinServer:
         self._initial_connect_succeeded: set[str] = set()
         self._connection_reasons: dict[str, ConnectionReason] = {}  # url → reason
         self._client_urls: dict[str, str] = {}  # client_id → url
+        self._external_stream_start_cbs: dict[str, ExternalStreamStartCallback] = {}
         self._pending_connections = set()
 
         self._mdns_client_urls: dict[str, str] = {}
@@ -171,8 +185,33 @@ class SendspinServer:
         client = self._clients.pop(client_id, None)
         if client is None:
             return
+        self._external_stream_start_cbs.pop(client_id, None)
         await client.group.remove_client(client)
         self._signal_event(ClientRemovedEvent(client_id))
+
+    def register_external_player(
+        self,
+        hello: ClientHelloPayload,
+        *,
+        on_stream_start: ExternalStreamStartCallback,
+    ) -> SendspinClient:
+        """Register a client identity that is connected by external orchestration."""
+        client = self.get_or_create_client(hello.client_id)
+        if client.is_connected:
+            raise RuntimeError(
+                f"Cannot register external player {hello.client_id!r} while client is connected"
+            )
+        client.preload_hello(hello)
+        self._external_stream_start_cbs[hello.client_id] = on_stream_start
+        return client
+
+    def unregister_external_player(self, client_id: str) -> None:
+        """Remove external stream-start callback for a registered client."""
+        self._external_stream_start_cbs.pop(client_id, None)
+
+    def is_external_player(self, client_id: str) -> bool:
+        """Whether this client is externally managed for playback connects."""
+        return client_id in self._external_stream_start_cbs
 
     def add_event_listener(
         self, callback: Callable[[SendspinServer, SendspinEvent], None]
@@ -285,6 +324,26 @@ class SendspinServer:
             return False
 
         self.connect_to_client(url, connection_reason=ConnectionReason.PLAYBACK)
+        return True
+
+    def request_client_playback_connection(self, client_id: str) -> bool:
+        """Request that a disconnected client connect for playback."""
+        external_cb = self._external_stream_start_cbs.get(client_id)
+        if external_cb is None:
+            return self.reclaim_client_for_playback(client_id)
+
+        request = ExternalStreamStartRequest(
+            client_id=client_id,
+            server=self,
+        )
+        try:
+            external_cb(request)
+        except Exception:
+            logger.exception(
+                "External stream-start callback failed for client_id=%s",
+                client_id,
+            )
+            return False
         return True
 
     def disconnect_from_client(self, url: str) -> None:

@@ -41,6 +41,9 @@ class _MockServer:
     _clients: dict[str, SendspinClient] = field(default_factory=dict)
     _connection_tasks: dict[str, asyncio.Task[None]] = field(default_factory=dict)
 
+    def is_external_player(self, client_id: str) -> bool:  # noqa: ARG002
+        return False
+
     def get_connection_reason(self, url: str) -> ConnectionReason:
         return self._connection_reasons.get(url, ConnectionReason.DISCOVERY)
 
@@ -281,9 +284,12 @@ class _MockServerWithReclaim:
 
     _reclaim_calls: list[str] = field(default_factory=list)
 
-    def reclaim_client_for_playback(self, client_id: str) -> bool:
+    def request_client_playback_connection(self, client_id: str) -> bool:
         self._reclaim_calls.append(client_id)
         return True
+
+    def is_external_player(self, client_id: str) -> bool:  # noqa: ARG002
+        return False
 
 
 class TestAutomaticReclaim:

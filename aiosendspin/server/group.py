@@ -137,7 +137,7 @@ class SendspinGroup:
         # This reconnects to clients that may have switched to another server.
         for client in self._clients:
             if not client.is_connected:
-                self._server.reclaim_client_for_playback(client.client_id)
+                self._server.request_client_playback_connection(client.client_id)
 
         # Starting a stream implies the group is actively playing.
         if self._current_state != PlaybackStateType.PLAYING:
@@ -426,7 +426,7 @@ class SendspinGroup:
             if not client.is_connected:
                 # Defensive fallback for programmatic moves of retained/disconnected clients:
                 # when joining an active group, try to reclaim the client for playback.
-                self._server.reclaim_client_for_playback(client.client_id)
+                self._server.request_client_playback_connection(client.client_id)
             else:
                 # Call on_role_join for all roles with audio requirements (hook-based flow)
                 for role in client.active_roles:

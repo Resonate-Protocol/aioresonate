@@ -23,6 +23,9 @@ class _DummyServer:
     id: str = "srv"
     name: str = "server"
 
+    def is_external_player(self, client_id: str) -> bool:  # noqa: ARG002
+        return False
+
 
 class _DummyGroup:
     def __init__(self, clients: list[SendspinClient]) -> None:

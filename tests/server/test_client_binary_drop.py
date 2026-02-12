@@ -30,6 +30,9 @@ class _DummyServer:
         _ = client_id
         raise AssertionError("client/hello not used in this test")
 
+    def is_external_player(self, client_id: str) -> bool:  # noqa: ARG002
+        return False
+
 
 @pytest.mark.asyncio
 async def test_stream_end_drops_queued_binary_before_sending() -> None:

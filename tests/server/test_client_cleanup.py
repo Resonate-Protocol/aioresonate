@@ -27,6 +27,9 @@ class _MockServer:
     name: str = "server"
     remove_client: AsyncMock = field(default_factory=AsyncMock)
 
+    def is_external_player(self, client_id: str) -> bool:  # noqa: ARG002
+        return False
+
 
 class _DummyConnection:
     async def disconnect(self, *, retry_connection: bool = True) -> None:  # noqa: ARG002

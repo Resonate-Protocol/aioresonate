@@ -30,6 +30,9 @@ class _DummyServer:
     def get_or_create_client(self, client_id: str) -> Any:  # noqa: ARG002
         raise AssertionError("unexpected get_or_create_client() in this test")
 
+    def is_external_player(self, client_id: str) -> bool:  # noqa: ARG002
+        return False
+
 
 class _DummyGroup:
     def __init__(self, clients: list[Any], group_id: str = "g1") -> None:

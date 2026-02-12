@@ -23,6 +23,9 @@ class _DummyServer:
     id: str = "srv"
     name: str = "server"
 
+    def is_external_player(self, client_id: str) -> bool:  # noqa: ARG002
+        return False
+
 
 class _DummyConnection:
     async def disconnect(self, *, retry_connection: bool = True) -> None:  # noqa: ARG002
