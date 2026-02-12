@@ -305,7 +305,7 @@ class SendspinClient:
         if self._connection is None:
             return
         if isinstance(message, StreamStartMessage):
-            self._logger.info("Sending stream/start: %s", message.payload)
+            self._logger.debug("Sending stream/start: %s", message.payload)
         self._connection.send_message(message)
 
     def send_role_message(self, role: str, message: ServerMessage) -> None:
@@ -313,7 +313,7 @@ class SendspinClient:
         if self._connection is None:
             return
         if isinstance(message, StreamStartMessage):
-            self._logger.info("Sending stream/start: %s", message.payload)
+            self._logger.debug("Sending stream/start: %s", message.payload)
         self._connection.send_role_message(role, message)
 
     def send_binary(

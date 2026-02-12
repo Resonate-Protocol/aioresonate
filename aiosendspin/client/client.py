@@ -622,7 +622,7 @@ class SendspinClient:
         elif msg.type is WSMsgType.BINARY:
             self._handle_binary_message(msg.data)
         elif msg.type in (WSMsgType.CLOSE, WSMsgType.CLOSING, WSMsgType.CLOSED):
-            logger.info("WebSocket closed by server")
+            logger.debug("WebSocket closed by server")
             await self.disconnect()
         elif msg.type is WSMsgType.ERROR:
             logger.error("WebSocket error: %s", self._ws.exception() if self._ws else "unknown")
@@ -669,7 +669,7 @@ class SendspinClient:
             return
 
         if not self._stream_active:
-            logger.warning(
+            logger.debug(
                 "Ignoring binary message of type %s since no stream is active", message_type
             )
             return
@@ -756,12 +756,12 @@ class SendspinClient:
 
     def _handle_stream_clear(self, message: StreamClearMessage) -> None:
         roles = message.payload.roles
-        logger.info("Stream clear received for roles: %s", roles or "all")
+        logger.debug("Stream clear received for roles: %s", roles or "all")
         self._notify_stream_clear(roles)
 
     def _handle_stream_end(self, message: StreamEndMessage) -> None:
         roles = message.payload.roles
-        logger.info("Stream ended for roles: %s", roles or "all")
+        logger.debug("Stream ended for roles: %s", roles or "all")
 
         # If roles is None or includes player role, end the player stream
         if roles is None or "player" in roles:

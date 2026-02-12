@@ -375,7 +375,7 @@ class SendspinConnection:
             self._client.detach_connection(self._last_goodbye_reason)
             self._client = None
 
-        self._logger.info("Connection disconnected")
+        self._logger.debug("Connection disconnected")
 
     def _initial_state_timeout_callback(self) -> None:
         if self._initial_state_received:
@@ -399,7 +399,7 @@ class SendspinConnection:
                 await self._wsock_server.prepare(self._request)
 
         # Start writer task for both client-initiated and server-initiated connections.
-        self._logger.info("Connection established")
+        self._logger.debug("Connection established")
         self._writer_task = create_task(self._writer())
 
     async def _cleanup_connection(self) -> None:
@@ -417,10 +417,14 @@ class SendspinConnection:
                 timestamp_us = self._server.clock.now_us()
 
                 if msg.type in (WSMsgType.CLOSE, WSMsgType.CLOSING, WSMsgType.CLOSED):
-                    self._logger.info(
+                    close_code = wsock.close_code
+                    log_func = (
+                        self._logger.debug if close_code in (1000, 1001) else self._logger.warning
+                    )
+                    log_func(
                         "WebSocket closed: type=%s close_code=%s",
                         msg.type.name,
-                        wsock.close_code,
+                        close_code,
                     )
                     break
 
@@ -480,7 +484,7 @@ class SendspinConnection:
             self._client_id = client_info.client_id
             self._active_roles = negotiate_active_roles(client_info.supported_roles)
             self._logger = logger.getChild(self._client_id)
-            self._logger.info("Received client/hello: %s", client_info)
+            self._logger.debug("Received client/hello: %s", client_info)
 
             client = self._server.get_or_create_client(self._client_id)
             client.attach_connection(self, client_info=client_info, active_roles=self._active_roles)
@@ -567,7 +571,7 @@ class SendspinConnection:
             return
 
         if isinstance(message, ClientGoodbyeMessage):
-            self._logger.info(
+            self._logger.debug(
                 "Received client/goodbye with reason: %s",
                 message.payload.reason,
             )
@@ -652,7 +656,8 @@ class SendspinConnection:
         await wsock.send_bytes(binary.data)
         elapsed_ms = (time.monotonic() - start_s) * 1000
         if elapsed_ms >= 50.0:
-            self._logger.error(
+            # Slow writes indicate transport/backpressure issues but are not fatal.
+            self._logger.debug(
                 "Slow send_bytes: %.1fms size=%s ts_us=%s role=%s",
                 elapsed_ms,
                 len(binary.data),
@@ -796,6 +801,8 @@ class SendspinConnection:
             stats["buf_max_ms"] = max(stats["buf_max_ms"], buf_ms)
 
     def _log_send_summaries_if_due(self) -> None:
+        if not self._logger.isEnabledFor(logging.DEBUG):
+            return
         now_s = time.monotonic()
         if now_s - self._send_summary_last_log_s < 5.0:
             return
@@ -808,7 +815,7 @@ class SendspinConnection:
             avg_ts = role_stats["ts_gap_sum_ms"] / count
             if role_stats["buf_count"] > 0:
                 avg_buf = role_stats["buf_sum_ms"] / role_stats["buf_count"]
-                self._logger.info(
+                self._logger.debug(
                     "Send summary role=%s samples=%s "
                     "send_gap_ms(avg=%.1f min=%.1f max=%.1f) "
                     "ts_gap_ms(avg=%.1f min=%.1f max=%.1f) "
@@ -826,7 +833,7 @@ class SendspinConnection:
                     role_stats["buf_max_ms"],
                 )
             else:
-                self._logger.info(
+                self._logger.debug(
                     "Send summary role=%s samples=%s "
                     "send_gap_ms(avg=%.1f min=%.1f max=%.1f) "
                     "ts_gap_ms(avg=%.1f min=%.1f max=%.1f)",
@@ -888,20 +895,24 @@ class SendspinConnection:
             self._block_role(role, now_us + wait_us)
             return False, now_us
 
-        # TODO: put all debugging info behind the debug flag, and in a
-        # separate method
-        timestamp_us = entry.timestamp_us
-        last_send_us = self._last_send_time_us_by_role.get(role)
-        last_ts_us = self._last_timestamp_us_by_role.get(role)
-        send_gap_ms = (now_us - last_send_us) / 1000 if last_send_us is not None else 0
-        ts_gap_ms = (timestamp_us - last_ts_us) / 1000 if last_ts_us is not None else 0
-        self._last_send_time_us_by_role[role] = now_us
-        self._last_timestamp_us_by_role[role] = timestamp_us
+        debug_enabled = self._logger.isEnabledFor(logging.DEBUG)
+        last_send_us: int | None = None
+        last_ts_us: int | None = None
+        send_gap_ms = 0.0
+        ts_gap_ms = 0.0
+        if debug_enabled:
+            timestamp_us = entry.timestamp_us
+            last_send_us = self._last_send_time_us_by_role.get(role)
+            last_ts_us = self._last_timestamp_us_by_role.get(role)
+            send_gap_ms = (now_us - last_send_us) / 1000 if last_send_us is not None else 0
+            ts_gap_ms = (timestamp_us - last_ts_us) / 1000 if last_ts_us is not None else 0
+            self._last_send_time_us_by_role[role] = now_us
+            self._last_timestamp_us_by_role[role] = timestamp_us
 
         self._discard_role_head(role)
         await self._send_binary_data(wsock, role, entry, buffer_tracker)
 
-        if last_send_us is not None and last_ts_us is not None:
+        if debug_enabled and last_send_us is not None and last_ts_us is not None:
             self._update_send_stats(
                 role,
                 send_gap_ms=send_gap_ms,
@@ -909,7 +920,8 @@ class SendspinConnection:
                 buffer_tracker=buffer_tracker,
                 now_us=now_us,
             )
-        self._log_send_summaries_if_due()
+        if debug_enabled:
+            self._log_send_summaries_if_due()
         self._schedule_role_head(role)
         return True, self._server.clock.now_us()
 

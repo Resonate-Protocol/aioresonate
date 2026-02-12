@@ -123,7 +123,7 @@ class ClientHelloPayload(DataClassORJSONMixin):
         if legacy_fields_used:
             old_names = ", ".join(old for old, _ in legacy_fields_used)
             new_names = ", ".join(new for _, new in legacy_fields_used)
-            logger.info(
+            logger.warning(
                 "client/hello message used deprecated field names (%s), "
                 "please update client to use (%s) instead",
                 old_names,

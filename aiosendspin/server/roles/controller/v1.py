@@ -164,7 +164,7 @@ class ControllerV1Role(Role):
         """Handle the switch command to cycle through groups (locked)."""
         # Clients in external_source can't participate in playback
         if self._client.client_state == ClientStateType.EXTERNAL_SOURCE:
-            self._logger.warning("Ignoring switch command while client is in external_source state")
+            self._logger.debug("Ignoring switch command while client is in external_source state")
             return
 
         # Check if client should rejoin previous group (external_source recovery priority)
