@@ -158,16 +158,15 @@ def test_controller_group_role_handle_volume_command() -> None:
     group.group_role.return_value = player_group_role
 
     cgr = ControllerGroupRole(group)
-    events: list[object] = []
-    cgr.add_event_listener(events.append)
 
     cmd = ControllerCommandPayload(command=MediaCommand.VOLUME, volume=50)
     cgr.handle_command(cmd)
 
     player_group_role.set_group_volume.assert_called_once_with(50)
-    assert len(events) == 1
-    assert isinstance(events[0], ControllerVolumeEvent)
-    assert events[0].volume == 50
+    group._signal_event.assert_called_once()  # noqa: SLF001
+    event = group._signal_event.call_args.args[0]  # noqa: SLF001
+    assert isinstance(event, ControllerVolumeEvent)
+    assert event.volume == 50
 
 
 def test_controller_group_role_handle_mute_command() -> None:
@@ -179,16 +178,15 @@ def test_controller_group_role_handle_mute_command() -> None:
     group.group_role.return_value = player_group_role
 
     cgr = ControllerGroupRole(group)
-    events: list[object] = []
-    cgr.add_event_listener(events.append)
 
     cmd = ControllerCommandPayload(command=MediaCommand.MUTE, mute=True)
     cgr.handle_command(cmd)
 
     player_group_role.set_group_muted.assert_called_once_with(True)  # noqa: FBT003
-    assert len(events) == 1
-    assert isinstance(events[0], ControllerMuteEvent)
-    assert events[0].muted is True
+    group._signal_event.assert_called_once()  # noqa: SLF001
+    event = group._signal_event.call_args.args[0]  # noqa: SLF001
+    assert isinstance(event, ControllerMuteEvent)
+    assert event.muted is True
 
 
 def test_controller_group_role_handle_play_command() -> None:
@@ -197,14 +195,12 @@ def test_controller_group_role_handle_play_command() -> None:
     cgr = ControllerGroupRole(group)
     cgr.set_supported_commands([MediaCommand.PLAY])
 
-    events: list[object] = []
-    cgr.add_event_listener(events.append)
-
     cmd = ControllerCommandPayload(command=MediaCommand.PLAY)
     cgr.handle_command(cmd)
 
-    assert len(events) == 1
-    assert isinstance(events[0], ControllerPlayEvent)
+    group._signal_event.assert_called_once()  # noqa: SLF001
+    event = group._signal_event.call_args.args[0]  # noqa: SLF001
+    assert isinstance(event, ControllerPlayEvent)
 
 
 def test_controller_group_role_handle_pause_command() -> None:
@@ -213,14 +209,12 @@ def test_controller_group_role_handle_pause_command() -> None:
     cgr = ControllerGroupRole(group)
     cgr.set_supported_commands([MediaCommand.PAUSE])
 
-    events: list[object] = []
-    cgr.add_event_listener(events.append)
-
     cmd = ControllerCommandPayload(command=MediaCommand.PAUSE)
     cgr.handle_command(cmd)
 
-    assert len(events) == 1
-    assert isinstance(events[0], ControllerPauseEvent)
+    group._signal_event.assert_called_once()  # noqa: SLF001
+    event = group._signal_event.call_args.args[0]  # noqa: SLF001
+    assert isinstance(event, ControllerPauseEvent)
 
 
 def test_controller_group_role_handle_stop_command() -> None:
@@ -229,14 +223,12 @@ def test_controller_group_role_handle_stop_command() -> None:
     cgr = ControllerGroupRole(group)
     cgr.set_supported_commands([MediaCommand.STOP])
 
-    events: list[object] = []
-    cgr.add_event_listener(events.append)
-
     cmd = ControllerCommandPayload(command=MediaCommand.STOP)
     cgr.handle_command(cmd)
 
-    assert len(events) == 1
-    assert isinstance(events[0], ControllerStopEvent)
+    group._signal_event.assert_called_once()  # noqa: SLF001
+    event = group._signal_event.call_args.args[0]  # noqa: SLF001
+    assert isinstance(event, ControllerStopEvent)
 
 
 def test_controller_group_role_handle_next_command() -> None:
@@ -245,14 +237,12 @@ def test_controller_group_role_handle_next_command() -> None:
     cgr = ControllerGroupRole(group)
     cgr.set_supported_commands([MediaCommand.NEXT])
 
-    events: list[object] = []
-    cgr.add_event_listener(events.append)
-
     cmd = ControllerCommandPayload(command=MediaCommand.NEXT)
     cgr.handle_command(cmd)
 
-    assert len(events) == 1
-    assert isinstance(events[0], ControllerNextEvent)
+    group._signal_event.assert_called_once()  # noqa: SLF001
+    event = group._signal_event.call_args.args[0]  # noqa: SLF001
+    assert isinstance(event, ControllerNextEvent)
 
 
 def test_controller_group_role_handle_previous_command() -> None:
@@ -261,14 +251,12 @@ def test_controller_group_role_handle_previous_command() -> None:
     cgr = ControllerGroupRole(group)
     cgr.set_supported_commands([MediaCommand.PREVIOUS])
 
-    events: list[object] = []
-    cgr.add_event_listener(events.append)
-
     cmd = ControllerCommandPayload(command=MediaCommand.PREVIOUS)
     cgr.handle_command(cmd)
 
-    assert len(events) == 1
-    assert isinstance(events[0], ControllerPreviousEvent)
+    group._signal_event.assert_called_once()  # noqa: SLF001
+    event = group._signal_event.call_args.args[0]  # noqa: SLF001
+    assert isinstance(event, ControllerPreviousEvent)
 
 
 def test_controller_group_role_handle_switch_command() -> None:
@@ -276,14 +264,12 @@ def test_controller_group_role_handle_switch_command() -> None:
     group = _make_group_stub()
     cgr = ControllerGroupRole(group)
 
-    events: list[object] = []
-    cgr.add_event_listener(events.append)
-
     cmd = ControllerCommandPayload(command=MediaCommand.SWITCH)
     cgr.handle_command(cmd)
 
-    assert len(events) == 1
-    assert isinstance(events[0], ControllerSwitchEvent)
+    group._signal_event.assert_called_once()  # noqa: SLF001
+    event = group._signal_event.call_args.args[0]  # noqa: SLF001
+    assert isinstance(event, ControllerSwitchEvent)
 
 
 def test_controller_group_role_handle_repeat_commands() -> None:
@@ -301,17 +287,15 @@ def test_controller_group_role_handle_repeat_commands() -> None:
         (MediaCommand.REPEAT_ONE, RepeatMode.ONE),
         (MediaCommand.REPEAT_ALL, RepeatMode.ALL),
     ]:
-        events: list[object] = []
-        cgr.add_event_listener(events.append)
+        group._signal_event.reset_mock()  # noqa: SLF001
 
         cmd = ControllerCommandPayload(command=media_cmd)
         cgr.handle_command(cmd)
 
-        assert len(events) == 1
-        assert isinstance(events[0], ControllerRepeatEvent)
-        assert events[0].mode == expected_mode
-
-        cgr._event_cbs.clear()  # noqa: SLF001
+        group._signal_event.assert_called_once()  # noqa: SLF001
+        event = group._signal_event.call_args.args[0]  # noqa: SLF001
+        assert isinstance(event, ControllerRepeatEvent)
+        assert event.mode == expected_mode
 
 
 def test_controller_group_role_handle_shuffle_commands() -> None:
@@ -324,17 +308,15 @@ def test_controller_group_role_handle_shuffle_commands() -> None:
         (MediaCommand.SHUFFLE, True),
         (MediaCommand.UNSHUFFLE, False),
     ]:
-        events: list[object] = []
-        cgr.add_event_listener(events.append)
+        group._signal_event.reset_mock()  # noqa: SLF001
 
         cmd = ControllerCommandPayload(command=media_cmd)
         cgr.handle_command(cmd)
 
-        assert len(events) == 1
-        assert isinstance(events[0], ControllerShuffleEvent)
-        assert events[0].shuffle == expected_shuffle
-
-        cgr._event_cbs.clear()  # noqa: SLF001
+        group._signal_event.assert_called_once()  # noqa: SLF001
+        event = group._signal_event.call_args.args[0]  # noqa: SLF001
+        assert isinstance(event, ControllerShuffleEvent)
+        assert event.shuffle == expected_shuffle
 
 
 def test_controller_group_role_handle_unsupported_command() -> None:
@@ -343,29 +325,7 @@ def test_controller_group_role_handle_unsupported_command() -> None:
     cgr = ControllerGroupRole(group)
     # Don't add PLAY to supported commands
 
-    events: list[object] = []
-    cgr.add_event_listener(events.append)
-
     cmd = ControllerCommandPayload(command=MediaCommand.PLAY)
     cgr.handle_command(cmd)
 
-    assert len(events) == 0
-
-
-def test_controller_group_role_remove_event_listener() -> None:
-    """add_event_listener() returns unsubscribe function."""
-    group = _make_group_stub()
-    cgr = ControllerGroupRole(group)
-    cgr.set_supported_commands([MediaCommand.PLAY])
-
-    events: list[object] = []
-    unsub = cgr.add_event_listener(events.append)
-
-    cmd = ControllerCommandPayload(command=MediaCommand.PLAY)
-    cgr.handle_command(cmd)
-    assert len(events) == 1
-
-    unsub()
-
-    cgr.handle_command(cmd)
-    assert len(events) == 1  # No new events after unsubscribe
+    group._signal_event.assert_not_called()  # noqa: SLF001

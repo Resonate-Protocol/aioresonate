@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
-from contextlib import suppress
 from typing import TYPE_CHECKING
 
 from aiosendspin.models.controller import ControllerCommandPayload, ControllerStatePayload
@@ -50,7 +49,6 @@ class ControllerGroupRole(GroupRole):
         self._last_sent_volume: int | None = None
         self._last_sent_muted: bool | None = None
         self._last_sent_supported_commands: list[MediaCommand] | None = None
-        self._event_cbs: list[Callable[[ControllerEvent], None]] = []
         # Track volume event subscriptions for player clients
         self._player_client_unsubs: dict[SendspinClient, Callable[[], None]] = {}
 
@@ -169,16 +167,16 @@ class ControllerGroupRole(GroupRole):
 
         if cmd.command == MediaCommand.VOLUME and cmd.volume is not None:
             self.set_volume(cmd.volume)
-            self._signal_event(ControllerVolumeEvent(volume=cmd.volume))
+            self.emit_group_event(ControllerVolumeEvent(volume=cmd.volume))
             return
         if cmd.command == MediaCommand.MUTE and cmd.mute is not None:
             self.set_mute(cmd.mute)
-            self._signal_event(ControllerMuteEvent(muted=cmd.mute))
+            self.emit_group_event(ControllerMuteEvent(muted=cmd.mute))
             return
 
         event = self._command_to_event(cmd)
         if event is not None:
-            self._signal_event(event)
+            self.emit_group_event(event)
 
     def _command_to_event(self, cmd: ControllerCommandPayload) -> ControllerEvent | None:
         """Convert a command payload to an event."""
@@ -207,28 +205,6 @@ class ControllerGroupRole(GroupRole):
                 return ControllerShuffleEvent(shuffle=False)
             case _:
                 return None
-
-    def add_event_listener(self, callback: Callable[[ControllerEvent], None]) -> Callable[[], None]:
-        """Register a callback to listen for controller events.
-
-        Returns a function to remove the listener.
-        """
-        self._event_cbs.append(callback)
-
-        def _remove() -> None:
-            with suppress(ValueError):
-                self._event_cbs.remove(callback)
-
-        return _remove
-
-    def _signal_event(self, event: ControllerEvent) -> None:
-        """Signal an event to all registered listeners and group listeners."""
-        for cb in self._event_cbs:
-            try:
-                cb(event)
-            except Exception:
-                logger.exception("Error in controller event listener")
-        self.emit_group_event(event)
 
     # --- Client added/removed hooks ---
 
