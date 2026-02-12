@@ -110,17 +110,8 @@ def test_player_format_request_defers_stream_start_when_stream_active(
     No immediate stream/start or stream/clear is sent. The requirements
     are rebuilt with the new format.
     """
-    owner = MagicMock()
-    owner.client_id = "owner"
-    owner.name = "owner"
-    owner.check_role.return_value = False
-    owner.group = MagicMock()
-    owner.group.stop = AsyncMock()
-
-    group = SendspinGroup(mock_server, owner)
-    group.start_stream()
-
     client, conn = _make_player_client(mock_server, "p1")
+    client.group.start_stream()
 
     request = StreamRequestFormatPayload(
         player=StreamRequestFormatPlayer(
@@ -129,7 +120,7 @@ def test_player_format_request_defers_stream_start_when_stream_active(
     )
 
     for role in client.active_roles:
-        role.on_stream_request_format(request, stream_active=group.has_active_stream)
+        role.on_stream_request_format(request)
 
     # No immediate stream/start or stream/clear should be sent.
     assert not any(isinstance(msg, StreamStartMessage) for msg in conn.sent)
@@ -152,15 +143,6 @@ def test_player_format_request_defers_stream_start_when_no_stream_active(
     mock_server: MagicMock,
 ) -> None:
     """When no PushStream is active, stream/start is also deferred via _pending_stream_start."""
-    owner = MagicMock()
-    owner.client_id = "owner"
-    owner.name = "owner"
-    owner.check_role.return_value = False
-    owner.group = MagicMock()
-    owner.group.stop = AsyncMock()
-
-    group = SendspinGroup(mock_server, owner)
-
     client, conn = _make_player_client(mock_server, "p1")
     request = StreamRequestFormatPayload(
         player=StreamRequestFormatPlayer(
@@ -169,7 +151,7 @@ def test_player_format_request_defers_stream_start_when_no_stream_active(
     )
 
     for role in client.active_roles:
-        role.on_stream_request_format(request, stream_active=group.has_active_stream)
+        role.on_stream_request_format(request)
 
     # No immediate stream/start (deferred until first audio chunk).
     assert not any(isinstance(msg, StreamStartMessage) for msg in conn.sent)
@@ -215,7 +197,7 @@ def test_player_format_request_uses_client_priority_order_when_codec_missing(
     )
 
     for role in client.active_roles:
-        role.on_stream_request_format(request, stream_active=False)
+        role.on_stream_request_format(request)
 
     player_role = client.role("player@v1")
     assert isinstance(player_role, PlayerV1Role)

@@ -374,8 +374,6 @@ class Role(ABC):
     def on_stream_request_format(  # noqa: B027
         self,
         payload: StreamRequestFormatPayload,
-        *,
-        stream_active: bool | None = None,
     ) -> None:
         """Handle stream/request-format payload."""
 

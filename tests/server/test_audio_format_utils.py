@@ -5,7 +5,7 @@ import sys
 import pytest
 
 from aiosendspin.server import audio as audio_module
-from aiosendspin.server.audio import AudioFormat, _convert_s32_to_s24, _resolve_audio_format
+from aiosendspin.server.audio import AudioFormat, _convert_s32_to_s24
 
 S32_SAMPLES = bytes([0x01, 0x11, 0x21, 0x31, 0x02, 0x12, 0x22, 0x32])
 
@@ -36,12 +36,6 @@ def test_resolve_audio_format_32_bit_is_supported() -> None:
     assert av_format == "s32"
     assert layout == "mono"
     assert av_bytes == 4
-
-
-def test_resolve_audio_format_wrapper_delegates() -> None:
-    """Compatibility helper should delegate to AudioFormat.resolve_av_format()."""
-    audio_format = AudioFormat(sample_rate=44_100, bit_depth=16, channels=2)
-    assert _resolve_audio_format(audio_format) == audio_format.resolve_av_format()
 
 
 def test_convert_s32_to_s24_drops_least_significant_byte_python_impl(

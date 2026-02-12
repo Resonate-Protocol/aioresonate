@@ -100,9 +100,8 @@ class SendspinClient:
         # Role-owned persistent state (per role family).
         self._role_state: dict[str, object] = {}
 
-        # TODO: dont mention O(1) here, cache is fine
         # Cache for binary handling lookup: message_type -> (BinaryHandling, Role)
-        # Built when roles are attached for O(1) lookup in _send_binary_frame().
+        # Built when roles are attached for cached lookup in _send_binary_frame().
         self._binary_handling_cache: dict[int, tuple[BinaryHandling, Role]] = {}
 
         # Pending cleanup handle (scheduled via loop.call_soon/call_later on disconnect)
@@ -243,7 +242,7 @@ class SendspinClient:
             role.on_connect()
             self._roles[role.role_id] = role
 
-        # Build binary handling cache for O(1) lookup
+        # Build binary handling cache for fast lookup
         for msg_type in BinaryMessageType:
             for role in self._roles.values():
                 handling = role.get_binary_handling(msg_type.value)
@@ -356,9 +355,8 @@ class SendspinClient:
         """All active roles for iteration."""
         return list(self._roles.values())
 
-    # TODO: rename this method and docstring so O(1) is not mentioned
     def get_binary_handling_cached(self, message_type: int) -> tuple[BinaryHandling, Role] | None:
-        """O(1) lookup for binary handling by message type."""
+        """Return cached binary handling for a message type."""
         return self._binary_handling_cache.get(message_type)
 
     # ---- Events + grouping ----

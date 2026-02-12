@@ -439,3 +439,23 @@ class TestAutomaticReclaim:
 
         # Should not try to reclaim since no active playback
         assert "speaker-2" not in server._reclaim_calls  # noqa: SLF001
+
+    @pytest.mark.asyncio
+    async def test_add_client_replaces_stale_client_with_same_client_id(self) -> None:
+        """add_client() replaces stale client objects that share the same client_id."""
+        loop = asyncio.get_running_loop()
+        server = _MockServerWithReclaim(loop=loop, clock=LoopClock(loop))
+
+        owner = SendspinClient(server, client_id="speaker-1")
+        stale = SendspinClient(server, client_id="speaker-2")
+        replacement = SendspinClient(server, client_id="speaker-2")
+
+        group1 = SendspinGroup(server, owner, stale)
+        SendspinGroup(server, replacement)
+
+        await group1.add_client(replacement)
+
+        # Group membership should contain only the replacement object for speaker-2.
+        speaker2_members = [c for c in group1.clients if c.client_id == "speaker-2"]
+        assert speaker2_members == [replacement]
+        assert stale not in group1.clients

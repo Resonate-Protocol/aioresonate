@@ -567,10 +567,8 @@ class SendspinConnection:
         if isinstance(message, StreamRequestFormatMessage):
             if self._client is None:
                 return
-            stream_active = self._client.group.has_active_stream
             for role in self._client.active_roles:
-                # TODO: why is stream_active passed here?
-                role.on_stream_request_format(message.payload, stream_active=stream_active)
+                role.on_stream_request_format(message.payload)
             return
 
         if isinstance(message, ClientCommandMessage):

@@ -863,7 +863,7 @@ async def test_format_change_during_active_stream(mock_loop: Any) -> None:
     Full PushStream flow:
     1. Create player with PCM 48kHz, start PushStream
     2. Commit audio N times
-    3. Trigger format change via on_stream_request_format with stream_active=True
+    3. Trigger format change via on_stream_request_format during active playback
     4. Commit more audio
     5. Assert: StreamStartMessage (with new format) in sent_json, NO StreamClearMessage
     6. Binary audio continues after format change
@@ -875,6 +875,7 @@ async def test_format_change_during_active_stream(mock_loop: Any) -> None:
 
     stream = PushStream(loop=mock_loop, clock=clock, group=group)
     group._push_stream = stream  # noqa: SLF001
+    group.has_active_stream = True
 
     # Commit several chunks at 48kHz PCM
     for _ in range(3):
@@ -906,7 +907,7 @@ async def test_format_change_during_active_stream(mock_loop: Any) -> None:
     )
     role = client.role("player@v1")
     assert role is not None
-    role.on_stream_request_format(request, stream_active=True)
+    role.on_stream_request_format(request)
 
     # No immediate stream/start or stream/clear
     assert not any(isinstance(msg, StreamStartMessage) for msg in conn.sent_json)

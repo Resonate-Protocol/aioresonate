@@ -161,11 +161,8 @@ class ArtworkV1Role(Role):
     def on_stream_request_format(
         self,
         payload: StreamRequestFormatPayload,
-        *,
-        stream_active: bool | None = None,  # noqa: ARG002
     ) -> None:
         """Handle stream/request-format for artwork channels."""
-        # TODO: verify this is allowed by the spec
         artwork_request = payload.artwork
         if artwork_request is None:
             return

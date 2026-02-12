@@ -518,9 +518,7 @@ class PlayerV1Role(Role):
                 VolumeChangedEvent(volume=self.volume, muted=self.muted)
             )
 
-    def on_stream_request_format(
-        self, payload: StreamRequestFormatPayload, *, stream_active: bool | None = None
-    ) -> None:
+    def on_stream_request_format(self, payload: StreamRequestFormatPayload) -> None:
         """Handle stream/request-format for player role."""
         player_req = payload.player
         if player_req is None:
@@ -578,8 +576,7 @@ class PlayerV1Role(Role):
 
         state = self._state()
 
-        if stream_active is None:
-            stream_active = self._client.group.has_active_stream
+        stream_active = self._client.group.has_active_stream
         if stream_active:
             # Mid-stream format change: rebuild requirements and defer stream/start
             # until the next audio chunk (which provides the codec header).

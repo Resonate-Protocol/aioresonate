@@ -348,25 +348,6 @@ class BufferTracker:
         return self.blocked_until_us - now_us
 
 
-def _resolve_audio_format(audio_format: AudioFormat) -> tuple[int, str, str, int]:
-    """Resolve helper data for an audio format.
-
-    Args:
-        audio_format: The audio format to resolve.
-
-    Returns:
-        A tuple of (wire_bytes_per_sample, av_format, layout, av_bytes_per_sample) where:
-        - wire_bytes_per_sample: Number of bytes per audio sample on the wire
-        - av_format: PyAV sample format string ("s16" or "s32")
-        - layout: Channel layout string ("mono" or "stereo")
-        - av_bytes_per_sample: Number of bytes per sample produced/consumed by PyAV
-
-    Raises:
-        ValueError: If bit_depth is not 16/24/32, or channels is not 1 or 2.
-    """
-    return audio_format.resolve_av_format()
-
-
 def _convert_s32_to_s24(data: bytes) -> bytes:
     """Convert 32-bit PCM samples to packed 24-bit samples."""
     if len(data) % 4:

@@ -24,7 +24,6 @@ from aiosendspin.server.events import (
 )
 from aiosendspin.server.roles import GroupRole
 from aiosendspin.server.roles.registry import create_group_roles
-from aiosendspin.util import create_task
 
 from .audio_transformers import TransformerPool
 from .channels import ChannelResolver, default_channel_resolver
@@ -61,8 +60,6 @@ class SendspinGroup:
     """Friendly name for this group."""
     _play_start_time_us: int | None
     """Absolute timestamp in microseconds when playback started, None when not streaming."""
-    _scheduled_stop_handle: asyncio.TimerHandle | None
-    """Timer handle for scheduled stop, None when no stop is scheduled."""
     _playback_lock: asyncio.Lock
     """Lock to serialize play_media() and stop() operations, preventing race conditions."""
     _push_stream: PushStream | None
@@ -93,7 +90,6 @@ class SendspinGroup:
         self._group_id = str(uuid.uuid4())
         self._group_name: str | None = None
         self._play_start_time_us: int | None = None
-        self._scheduled_stop_handle: asyncio.TimerHandle | None = None
         self._playback_lock = asyncio.Lock()
         self._push_stream: PushStream | None = None
         self._transformer_pool = TransformerPool()
@@ -196,47 +192,6 @@ class SendspinGroup:
                 if role.get_audio_requirements() is not None:
                     self._push_stream.on_role_join(role)
 
-    # TODO: potentially delete with stop() discussion/todo
-    def _schedule_delayed_stop(self, stop_time_us: int, active: bool, needs_cleanup: bool) -> bool:  # noqa: FBT001
-        """Schedule a delayed stop at the specified timestamp.
-
-        Args:
-            stop_time_us: Absolute timestamp when stop should occur
-            active: Whether stream task is currently active
-            needs_cleanup: Whether cleanup is needed
-
-        Returns:
-            True if stop was scheduled, False if nothing to do
-        """
-        now_us = self._server.clock.now_us()
-        if stop_time_us <= now_us:
-            return False
-
-        # Only schedule if there's something to stop or cleanup
-        if not active and not needs_cleanup:
-            return False
-
-        delay = (stop_time_us - now_us) / 1_000_000
-
-        async def _delayed_stop() -> None:
-            # Store handle locally to detect if it's been replaced
-            handle = self._scheduled_stop_handle
-            try:
-                await self.stop()  # This will clear _scheduled_stop_handle
-            except Exception:
-                logger.exception("Scheduled stop failed")
-            finally:
-                # Only clear if this handle is still current (e.g., stop() was interrupted
-                # or a new stop was scheduled during the stop() call)
-                if self._scheduled_stop_handle is handle:
-                    self._scheduled_stop_handle = None
-
-        def _schedule_stop() -> None:
-            create_task(_delayed_stop())
-
-        self._scheduled_stop_handle = self._server.loop.call_later(delay, _schedule_stop)
-        return True
-
     def _send_stopped_state_to_clients(self) -> None:
         """Send stopped state to all clients."""
         group_message = GroupUpdateServerMessage(
@@ -249,21 +204,12 @@ class SendspinGroup:
         for client in self._clients:
             client.send_message(group_message)
 
-    # TODO: any reason why stop_time_us is useful?
-    # TODO: looks like _schedule_delayed_stop is not used anywhere
-    # TODO: except for here? and is potentially not precise enough
-    # TODO: to avoid race conditions?
-    async def stop(self, stop_time_us: int | None = None) -> bool:
+    async def stop(self) -> bool:
         """
         Stop playback for the group and clean up resources.
 
-        Args:
-            stop_time_us: Optional absolute timestamp (microseconds) when playback should
-                stop. When provided and in the future, the stop request is scheduled and
-                this method returns immediately.
-
         Returns:
-            bool: True if an active stream was stopped (or scheduled to stop),
+            bool: True if an active stream was stopped,
             False if no stream was active and no cleanup was required.
         """
         if len(self._clients) == 0:
@@ -271,20 +217,8 @@ class SendspinGroup:
             return False
 
         async with self._playback_lock:
-            # Cancel any existing scheduled stop first to prevent race conditions
-            if self._scheduled_stop_handle is not None:
-                logger.debug("Canceling previously scheduled stop in stop()")
-                self._scheduled_stop_handle.cancel()
-                self._scheduled_stop_handle = None
-
             active = self._push_stream is not None and not self._push_stream.is_stopped
             needs_cleanup = self._current_state != PlaybackStateType.STOPPED
-
-            # Handle delayed stop if requested
-            if stop_time_us is not None and self._schedule_delayed_stop(
-                stop_time_us, active, needs_cleanup
-            ):
-                return active or needs_cleanup
 
             if not active and not needs_cleanup:
                 return False
@@ -336,11 +270,6 @@ class SendspinGroup:
     def group_role(self, family: str) -> GroupRole | None:
         """Get the GroupRole for a role family."""
         return self._group_roles.get(family)
-
-    # TODO: unused?
-    def register_group_role(self, group_role: GroupRole) -> None:
-        """Register a GroupRole (called during group initialization)."""
-        self._group_roles[group_role.role_family] = group_role
 
     def add_event_listener(
         self, callback: Callable[[SendspinGroup, GroupEvent], None]
@@ -471,7 +400,9 @@ class SendspinGroup:
         # while still being listed in _clients (e.g., solo client disconnect)
         stale_client = next((c for c in self._clients if c.client_id == client.client_id), None)
         if stale_client is not None:
-            # TODO: is there any case where this could run at all?
+            # Defensive fallback: normal server flow keeps one persistent client object
+            # per client_id, but if a duplicate object appears, replace the stale one so
+            # membership and role subscriptions stay coherent.
             logger.debug(
                 "Removing stale client %s (object %s) before adding new client (object %s)",
                 stale_client.client_id,
@@ -493,9 +424,8 @@ class SendspinGroup:
         # Handle player joining/reconnecting with active PushStream
         if self._push_stream is not None and not self._push_stream.is_stopped:
             if not client.is_connected:
-                # TODO: same here, could this every be actually hit?
-                # Client is disconnected but joining a group with active playback.
-                # Try to reclaim it (multi-server support).
+                # Defensive fallback for programmatic moves of retained/disconnected clients:
+                # when joining an active group, try to reclaim the client for playback.
                 self._server.reclaim_client_for_playback(client.client_id)
             else:
                 # Call on_role_join for all roles with audio requirements (hook-based flow)
