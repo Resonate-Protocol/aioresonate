@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import asyncio
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from aiohttp import ClientConnectionError
 
+from aiosendspin.models.types import GoodbyeReason
 from aiosendspin.server.server import SendspinServer
 
 
@@ -52,6 +53,21 @@ class _SuccessfulInitialConnectSession:
 
     async def close(self) -> None:
         """Close session."""
+        self.closed = True
+
+
+class _PersistentSuccessfulSession:
+    """Client session with successful connects and open lifecycle."""
+
+    def __init__(self) -> None:
+        self.closed = False
+        self.calls = 0
+
+    def ws_connect(self, *_args: object, **_kwargs: object) -> _SuccessfulConnectContext:
+        self.calls += 1
+        return _SuccessfulConnectContext()
+
+    async def close(self) -> None:
         self.closed = True
 
 
@@ -138,3 +154,87 @@ async def test_connect_to_client_and_wait_returns_on_initial_success(
     await server.connect_to_client_and_wait(url)
 
     assert session.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_server_initiated_stops_retrying_on_another_server_goodbye(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Server-initiated loop must stop when client disconnects with ANOTHER_SERVER."""
+    session = _PersistentSuccessfulSession()
+    server = _make_server(session)
+    url = "ws://127.0.0.1:9999/sendspin"
+
+    class _FakeConnection:
+        closing = False
+
+        def __init__(
+            self,
+            _server: SendspinServer,
+            *,
+            wsock_client: object,  # noqa: ARG002
+            url: str | None = None,  # noqa: ARG002
+        ) -> None:
+            self.goodbye_reason = GoodbyeReason.ANOTHER_SERVER
+            self.should_retry_server_initiated_connection = False
+
+        async def _handle_client(self) -> None:
+            return
+
+    monkeypatch.setattr("aiosendspin.server.server.SendspinConnection", _FakeConnection)
+
+    server.connect_to_client(url)
+
+    for _ in range(40):
+        if url not in server._connection_tasks:  # noqa: SLF001
+            break
+        await asyncio.sleep(0.01)
+    else:
+        pytest.fail("Connection task was not cleaned up after ANOTHER_SERVER goodbye")
+
+    assert session.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_mdns_removal_cleans_retained_another_server_client() -> None:
+    """Removing mDNS entry should clean retained ANOTHER_SERVER clients."""
+    session = _PersistentSuccessfulSession()
+    server = _make_server(session)
+    url = "ws://127.0.0.1:9999/sendspin"
+
+    retained_client = MagicMock()
+    retained_client.is_connected = False
+    retained_client.cleanup_on_mdns_removal = True
+
+    server._clients = {"client-1": retained_client}  # noqa: SLF001
+    server._client_urls = {"client-1": url}  # noqa: SLF001
+    server._mdns_client_urls = {"service._sendspin._tcp.local.": url}  # noqa: SLF001
+    server.remove_client = AsyncMock()  # type: ignore[method-assign]
+
+    server._handle_service_removed("service._sendspin._tcp.local.")  # noqa: SLF001
+    await asyncio.sleep(0)
+
+    server.remove_client.assert_awaited_once_with("client-1")
+    assert "client-1" not in server._client_urls  # noqa: SLF001
+
+
+@pytest.mark.asyncio
+async def test_mdns_removal_keeps_non_retained_client() -> None:
+    """MDNS removal should not remove clients that are not marked for mDNS cleanup."""
+    session = _PersistentSuccessfulSession()
+    server = _make_server(session)
+    url = "ws://127.0.0.1:9999/sendspin"
+
+    retained_client = MagicMock()
+    retained_client.is_connected = False
+    retained_client.cleanup_on_mdns_removal = False
+
+    server._clients = {"client-1": retained_client}  # noqa: SLF001
+    server._client_urls = {"client-1": url}  # noqa: SLF001
+    server._mdns_client_urls = {"service._sendspin._tcp.local.": url}  # noqa: SLF001
+    server.remove_client = AsyncMock()  # type: ignore[method-assign]
+
+    server._handle_service_removed("service._sendspin._tcp.local.")  # noqa: SLF001
+    await asyncio.sleep(0)
+
+    server.remove_client.assert_not_awaited()

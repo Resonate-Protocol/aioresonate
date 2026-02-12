@@ -123,14 +123,13 @@ async def test_immediate_cleanup_on_explicit_disconnect(
     "reason",
     [
         GoodbyeReason.RESTART,
-        GoodbyeReason.ANOTHER_SERVER,  # Delayed for multi-server reclaim support
         None,  # Ungraceful disconnect
     ],
 )
 async def test_delayed_cleanup_on_reconnectable_disconnect(
     mock_server: _MockServer, client: SendspinClient, reason: GoodbyeReason | None
 ) -> None:
-    """Client cleanup is delayed for RESTART, ANOTHER_SERVER, and ungraceful disconnects."""
+    """Client cleanup is delayed for RESTART and ungraceful disconnects."""
     client.detach_connection(reason)
 
     # Allow immediate callbacks to run
@@ -143,6 +142,19 @@ async def test_delayed_cleanup_on_reconnectable_disconnect(
     await asyncio.sleep(client_module.CLIENT_CLEANUP_DELAY + 0.1)
 
     mock_server.remove_client.assert_awaited_once_with("player-1")
+
+
+@pytest.mark.asyncio
+async def test_no_cleanup_on_another_server_disconnect(
+    mock_server: _MockServer, client: SendspinClient
+) -> None:
+    """Client remains in registry indefinitely after ANOTHER_SERVER disconnect."""
+    client.detach_connection(GoodbyeReason.ANOTHER_SERVER)
+
+    await asyncio.sleep(0)
+    await asyncio.sleep(client_module.CLIENT_CLEANUP_DELAY + 0.1)
+
+    mock_server.remove_client.assert_not_awaited()
 
 
 @pytest.mark.asyncio

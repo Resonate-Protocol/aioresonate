@@ -192,6 +192,16 @@ class SendspinConnection:
         """Return True if this connection was initiated by the server."""
         return self._wsock_client is not None
 
+    @property
+    def should_retry_server_initiated_connection(self) -> bool:
+        """Whether the server should reconnect this URL after disconnect."""
+        return self._last_goodbye_reason != GoodbyeReason.ANOTHER_SERVER
+
+    @property
+    def goodbye_reason(self) -> GoodbyeReason | None:
+        """Disconnect reason reported by client/goodbye, if available."""
+        return self._last_goodbye_reason
+
     def requires_initial_state(self) -> bool:
         """Whether this connection must receive initial client/state before being 'connected'."""
         if self._client is None:

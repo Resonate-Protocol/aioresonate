@@ -44,14 +44,11 @@ logger = logging.getLogger(__name__)
 
 _T = TypeVar("_T")
 
-# TODO: does this mean clients disconnected with ANOTHER_SERVER also are cleaned up after
-# TODO: 30s?
-# Cleanup delay for non-immediate disconnect reasons (seconds)
+# Cleanup delay for reconnect-friendly disconnect reasons (seconds)
 CLIENT_CLEANUP_DELAY = 30.0
 
 # Reasons that trigger immediate client cleanup from the registry.
-# Note: ANOTHER_SERVER is NOT included - the client stays registered so it can be
-# reclaimed for playback via server.reclaim_client_for_playback().
+# Note: ANOTHER_SERVER is intentionally excluded and never auto-cleaned up.
 IMMEDIATE_CLEANUP_REASONS: frozenset[GoodbyeReason] = frozenset(
     {
         GoodbyeReason.SHUTDOWN,
@@ -110,6 +107,8 @@ class SendspinClient:
 
         # Pending cleanup handle (scheduled via loop.call_soon/call_later on disconnect)
         self._cleanup_handle: asyncio.Handle | None = None
+        # True when we intentionally retain a disconnected client after ANOTHER_SERVER goodbye.
+        self._cleanup_on_mdns_removal: bool = False
 
     @property
     def client_id(self) -> str:
@@ -181,6 +180,11 @@ class SendspinClient:
         return self._connection
 
     @property
+    def cleanup_on_mdns_removal(self) -> bool:
+        """Whether this retained client should be removed when mDNS record disappears."""
+        return self._cleanup_on_mdns_removal
+
+    @property
     def client_state(self) -> ClientStateType:
         """Return the current client operational state reported by `client/state`."""
         return self._client_state
@@ -220,6 +224,7 @@ class SendspinClient:
 
         self._connection = connection
         self._connected = False  # set True once initial state is received (spec)
+        self._cleanup_on_mdns_removal = False
 
         self._info = client_info
         self._name = client_info.name
@@ -274,6 +279,12 @@ class SendspinClient:
 
     def _schedule_cleanup(self, goodbye_reason: GoodbyeReason | None) -> None:
         """Schedule cleanup from server registry based on disconnect reason."""
+        if goodbye_reason == GoodbyeReason.ANOTHER_SERVER:
+            self._logger.debug("Skipping cleanup scheduling (reason: %s)", goodbye_reason)
+            self._cleanup_on_mdns_removal = True
+            return
+
+        self._cleanup_on_mdns_removal = False
         if goodbye_reason in IMMEDIATE_CLEANUP_REASONS:
             # Immediate cleanup for explicit disconnect reasons
             self._logger.debug("Scheduling immediate cleanup (reason: %s)", goodbye_reason)

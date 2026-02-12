@@ -26,7 +26,7 @@ from zeroconf import (
 )
 from zeroconf.asyncio import AsyncServiceBrowser, AsyncServiceInfo, AsyncZeroconf
 
-from aiosendspin.models.types import ConnectionReason
+from aiosendspin.models.types import ConnectionReason, GoodbyeReason
 from aiosendspin.util import create_task, get_local_ip
 
 from .client import SendspinClient
@@ -327,9 +327,15 @@ class SendspinServer:
                         conn = SendspinConnection(self, wsock_client=wsock, url=url)
                         await conn._handle_client()  # noqa: SLF001
 
+                    if not conn.should_retry_server_initiated_connection:
+                        if conn.goodbye_reason == GoodbyeReason.ANOTHER_SERVER:
+                            logger.debug(
+                                "Not reconnecting to %s after goodbye reason another_server",
+                                url,
+                            )
+                        break
+
                     if self._client_session.closed:
-                        # TODO: check if still correct according to multi server support,
-                        # maybe check goodbye message?
                         break
 
                 except asyncio.CancelledError:
@@ -567,6 +573,23 @@ class SendspinServer:
         url = self._mdns_client_urls.pop(name, None)
         if url is not None:
             self.disconnect_from_client(url)
+            create_task(self._cleanup_retained_clients_for_removed_mdns_url(url))
+
+    async def _cleanup_retained_clients_for_removed_mdns_url(self, url: str) -> None:
+        """Remove retained ANOTHER_SERVER clients when their mDNS URL disappears."""
+        client_ids = [
+            client_id for client_id, known_url in self._client_urls.items() if known_url == url
+        ]
+        for client_id in client_ids:
+            self._client_urls.pop(client_id, None)
+
+        for client_id in client_ids:
+            client = self._clients.get(client_id)
+            if client is None:
+                continue
+
+            if client.cleanup_on_mdns_removal and not client.is_connected:
+                await self.remove_client(client_id)
 
     async def _stop_mdns(self) -> None:
         if self._zc is None:
