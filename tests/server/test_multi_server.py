@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock
 
+import orjson
 import pytest
 from aiohttp import web
 
@@ -236,6 +237,133 @@ class TestConnectionSendsCorrectReason:
 
         server_hello = next(m for m in sent_messages if isinstance(m, ServerHelloMessage))
         assert server_hello.payload.connection_reason == ConnectionReason.DISCOVERY
+
+
+class TestCustomRoleSupportParsing:
+    """Tests for custom role support-key handling in inbound client/hello messages."""
+
+    @pytest.mark.parametrize(
+        ("role_id", "support_key", "expected_attr", "support_payload"),
+        [
+            (
+                "player@_custom_version",
+                "player@_custom_version_support",
+                "player_support",
+                {
+                    "supported_formats": [
+                        {"codec": "pcm", "sample_rate": 48000, "bit_depth": 16, "channels": 2}
+                    ],
+                    "buffer_capacity": 100_000,
+                    "supported_commands": [],
+                },
+            ),
+            (
+                "artwork@_custom_version",
+                "artwork@_custom_version_support",
+                "artwork_support",
+                {
+                    "channels": [
+                        {
+                            "source": "album",
+                            "format": "jpeg",
+                            "media_width": 300,
+                            "media_height": 300,
+                        }
+                    ]
+                },
+            ),
+            (
+                "visualizer@_custom_version",
+                "visualizer@_custom_version_support",
+                "visualizer_support",
+                {"buffer_capacity": 100_000},
+            ),
+        ],
+    )
+    def test_deserialize_client_hello_maps_custom_support(
+        self,
+        role_id: str,
+        support_key: str,
+        expected_attr: str,
+        support_payload: dict[str, object],
+    ) -> None:
+        """Custom role support keys are mapped into existing support fields."""
+        raw = orjson.dumps(
+            {
+                "type": "client/hello",
+                "payload": {
+                    "client_id": "c1",
+                    "name": "Client",
+                    "version": 1,
+                    "supported_roles": [role_id],
+                    support_key: support_payload,
+                },
+            }
+        ).decode()
+
+        msg = SendspinConnection._deserialize_client_message(raw)  # noqa: SLF001
+        assert isinstance(msg, ClientHelloMessage)
+        assert getattr(msg.payload, expected_attr) is not None
+
+    @pytest.mark.parametrize(
+        ("role_id", "missing_support_key"),
+        [
+            ("player@_custom_version", "player@_custom_version_support"),
+            ("artwork@_custom_version", "artwork@_custom_version_support"),
+            ("visualizer@_custom_version", "visualizer@_custom_version_support"),
+        ],
+    )
+    def test_deserialize_client_hello_requires_custom_support_key(
+        self, role_id: str, missing_support_key: str
+    ) -> None:
+        """Custom role IDs require their matching custom support keys."""
+        raw = orjson.dumps(
+            {
+                "type": "client/hello",
+                "payload": {
+                    "client_id": "c1",
+                    "name": "Client",
+                    "version": 1,
+                    "supported_roles": [role_id],
+                },
+            }
+        ).decode()
+
+        with pytest.raises(ValueError, match=missing_support_key):
+            SendspinConnection._deserialize_client_message(raw)  # noqa: SLF001
+
+    def test_deserialize_client_hello_logs_legacy_support_conversion_warning(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Legacy support alias conversion warning is preserved for v1 roles."""
+        caplog.set_level("WARNING")
+        raw = orjson.dumps(
+            {
+                "type": "client/hello",
+                "payload": {
+                    "client_id": "c1",
+                    "name": "Client",
+                    "version": 1,
+                    "supported_roles": ["player@v1"],
+                    "player_support": {
+                        "supported_formats": [
+                            {
+                                "codec": "pcm",
+                                "sample_rate": 48000,
+                                "bit_depth": 16,
+                                "channels": 2,
+                            }
+                        ],
+                        "buffer_capacity": 100_000,
+                        "supported_commands": [],
+                    },
+                },
+            }
+        ).decode()
+
+        msg = SendspinConnection._deserialize_client_message(raw)  # noqa: SLF001
+        assert isinstance(msg, ClientHelloMessage)
+        assert "client/hello message used deprecated field names" in caplog.text
 
 
 class TestClientUrlRegistration:

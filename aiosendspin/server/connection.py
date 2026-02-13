@@ -35,12 +35,15 @@ import heapq
 import logging
 import time
 from collections import defaultdict, deque
+from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Any, cast
 
+import orjson
 from aiohttp import ClientWebSocketResponse, WSMsgType, web
 
+from aiosendspin.models.artwork import ClientHelloArtworkSupport
 from aiosendspin.models.core import (
     ClientCommandMessage,
     ClientGoodbyeMessage,
@@ -56,13 +59,17 @@ from aiosendspin.models.core import (
     StreamEndMessage,
     StreamRequestFormatMessage,
 )
+from aiosendspin.models.player import ClientHelloPlayerSupport
 from aiosendspin.models.types import (
     ClientMessage,
     ConnectionReason,
     GoodbyeReason,
+    Roles,
     ServerMessage,
     negotiate_active_roles,
+    role_family,
 )
+from aiosendspin.models.visualizer import ClientHelloVisualizerSupport
 from aiosendspin.util import create_task
 
 from .client import SendspinClient
@@ -76,6 +83,42 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 MAX_PENDING_MSG = 4096  # Default queue cap (per role queues, and global control queues)
+
+
+@dataclass(frozen=True, slots=True)
+class _RoleSupportSpec:
+    """Support-key mapping for a role family in client/hello."""
+
+    attr_name: str
+    v1_role_id: str
+    v1_support_key: str
+    legacy_support_key: str
+    parse_support: Callable[[dict[str, Any]], object]
+
+
+_ROLE_SUPPORT_SPECS: dict[str, _RoleSupportSpec] = {
+    "player": _RoleSupportSpec(
+        attr_name="player_support",
+        v1_role_id=Roles.PLAYER.value,
+        v1_support_key="player@v1_support",
+        legacy_support_key="player_support",
+        parse_support=ClientHelloPlayerSupport.from_dict,
+    ),
+    "artwork": _RoleSupportSpec(
+        attr_name="artwork_support",
+        v1_role_id=Roles.ARTWORK.value,
+        v1_support_key="artwork@v1_support",
+        legacy_support_key="artwork_support",
+        parse_support=ClientHelloArtworkSupport.from_dict,
+    ),
+    "visualizer": _RoleSupportSpec(
+        attr_name="visualizer_support",
+        v1_role_id=Roles.VISUALIZER.value,
+        v1_support_key="visualizer@v1_support",
+        legacy_support_key="visualizer_support",
+        parse_support=ClientHelloVisualizerSupport.from_dict,
+    ),
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -401,6 +444,89 @@ class SendspinConnection:
             self._initial_state_received = True
             self._client.mark_connected()
 
+    @staticmethod
+    def _first_custom_role_id(
+        supported_roles: list[str], *, family: str, v1_role_id: str
+    ) -> str | None:
+        """Return the first non-v1 role id for a role family."""
+        for role_id in supported_roles:
+            if role_family(role_id) == family and role_id != v1_role_id:
+                return role_id
+        return None
+
+    @classmethod
+    def _extract_custom_role_supports(cls, message: dict[str, Any]) -> dict[str, tuple[str, Any]]:
+        """Extract custom support objects from raw client/hello JSON without mutating payload."""
+        payload = message.get("payload")
+        if not isinstance(payload, dict):
+            return {}
+        supported_roles = payload.get("supported_roles")
+        if not (
+            isinstance(supported_roles, list) and all(isinstance(v, str) for v in supported_roles)
+        ):
+            return {}
+
+        custom_supports: dict[str, tuple[str, Any]] = {}
+        for family, spec in _ROLE_SUPPORT_SPECS.items():
+            custom_role = cls._first_custom_role_id(
+                supported_roles, family=family, v1_role_id=spec.v1_role_id
+            )
+            if custom_role is None:
+                continue
+
+            custom_support_key = f"{custom_role}_support"
+            custom_support = payload.get(custom_support_key)
+            if custom_support is None and (
+                payload.get(spec.v1_support_key) is not None
+                or payload.get(spec.legacy_support_key) is not None
+            ):
+                # If legacy/v1 support keys are present for custom role IDs, keep legacy behavior
+                # but make it explicit that custom roles must use their versioned support key.
+                logger.warning(
+                    "Ignoring %s/%s for custom role %s; expected %s",
+                    spec.v1_support_key,
+                    spec.legacy_support_key,
+                    custom_role,
+                    custom_support_key,
+                )
+            custom_supports[spec.attr_name] = (custom_role, custom_support)
+        return custom_supports
+
+    @classmethod
+    def _apply_custom_role_support(
+        cls, hello: ClientHelloPayload, custom_supports: dict[str, tuple[str, Any]]
+    ) -> None:
+        """Apply parsed custom role support objects onto ClientHelloPayload fields."""
+        for family, spec in _ROLE_SUPPORT_SPECS.items():
+            custom = custom_supports.get(spec.attr_name)
+            if custom is None:
+                continue
+            custom_role, raw_support = custom
+            if raw_support is None:
+                raise ValueError(
+                    f"{custom_role}_support must be provided when "
+                    f"'{custom_role}' is in supported_roles"
+                )
+            if not isinstance(raw_support, dict):
+                raise TypeError(
+                    f"{custom_role}_support must be an object for role family '{family}'"
+                )
+            setattr(hello, spec.attr_name, spec.parse_support(raw_support))
+
+    @classmethod
+    def _deserialize_client_message(cls, raw_message: str) -> ClientMessage:
+        """Deserialize inbound client message with custom support-key normalization."""
+        parsed = ClientMessage.from_json(raw_message)
+        if isinstance(parsed, ClientHelloMessage):
+            decoded = orjson.loads(raw_message)
+            if not isinstance(decoded, dict):
+                return parsed
+            custom_supports = cls._extract_custom_role_supports(decoded)
+            if isinstance(parsed, ClientHelloMessage):
+                cls._apply_custom_role_support(parsed.payload, custom_supports)
+            return parsed
+        return parsed
+
     async def _setup_connection(self) -> None:
         """Prepare a server-side WebSocketResponse, if applicable."""
         if self._wsock_server is not None:
@@ -451,7 +577,7 @@ class SendspinConnection:
                     continue
 
                 await self._handle_message(
-                    ClientMessage.from_json(cast("str", msg.data)), timestamp_us
+                    self._deserialize_client_message(cast("str", msg.data)), timestamp_us
                 )
             else:
                 # Loop exited normally (iterator exhausted) - connection closed
