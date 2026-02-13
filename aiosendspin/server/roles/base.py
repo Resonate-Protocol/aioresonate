@@ -282,8 +282,10 @@ class Role(ABC):
         return False
 
     def reset_binary_timing(self) -> None:
-        """Reset timing state for binary handling (called on stream clear/end)."""
+        """Reset timing/log state for binary handling at stream boundaries."""
         self._stream_start_time_us = None
+        self._last_late_log_s = 0.0
+        self._late_skips_since_log = 0
 
     # --- Framework-provided send methods ---
 

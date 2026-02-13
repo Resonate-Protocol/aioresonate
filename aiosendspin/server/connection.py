@@ -58,6 +58,7 @@ from aiosendspin.models.core import (
     StreamClearMessage,
     StreamEndMessage,
     StreamRequestFormatMessage,
+    StreamStartMessage,
 )
 from aiosendspin.models.player import ClientHelloPlayerSupport
 from aiosendspin.models.types import (
@@ -342,6 +343,9 @@ class SendspinConnection:
         The message inherits the timestamp of the last message enqueued for this role,
         so it maintains its position relative to surrounding timed binary. If no previous
         message exists, it uses timestamp 0 (sent before any timed binary).
+
+        Exception: StreamEnd and StreamStart use current time instead of inheriting,
+        ensuring they are ordered correctly across stream boundaries.
         """
         if isinstance(message, StreamClearMessage | StreamEndMessage):
             self.drop_pending_binary(message.payload.roles)
@@ -353,7 +357,15 @@ class SendspinConnection:
             )
             return
 
-        sort_ts = self._last_enqueued_ts_by_role.get(role, 0)
+        # Stream lifecycle messages use current time to ensure correct ordering
+        # across stream boundaries (prevents old stream timestamps from affecting new stream)
+        if isinstance(message, StreamEndMessage | StreamStartMessage):
+            sort_ts = self._server.clock.now_us()
+            # Update tracker so subsequent messages inherit this timestamp
+            self._last_enqueued_ts_by_role[role] = sort_ts
+        else:
+            sort_ts = self._last_enqueued_ts_by_role.get(role, 0)
+
         entry = _RoleQueueEntry(
             epoch=self._epoch_by_role[role],
             timestamp_us=sort_ts,

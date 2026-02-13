@@ -193,6 +193,30 @@ def test_player_role_on_stream_start_sets_pending_flag() -> None:
     assert role._pending_stream_start is True  # noqa: SLF001
 
 
+def test_player_role_on_stream_start_resets_binary_timing() -> None:
+    """on_stream_start() should reset stale timing so late-drop grace reapplies."""
+    client = _make_client_stub()
+
+    audio_req = AudioRequirements(
+        sample_rate=48000,
+        bit_depth=16,
+        channels=2,
+        transformer=PcmPassthrough(sample_rate=48000, bit_depth=16, channels=2),
+    )
+    role = PlayerV1Role(client=client, audio_requirements=audio_req)
+    role._client.connection = MagicMock()  # noqa: SLF001
+    role._stream_start_time_us = 12345  # noqa: SLF001
+    role._late_skips_since_log = 4  # noqa: SLF001
+    role._last_late_log_s = 42.0  # noqa: SLF001
+
+    role.on_stream_start()
+
+    assert role._stream_start_time_us is None  # noqa: SLF001
+    assert role._late_skips_since_log == 0  # noqa: SLF001
+    assert role._last_late_log_s == 0.0  # noqa: SLF001
+    assert role._pending_stream_start is True  # noqa: SLF001
+
+
 def test_player_role_on_audio_chunk_sends_deferred_stream_start_with_pcm() -> None:
     """on_audio_chunk() sends deferred stream/start with PCM codec."""
     client = _make_client_stub()

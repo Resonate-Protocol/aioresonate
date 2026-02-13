@@ -262,6 +262,9 @@ class PlayerV1Role(Role):
         if not self.has_connection():
             return
 
+        # New stream boundary: clear prior stream timing/log state so
+        # late-drop grace period is measured from this stream's first chunk.
+        self.reset_binary_timing()
         self._pending_stream_start = True
 
     def _send_stream_start_message(self) -> None:
