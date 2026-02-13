@@ -280,8 +280,24 @@ class SendspinClient:
 
         self._connection = None
 
+        if goodbye_reason == GoodbyeReason.ANOTHER_SERVER:
+            create_task(self._handle_takeover_disconnect())
+
         # Schedule client cleanup from registry
         self._schedule_cleanup(goodbye_reason)
+
+    async def _handle_takeover_disconnect(self) -> None:
+        """Handle ANOTHER_SERVER disconnect by ungrouping first, then stopping."""
+        old_group_id = self.group.group_id
+        try:
+            await self.ungroup()
+            await self.group.stop()
+        except Exception:
+            self._logger.exception(
+                "Takeover disconnect sequence failed for %s (old_group=%s)",
+                self._client_id,
+                old_group_id,
+            )
 
     def _schedule_cleanup(self, goodbye_reason: GoodbyeReason | None) -> None:
         """Schedule cleanup from server registry based on disconnect reason."""

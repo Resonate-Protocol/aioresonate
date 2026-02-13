@@ -161,6 +161,96 @@ async def test_no_cleanup_on_another_server_disconnect(
 
 
 @pytest.mark.asyncio
+async def test_another_server_disconnect_runs_ungroup_then_stop(
+    mock_server: _MockServer, client: SendspinClient
+) -> None:
+    """Takeover disconnect runs ungroup before stop."""
+    other = SendspinClient(mock_server, client_id="player-2")
+    SendspinGroup(mock_server, other)
+    await client.group.add_client(other)
+
+    call_order: list[str] = []
+
+    async def _record_ungroup() -> None:
+        call_order.append("ungroup")
+        await original_ungroup()
+
+    async def _record_stop(group: SendspinGroup) -> bool:
+        if client in group.clients:
+            call_order.append("stop")
+        return await original_stop(group)
+
+    original_ungroup = client.ungroup
+    original_stop = SendspinGroup.stop
+    client.ungroup = _record_ungroup  # type: ignore[method-assign]
+    SendspinGroup.stop = _record_stop  # type: ignore[method-assign]
+
+    try:
+        client.detach_connection(GoodbyeReason.ANOTHER_SERVER)
+        await asyncio.sleep(0)
+    finally:
+        SendspinGroup.stop = original_stop  # type: ignore[method-assign]
+
+    assert call_order == ["ungroup", "stop"]
+
+
+@pytest.mark.asyncio
+async def test_another_server_disconnect_solo_client_is_stopped(
+    client: SendspinClient,
+) -> None:
+    """Takeover disconnect is safe for solo clients and results in STOPPED state."""
+    client.group.start_stream()
+    assert client.group.has_active_stream
+
+    client.detach_connection(GoodbyeReason.ANOTHER_SERVER)
+    await asyncio.sleep(0)
+
+    assert len(client.group.clients) == 1
+    assert client.group.clients[0] is client
+    assert not client.group.has_active_stream
+
+
+@pytest.mark.asyncio
+async def test_another_server_disconnect_already_stopped_remains_stopped(
+    client: SendspinClient,
+) -> None:
+    """Takeover disconnect remains safe when playback is already stopped."""
+    assert not client.group.has_active_stream
+
+    client.detach_connection(GoodbyeReason.ANOTHER_SERVER)
+    await asyncio.sleep(0)
+
+    assert len(client.group.clients) == 1
+    assert client.group.clients[0] is client
+    assert not client.group.has_active_stream
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "reason",
+    [
+        GoodbyeReason.SHUTDOWN,
+        GoodbyeReason.USER_REQUEST,
+        GoodbyeReason.RESTART,
+        None,
+    ],
+)
+async def test_non_takeover_disconnect_does_not_ungroup_or_stop(
+    client: SendspinClient, reason: GoodbyeReason | None
+) -> None:
+    """Non-takeover disconnect reasons keep existing behavior."""
+    client.group.start_stream()
+    assert client.group.has_active_stream
+    initial_group = client.group
+
+    client.detach_connection(reason)
+    await asyncio.sleep(0)
+
+    assert client.group is initial_group
+    assert client.group.has_active_stream
+
+
+@pytest.mark.asyncio
 async def test_cleanup_cancelled_on_reconnect(
     mock_server: _MockServer, client: SendspinClient
 ) -> None:
