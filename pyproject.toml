@@ -32,7 +32,9 @@ version = "0.0.0"
 numpy = [
   "numpy>=1.26.0",
 ]
-test = [
+
+[dependency-groups]
+dev = [
   "codespell==2.4.1",
   "isort==7.0.0",
   "mypy==1.19.1",
@@ -41,6 +43,7 @@ test = [
   "pytest==9.0.2",
   "pytest-aiohttp==1.1.0",
   "pytest-cov==7.0.0",
+  "pytest-timeout==2.4.0",
   "pytest-xdist==3.8.0",
   "syrupy==5.0.0",
   "tomli==2.4.0",
@@ -111,7 +114,7 @@ packages = ["aiosendspin"]
 line-ending = "lf"
 
 [tool.pytest.ini_options]
-addopts = "--cov -n auto"
+addopts = "--cov -n auto --timeout=5"
 asyncio_mode = "auto"
 
 [tool.ruff.lint]

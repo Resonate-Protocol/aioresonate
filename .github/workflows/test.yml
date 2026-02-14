@@ -28,25 +28,25 @@ jobs:
       - name: Lint/test with pre-commit
         run: SKIP=no-commit-to-branch pre-commit run --all-files
 
-  # test:
-  #   runs-on: ubuntu-latest
-  #   continue-on-error: true
-  #   strategy:
-  #     fail-fast: false
-  #     matrix:
-  #       python-version:
-  #         - "3.12"
-  #
-  #   steps:
-  #     - name: Check out code from GitHub
-  #       uses: actions/checkout@v6.0.1
-  #     - name: Set up Python ${{ matrix.python-version }}
-  #       uses: actions/setup-python@v6.1.0
-  #       with:
-  #         python-version: ${{ matrix.python-version }}
-  #     - name: Install dependencies
-  #       run: |
-  #         python -m pip install --upgrade pip build setuptools
-  #         pip install .[test]
-  #     - name: Pytest
-  #       run: pytest --durations 10 --cov-report term-missing --cov=aiosendspin --cov-report=xml tests/
+  test:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version:
+          - "3.12"
+
+    steps:
+      - name: Check out code from GitHub
+        uses: actions/checkout@v6.0.1
+      - name: Install uv and set the Python version
+        uses: astral-sh/setup-uv@v7
+        with:
+          python-version: ${{ matrix.python-version }}
+          enable-cache: true
+      - name: Install dependencies
+        run: |
+          uv sync --dev
+      - name: Pytest
+        run: uv run pytest --durations 10 --cov-report term-missing --cov=aiosendspin --cov-report=xml tests/
