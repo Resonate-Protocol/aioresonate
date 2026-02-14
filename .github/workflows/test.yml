@@ -10,26 +10,25 @@ on:
     branches: [main]
 
 jobs:
-  lint-and-test:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./.github/actions/setup
+        with:
+          python-version: "3.12"
+      - name: Lint with pre-commit
+        run: SKIP=no-commit-to-branch uv run pre-commit run --all-files
+
+  test:
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         python-version:
           - "3.12"
-
     steps:
-      - name: Check out code from GitHub
-        uses: actions/checkout@v6.0.1
-      - name: Install uv and set the Python version
-        uses: astral-sh/setup-uv@v7
+      - uses: ./.github/actions/setup
         with:
           python-version: ${{ matrix.python-version }}
-          enable-cache: true
-      - name: Install dependencies
-        run: uv sync --dev
-      - name: Lint with pre-commit
-        run: SKIP=no-commit-to-branch uv run pre-commit run --all-files
       - name: Pytest
-        if: success() || failure()
         run: uv run pytest --durations 10 --cov-report term-missing --cov=aiosendspin --cov-report=xml tests/
