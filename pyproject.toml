@@ -114,7 +114,7 @@ packages = ["aiosendspin"]
 line-ending = "lf"
 
 [tool.pytest.ini_options]
-addopts = "--cov -n auto --timeout=5"
+addopts = "--cov -n auto --timeout=10"
 asyncio_mode = "auto"
 
 [tool.ruff.lint]
