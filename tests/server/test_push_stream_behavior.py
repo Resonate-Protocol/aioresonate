@@ -1295,6 +1295,55 @@ async def test_missing_channel_commits_keep_channel_timing_aligned() -> None:
 
 
 @pytest.mark.asyncio
+async def test_late_introduced_channel_aligns_with_existing_timeline() -> None:
+    """A channel added late should start on the same timeline as existing channels."""
+    group = _DummyGroup(clients=[])
+    other_channel = UUID("cdcdcdcd-cdcd-cdcd-cdcd-cdcdcdcdcdcd")
+    role_main = _DummyRole(
+        AudioRequirements(
+            sample_rate=48000,
+            bit_depth=16,
+            channels=2,
+            transformer=None,
+            channel_id=MAIN_CHANNEL,
+            frame_duration_us=25_000,
+        )
+    )
+    group.clients.append(_DummyClient([role_main]))
+
+    loop = asyncio.get_running_loop()
+    clock = ManualClock()
+    stream = PushStream(loop=loop, clock=clock, group=group)
+    fmt = AudioFormat(sample_rate=48000, bit_depth=16, channels=2)
+
+    # Let MAIN_CHANNEL get far ahead of wall clock (no clock advancement).
+    for _ in range(40):
+        stream.prepare_audio(bytes(4800), fmt, channel_id=MAIN_CHANNEL)
+        await stream.commit_audio()
+
+    role_other = _DummyRole(
+        AudioRequirements(
+            sample_rate=48000,
+            bit_depth=16,
+            channels=2,
+            transformer=None,
+            channel_id=other_channel,
+            frame_duration_us=25_000,
+        )
+    )
+    group.clients.append(_DummyClient([role_other]))
+    stream.on_role_join(role_other)
+
+    stream.prepare_audio(bytes(4800), fmt, channel_id=MAIN_CHANNEL)
+    stream.prepare_audio(bytes(4800), fmt, channel_id=other_channel)
+    await stream.commit_audio()
+
+    assert role_main.received
+    assert role_other.received
+    assert role_main.received[-1].timestamp_us == role_other.received[-1].timestamp_us
+
+
+@pytest.mark.asyncio
 async def test_historical_pcm_cache_populated() -> None:
     """Historical audio populates PCM cache when enabled for the channel."""
     group = _DummyGroup(clients=[])

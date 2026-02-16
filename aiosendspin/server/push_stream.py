@@ -602,15 +602,21 @@ class PushStream:
 
         # Auto-calculate mode (existing behavior).
         now_us = self._clock.now_us()
+        target_min_us = now_us + DEFAULT_INITIAL_DELAY_US
         for channel_id in prepared:
             if channel_id not in self._channel_timing:
-                self._channel_timing[channel_id] = now_us + DEFAULT_INITIAL_DELAY_US
+                if self._channel_timing:
+                    # Late-introduced channels should join the shared timeline
+                    # instead of restarting from now+delay behind active channels.
+                    shared_timing_us = min(self._channel_timing.values())
+                    self._channel_timing[channel_id] = max(shared_timing_us, target_min_us)
+                else:
+                    self._channel_timing[channel_id] = target_min_us
 
         # If audio production stalls (e.g., the upstream source blocks), the scheduled
         # play timeline can drift into the past. Rebase the timeline so new audio is
         # always scheduled with at least the default initial delay from "now".
         min_timing_us = min(self._channel_timing.values())
-        target_min_us = now_us + DEFAULT_INITIAL_DELAY_US
         if min_timing_us < target_min_us:
             shift_us = target_min_us - min_timing_us
             for channel_id in self._channel_timing:
