@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+__all__ = ["MAIN_CHANNEL", "PushStream"]
+
 import asyncio
 import logging
 import weakref
