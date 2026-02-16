@@ -293,7 +293,10 @@ class SendspinConnection:
             )
             return
 
-        sort_ts = max(0, timestamp_us)
+        # Keep per-role queue ordering monotonic so role-scoped lifecycle JSON
+        # (stream/start, stream/end, stream/clear) cannot be overtaken by binary
+        # packets that carry an older playback timestamp (e.g. historical backfill).
+        sort_ts = max(0, timestamp_us, self._last_enqueued_ts_by_role.get(role, 0))
         entry = _RoleQueueEntry(
             epoch=self._epoch_by_role[role],
             timestamp_us=timestamp_us,
