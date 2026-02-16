@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from mashumaro.config import BaseConfig
 from mashumaro.mixins.orjson import DataClassORJSONMixin
 
+from .source import ControllerSourceItem
 from .types import MediaCommand
 
 
@@ -67,8 +68,15 @@ class ControllerStatePayload(DataClassORJSONMixin):
     """Volume of the whole group, range 0-100."""
     muted: bool
     """Mute state of the whole group."""
+    sources: list[ControllerSourceItem] | None = None
+    """Optional list of available sources."""
 
     def __post_init__(self) -> None:
         """Validate field values."""
         if not 0 <= self.volume <= 100:
             raise ValueError(f"Volume must be in range 0-100, got {self.volume}")
+
+    class Config(BaseConfig):
+        """Config for parsing json messages."""
+
+        omit_none = True

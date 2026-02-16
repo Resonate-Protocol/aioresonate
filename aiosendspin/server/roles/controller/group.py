@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from aiosendspin.models.controller import ControllerCommandPayload, ControllerStatePayload
 from aiosendspin.models.core import ServerStateMessage, ServerStatePayload
@@ -27,8 +27,10 @@ from aiosendspin.server.roles.controller.events import (
 from aiosendspin.server.roles.player.events import VolumeChangedEvent
 
 if TYPE_CHECKING:
+    from aiosendspin.models.source import ControllerSourceItem
     from aiosendspin.server.client import SendspinClient
     from aiosendspin.server.group import SendspinGroup
+    from aiosendspin.server.roles.source.group import SourceGroupRole
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +51,9 @@ class ControllerGroupRole(GroupRole):
         self._last_sent_volume: int | None = None
         self._last_sent_muted: bool | None = None
         self._last_sent_supported_commands: list[MediaCommand] | None = None
+        self._last_sent_sources_sig: (
+            list[tuple[str, str, str | None, bool | None, str | None, int | None]] | None
+        ) = None
         # Track volume event subscriptions for player clients
         self._player_client_unsubs: dict[SendspinClient, Callable[[], None]] = {}
 
@@ -115,10 +120,12 @@ class ControllerGroupRole(GroupRole):
     def _send_state_to_role(self, role: Role) -> None:
         """Send current controller state to a single role."""
         supported_commands = self._get_supported_commands()
+        sources = self._list_sources()
         controller_state = ControllerStatePayload(
             supported_commands=supported_commands,
             volume=self.volume,
             muted=self.muted,
+            sources=sources,
         )
         state_message = ServerStateMessage(ServerStatePayload(controller=controller_state))
         role.send_message(state_message)
@@ -128,27 +135,57 @@ class ControllerGroupRole(GroupRole):
         current_volume = self.volume
         current_muted = self.muted
         current_supported_commands = self._get_supported_commands()
+        sources = self._list_sources()
+        current_sources_sig = (
+            [
+                (
+                    s.id,
+                    s.state.value,
+                    s.signal.value if s.signal else None,
+                    s.selected,
+                    s.last_event.value if s.last_event else None,
+                    s.last_event_ts_us,
+                )
+                for s in sources
+            ]
+            if sources is not None
+            else None
+        )
 
         if (
             self._last_sent_volume == current_volume
             and self._last_sent_muted == current_muted
             and self._last_sent_supported_commands == current_supported_commands
+            and self._last_sent_sources_sig == current_sources_sig
         ):
             return
 
         self._last_sent_volume = current_volume
         self._last_sent_muted = current_muted
         self._last_sent_supported_commands = current_supported_commands
+        self._last_sent_sources_sig = current_sources_sig
 
         controller_state = ControllerStatePayload(
             supported_commands=current_supported_commands,
             volume=current_volume,
             muted=current_muted,
+            sources=sources,
         )
         state_message = ServerStateMessage(ServerStatePayload(controller=controller_state))
 
         for role in self._members:
             role.send_message(state_message)
+
+    def _list_sources(self) -> list[ControllerSourceItem] | None:
+        """Return source list when source group role is present."""
+        source_group_role = self._group.group_role("source")
+        if source_group_role is None:
+            return None
+        return cast("SourceGroupRole", source_group_role).list_sources()
+
+    def push_state(self) -> None:
+        """Force a controller state push check."""
+        self._push_state_to_members()
 
     def handle_command(self, cmd: ControllerCommandPayload) -> None:
         """Handle a command from a controller client.

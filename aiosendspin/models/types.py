@@ -73,6 +73,8 @@ class Roles(Enum):
 
     Has preferred format for audio features.
     """
+    SOURCE = "source@v1"
+    """Captures audio input and streams it to the server."""
 
 
 class BinaryMessageType(Enum):
@@ -91,6 +93,10 @@ class BinaryMessageType(Enum):
     """Artwork channel 2 (Artwork role, slot 2)."""
     ARTWORK_CHANNEL_3 = 11
     """Artwork channel 3 (Artwork role, slot 3)."""
+
+    # Source role (bits 000011xx, IDs 12-15):
+    SOURCE_AUDIO_CHUNK = 12
+    """Source audio chunk with timestamps (Source role, slot 0)."""
 
     # Visualizer role (bits 00010xxx, IDs 16-23):
     VISUALIZATION_DATA = 16
@@ -141,6 +147,47 @@ class PlayerCommand(Enum):
 
     VOLUME = "volume"
     MUTE = "mute"
+
+
+class SourceCommand(Enum):
+    """Enum for Source Commands."""
+
+    START = "start"
+    STOP = "stop"
+
+
+class SourceControl(Enum):
+    """Optional source control commands."""
+
+    PLAY = "play"
+    PAUSE = "pause"
+    NEXT = "next"
+    PREVIOUS = "previous"
+    ACTIVATE = "activate"
+    DEACTIVATE = "deactivate"
+
+
+class SourceClientCommand(Enum):
+    """Enum for Source client commands."""
+
+    STARTED = "started"
+    STOPPED = "stopped"
+
+
+class SourceStateType(Enum):
+    """Enum for Source States."""
+
+    IDLE = "idle"
+    STREAMING = "streaming"
+    ERROR = "error"
+
+
+class SourceSignalType(Enum):
+    """Enum for Source Signal Presence."""
+
+    UNKNOWN = "unknown"
+    PRESENT = "present"
+    ABSENT = "absent"
 
 
 class MediaCommand(Enum):
@@ -243,6 +290,7 @@ SUPPORTED_ROLE_VERSIONS: dict[str, str] = {
     "metadata": "metadata@v1",
     "artwork": "artwork@v1",
     "visualizer": "visualizer@v1",
+    "source": "source@v1",
 }
 
 

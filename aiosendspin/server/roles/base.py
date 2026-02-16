@@ -21,6 +21,7 @@ if TYPE_CHECKING:
     from aiosendspin.models.core import (
         ClientCommandPayload,
         ClientStatePayload,
+        InputStreamStartPayload,
         StreamRequestFormatPayload,
     )
     from aiosendspin.models.types import ClientStateType, ServerMessage
@@ -384,3 +385,18 @@ class Role(ABC):
 
         Handlers must be synchronous. For async operations, launch eager tasks.
         """
+
+    def on_input_stream_start(self, payload: InputStreamStartPayload) -> None:  # noqa: B027
+        """Handle input_stream/start payload."""
+
+    def on_input_stream_end(self) -> None:  # noqa: B027
+        """Handle input_stream/end."""
+
+    def on_client_binary(  # noqa: B027
+        self,
+        *,
+        message_type: int,
+        timestamp_us: int,
+        payload: bytes,
+    ) -> None:
+        """Handle a binary frame received from the client."""

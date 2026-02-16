@@ -10,6 +10,11 @@ __all__ = [
     "BinaryMessageType",
     "ClientMessage",
     "DeviceInfo",
+    "InputStreamEndMessage",
+    "InputStreamRequestFormatMessage",
+    "InputStreamRequestFormatSource",
+    "InputStreamStartMessage",
+    "InputStreamStartSource",
     "MediaCommand",
     "PictureFormat",
     "PlaybackStateType",
@@ -18,6 +23,12 @@ __all__ = [
     "RepeatMode",
     "Roles",
     "ServerMessage",
+    "SourceClientCommand",
+    "SourceCommand",
+    "SourceControl",
+    "SourceSignalType",
+    "SourceStateType",
+    "SourceVadSettings",
     "UndefinedField",
     "artwork",
     "controller",
@@ -26,6 +37,7 @@ __all__ = [
     "pack_binary_header",
     "pack_binary_header_raw",
     "player",
+    "source",
     "types",
     "undefined_field",
     "unpack_binary_header",
@@ -34,8 +46,18 @@ __all__ = [
 import struct
 from typing import NamedTuple
 
-from . import artwork, controller, core, metadata, player, types, visualizer
-from .core import DeviceInfo
+from . import artwork, controller, core, metadata, player, source, types, visualizer
+from .core import (
+    DeviceInfo,
+    InputStreamEndMessage,
+    InputStreamRequestFormatMessage,
+    InputStreamStartMessage,
+)
+from .source import (
+    InputStreamRequestFormatSource,
+    InputStreamStartSource,
+    SourceVadSettings,
+)
 from .types import (
     AudioCodec,
     BinaryMessageType,
@@ -48,6 +70,11 @@ from .types import (
     RepeatMode,
     Roles,
     ServerMessage,
+    SourceClientCommand,
+    SourceCommand,
+    SourceControl,
+    SourceSignalType,
+    SourceStateType,
     UndefinedField,
     undefined_field,
 )

@@ -30,6 +30,14 @@ from .player import (
     StreamRequestFormatPlayer,
     StreamStartPlayer,
 )
+from .source import (
+    ClientHelloSourceSupport,
+    InputStreamRequestFormatSource,
+    InputStreamStartSource,
+    SourceClientCommandPayload,
+    SourceCommandPayload,
+    SourceStatePayload,
+)
 from .types import (
     ClientMessage,
     ClientStateType,
@@ -68,6 +76,7 @@ _CLIENT_HELLO_LEGACY_FIELD_ALIASES: dict[str, str] = {
     "player_support": "player@v1_support",
     "artwork_support": "artwork@v1_support",
     "visualizer_support": "visualizer@v1_support",
+    "source_support": "source@v1_support",
 }
 
 
@@ -111,6 +120,8 @@ class ClientHelloPayload(DataClassORJSONMixin):
         ClientHelloVisualizerSupport | None, Alias("visualizer@v1_support")
     ] = None
     """Visualizer support configuration - only if visualizer role is in supported_roles."""
+    source_support: Annotated[ClientHelloSourceSupport | None, Alias("source@v1_support")] = None
+    """Source support configuration - only if source role is in supported_roles."""
 
     @classmethod
     def __pre_deserialize__(cls, d: dict[str, Any]) -> dict[str, Any]:
@@ -166,6 +177,16 @@ class ClientHelloPayload(DataClassORJSONMixin):
         if not visualizer_role_supported:
             self.visualizer_support = None
 
+        # Validate source role and support configuration
+        source_role_supported = Roles.SOURCE.value in self.supported_roles
+        if source_role_supported and self.source_support is None:
+            raise ValueError(
+                "source@v1_support (source_support alias) must be provided when "
+                "'source@v1' is in supported_roles"
+            )
+        if not source_role_supported:
+            self.source_support = None
+
     class Config(BaseConfig):
         """Config for parsing json messages."""
 
@@ -214,6 +235,8 @@ class ClientStatePayload(DataClassORJSONMixin):
     """
     player: PlayerStatePayload | None = None
     """Player state - only if client has player role."""
+    source: SourceStatePayload | None = None
+    """Source state - only if client has source role."""
 
     class Config(BaseConfig):
         """Config for parsing json messages."""
@@ -236,6 +259,8 @@ class ClientCommandPayload(DataClassORJSONMixin):
 
     controller: ControllerCommandPayload | None = None
     """Controller commands - only if client has controller role."""
+    source: SourceClientCommandPayload | None = None
+    """Source client command events - only if client has source role."""
 
     class Config(BaseConfig):
         """Config for parsing json messages."""
@@ -386,6 +411,8 @@ class ServerCommandPayload(DataClassORJSONMixin):
 
     player: PlayerCommandPayload | None = None
     """Player commands - only sent to clients with player role."""
+    source: SourceCommandPayload | None = None
+    """Source commands - only sent to clients with source role."""
 
     class Config(BaseConfig):
         """Config for parsing json messages."""
@@ -522,3 +549,61 @@ class StreamEndMessage(ServerMessage):
 
     payload: StreamEndPayload
     type: Literal["stream/end"] = "stream/end"
+
+
+# Client -> Server: input_stream/start
+@dataclass
+class InputStreamStartPayload(DataClassORJSONMixin):
+    """Input stream start payload."""
+
+    source: InputStreamStartSource
+    """Source input stream format details."""
+
+    class Config(BaseConfig):
+        """Mashumaro config."""
+
+        omit_none = True
+
+
+@dataclass
+class InputStreamStartMessage(ClientMessage):
+    """Message sent by the client to start an input stream."""
+
+    payload: InputStreamStartPayload
+    type: Literal["input_stream/start"] = "input_stream/start"
+
+
+# Server -> Client: input_stream/request-format
+@dataclass
+class InputStreamRequestFormatPayload(DataClassORJSONMixin):
+    """Input stream format request payload."""
+
+    source: InputStreamRequestFormatSource
+    """Requested source input stream format."""
+
+    class Config(BaseConfig):
+        """Mashumaro config."""
+
+        omit_none = True
+
+
+@dataclass
+class InputStreamRequestFormatMessage(ServerMessage):
+    """Message sent by the server to request a different input stream format."""
+
+    payload: InputStreamRequestFormatPayload
+    type: Literal["input_stream/request-format"] = "input_stream/request-format"
+
+
+# Client -> Server: input_stream/end
+@dataclass
+class InputStreamEndPayload(DataClassORJSONMixin):
+    """Input stream end payload."""
+
+
+@dataclass
+class InputStreamEndMessage(ClientMessage):
+    """Message sent by the client to end an input stream."""
+
+    payload: InputStreamEndPayload
+    type: Literal["input_stream/end"] = "input_stream/end"

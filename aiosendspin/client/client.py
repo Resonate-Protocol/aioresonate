@@ -11,7 +11,12 @@ from dataclasses import dataclass
 
 from aiohttp import ClientSession, ClientWebSocketResponse, WSMessage, WSMsgType, web
 
-from aiosendspin.models import BINARY_HEADER_SIZE, BinaryMessageType, unpack_binary_header
+from aiosendspin.models import (
+    BINARY_HEADER_SIZE,
+    BinaryMessageType,
+    pack_binary_header_raw,
+    unpack_binary_header,
+)
 from aiosendspin.models.artwork import ClientHelloArtworkSupport
 from aiosendspin.models.controller import ControllerCommandPayload
 from aiosendspin.models.core import (
@@ -26,6 +31,11 @@ from aiosendspin.models.core import (
     DeviceInfo,
     GroupUpdateServerMessage,
     GroupUpdateServerPayload,
+    InputStreamEndMessage,
+    InputStreamEndPayload,
+    InputStreamRequestFormatMessage,
+    InputStreamStartMessage,
+    InputStreamStartPayload,
     ServerCommandMessage,
     ServerCommandPayload,
     ServerHelloMessage,
@@ -43,7 +53,22 @@ from aiosendspin.models.player import (
     PlayerStatePayload,
     StreamStartPlayer,
 )
-from aiosendspin.models.types import AudioCodec, MediaCommand, PlayerStateType, Roles, ServerMessage
+from aiosendspin.models.source import (
+    ClientHelloSourceSupport,
+    InputStreamRequestFormatSource,
+    InputStreamStartSource,
+    SourceClientCommandPayload,
+    SourceCommandPayload,
+    SourceStatePayload,
+)
+from aiosendspin.models.types import (
+    AudioCodec,
+    MediaCommand,
+    PlayerStateType,
+    Roles,
+    ServerMessage,
+    SourceClientCommand,
+)
 
 from .time_sync import SendspinTimeFilter
 
@@ -117,6 +142,12 @@ DisconnectCallback = Callable[[], None]
 # Callback invoked when server sends player commands (volume, mute).
 ServerCommandCallback = Callable[[ServerCommandPayload], None]
 
+# Callback invoked when server sends source commands (start/stop/control/vad).
+SourceCommandCallback = Callable[[SourceCommandPayload], None]
+
+# Callback invoked when server requests input stream format changes.
+InputStreamRequestFormatCallback = Callable[[InputStreamRequestFormatSource], None]
+
 
 @dataclass(slots=True)
 class ServerInfo:
@@ -148,6 +179,8 @@ class SendspinClient:
     """Player capabilities (only set if PLAYER role is supported)."""
     _artwork_support: ClientHelloArtworkSupport | None
     """Artwork capabilities (only set if ARTWORK role is supported)."""
+    _source_support: ClientHelloSourceSupport | None
+    """Source capabilities (only set if SOURCE role is supported)."""
     _session: ClientSession | None
     """Optional aiohttp ClientSession for WebSocket connection."""
 
@@ -206,13 +239,17 @@ class SendspinClient:
     """Callbacks invoked when the client disconnects."""
     _server_command_callbacks: list[ServerCommandCallback]
     """Callbacks invoked when server sends player commands."""
+    _source_command_callbacks: list[SourceCommandCallback]
+    """Callbacks invoked when server sends source commands."""
+    _input_stream_request_format_callbacks: list[InputStreamRequestFormatCallback]
+    """Callbacks invoked when server requests input stream format changes."""
 
     _initial_volume: int
     """Initial volume level for player role (0-100)."""
     _initial_muted: bool
     """Initial mute state for player role."""
 
-    def __init__(
+    def __init__(  # noqa: PLR0913
         self,
         client_id: str,
         client_name: str,
@@ -221,6 +258,7 @@ class SendspinClient:
         device_info: DeviceInfo | None = None,
         player_support: ClientHelloPlayerSupport | None = None,
         artwork_support: ClientHelloArtworkSupport | None = None,
+        source_support: ClientHelloSourceSupport | None = None,
         session: ClientSession | None = None,
         static_delay_ms: float = 0.0,
         initial_volume: int = 100,
@@ -241,6 +279,8 @@ class SendspinClient:
                 is specified; raises ValueError if missing.
             artwork_support: Custom artwork capabilities. Required if ARTWORK
                 role is specified; raises ValueError if missing.
+            source_support: Custom source capabilities. Required if SOURCE role
+                is specified; raises ValueError if missing.
             session: Optional aiohttp ClientSession. If None, a session is created
                 and managed by this client.
             static_delay_ms: Static playback delay in milliseconds applied after
@@ -253,7 +293,8 @@ class SendspinClient:
 
         Raises:
             ValueError: If PLAYER in roles but player_support is None, or if
-                ARTWORK in roles but artwork_support is None.
+                ARTWORK in roles but artwork_support is None, or if SOURCE
+                in roles but source_support is None.
         """
         self._client_id = client_id
         self._client_name = client_name
@@ -275,6 +316,13 @@ class SendspinClient:
             self._artwork_support = artwork_support
         else:
             self._artwork_support = None
+
+        if Roles.SOURCE in self._roles:
+            if source_support is None:
+                raise ValueError("source_support is required when SOURCE role is specified")
+            self._source_support = source_support
+        else:
+            self._source_support = None
         self._session = session
         self._owns_session = session is None
         self._loop = asyncio.get_running_loop()
@@ -294,6 +342,8 @@ class SendspinClient:
         self._audio_chunk_callbacks = []
         self._disconnect_callbacks = []
         self._server_command_callbacks = []
+        self._source_command_callbacks = []
+        self._input_stream_request_format_callbacks = []
 
     @property
     def server_info(self) -> ServerInfo | None:
@@ -443,6 +493,50 @@ class SendspinClient:
         message = ClientCommandMessage(payload=payload)
         await self._send_message(message.to_json())
 
+    async def send_source_state(self, *, state: SourceStatePayload) -> None:
+        """Send the current source state to the server."""
+        if not self.connected:
+            raise RuntimeError("Client is not connected")
+        message = ClientStateMessage(payload=ClientStatePayload(source=state))
+        await self._send_message(message.to_json())
+
+    async def send_source_command(self, command: SourceClientCommand) -> None:
+        """Send a source client command event to the server."""
+        if not self.connected:
+            raise RuntimeError("Client is not connected")
+        message = ClientCommandMessage(
+            payload=ClientCommandPayload(source=SourceClientCommandPayload(command=command))
+        )
+        await self._send_message(message.to_json())
+
+    async def send_input_stream_start(self, source: InputStreamStartSource) -> None:
+        """Send input_stream/start with source format details."""
+        if not self.connected:
+            raise RuntimeError("Client is not connected")
+        message = InputStreamStartMessage(payload=InputStreamStartPayload(source=source))
+        await self._send_message(message.to_json())
+
+    async def send_input_stream_end(self) -> None:
+        """Send input_stream/end to stop the input stream."""
+        if not self.connected:
+            raise RuntimeError("Client is not connected")
+        message = InputStreamEndMessage(payload=InputStreamEndPayload())
+        await self._send_message(message.to_json())
+
+    async def send_source_audio_chunk(self, data: bytes, *, capture_timestamp_us: int) -> None:
+        """Send a source audio chunk as binary message type 12."""
+        if not self.connected:
+            raise RuntimeError("Client is not connected")
+        server_timestamp_us = self.compute_source_timestamp(capture_timestamp_us)
+        payload = (
+            pack_binary_header_raw(BinaryMessageType.SOURCE_AUDIO_CHUNK.value, server_timestamp_us)
+            + data
+        )
+        if not self._ws:
+            raise RuntimeError("WebSocket is not connected")
+        async with self._send_lock:
+            await self._ws.send_bytes(payload)
+
     def add_metadata_listener(self, callback: MetadataCallback) -> Callable[[], None]:
         """Add a listener for server/state messages with metadata.
 
@@ -570,6 +664,26 @@ class SendspinClient:
             else None
         )
 
+    def add_source_command_listener(self, callback: SourceCommandCallback) -> Callable[[], None]:
+        """Add a listener for source command events."""
+        self._source_command_callbacks.append(callback)
+        return lambda: (
+            self._source_command_callbacks.remove(callback)
+            if callback in self._source_command_callbacks
+            else None
+        )
+
+    def add_input_stream_request_format_listener(
+        self, callback: InputStreamRequestFormatCallback
+    ) -> Callable[[], None]:
+        """Add a listener for input_stream/request-format events."""
+        self._input_stream_request_format_callbacks.append(callback)
+        return lambda: (
+            self._input_stream_request_format_callbacks.remove(callback)
+            if callback in self._input_stream_request_format_callbacks
+            else None
+        )
+
     def is_time_synchronized(self) -> bool:
         """Return whether time synchronization with the server has converged."""
         return self._time_filter.is_synchronized
@@ -583,6 +697,7 @@ class SendspinClient:
             device_info=self._device_info,
             player_support=self._player_support,
             artwork_support=self._artwork_support,
+            source_support=self._source_support,
         )
         return ClientHelloMessage(payload=payload)
 
@@ -652,6 +767,8 @@ class SendspinClient:
                 self._handle_server_state(payload)
             case ServerCommandMessage(payload=payload):
                 self._handle_server_command(payload)
+            case InputStreamRequestFormatMessage(payload=payload):
+                self._notify_input_stream_request_format(payload.source)
             case _:
                 logger.debug("Unhandled server message type: %s", type(message).__name__)
 
@@ -786,6 +903,8 @@ class SendspinClient:
     def _handle_server_command(self, payload: ServerCommandPayload) -> None:
         """Handle server/command message."""
         self._notify_server_command_callback(payload)
+        if payload.source is not None:
+            self._notify_source_command_callback(payload.source)
 
     def _configure_audio_output(self, audio_format: AudioFormat) -> None:
         """Store the current audio format for use in callbacks."""
@@ -845,6 +964,10 @@ class SendspinClient:
         adjusted_client_time = client_timestamp_us - self._static_delay_us
         return self._time_filter.compute_server_time(adjusted_client_time)
 
+    def compute_source_timestamp(self, capture_timestamp_us: int) -> int:
+        """Convert capture timestamp to server time without static delay adjustments."""
+        return self._time_filter.compute_server_time(capture_timestamp_us)
+
     def _notify_metadata_callback(self, payload: ServerStatePayload) -> None:
         for callback in list(self._metadata_callbacks):
             try:
@@ -900,6 +1023,20 @@ class SendspinClient:
                 callback(payload)
             except Exception:
                 logger.exception("Error in server command callback %s", callback)
+
+    def _notify_source_command_callback(self, payload: SourceCommandPayload) -> None:
+        for callback in list(self._source_command_callbacks):
+            try:
+                callback(payload)
+            except Exception:
+                logger.exception("Error in source command callback %s", callback)
+
+    def _notify_input_stream_request_format(self, payload: InputStreamRequestFormatSource) -> None:
+        for callback in list(self._input_stream_request_format_callbacks):
+            try:
+                callback(payload)
+            except Exception:
+                logger.exception("Error in input stream request-format callback %s", callback)
 
     async def _time_sync_loop(self) -> None:
         try:

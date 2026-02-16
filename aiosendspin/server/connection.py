@@ -43,6 +43,7 @@ from typing import TYPE_CHECKING, Any, cast
 import orjson
 from aiohttp import ClientWebSocketResponse, WSMsgType, web
 
+from aiosendspin.models import BINARY_HEADER_SIZE, unpack_binary_header
 from aiosendspin.models.artwork import ClientHelloArtworkSupport
 from aiosendspin.models.core import (
     ClientCommandMessage,
@@ -51,6 +52,8 @@ from aiosendspin.models.core import (
     ClientHelloPayload,
     ClientStateMessage,
     ClientTimeMessage,
+    InputStreamEndMessage,
+    InputStreamStartMessage,
     ServerHelloMessage,
     ServerHelloPayload,
     ServerTimeMessage,
@@ -61,6 +64,7 @@ from aiosendspin.models.core import (
     StreamStartMessage,
 )
 from aiosendspin.models.player import ClientHelloPlayerSupport
+from aiosendspin.models.source import ClientHelloSourceSupport
 from aiosendspin.models.types import (
     ClientMessage,
     ConnectionReason,
@@ -118,6 +122,13 @@ _ROLE_SUPPORT_SPECS: dict[str, _RoleSupportSpec] = {
         v1_support_key="visualizer@v1_support",
         legacy_support_key="visualizer_support",
         parse_support=ClientHelloVisualizerSupport.from_dict,
+    ),
+    "source": _RoleSupportSpec(
+        attr_name="source_support",
+        v1_role_id=Roles.SOURCE.value,
+        v1_support_key="source@v1_support",
+        legacy_support_key="source_support",
+        parse_support=ClientHelloSourceSupport.from_dict,
     ),
 }
 
@@ -581,7 +592,21 @@ class SendspinConnection:
                     break
 
                 if msg.type == WSMsgType.BINARY:
-                    self._logger.warning("Received binary message from client (spec violation)")
+                    if self._client is None:
+                        self._logger.warning("Received binary message before client/hello")
+                        continue
+                    try:
+                        header = unpack_binary_header(cast("bytes", msg.data))
+                    except Exception:
+                        self._logger.exception("Failed to unpack binary header from client")
+                        continue
+                    payload = cast("bytes", msg.data)[BINARY_HEADER_SIZE:]
+                    for role in self._client.active_roles:
+                        role.on_client_binary(
+                            message_type=header.message_type,
+                            timestamp_us=header.timestamp_us,
+                            payload=payload,
+                        )
                     continue
 
                 if msg.type != WSMsgType.TEXT:
@@ -609,7 +634,11 @@ class SendspinConnection:
             if self._writer_task and not self._writer_task.done():
                 self._writer_task.cancel()
 
-    async def _handle_message(self, message: ClientMessage, timestamp_us: int) -> None:  # noqa: PLR0915
+    async def _handle_message(  # noqa: C901, PLR0912, PLR0915
+        self,
+        message: ClientMessage,
+        timestamp_us: int,
+    ) -> None:
         if self._client_info is None and not isinstance(message, ClientHelloMessage):
             raise ValueError("First message must be client/hello")
         if (
@@ -707,6 +736,20 @@ class SendspinConnection:
                 return
             for role in self._client.active_roles:
                 role.on_stream_request_format(message.payload)
+            return
+
+        if isinstance(message, InputStreamStartMessage):
+            if self._client is None:
+                return
+            for role in self._client.active_roles:
+                role.on_input_stream_start(message.payload)
+            return
+
+        if isinstance(message, InputStreamEndMessage):
+            if self._client is None:
+                return
+            for role in self._client.active_roles:
+                role.on_input_stream_end()
             return
 
         if isinstance(message, ClientCommandMessage):
