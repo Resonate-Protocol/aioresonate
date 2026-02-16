@@ -298,6 +298,8 @@ class PushStream:
         self._channel_buffers: dict[UUID, tuple[bytes, AudioFormat]] = {}
         # Per-channel timing: channel_id -> next_chunk_start_us
         self._channel_timing: dict[UUID, int] = {}
+        # Channels that have committed real audio (live or historical), not just synthetic timing.
+        self._channels_with_committed_audio: set[UUID] = set()
         # Role-based streaming tracking (for hook-based flow)
         self._started_roles: set[Role] = set()
         # Inline resamplers for role-based audio delivery
@@ -433,7 +435,7 @@ class PushStream:
         Raises:
             ValueError: If the channel already has active timing.
         """
-        if channel_id in self._channel_timing:
+        if channel_id in self._channels_with_committed_audio:
             raise ValueError(
                 f"Cannot add historical audio to channel {channel_id} - "
                 "channel already has active timing"
@@ -536,6 +538,7 @@ class PushStream:
         # Advance each channel's timing by its duration
         for channel_id, duration_us in durations_us.items():
             self._channel_timing[channel_id] += duration_us
+            self._channels_with_committed_audio.add(channel_id)
 
         # Keep non-prepared active channels on the shared timeline.
         #
@@ -633,24 +636,33 @@ class PushStream:
         :param historical: Channel ID -> list of (pcm, format) chunks (oldest first).
         """
         now_us = self._clock.now_us()
+        min_delivery_timestamp_us = now_us + DEFAULT_INITIAL_DELAY_US
 
         for channel_id, chunks in historical.items():
-            if channel_id not in self._channel_timing:
-                if historical_start_us is not None and channel_id in historical_start_us:
-                    self._channel_timing[channel_id] = historical_start_us[channel_id]
-                elif self._channel_timing:
-                    # Align injected history so it ends at the current shared timeline.
-                    # This avoids leaving newly injected channels permanently behind live.
-                    anchor_timing_us = min(self._channel_timing.values())
-                    total_duration_us = 0
-                    for pcm_bytes, fmt in chunks:
-                        bytes_per_sample = fmt.bit_depth // 8
-                        frame_stride = bytes_per_sample * fmt.channels
-                        sample_count = len(pcm_bytes) // frame_stride
-                        total_duration_us += int(sample_count * 1_000_000 / fmt.sample_rate)
-                    self._channel_timing[channel_id] = max(0, anchor_timing_us - total_duration_us)
-                else:
-                    self._channel_timing[channel_id] = now_us + DEFAULT_INITIAL_DELAY_US
+            total_duration_us = 0
+            for pcm_bytes, fmt in chunks:
+                bytes_per_sample = fmt.bit_depth // 8
+                frame_stride = bytes_per_sample * fmt.channels
+                sample_count = len(pcm_bytes) // frame_stride
+                total_duration_us += int(sample_count * 1_000_000 / fmt.sample_rate)
+
+            if historical_start_us is not None and channel_id in historical_start_us:
+                self._channel_timing[channel_id] = historical_start_us[channel_id]
+            elif channel_id in self._channel_timing:
+                if channel_id not in self._channels_with_committed_audio:
+                    # Synthetic timing (from alignment of missing channels) should not block
+                    # history injection. Backfill from current channel tail so history ends
+                    # exactly at the existing shared timeline position.
+                    self._channel_timing[channel_id] = max(
+                        0, self._channel_timing[channel_id] - total_duration_us
+                    )
+            elif self._channel_timing:
+                # Align injected history so it ends at the current shared timeline.
+                # This avoids leaving newly injected channels permanently behind live.
+                anchor_timing_us = min(self._channel_timing.values())
+                self._channel_timing[channel_id] = max(0, anchor_timing_us - total_duration_us)
+            else:
+                self._channel_timing[channel_id] = now_us + DEFAULT_INITIAL_DELAY_US
 
             for pcm_bytes, fmt in chunks:
                 chunk_start_us = self._channel_timing[channel_id]
@@ -674,15 +686,22 @@ class PushStream:
                     )
                     self._pcm_chunk_cache.setdefault(channel_int, deque()).append(pcm_chunk)
 
+                # Advance timing even if we skip delivery for stale chunks.
+                self._channel_timing[channel_id] += duration_us
+
+                # For late-join injection, historical chunks may already be too old by the
+                # time they're processed. Keep timeline/cache continuity, but don't deliver
+                # chunks that would be immediately dropped as late by the connection layer.
+                if chunk_start_us + duration_us <= min_delivery_timestamp_us:
+                    continue
+
                 # Encode and deliver to roles
                 prepared = {channel_id: (pcm_bytes, fmt)}
                 play_start = {channel_id: chunk_start_us}
                 role_cache_results = await self._deliver_audio_to_roles(prepared, play_start)
                 for cache_key, cached_chunks in role_cache_results.items():
                     self._role_chunk_cache[cache_key].extend(cached_chunks)
-
-                # Advance timing
-                self._channel_timing[channel_id] += duration_us
+            self._channels_with_committed_audio.add(channel_id)
 
     def _calculate_channel_durations(
         self,
@@ -1494,6 +1513,7 @@ class PushStream:
         self._historical_buffers.clear()
         self._historical_start_us.clear()
         self._transform_last_input_end_us.clear()
+        self._channels_with_committed_audio.clear()
 
     def clear(self) -> None:
         """
@@ -1509,6 +1529,7 @@ class PushStream:
 
         # Reset per-channel timing
         self._channel_timing.clear()
+        self._channels_with_committed_audio.clear()
 
         # Clear chunk cache
         self._role_chunk_cache.clear()
