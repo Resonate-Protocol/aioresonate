@@ -386,13 +386,20 @@ class PushStream:
         return self._channel_buffers
 
     async def sleep_to_limit_buffer(self, max_buffer_us: int) -> None:
-        """Sleep until the furthest-ahead channel is at most max_buffer_us ahead of now.
+        """Sleep until the furthest-ahead active channel is at most max_buffer_us ahead of now.
+
+        Only considers channels with active audio roles; stale channels from ungrouped
+        players are ignored.
 
         :param max_buffer_us: Maximum allowed buffer depth in microseconds.
         """
         if not self._channel_timing:
             return
-        max_timing_us = max(self._channel_timing.values())
+        active_channels = self._get_active_audio_channels()
+        active_timings = [t for ch, t in self._channel_timing.items() if ch in active_channels]
+        if not active_timings:
+            return
+        max_timing_us = max(active_timings)
         now_us = self._clock.now_us()
         ahead_us = max_timing_us - now_us
         if ahead_us > max_buffer_us:
