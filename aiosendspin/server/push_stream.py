@@ -723,6 +723,8 @@ class PushStream:
                 role_cache_results = await self._deliver_audio_to_roles(prepared, play_start)
                 for cache_key, cached_chunks in role_cache_results.items():
                     self._role_chunk_cache[cache_key].extend(cached_chunks)
+                # Yield so historical injection doesn't starve the event loop.
+                await asyncio.sleep(0)
             self._channels_with_committed_audio.add(channel_id)
 
     def _calculate_channel_durations(
