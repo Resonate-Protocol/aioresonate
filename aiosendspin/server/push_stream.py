@@ -39,6 +39,10 @@ _LOGGER = logging.getLogger(__name__)
 DEFAULT_INITIAL_DELAY_US = 250_000  # 250ms
 # Pre-roll amount for catch-up encoding to absorb codec startup delay.
 ENCODER_CATCHUP_WARMUP_US = 120_000
+# Maximum allowed drift between transformer's internal timeline and the expected output
+# timestamp before we discard the transformer's timeline. Normal codec buffering delays are
+# < 100ms; this threshold catches the accumulated drift from timeline rebasing.
+_TRANSFORMER_DRIFT_THRESHOLD_US = 500_000  # 500ms
 
 
 def _encode_for_transform_key(
@@ -59,7 +63,9 @@ def _encode_for_transform_key(
     base_ts = output_ts
     pending = transformer.pending_timestamp_us
     if pending is not None:
-        base_ts = pending - (len(frames) * frame_dur)
+        candidate_base = pending - (len(frames) * frame_dur)
+        if abs(candidate_base - output_ts) <= _TRANSFORMER_DRIFT_THRESHOLD_US:
+            base_ts = candidate_base
 
     return [(data, base_ts + i * frame_dur, frame_dur) for i, data in enumerate(frames)]
 
@@ -871,6 +877,19 @@ class PushStream:
             transformer is not None
             and last_input_end_us is not None
             and output_ts - last_input_end_us > 1_500_000
+        ):
+            transformer.reset()
+
+        # Reset transformer if its internal timeline has drifted too far from the
+        # expected output position. This catches gradual drift from timeline rebasing
+        # (when audio production is slower than real-time, each commit's rebase shifts
+        # timestamps forward, but the transformer's internal timeline only advances by
+        # the actual audio duration).
+        if (
+            transformer is not None
+            and transformer.pending_timestamp_us is not None
+            and abs(transformer.pending_timestamp_us - (output_ts + duration_us))
+            > _TRANSFORMER_DRIFT_THRESHOLD_US
         ):
             transformer.reset()
 
