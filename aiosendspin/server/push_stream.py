@@ -594,6 +594,7 @@ class PushStream:
 
         # Prune old chunks from cache
         self._prune_role_chunk_cache()
+        self._prune_stale_channel_timing()
 
         # Return earliest play_start_us
         return min(channel_play_start.values())
@@ -1048,6 +1049,19 @@ class PushStream:
                 pcm_chunks.popleft()
             if not pcm_chunks:
                 self._pcm_chunk_cache.pop(channel_int, None)
+
+    def _prune_stale_channel_timing(self) -> None:
+        """Remove _channel_timing entries for channels with no active roles or pending audio."""
+        active = self._get_active_audio_channels()
+        for ch in list(self._channel_timing):
+            if ch in active:
+                continue
+            if ch in self._channel_buffers:
+                continue
+            if ch in self._historical_buffers:
+                continue
+            del self._channel_timing[ch]
+            self._channels_with_committed_audio.discard(ch)
 
     def _ensure_role_started(self, role: Role) -> None:
         if role in self._started_roles:
