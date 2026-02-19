@@ -9,9 +9,20 @@ import pytest
 
 from aiosendspin.models.core import ClientHelloPayload
 from aiosendspin.models.player import ClientHelloPlayerSupport, SupportedAudioFormat
-from aiosendspin.models.types import AudioCodec, ConnectionReason, PlayerCommand, Roles
+from aiosendspin.models.types import (
+    SUPPORTED_ROLE_VERSIONS,
+    AudioCodec,
+    BinaryMessageType,
+    ConnectionReason,
+    PlayerCommand,
+    Roles,
+)
+from aiosendspin.server.audio import AudioFormat
 from aiosendspin.server.client import SendspinClient
 from aiosendspin.server.group import SendspinGroup
+from aiosendspin.server.roles.base import AudioChunk, AudioRequirements, Role
+from aiosendspin.server.roles.player.v1 import PlayerPersistentState
+from aiosendspin.server.roles.registry import ROLE_FACTORIES
 from aiosendspin.server.server import ExternalStreamStartRequest, SendspinServer
 
 
@@ -60,6 +71,36 @@ def _player_hello(client_id: str) -> ClientHelloPayload:
     )
 
 
+def _player_and_metadata_hello(client_id: str) -> ClientHelloPayload:
+    return ClientHelloPayload(
+        client_id=client_id,
+        name=client_id,
+        version=1,
+        supported_roles=[Roles.PLAYER.value, Roles.METADATA.value],
+        player_support=ClientHelloPlayerSupport(
+            supported_formats=[
+                SupportedAudioFormat(
+                    codec=AudioCodec.PCM,
+                    channels=2,
+                    sample_rate=48000,
+                    bit_depth=16,
+                )
+            ],
+            buffer_capacity=100_000,
+            supported_commands=[PlayerCommand.VOLUME, PlayerCommand.MUTE],
+        ),
+    )
+
+
+def _custom_audio_hello(client_id: str) -> ClientHelloPayload:
+    return ClientHelloPayload(
+        client_id=client_id,
+        name=client_id,
+        version=1,
+        supported_roles=["customaudio@v1"],
+    )
+
+
 def _make_server() -> SendspinServer:
     loop = asyncio.get_running_loop()
     client_session = MagicMock()
@@ -98,6 +139,159 @@ async def test_register_external_player_preloads_identity_and_fires_on_start_str
 
     assert len(callback_calls) == 1
     assert callback_calls[0].client_id == "external-1"
+
+
+@pytest.mark.asyncio
+async def test_register_external_player_cold_preinit_builds_roles_without_group_membership(
+) -> None:
+    """External registration should build cold role/caches without lifecycle side effects."""
+    server = _make_server()
+
+    player = server.register_external_player(
+        _player_hello("external-preinit"),
+        on_stream_start=lambda _req: None,
+    )
+
+    assert player.role(Roles.PLAYER.value) is not None
+    assert player.get_binary_handling_cached(BinaryMessageType.AUDIO_CHUNK.value) is not None
+    assert player.get_role_state("player", PlayerPersistentState) is None
+
+    player_group_role = player.group.group_role("player")
+    assert player_group_role is not None
+    assert player_group_role.get_player_clients() == []
+
+
+@pytest.mark.asyncio
+async def test_attach_connection_reuses_external_cold_preinitialized_roles() -> None:
+    """Attach should reuse cold-preinitialized roles and then run on_connect."""
+    server = _make_server()
+
+    player = server.register_external_player(
+        _player_hello("external-reuse"),
+        on_stream_start=lambda _req: None,
+    )
+    precreated_role = player.role(Roles.PLAYER.value)
+    assert precreated_role is not None
+    assert player.get_role_state("player", PlayerPersistentState) is None
+
+    player.attach_connection(
+        _DummyConnection(),
+        client_info=_player_hello("external-reuse"),
+        active_roles=[Roles.PLAYER.value],
+    )
+
+    assert player.role(Roles.PLAYER.value) is precreated_role
+    assert player.get_role_state("player", PlayerPersistentState) is not None
+
+
+@pytest.mark.asyncio
+async def test_attach_connection_rebuilds_roles_when_cold_preinit_mismatches() -> None:
+    """Attach should rebuild roles when negotiated roles differ from cold pre-init."""
+    server = _make_server()
+
+    player = server.register_external_player(
+        _player_hello("external-mismatch"),
+        on_stream_start=lambda _req: None,
+    )
+    precreated_player_role = player.role(Roles.PLAYER.value)
+    assert precreated_player_role is not None
+    assert player.role(Roles.METADATA.value) is None
+
+    player.attach_connection(
+        _DummyConnection(),
+        client_info=_player_and_metadata_hello("external-mismatch"),
+        active_roles=[Roles.PLAYER.value, Roles.METADATA.value],
+    )
+
+    assert player.role(Roles.PLAYER.value) is not precreated_player_role
+    assert player.role(Roles.METADATA.value) is not None
+
+
+@pytest.mark.asyncio
+async def test_reregister_external_player_refreshes_cold_preinit_state() -> None:
+    """Repeated disconnected registration should refresh cold-preinitialized role state."""
+    server = _make_server()
+
+    player = server.register_external_player(
+        _player_hello("external-refresh"),
+        on_stream_start=lambda _req: None,
+    )
+    first_player_role = player.role(Roles.PLAYER.value)
+    assert first_player_role is not None
+    assert player.role(Roles.METADATA.value) is None
+
+    refreshed = server.register_external_player(
+        _player_and_metadata_hello("external-refresh"),
+        on_stream_start=lambda _req: None,
+    )
+
+    assert refreshed is player
+    assert player.role(Roles.PLAYER.value) is not first_player_role
+    assert player.role(Roles.METADATA.value) is not None
+    assert not player.is_connected
+
+
+@pytest.mark.asyncio
+async def test_cold_preinitialized_custom_role_can_receive_audio_without_warm_flag(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Custom roles can opt into preconnect audio without touching warm-disconnected state."""
+
+    class _CustomAudioRole(Role):
+        def __init__(self, client: SendspinClient) -> None:
+            self._client = client
+            self._chunks: list[AudioChunk] = []
+
+        @property
+        def role_id(self) -> str:
+            return "customaudio@v1"
+
+        @property
+        def role_family(self) -> str:
+            return "customaudio"
+
+        @property
+        def chunk_count(self) -> int:
+            return len(self._chunks)
+
+        def get_audio_requirements(self) -> AudioRequirements | None:
+            return AudioRequirements(sample_rate=48000, bit_depth=16, channels=2)
+
+        def supports_preconnect_audio(self) -> bool:
+            return True
+
+        def on_connect(self) -> None:
+            return
+
+        def on_disconnect(self) -> None:
+            return
+
+        def on_audio_chunk(self, chunk: AudioChunk) -> None:
+            self._chunks.append(chunk)
+
+    monkeypatch.setitem(SUPPORTED_ROLE_VERSIONS, "customaudio", "customaudio@v1")
+    monkeypatch.setitem(ROLE_FACTORIES, "customaudio@v1", lambda client: _CustomAudioRole(client))
+
+    server = _make_server()
+    player = server.register_external_player(
+        _custom_audio_hello("external-custom"),
+        on_stream_start=lambda _req: None,
+    )
+    assert not player.has_warm_disconnected_roles
+    assert player.has_cold_preinitialized_roles
+
+    role = player.role("customaudio@v1")
+    assert isinstance(role, _CustomAudioRole)
+    assert role.chunk_count == 0
+
+    stream = player.group.start_stream()
+    stream.prepare_audio(
+        b"\x00\x00" * 480,
+        AudioFormat(sample_rate=48000, bit_depth=16, channels=2),
+    )
+    await stream.commit_audio()
+
+    assert role.chunk_count > 0
 
 
 @pytest.mark.asyncio

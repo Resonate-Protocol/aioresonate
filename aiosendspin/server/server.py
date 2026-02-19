@@ -226,7 +226,7 @@ class SendspinServer:
             raise RuntimeError(
                 f"Cannot register external player {hello.client_id!r} while client is connected"
             )
-        client.preload_hello(hello)
+        client.preinitialize_client_from_hello(hello)
         self._external_stream_start_cbs[hello.client_id] = on_stream_start
         self._cancel_reclaim_timeout(hello.client_id)
         if timeout_s > 0:
