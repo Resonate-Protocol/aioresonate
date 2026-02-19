@@ -262,6 +262,33 @@ async def test_clear_sends_stream_clear(mock_loop: Any) -> None:
 
 
 @pytest.mark.asyncio
+async def test_transient_disconnect_keeps_role_in_audio_pipeline(mock_loop: Any) -> None:
+    """Transient disconnect keeps role processing active, but transport send remains no-op."""
+    group = _DummyGroup(clients=[])
+    client, conn = _make_connected_player(mock_loop, group, "p1")
+    stream = PushStream(loop=mock_loop, clock=LoopClock(mock_loop), group=group)
+
+    role = client.role("player@v1")
+    assert role is not None
+    original_on_audio_chunk = role.on_audio_chunk
+    on_audio_chunk_spy = MagicMock(side_effect=original_on_audio_chunk)
+    role.on_audio_chunk = on_audio_chunk_spy  # type: ignore[method-assign]
+
+    client.detach_connection(None)
+    assert client.has_warm_disconnected_roles
+
+    conn.sent_binary.clear()
+    stream.prepare_audio(
+        bytes(4800),
+        AudioFormat(sample_rate=48000, bit_depth=16, channels=2),
+    )
+    await stream.commit_audio()
+
+    assert on_audio_chunk_spy.call_count > 0
+    assert not conn.sent_binary
+
+
+@pytest.mark.asyncio
 async def test_on_role_join_sends_catchup_chunks(mock_loop: Any) -> None:
     """Late join via on_role_join triggers stream/start and cached audio catch-up."""
     group = _DummyGroup(clients=[])

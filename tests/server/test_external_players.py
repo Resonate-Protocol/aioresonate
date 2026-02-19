@@ -9,7 +9,7 @@ import pytest
 
 from aiosendspin.models.core import ClientHelloPayload
 from aiosendspin.models.player import ClientHelloPlayerSupport, SupportedAudioFormat
-from aiosendspin.models.types import AudioCodec, PlayerCommand, Roles
+from aiosendspin.models.types import AudioCodec, ConnectionReason, PlayerCommand, Roles
 from aiosendspin.server.client import SendspinClient
 from aiosendspin.server.group import SendspinGroup
 from aiosendspin.server.server import ExternalStreamStartRequest, SendspinServer
@@ -73,6 +73,11 @@ def _make_server() -> SendspinServer:
     )
 
 
+async def _flush_asyncio_callbacks() -> None:
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+
+
 @pytest.mark.asyncio
 async def test_register_external_player_preloads_identity_and_fires_on_start_stream() -> None:
     """External player should be visible and trigger callback on stream start."""
@@ -121,3 +126,129 @@ async def test_add_external_player_to_active_group_requests_external_connect() -
 
     assert len(callback_calls) == 1
     assert callback_calls[0].client_id == "external-2"
+
+
+@pytest.mark.asyncio
+async def test_register_external_player_timeout_full_unregisters_disconnected_client() -> None:
+    """External registration timeout removes callback and client while disconnected."""
+    server = _make_server()
+    callback_calls: list[ExternalStreamStartRequest] = []
+
+    server.register_external_player(
+        _player_hello("external-timeout"),
+        on_stream_start=callback_calls.append,
+        timeout_s=0.05,
+    )
+    assert server.get_client("external-timeout") is not None
+    assert server.is_external_player("external-timeout")
+
+    await asyncio.sleep(0.08)
+    await _flush_asyncio_callbacks()
+
+    assert server.get_client("external-timeout") is None
+    assert not server.is_external_player("external-timeout")
+
+
+@pytest.mark.asyncio
+async def test_register_external_player_timeout_cancelled_on_transport_attach() -> None:
+    """External registration timeout is cancelled once transport attaches."""
+    server = _make_server()
+
+    client = server.register_external_player(
+        _player_hello("external-connected"),
+        on_stream_start=lambda _req: None,
+        timeout_s=0.05,
+    )
+    client.attach_connection(
+        _DummyConnection(),
+        client_info=_player_hello("external-connected"),
+        active_roles=[Roles.PLAYER.value],
+    )
+
+    await asyncio.sleep(0.08)
+    await _flush_asyncio_callbacks()
+
+    assert server.get_client("external-connected") is client
+    assert server.is_external_player("external-connected")
+
+
+@pytest.mark.asyncio
+async def test_reclaim_timeout_full_unregisters_disconnected_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reclaim timeout removes client when reconnect never succeeds."""
+    server = _make_server()
+    server.get_or_create_client("speaker-timeout")
+    server.register_client_url("speaker-timeout", "ws://127.0.0.1:9000/sendspin")
+
+    connect_calls: list[tuple[str, ConnectionReason]] = []
+
+    def _connect_to_client(url: str, *, connection_reason: ConnectionReason) -> None:
+        connect_calls.append((url, connection_reason))
+
+    monkeypatch.setattr(server, "connect_to_client", _connect_to_client)
+
+    assert server.reclaim_client_for_playback("speaker-timeout", timeout_s=0.05)
+    assert connect_calls == [("ws://127.0.0.1:9000/sendspin", ConnectionReason.PLAYBACK)]
+
+    await asyncio.sleep(0.08)
+    await _flush_asyncio_callbacks()
+
+    assert server.get_client("speaker-timeout") is None
+    assert server.get_client_url("speaker-timeout") is None
+
+
+@pytest.mark.asyncio
+async def test_reclaim_timeout_refreshes_on_repeated_requests(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Repeated reclaim requests refresh the timeout window."""
+    server = _make_server()
+    server.get_or_create_client("speaker-refresh")
+    server.register_client_url("speaker-refresh", "ws://127.0.0.1:9001/sendspin")
+
+    monkeypatch.setattr(
+        server,
+        "connect_to_client",
+        lambda _url, *, connection_reason: None,  # noqa: ARG005
+    )
+
+    assert server.reclaim_client_for_playback("speaker-refresh", timeout_s=0.12)
+    await asyncio.sleep(0.07)
+    assert server.reclaim_client_for_playback("speaker-refresh", timeout_s=0.12)
+
+    await asyncio.sleep(0.07)
+    await _flush_asyncio_callbacks()
+    assert server.get_client("speaker-refresh") is not None
+
+    await asyncio.sleep(0.08)
+    await _flush_asyncio_callbacks()
+    assert server.get_client("speaker-refresh") is None
+
+
+@pytest.mark.asyncio
+async def test_reclaim_timeout_cancelled_on_transport_attach(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reclaim timeout does not remove client once transport has attached."""
+    server = _make_server()
+    client = server.get_or_create_client("speaker-connected")
+    server.register_client_url("speaker-connected", "ws://127.0.0.1:9002/sendspin")
+
+    monkeypatch.setattr(
+        server,
+        "connect_to_client",
+        lambda _url, *, connection_reason: None,  # noqa: ARG005
+    )
+
+    assert server.reclaim_client_for_playback("speaker-connected", timeout_s=0.05)
+    client.attach_connection(
+        _DummyConnection(),
+        client_info=_player_hello("speaker-connected"),
+        active_roles=[Roles.PLAYER.value],
+    )
+
+    await asyncio.sleep(0.08)
+    await _flush_asyncio_callbacks()
+
+    assert server.get_client("speaker-connected") is client

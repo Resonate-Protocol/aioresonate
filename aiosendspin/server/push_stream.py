@@ -338,11 +338,16 @@ class PushStream:
         """Whether this stream has been stopped."""
         return self._is_stopped
 
+    @staticmethod
+    def _client_in_audio_pipeline(client: SendspinClient) -> bool:
+        """Whether a client should participate in transform/delivery processing."""
+        return client.is_connected or bool(getattr(client, "has_warm_disconnected_roles", False))
+
     def _get_audio_roles(self) -> list[tuple[SendspinClient, Role]]:
         """Get all roles that need audio from connected clients."""
         result: list[tuple[SendspinClient, Role]] = []
         for client in self._group.clients:
-            if not client.is_connected:
+            if not self._client_in_audio_pipeline(client):
                 continue
             result.extend(
                 (client, role)
@@ -1261,7 +1266,7 @@ class PushStream:
     def _other_roles_use_transform_key(self, cache_key: TransformKey, exclude_role: Role) -> bool:
         """Check if any other connected role uses the same TransformKey."""
         for client in self._group.clients:
-            if not client.is_connected:
+            if not self._client_in_audio_pipeline(client):
                 continue
             for role in client.active_roles:
                 if role is exclude_role:
@@ -1278,7 +1283,7 @@ class PushStream:
     def _channel_has_other_audio_roles(self, channel_id: UUID, exclude_role: Role) -> bool:
         """Check whether any other connected role is subscribed to the channel."""
         for client in self._group.clients:
-            if not client.is_connected:
+            if not self._client_in_audio_pipeline(client):
                 continue
             for role in client.active_roles:
                 if role is exclude_role:

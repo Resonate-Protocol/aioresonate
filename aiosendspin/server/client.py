@@ -89,6 +89,7 @@ class SendspinClient:
 
         self._connection: SendspinConnection | None = None
         self._connected: bool = False
+        self._roles_warm_disconnected: bool = False
 
         self.disconnect_behaviour = DisconnectBehaviour.UNGROUP
 
@@ -180,6 +181,11 @@ class SendspinClient:
         return self._connection
 
     @property
+    def has_warm_disconnected_roles(self) -> bool:
+        """Whether role instances are retained while transport is down."""
+        return self._roles_warm_disconnected and self._connection is None
+
+    @property
     def cleanup_on_mdns_removal(self) -> bool:
         """Whether this retained client should be removed when mDNS record disappears."""
         return self._cleanup_on_mdns_removal
@@ -225,25 +231,41 @@ class SendspinClient:
         self._connection = connection
         self._connected = False  # set True once initial state is received (spec)
         self._cleanup_on_mdns_removal = False
+        on_transport_attached = getattr(self._server, "on_client_transport_attached", None)
+        if callable(on_transport_attached):
+            on_transport_attached(self._client_id)
 
         self._info = client_info
         self._name = client_info.name
+        previous_roles = list(self._negotiated_roles)
         self._negotiated_roles = active_roles
         self._logger = logger.getChild(self._client_id)
 
-        # Clear previous roles and binary handling cache
-        self._roles.clear()
-        self._binary_handling_cache.clear()
+        # Reuse warm-disconnected roles when the negotiated role IDs are unchanged.
+        can_reuse_warm_roles = (
+            self._roles_warm_disconnected
+            and bool(self._roles)
+            and set(previous_roles) == set(self._negotiated_roles)
+            and set(self._roles.keys()) == set(self._negotiated_roles)
+        )
+        if can_reuse_warm_roles:
+            for role in self._roles.values():
+                role.on_connect()
+        else:
+            self._hard_detach_roles()
 
-        # Create and register active roles via registry.
-        for role_id in self._negotiated_roles:
-            role = create_role(role_id, self)
-            if role is None:
-                continue
-            role.on_connect()
-            self._roles[role.role_id] = role
+            # Create and register active roles via registry.
+            for role_id in self._negotiated_roles:
+                role = create_role(role_id, self)
+                if role is None:
+                    continue
+                role.on_connect()
+                self._roles[role.role_id] = role
+
+        self._roles_warm_disconnected = False
 
         # Build binary handling cache for fast lookup
+        self._binary_handling_cache.clear()
         for msg_type in BinaryMessageType:
             for role in self._roles.values():
                 handling = role.get_binary_handling(msg_type.value)
@@ -272,11 +294,17 @@ class SendspinClient:
         """Detach the current connection and apply BufferTracker reset policy."""
         self._connected = False
 
-        # Notify all roles about detachment
-        for role in self._roles.values():
-            role.on_disconnect()
-        self._roles.clear()
-        self._binary_handling_cache.clear()
+        warm_disconnect = goodbye_reason in {None, GoodbyeReason.RESTART}
+        if warm_disconnect:
+            # Keep role instances alive for reconnect-aware processing, but run
+            # role disconnect hooks so reconnect always preserves lifecycle order.
+            for role in self._roles.values():
+                role.on_disconnect()
+            self._binary_handling_cache.clear()
+            self._roles_warm_disconnected = True
+        else:
+            self._hard_detach_roles()
+            self._roles_warm_disconnected = False
 
         self._connection = None
 
@@ -333,8 +361,17 @@ class SendspinClient:
         if self._connected:
             # Client reconnected, don't clean up
             return
+        self._hard_detach_roles()
+        self._roles_warm_disconnected = False
         self._logger.debug("Cleaning up client from registry")
         create_task(self._server.remove_client(self._client_id))
+
+    def _hard_detach_roles(self) -> None:
+        """Run role disconnect hooks and clear role-related caches."""
+        for role in self._roles.values():
+            role.on_disconnect()
+        self._roles.clear()
+        self._binary_handling_cache.clear()
 
     # ---- Messaging (delegates to connection) ----
 
