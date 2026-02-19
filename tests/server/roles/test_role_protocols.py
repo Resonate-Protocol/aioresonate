@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock
 
+from aiosendspin.server.roles import register_role
 from aiosendspin.server.roles.artwork.types import ArtworkRoleProtocol
 from aiosendspin.server.roles.artwork.v1 import ArtworkV1Role
 from aiosendspin.server.roles.controller.types import ControllerRoleProtocol
@@ -12,6 +13,7 @@ from aiosendspin.server.roles.metadata.types import MetadataRoleProtocol
 from aiosendspin.server.roles.metadata.v1 import MetadataV1Role
 from aiosendspin.server.roles.player.types import PlayerRoleProtocol
 from aiosendspin.server.roles.player.v1 import PlayerV1Role
+from aiosendspin.server.roles.registry import register_role as registry_register_role
 
 
 def _make_basic_client_stub() -> MagicMock:
@@ -76,3 +78,8 @@ def test_player_role_matches_protocol() -> None:
     client = _make_player_client_stub()
     role = PlayerV1Role(client=client)
     assert isinstance(role, PlayerRoleProtocol)
+
+
+def test_register_role_is_reexported() -> None:
+    """register_role is available from aiosendspin.server.roles."""
+    assert register_role is registry_register_role
