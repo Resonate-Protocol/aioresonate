@@ -24,13 +24,13 @@ from aiosendspin.models.types import (
     GoodbyeReason,
     Roles,
     has_role,
-    negotiate_active_roles,
 )
 from aiosendspin.util import create_task
 
 from .events import ClientEvent, ClientGroupChangedEvent
 from .roles import Role
 from .roles.base import BinaryHandling
+from .roles.negotiation import negotiate_active_roles
 from .roles.registry import create_role
 
 if TYPE_CHECKING:

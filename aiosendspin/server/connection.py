@@ -67,13 +67,13 @@ from aiosendspin.models.types import (
     GoodbyeReason,
     Roles,
     ServerMessage,
-    negotiate_active_roles,
     role_family,
 )
 from aiosendspin.models.visualizer import ClientHelloVisualizerSupport
 from aiosendspin.util import create_task
 
 from .client import SendspinClient
+from .roles.negotiation import negotiate_active_roles
 
 if TYPE_CHECKING:
     from .audio import BufferTracker
