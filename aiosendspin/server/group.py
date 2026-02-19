@@ -127,6 +127,11 @@ class SendspinGroup:
         else:
             self._channel_resolver = default_channel_resolver
 
+        # Replace any existing active stream so stale handles cannot continue
+        # committing audio after a new stream is started.
+        if self._push_stream is not None and not self._push_stream.is_stopped:
+            self._push_stream.stop()
+
         self._push_stream = PushStream(
             loop=self._server.loop,
             clock=self._server.clock,
@@ -139,16 +144,18 @@ class SendspinGroup:
             if not client.is_connected:
                 self._server.request_client_playback_connection(client.client_id)
 
-        # Starting a stream implies the group is actively playing.
-        if self._current_state != PlaybackStateType.PLAYING:
-            self._current_state = PlaybackStateType.PLAYING
-            self._signal_event(GroupStateChangedEvent(PlaybackStateType.PLAYING))
-            self._send_group_update_to_clients()
+        self._set_playback_state(PlaybackStateType.PLAYING)
         return self._push_stream
 
     def stop_stream(self) -> None:
         """
-        Stop the current push stream.
+        Stop only the current PushStream transport.
+
+        This preserves group playback state as PLAYING. Use this when you are
+        about to immediately start another stream and want clients to stay in a
+        logical PLAYING state during the transition.
+
+        To stop transport and also mark the group state as STOPPED, call stop().
 
         Does nothing if no stream is active.
         """
@@ -192,21 +199,21 @@ class SendspinGroup:
                 if role.get_audio_requirements() is not None:
                     self._push_stream.on_role_join(role)
 
-    def _send_stopped_state_to_clients(self) -> None:
-        """Send stopped state to all clients."""
-        group_message = GroupUpdateServerMessage(
-            GroupUpdateServerPayload(
-                playback_state=PlaybackStateType.STOPPED,
-                group_id=self.group_id,
-                group_name=self.group_name,
-            )
-        )
-        for client in self._clients:
-            client.send_message(group_message)
+    def _set_playback_state(self, new_state: PlaybackStateType) -> None:
+        """Set playback state and notify listeners/clients when it changes."""
+        if self._current_state == new_state:
+            return
+
+        self._current_state = new_state
+        self._signal_event(GroupStateChangedEvent(new_state))
+        self._send_group_update_to_clients()
 
     async def stop(self) -> bool:
         """
         Stop playback for the group and clean up resources.
+
+        This stops any active PushStream and marks the group playback state as
+        STOPPED.
 
         Returns:
             bool: True if an active stream was stopped,
@@ -233,11 +240,7 @@ class SendspinGroup:
                 self._push_stream.stop()
                 self._push_stream = None
 
-            if self._current_state != PlaybackStateType.STOPPED:
-                self._signal_event(GroupStateChangedEvent(PlaybackStateType.STOPPED))
-                self._current_state = PlaybackStateType.STOPPED
-
-            self._send_stopped_state_to_clients()
+            self._set_playback_state(PlaybackStateType.STOPPED)
             return True
 
     @property

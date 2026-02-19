@@ -7,12 +7,13 @@ from uuid import UUID
 
 import pytest
 
-from aiosendspin.models.types import Roles
+from aiosendspin.models.types import PlaybackStateType, Roles
 from aiosendspin.server.audio_transformers import TransformerPool
 from aiosendspin.server.channels import MAIN_CHANNEL
 from aiosendspin.server.clock import LoopClock
+from aiosendspin.server.events import GroupStateChangedEvent
 from aiosendspin.server.group import SendspinGroup
-from aiosendspin.server.push_stream import PushStream
+from aiosendspin.server.push_stream import PushStream, StreamStoppedError
 
 
 class TestGroupStartStream:
@@ -118,6 +119,22 @@ class TestGroupStartStream:
 
         assert group._push_stream is None  # noqa: SLF001
 
+    @pytest.mark.asyncio
+    async def test_group_stop_updates_state_to_stopped(
+        self,
+        mock_server: MagicMock,
+        mock_client: MagicMock,
+    ) -> None:
+        """stop() should set logical playback state to STOPPED."""
+        group = SendspinGroup(mock_server, mock_client)
+        group.start_stream()
+
+        assert group.state == PlaybackStateType.PLAYING
+
+        await group.stop()
+
+        assert group.state == PlaybackStateType.STOPPED
+
     def test_multiple_start_stream_returns_new_instances(
         self,
         mock_server: MagicMock,
@@ -129,6 +146,36 @@ class TestGroupStartStream:
         stream2 = group.start_stream()
 
         assert stream1 is not stream2
+
+    def test_start_stream_replaces_and_stops_previous_stream(
+        self,
+        mock_server: MagicMock,
+        mock_client: MagicMock,
+    ) -> None:
+        """Starting a new stream should stop the previous active stream."""
+        group = SendspinGroup(mock_server, mock_client)
+        stream1 = group.start_stream()
+
+        assert not stream1.is_stopped
+
+        stream2 = group.start_stream()
+
+        assert stream2 is not stream1
+        assert stream1.is_stopped
+
+    @pytest.mark.asyncio
+    async def test_replaced_stream_cannot_commit_audio(
+        self,
+        mock_server: MagicMock,
+        mock_client: MagicMock,
+    ) -> None:
+        """A superseded stream handle must not be able to commit audio."""
+        group = SendspinGroup(mock_server, mock_client)
+        stream1 = group.start_stream()
+        group.start_stream()
+
+        with pytest.raises(StreamStoppedError):
+            await stream1.commit_audio()
 
     def test_start_stream_with_channel_resolver(
         self,
@@ -148,6 +195,57 @@ class TestGroupStartStream:
 
         assert group.get_channel_for_player("left-speaker") == left_channel
         assert group.get_channel_for_player("other") == MAIN_CHANNEL
+
+    def test_start_stream_default_updates_state_to_playing(
+        self,
+        mock_server: MagicMock,
+        mock_client: MagicMock,
+    ) -> None:
+        """start_stream() should update group state to PLAYING by default."""
+        group = SendspinGroup(mock_server, mock_client)
+
+        assert group.state == PlaybackStateType.STOPPED
+
+        group.start_stream()
+
+        assert group.state == PlaybackStateType.PLAYING
+
+    def test_stop_stream_preserves_playback_state(
+        self,
+        mock_server: MagicMock,
+        mock_client: MagicMock,
+    ) -> None:
+        """stop_stream() should not modify logical playback state."""
+        group = SendspinGroup(mock_server, mock_client)
+        group.start_stream()
+
+        assert group.state == PlaybackStateType.PLAYING
+
+        group.stop_stream()
+
+        assert group.state == PlaybackStateType.PLAYING
+
+    def test_track_transition_no_state_flap(
+        self,
+        mock_server: MagicMock,
+        mock_client: MagicMock,
+    ) -> None:
+        """stop_stream() + start_stream() should not emit STOPPED during transitions."""
+        group = SendspinGroup(mock_server, mock_client)
+        state_events: list[PlaybackStateType] = []
+
+        def on_group_event(_: SendspinGroup, event: object) -> None:
+            if isinstance(event, GroupStateChangedEvent):
+                state_events.append(event.state)
+
+        group.add_event_listener(on_group_event)
+
+        group.start_stream()
+        group.stop_stream()
+        group.start_stream()
+
+        assert group.state == PlaybackStateType.PLAYING
+        assert state_events == [PlaybackStateType.PLAYING]
 
 
 class TestRoleJoinWithActiveStream:

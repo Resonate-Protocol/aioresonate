@@ -1515,11 +1515,16 @@ class PushStream:
 
     def stop(self) -> None:
         """
-        Stop the stream.
+        Stop only this PushStream transport.
 
         After calling stop(), commit_audio() will raise StreamStoppedError.
         Flushes remaining audio from transformers, then sends stream/end message
         to all roles via hooks.
+
+        This does not change the owning group's logical playback state.
+        Use this when you are about to immediately start another stream and
+        want clients to remain in PLAYING state during the transition.
+        Call group.stop() to stop transport and also set playback state to STOPPED.
         """
         if self._is_stopped:
             return
