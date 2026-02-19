@@ -256,11 +256,11 @@ class SendspinClient:
 
             # Create and register active roles via registry.
             for role_id in self._negotiated_roles:
-                role = create_role(role_id, self)
-                if role is None:
+                new_role = create_role(role_id, self)
+                if new_role is None:
                     continue
-                role.on_connect()
-                self._roles[role.role_id] = role
+                new_role.on_connect()
+                self._roles[new_role.role_id] = new_role
 
         self._roles_warm_disconnected = False
 
