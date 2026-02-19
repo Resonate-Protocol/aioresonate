@@ -1,6 +1,7 @@
 """Models for enum types used by Sendspin."""
 
 from __future__ import annotations
+
 from dataclasses import dataclass
 from enum import Enum
 
