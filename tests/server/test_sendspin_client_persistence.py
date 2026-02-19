@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
+from unittest.mock import MagicMock
 
 import pytest
 
 from aiosendspin.models.core import ClientHelloPayload
 from aiosendspin.models.player import ClientHelloPlayerSupport, SupportedAudioFormat
 from aiosendspin.models.types import AudioCodec, GoodbyeReason, PlayerCommand, Roles
+from aiosendspin.server import client as client_module
 from aiosendspin.server.client import SendspinClient
 from aiosendspin.server.clock import LoopClock
 from aiosendspin.server.group import SendspinGroup
@@ -156,3 +158,75 @@ async def test_reconnect_resets_buffer_tracker() -> None:
     # Buffer tracker should be reset immediately on reconnect
     # (client's actual buffer is empty after reconnect)
     assert state.buffer_tracker.buffered_bytes == 0
+
+
+@pytest.mark.asyncio
+async def test_transient_disconnect_reuses_role_instance_and_preserves_lifecycle_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Transient reconnect should reuse role object but still run disconnect/connect hooks."""
+    loop = asyncio.get_running_loop()
+    server = _DummyServer(loop=loop, clock=LoopClock(loop))
+    client = SendspinClient(server, client_id="player-1")
+    SendspinGroup(server, client)
+
+    class _TrackedRole:
+        def __init__(self) -> None:
+            self.role_id = "player@v1"
+            self.role_family = "player"
+            self.on_connect = MagicMock()
+            self.on_disconnect = MagicMock()
+
+        def get_binary_handling(self, _message_type: int) -> None:
+            return None
+
+    tracked_role = _TrackedRole()
+
+    def _create_role(role_id: str, _client: SendspinClient) -> _TrackedRole | None:
+        return tracked_role if role_id == "player@v1" else None
+
+    monkeypatch.setattr(client_module, "create_role", _create_role)
+
+    client.attach_connection(
+        _DummyConnection(),
+        client_info=_player_hello("player-1"),
+        active_roles=[Roles.PLAYER.value],
+    )
+    first_role = client.role("player@v1")
+    assert first_role is tracked_role
+    assert tracked_role.on_connect.call_count == 1
+    assert tracked_role.on_disconnect.call_count == 0
+
+    client.detach_connection(None)
+    assert client.has_warm_disconnected_roles
+    assert client.role("player@v1") is tracked_role
+    assert tracked_role.on_disconnect.call_count == 1
+
+    client.attach_connection(
+        _DummyConnection(),
+        client_info=_player_hello("player-1"),
+        active_roles=[Roles.PLAYER.value],
+    )
+    assert client.role("player@v1") is first_role
+    assert tracked_role.on_connect.call_count == 2
+    assert tracked_role.on_disconnect.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_hard_disconnect_clears_roles() -> None:
+    """Non-transient disconnect reasons should clear role instances."""
+    loop = asyncio.get_running_loop()
+    server = _DummyServer(loop=loop, clock=LoopClock(loop))
+    client = SendspinClient(server, client_id="player-1")
+    SendspinGroup(server, client)
+
+    client.attach_connection(
+        _DummyConnection(),
+        client_info=_player_hello("player-1"),
+        active_roles=[Roles.PLAYER.value],
+    )
+    assert client.role("player@v1") is not None
+
+    client.detach_connection(GoodbyeReason.USER_REQUEST)
+    assert not client.has_warm_disconnected_roles
+    assert client.role("player@v1") is None
