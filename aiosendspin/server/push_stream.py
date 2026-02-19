@@ -346,24 +346,29 @@ class PushStream:
         # outputs. On reconnect that leaves no backlog for catch-up and creates
         # an audible gap. Warm roles keep push processing running while the
         # transport is down so reconnect can resume from cached output.
-        return client.is_connected or bool(getattr(client, "has_warm_disconnected_roles", False))
+        return client.is_connected or client.has_warm_disconnected_roles
+
+    @classmethod
+    def _role_in_audio_pipeline(cls, client: SendspinClient, role: Role) -> bool:
+        """Whether a specific role should participate in transform/delivery processing."""
+        if cls._client_in_audio_pipeline(client):
+            return True
+        if not client.has_cold_preinitialized_roles:
+            return False
+        return role.supports_preconnect_audio()
 
     def _get_audio_roles(self) -> list[tuple[SendspinClient, Role]]:
-        """Get all roles that need audio from clients in the audio pipeline.
-
-        Includes roles on both currently connected clients and warm-disconnected
-        clients retained via _client_in_audio_pipeline().
-        """
+        """Get all roles that need audio from connected/warm/cold-opted-in clients."""
         result: list[tuple[SendspinClient, Role]] = []
         for client in self._group.clients:
-            if not self._client_in_audio_pipeline(client):
-                continue
-            result.extend(
-                (client, role)
-                for role in client.active_roles
-                if role.get_audio_requirements() is not None
-                and role not in self._pending_join_roles
-            )
+            for role in client.active_roles:
+                if role.get_audio_requirements() is None:
+                    continue
+                if role in self._pending_join_roles:
+                    continue
+                if not self._role_in_audio_pipeline(client, role):
+                    continue
+                result.append((client, role))
         return result
 
     def _get_cached_resampler(self, key: _ResamplerKey) -> _ResamplerState | None:
@@ -1278,10 +1283,10 @@ class PushStream:
     def _other_roles_use_transform_key(self, cache_key: TransformKey, exclude_role: Role) -> bool:
         """Check if any other active pipeline role uses the same TransformKey."""
         for client in self._group.clients:
-            if not self._client_in_audio_pipeline(client):
-                continue
             for role in client.active_roles:
                 if role is exclude_role:
+                    continue
+                if not self._role_in_audio_pipeline(client, role):
                     continue
                 req = role.get_audio_requirements()
                 if req is None:
@@ -1295,10 +1300,10 @@ class PushStream:
     def _channel_has_other_audio_roles(self, channel_id: UUID, exclude_role: Role) -> bool:
         """Check whether any other active pipeline role is subscribed to the channel."""
         for client in self._group.clients:
-            if not self._client_in_audio_pipeline(client):
-                continue
             for role in client.active_roles:
                 if role is exclude_role:
+                    continue
+                if not self._role_in_audio_pipeline(client, role):
                     continue
                 req = role.get_audio_requirements()
                 if req is None:

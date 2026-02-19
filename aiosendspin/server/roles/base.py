@@ -235,6 +235,16 @@ class Role(ABC):
         """
         return None
 
+    def supports_preconnect_audio(self) -> bool:
+        """Whether this role may receive audio before any transport has connected.
+
+        Default is False and should remain False in almost all cases.
+        Set this to True only for specialized roles that must continue receiving
+        on_stream_start()/on_audio_chunk() while the owning client is intentionally
+        disconnected and registered through SendspinServer.register_external_player().
+        """
+        return False
+
     def get_binary_handling(self, message_type: int) -> BinaryHandling | None:  # noqa: ARG002
         """Return handling policy for a binary message type, or None if not handled.
 
