@@ -119,6 +119,8 @@ class SendspinServer:
         self._connection_reasons: dict[str, ConnectionReason] = {}  # url → reason
         self._client_urls: dict[str, str] = {}  # client_id → url
         self._external_stream_start_cbs: dict[str, ExternalStreamStartCallback] = {}
+        self._external_registration_timeouts: dict[str, asyncio.Handle] = {}
+        self._reclaim_timeouts: dict[str, asyncio.Handle] = {}
         self._pending_connections = set()
 
         self._mdns_client_urls: dict[str, str] = {}
@@ -182,10 +184,14 @@ class SendspinServer:
 
     async def remove_client(self, client_id: str) -> None:
         """Remove a client from the persistent registry."""
+        self._cancel_external_registration_timeout(client_id)
+        self._cancel_reclaim_timeout(client_id)
+        self._external_stream_start_cbs.pop(client_id, None)
+        self._client_urls.pop(client_id, None)
+
         client = self._clients.pop(client_id, None)
         if client is None:
             return
-        self._external_stream_start_cbs.pop(client_id, None)
         await client.group.remove_client(client)
         self._signal_event(ClientRemovedEvent(client_id))
 
@@ -194,8 +200,27 @@ class SendspinServer:
         hello: ClientHelloPayload,
         *,
         on_stream_start: ExternalStreamStartCallback,
+        timeout_s: float = 0.0,
     ) -> SendspinClient:
-        """Register a client identity that is connected by external orchestration."""
+        """Register an externally orchestrated client identity.
+
+        Use this for clients that do not connect through Sendspin's standard
+        discovery/reconnect mechanisms, or that require an external call to
+        start their Sendspin client connection.
+
+        Args:
+            hello: Client identity/capability payload to preload while disconnected.
+                This must match the hello payload sent when the client later
+                connects to this server.
+            on_stream_start: Callback invoked when playback needs this client to
+                connect to the server through its usual external mechanism.
+            timeout_s: Optional registration deadline in seconds. If > 0 and the
+                client transport does not attach before the deadline, the client
+                is fully unregistered from this server.
+        """
+        if timeout_s < 0:
+            raise ValueError("timeout_s must be >= 0")
+
         client = self.get_or_create_client(hello.client_id)
         if client.is_connected:
             raise RuntimeError(
@@ -203,15 +228,26 @@ class SendspinServer:
             )
         client.preload_hello(hello)
         self._external_stream_start_cbs[hello.client_id] = on_stream_start
+        self._cancel_reclaim_timeout(hello.client_id)
+        if timeout_s > 0:
+            self._schedule_external_registration_timeout(hello.client_id, timeout_s)
+        else:
+            self._cancel_external_registration_timeout(hello.client_id)
         return client
 
     def unregister_external_player(self, client_id: str) -> None:
         """Remove external stream-start callback for a registered client."""
+        self._cancel_external_registration_timeout(client_id)
         self._external_stream_start_cbs.pop(client_id, None)
 
     def is_external_player(self, client_id: str) -> bool:
         """Whether this client is externally managed for playback connects."""
         return client_id in self._external_stream_start_cbs
+
+    def on_client_transport_attached(self, client_id: str) -> None:
+        """Cancel pending connection-deadline timeouts once transport is attached."""
+        self._cancel_external_registration_timeout(client_id)
+        self._cancel_reclaim_timeout(client_id)
 
     def add_event_listener(
         self, callback: Callable[[SendspinServer, SendspinEvent], None]
@@ -313,17 +349,26 @@ class SendspinServer:
         """Get the URL for a client (for reconnection)."""
         return self._client_urls.get(client_id)
 
-    def reclaim_client_for_playback(self, client_id: str) -> bool:
+    def reclaim_client_for_playback(self, client_id: str, timeout_s: float = 30.0) -> bool:
         """Attempt to reconnect to a client for playback.
 
         Returns True if reconnection was initiated, False if no URL available.
         Used when starting playback to reclaim clients that disconnected with 'another_server'.
+
+        The client must reconnect within timeout_s seconds; otherwise it is
+        fully unregistered from this server.
         """
+        if timeout_s < 0:
+            raise ValueError("timeout_s must be >= 0")
         url = self._client_urls.get(client_id)
         if url is None:
             return False
 
         self.connect_to_client(url, connection_reason=ConnectionReason.PLAYBACK)
+        if timeout_s > 0:
+            self._schedule_reclaim_timeout(client_id, timeout_s)
+        else:
+            self._cancel_reclaim_timeout(client_id)
         return True
 
     def request_client_playback_connection(self, client_id: str) -> bool:
@@ -351,6 +396,52 @@ class SendspinServer:
         connection_task = self._connection_tasks.pop(url, None)
         if connection_task is not None:
             connection_task.cancel()
+
+    def _cancel_external_registration_timeout(self, client_id: str) -> None:
+        """Cancel a pending external-registration timeout for a client."""
+        handle = self._external_registration_timeouts.pop(client_id, None)
+        if handle is not None:
+            handle.cancel()
+
+    def _cancel_reclaim_timeout(self, client_id: str) -> None:
+        """Cancel a pending reclaim timeout for a client."""
+        handle = self._reclaim_timeouts.pop(client_id, None)
+        if handle is not None:
+            handle.cancel()
+
+    def _schedule_external_registration_timeout(self, client_id: str, timeout_s: float) -> None:
+        """Schedule full unregister if an externally registered client never connects."""
+        self._cancel_external_registration_timeout(client_id)
+        self._external_registration_timeouts[client_id] = self._loop.call_later(
+            timeout_s,
+            lambda: create_task(self._expire_external_registration(client_id)),
+        )
+
+    def _schedule_reclaim_timeout(self, client_id: str, timeout_s: float) -> None:
+        """Schedule full unregister if reclaim never reconnects the client."""
+        self._cancel_reclaim_timeout(client_id)
+        self._reclaim_timeouts[client_id] = self._loop.call_later(
+            timeout_s,
+            lambda: create_task(self._expire_reclaim(client_id)),
+        )
+
+    async def _expire_external_registration(self, client_id: str) -> None:
+        """Handle external-registration timeout."""
+        self._external_registration_timeouts.pop(client_id, None)
+        await self._full_unregister_disconnected_client(client_id)
+
+    async def _expire_reclaim(self, client_id: str) -> None:
+        """Handle reclaim timeout."""
+        self._reclaim_timeouts.pop(client_id, None)
+        await self._full_unregister_disconnected_client(client_id)
+
+    async def _full_unregister_disconnected_client(self, client_id: str) -> None:
+        """Fully unregister a client if it still has no active connection."""
+        client = self._clients.get(client_id)
+        if client is not None and client.connection is not None:
+            return
+        self.unregister_external_player(client_id)
+        await self.remove_client(client_id)
 
     def _resolve_initial_connect_waiters(self, url: str, err: BaseException | None = None) -> None:
         """Resolve or fail waiters for an initial connection attempt."""
