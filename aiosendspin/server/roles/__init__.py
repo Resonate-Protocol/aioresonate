@@ -60,6 +60,7 @@ from aiosendspin.server.roles.player import (
     PlayerGroupVolumeChangedEvent,
     PlayerV1Role,
 )
+from aiosendspin.server.roles.registry import register_role
 from aiosendspin.server.roles.visualizer import (
     VisualizerGroupRole,
     VisualizerV1Role,
@@ -101,4 +102,5 @@ __all__ = [
     "StreamRequirements",
     "VisualizerGroupRole",
     "VisualizerV1Role",
+    "register_role",
 ]
