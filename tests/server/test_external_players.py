@@ -142,8 +142,9 @@ async def test_register_external_player_preloads_identity_and_fires_on_start_str
 
 
 @pytest.mark.asyncio
-async def test_register_external_player_cold_preinit_builds_roles_without_group_membership(
-) -> None:
+async def test_register_external_player_cold_preinit_builds_roles_without_group_membership() -> (
+    None
+):
     """External registration should build cold role/caches without lifecycle side effects."""
     server = _make_server()
 
