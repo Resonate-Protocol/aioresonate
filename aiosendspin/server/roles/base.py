@@ -235,6 +235,14 @@ class Role(ABC):
         """
         return None
 
+    def supports_preconnect_audio(self) -> bool:
+        """Whether this role may receive audio before any transport has connected.
+
+        Default is False. Roles that opt in may receive on_stream_start/on_audio_chunk
+        while the owning client is cold-preinitialized and disconnected.
+        """
+        return False
+
     def get_binary_handling(self, message_type: int) -> BinaryHandling | None:  # noqa: ARG002
         """Return handling policy for a binary message type, or None if not handled.
 
