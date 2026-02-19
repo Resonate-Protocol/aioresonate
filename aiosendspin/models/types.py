@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib
 from dataclasses import dataclass
 from enum import Enum
 
@@ -246,11 +247,29 @@ SUPPORTED_ROLE_VERSIONS: dict[str, str] = {
 }
 
 
+def _is_registered_server_role_id(role_id: str) -> bool:
+    """Return True when server role registry has a factory for this exact role ID."""
+    try:
+        # Lazy module load avoids import-time coupling between models and server modules.
+        registry_module = importlib.import_module("aiosendspin.server.roles.registry")
+    except ImportError:
+        return False
+
+    role_factories = getattr(registry_module, "ROLE_FACTORIES", None)
+    if not isinstance(role_factories, dict):
+        return False
+    return role_id in role_factories
+
+
 def negotiate_active_roles(client_supported_roles: list[str]) -> list[str]:
     """Negotiate active roles from client's supported roles.
 
-    For each role family the client supports, select the highest version
-    that both client and server support. Unknown role families are ignored.
+    For each role family the client supports, choose the first role ID in
+    client order that is negotiable by the server.
+
+    A role ID is negotiable when either:
+    - It matches this server's built-in supported version for that family, or
+    - It is present in the runtime role factory registry.
 
     Args:
         client_supported_roles: Versioned role IDs from client/hello
@@ -268,14 +287,15 @@ def negotiate_active_roles(client_supported_roles: list[str]) -> list[str]:
         if family in active:
             continue
 
-        # Skip if server doesn't support this role family
-        if family not in SUPPORTED_ROLE_VERSIONS:
-            continue
+        # Built-in role support path.
+        if family in SUPPORTED_ROLE_VERSIONS:
+            server_role_id = SUPPORTED_ROLE_VERSIONS[family]
+            if client_role_id == server_role_id:
+                active[family] = server_role_id
+                continue
 
-        # For now, we only support v1 of each role, so just check
-        # if the client supports the same version we do
-        server_role_id = SUPPORTED_ROLE_VERSIONS[family]
-        if client_role_id == server_role_id:
-            active[family] = server_role_id
+        # Custom role support path (exact role ID must be registered).
+        if _is_registered_server_role_id(client_role_id):
+            active[family] = client_role_id
 
     return list(active.values())
