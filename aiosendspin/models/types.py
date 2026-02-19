@@ -232,4 +232,3 @@ def has_role(role_id: str, supported_roles: list[str]) -> bool:
         has_role("player@v1", ["controller@v1"]) -> False
     """
     return has_role_family(role_family(role_id), supported_roles)
-
