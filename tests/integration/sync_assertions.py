@@ -91,41 +91,47 @@ def best_lag_samples(
     if not received or not expected:
         raise ValueError("signals must be non-empty")
 
+    import numpy as np  # noqa: PLC0415
+
     n = min(len(received), len(expected))
-    rec = received[:n]
-    exp = expected[:n]
+    rec = np.array(received[:n], dtype=np.float64)
+    exp_arr = np.array(expected[:n], dtype=np.float64)
 
-    best_lag = 0
-    best_score = -1.0
+    # FFT-based cross-correlation: O(n log n) instead of O(n * max_lag)
+    size = 2 * n - 1
+    fft_size = 1 << (size - 1).bit_length()
+    corr = np.fft.irfft(
+        np.conj(np.fft.rfft(rec, fft_size)) * np.fft.rfft(exp_arr, fft_size),
+        fft_size,
+    )
 
-    for lag in range(-max_lag_samples, max_lag_samples + 1):
-        if lag >= 0:
-            x = rec[: n - lag]
-            y = exp[lag:n]
-        else:
-            x = rec[-lag:n]
-            y = exp[: n + lag]
+    # Cumulative sum of squares for per-overlap normalization (matches original per-lag norm)
+    rec_css = np.empty(n + 1, dtype=np.float64)
+    rec_css[0] = 0.0
+    np.cumsum(rec**2, out=rec_css[1:])
+    exp_css = np.empty(n + 1, dtype=np.float64)
+    exp_css[0] = 0.0
+    np.cumsum(exp_arr**2, out=exp_css[1:])
 
-        if not x or not y:
-            continue
+    # Positive lags k = 0..min(n-1, max_lag_samples): rec[0..n-k-1] vs exp[k..n-1]
+    pk = np.arange(0, min(n, max_lag_samples + 1), dtype=np.intp)
+    p_denom = np.sqrt(rec_css[n - pk] * (exp_css[n] - exp_css[pk]))
+    p_valid = p_denom > 0
+    p_score = np.where(p_valid, corr[pk] / np.where(p_valid, p_denom, 1.0), -2.0)
 
-        dot = 0.0
-        norm_x = 0.0
-        norm_y = 0.0
-        for xi, yi in zip(x, y, strict=True):
-            dot += xi * yi
-            norm_x += xi * xi
-            norm_y += yi * yi
+    # Negative lags: k=1..min(n-1, max_lag_samples), lag=-k: rec[k..n-1] vs exp[0..n-k-1]
+    nk = np.arange(1, min(n, max_lag_samples + 1), dtype=np.intp)
+    n_denom = np.sqrt((rec_css[n] - rec_css[nk]) * exp_css[n - nk])
+    n_valid = n_denom > 0
+    n_score = np.where(n_valid, corr[fft_size - nk] / np.where(n_valid, n_denom, 1.0), -2.0)
 
-        denom = math.sqrt(norm_x * norm_y)
-        if denom <= 0.0:
-            continue
-        score = dot / denom
-        if score > best_score:
-            best_score = score
-            best_lag = lag
-
-    return best_lag, best_score
+    p_best_i = int(np.argmax(p_score))
+    if n_score.size == 0:
+        return int(pk[p_best_i]), float(p_score[p_best_i])
+    n_best_i = int(np.argmax(n_score))
+    if float(p_score[p_best_i]) >= float(n_score[n_best_i]):
+        return int(pk[p_best_i]), float(p_score[p_best_i])
+    return -int(nk[n_best_i]), float(n_score[n_best_i])
 
 
 def _decode_frames_to_pcm_s16le(
