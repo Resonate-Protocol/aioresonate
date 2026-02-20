@@ -25,6 +25,7 @@ from aiosendspin.server.group import SendspinGroup
 from aiosendspin.server.push_stream import PushStream
 from aiosendspin.server.roles import AudioRequirements
 from aiosendspin.server.roles.player.audio_transformers import FlacEncoder, PcmPassthrough
+from tests.integration.sync_assertions import best_lag_samples
 
 
 @dataclass(slots=True)
@@ -135,53 +136,6 @@ def _extract_left_channel_s16le(pcm_s16le: bytes, channels: int) -> list[int]:
     samples = array("h")
     samples.frombytes(pcm_s16le)
     return list(samples[0::channels])
-
-
-def _best_lag_samples(
-    received: list[int],
-    expected: list[int],
-    *,
-    max_lag_samples: int,
-) -> tuple[int, float]:
-    """Return the lag with the best normalized correlation score."""
-    if not received or not expected:
-        raise ValueError("signals must be non-empty")
-
-    n = min(len(received), len(expected))
-    rec = received[:n]
-    exp = expected[:n]
-
-    best_lag = 0
-    best_score = -1.0
-
-    for lag in range(-max_lag_samples, max_lag_samples + 1):
-        if lag >= 0:
-            x = rec[: n - lag]
-            y = exp[lag:n]
-        else:
-            x = rec[-lag:n]
-            y = exp[: n + lag]
-
-        if not x or not y:
-            continue
-
-        dot = 0.0
-        norm_x = 0.0
-        norm_y = 0.0
-        for xi, yi in zip(x, y, strict=True):
-            dot += xi * yi
-            norm_x += xi * xi
-            norm_y += yi * yi
-
-        denom = math.sqrt(norm_x * norm_y)
-        if denom <= 0.0:
-            continue
-        score = dot / denom
-        if score > best_score:
-            best_score = score
-            best_lag = lag
-
-    return best_lag, best_score
 
 
 def _make_player(
@@ -543,9 +497,9 @@ def _assert_three_player_sync_and_continuity(
     max_b = int(b_last.sample_rate * (max_skew_us / 1_000_000))
     max_c = int(c_last.sample_rate * (max_skew_us / 1_000_000))
 
-    lag_a, score_a = _best_lag_samples(rec_a, exp_a, max_lag_samples=max_a)
-    lag_b, score_b = _best_lag_samples(rec_b, exp_b, max_lag_samples=max_b)
-    lag_c, score_c = _best_lag_samples(rec_c, exp_c, max_lag_samples=max_c)
+    lag_a, score_a = best_lag_samples(rec_a, exp_a, max_lag_samples=max_a)
+    lag_b, score_b = best_lag_samples(rec_b, exp_b, max_lag_samples=max_b)
+    lag_c, score_c = best_lag_samples(rec_c, exp_c, max_lag_samples=max_c)
 
     lag_a_us = abs(lag_a) * 1_000_000 / a_last.sample_rate
     lag_b_us = abs(lag_b) * 1_000_000 / b_last.sample_rate
@@ -658,10 +612,10 @@ async def test_multi_player_group_join_sync_stable_source() -> None:
         window_start_us, sample_rate=b_last.sample_rate, frame_count=frames_b
     )
 
-    lag_a, score_a = _best_lag_samples(
+    lag_a, score_a = best_lag_samples(
         received_a, expected_a, max_lag_samples=int(a_last.sample_rate * 0.005)
     )
-    lag_b, score_b = _best_lag_samples(
+    lag_b, score_b = best_lag_samples(
         received_b, expected_b, max_lag_samples=int(b_last.sample_rate * 0.005)
     )
 
@@ -741,10 +695,10 @@ async def test_multi_player_sync_with_jittery_source_is_continuous() -> None:
         window_start_us, sample_rate=b_last.sample_rate, frame_count=frames_b
     )
 
-    lag_a, score_a = _best_lag_samples(
+    lag_a, score_a = best_lag_samples(
         received_a, expected_a, max_lag_samples=int(a_last.sample_rate * 0.005)
     )
-    lag_b, score_b = _best_lag_samples(
+    lag_b, score_b = best_lag_samples(
         received_b, expected_b, max_lag_samples=int(b_last.sample_rate * 0.005)
     )
 
@@ -953,7 +907,7 @@ async def test_four_players_regroup_fast_start_and_sync() -> None:  # noqa: PLR0
         window_start_us, sample_rate=d_last.sample_rate, frame_count=frames_d
     )
     max_d = int(d_last.sample_rate * (5_000 / 1_000_000))
-    lag_d, score_d = _best_lag_samples(rec_d, exp_d, max_lag_samples=max_d)
+    lag_d, score_d = best_lag_samples(rec_d, exp_d, max_lag_samples=max_d)
     lag_d_us = abs(lag_d) * 1_000_000 / d_last.sample_rate
     assert lag_d_us <= 5_000
     assert score_d >= 0.85
