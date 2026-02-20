@@ -13,8 +13,10 @@ jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6.0.1
-      - uses: astral-sh/setup-uv@v7
+      - name: Check out code from GitHub
+        uses: actions/checkout@v6.0.2
+      - name: Set up Python
+        uses: astral-sh/setup-uv@v7
         with:
           python-version: "3.12"
           enable-cache: true
@@ -30,8 +32,10 @@ jobs:
         python-version:
           - "3.12"
     steps:
-      - uses: actions/checkout@v6.0.1
-      - uses: astral-sh/setup-uv@v7
+      - name: Check out code from GitHub
+        uses: actions/checkout@v6.0.2
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: astral-sh/setup-uv@v7
         with:
           python-version: ${{ matrix.python-version }}
           enable-cache: true

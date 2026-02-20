@@ -338,18 +338,37 @@ class PushStream:
         """Whether this stream has been stopped."""
         return self._is_stopped
 
+    @staticmethod
+    def _client_in_audio_pipeline(client: SendspinClient) -> bool:
+        """Whether a client should participate in transform/delivery processing."""
+        # Keep warm-disconnected roles in the pipeline: if audio processing
+        # stops during a temporary disconnect, we stop generating/caching role
+        # outputs. On reconnect that leaves no backlog for catch-up and creates
+        # an audible gap. Warm roles keep push processing running while the
+        # transport is down so reconnect can resume from cached output.
+        return client.is_connected or client.has_warm_disconnected_roles
+
+    @classmethod
+    def _role_in_audio_pipeline(cls, client: SendspinClient, role: Role) -> bool:
+        """Whether a specific role should participate in transform/delivery processing."""
+        if cls._client_in_audio_pipeline(client):
+            return True
+        if not client.has_cold_preinitialized_roles:
+            return False
+        return role.supports_preconnect_audio()
+
     def _get_audio_roles(self) -> list[tuple[SendspinClient, Role]]:
-        """Get all roles that need audio from connected clients."""
+        """Get all roles that need audio from connected/warm/cold-opted-in clients."""
         result: list[tuple[SendspinClient, Role]] = []
         for client in self._group.clients:
-            if not client.is_connected:
-                continue
-            result.extend(
-                (client, role)
-                for role in client.active_roles
-                if role.get_audio_requirements() is not None
-                and role not in self._pending_join_roles
-            )
+            for role in client.active_roles:
+                if role.get_audio_requirements() is None:
+                    continue
+                if role in self._pending_join_roles:
+                    continue
+                if not self._role_in_audio_pipeline(client, role):
+                    continue
+                result.append((client, role))
         return result
 
     def _get_cached_resampler(self, key: _ResamplerKey) -> _ResamplerState | None:
@@ -1183,6 +1202,9 @@ class PushStream:
     def _do_role_join(self, role: Role) -> None:
         """Execute role join with cached chunk replay."""
         self._pending_join_roles.discard(role)
+        # A rejoining role (e.g. warm reconnect) must receive on_stream_start()
+        # again so the new transport gets stream/start before any audio chunks.
+        self._started_roles.discard(role)
         if self._is_stopped:
             return
         req = role.get_audio_requirements()
@@ -1259,12 +1281,12 @@ class PushStream:
         self._send_cached_chunks_to_role(role, cached[start_index:], now_us)
 
     def _other_roles_use_transform_key(self, cache_key: TransformKey, exclude_role: Role) -> bool:
-        """Check if any other connected role uses the same TransformKey."""
+        """Check if any other active pipeline role uses the same TransformKey."""
         for client in self._group.clients:
-            if not client.is_connected:
-                continue
             for role in client.active_roles:
                 if role is exclude_role:
+                    continue
+                if not self._role_in_audio_pipeline(client, role):
                     continue
                 req = role.get_audio_requirements()
                 if req is None:
@@ -1276,12 +1298,12 @@ class PushStream:
         return False
 
     def _channel_has_other_audio_roles(self, channel_id: UUID, exclude_role: Role) -> bool:
-        """Check whether any other connected role is subscribed to the channel."""
+        """Check whether any other active pipeline role is subscribed to the channel."""
         for client in self._group.clients:
-            if not client.is_connected:
-                continue
             for role in client.active_roles:
                 if role is exclude_role:
+                    continue
+                if not self._role_in_audio_pipeline(client, role):
                     continue
                 req = role.get_audio_requirements()
                 if req is None:
@@ -1515,11 +1537,16 @@ class PushStream:
 
     def stop(self) -> None:
         """
-        Stop the stream.
+        Stop only this PushStream transport.
 
         After calling stop(), commit_audio() will raise StreamStoppedError.
         Flushes remaining audio from transformers, then sends stream/end message
         to all roles via hooks.
+
+        This does not change the owning group's logical playback state.
+        Use this when you are about to immediately start another stream and
+        want clients to remain in PLAYING state during the transition.
+        Call group.stop() to stop transport and also set playback state to STOPPED.
         """
         if self._is_stopped:
             return

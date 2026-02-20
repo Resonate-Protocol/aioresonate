@@ -24,13 +24,13 @@ from aiosendspin.models.types import (
     GoodbyeReason,
     Roles,
     has_role,
-    negotiate_active_roles,
 )
 from aiosendspin.util import create_task
 
 from .events import ClientEvent, ClientGroupChangedEvent
 from .roles import Role
 from .roles.base import BinaryHandling
+from .roles.negotiation import negotiate_active_roles
 from .roles.registry import create_role
 
 if TYPE_CHECKING:
@@ -89,6 +89,8 @@ class SendspinClient:
 
         self._connection: SendspinConnection | None = None
         self._connected: bool = False
+        self._roles_warm_disconnected: bool = False
+        self._roles_cold_preinitialized: bool = False
 
         self.disconnect_behaviour = DisconnectBehaviour.UNGROUP
 
@@ -180,6 +182,16 @@ class SendspinClient:
         return self._connection
 
     @property
+    def has_warm_disconnected_roles(self) -> bool:
+        """Whether role instances are retained while transport is down."""
+        return self._roles_warm_disconnected and self._connection is None
+
+    @property
+    def has_cold_preinitialized_roles(self) -> bool:
+        """Whether role instances were preinitialized without any transport attach."""
+        return self._roles_cold_preinitialized and self._connection is None
+
+    @property
     def cleanup_on_mdns_removal(self) -> bool:
         """Whether this retained client should be removed when mDNS record disappears."""
         return self._cleanup_on_mdns_removal
@@ -225,31 +237,52 @@ class SendspinClient:
         self._connection = connection
         self._connected = False  # set True once initial state is received (spec)
         self._cleanup_on_mdns_removal = False
+        on_transport_attached = getattr(self._server, "on_client_transport_attached", None)
+        if callable(on_transport_attached):
+            on_transport_attached(self._client_id)
 
-        self._info = client_info
-        self._name = client_info.name
-        self._negotiated_roles = active_roles
+        previous_roles = list(self._negotiated_roles)
+        self._set_identity_from_hello(client_info, active_roles=active_roles)
         self._logger = logger.getChild(self._client_id)
+        expected_role_ids = set(self._negotiated_roles)
 
-        # Clear previous roles and binary handling cache
-        self._roles.clear()
-        self._binary_handling_cache.clear()
-
-        # Create and register active roles via registry.
-        for role_id in self._negotiated_roles:
-            role = create_role(role_id, self)
-            if role is None:
-                continue
-            role.on_connect()
-            self._roles[role.role_id] = role
-
-        # Build binary handling cache for fast lookup
-        for msg_type in BinaryMessageType:
+        # Reuse warm-disconnected roles when the negotiated role IDs are unchanged.
+        can_reuse_warm_roles = (
+            self._roles_warm_disconnected
+            and bool(self._roles)
+            and set(previous_roles) == expected_role_ids
+            and set(self._roles.keys()) == expected_role_ids
+        )
+        can_reuse_cold_preinit = (
+            self._roles_cold_preinitialized
+            and bool(self._roles)
+            and set(previous_roles) == expected_role_ids
+            and set(self._roles.keys()) == expected_role_ids
+        )
+        if can_reuse_warm_roles or can_reuse_cold_preinit:
             for role in self._roles.values():
-                handling = role.get_binary_handling(msg_type.value)
-                if handling is not None:
-                    self._binary_handling_cache[msg_type.value] = (handling, role)
-                    break  # First role that handles it wins
+                role.on_connect()
+        else:
+            if self._roles_warm_disconnected:
+                # Roles already received on_disconnect() during detach_connection();
+                # just clear the mappings to avoid invoking disconnect hooks twice.
+                self._roles.clear()
+                self._binary_handling_cache.clear()
+            else:
+                self._hard_detach_roles(call_disconnect_hooks=not self._roles_cold_preinitialized)
+
+            # Create and register active roles via registry.
+            for role_id in self._negotiated_roles:
+                new_role = create_role(role_id, self)
+                if new_role is None:
+                    continue
+                new_role.on_connect()
+                self._roles[new_role.role_id] = new_role
+
+        self._roles_warm_disconnected = False
+        self._roles_cold_preinitialized = False
+
+        self._rebuild_binary_handling_cache()
 
         # Ensure group exists (server creates it on first sight).
         if self._group is None:
@@ -257,9 +290,42 @@ class SendspinClient:
 
     def preload_hello(self, client_info: ClientHelloPayload) -> None:
         """Seed persistent client identity/capabilities without an active connection."""
-        self._info = client_info
-        self._name = client_info.name
-        self._negotiated_roles = negotiate_active_roles(client_info.supported_roles)
+        self._set_identity_from_hello(client_info)
+
+    def preinitialize_client_from_hello(self, client_info: ClientHelloPayload) -> None:
+        """Preinitialize almost all client state from hello while disconnected.
+
+        This prepares a not-yet-connected client with negotiated identity and
+        role setup so PushStream logic can reason about role capabilities before
+        transport attach.
+
+        Initializes:
+        - persisted client identity/capabilities from hello
+        - negotiated role list
+        - role instances for negotiated role IDs
+        - binary handling cache derived from those roles
+        - cold-preinitialized role marker
+
+        Deferred until websocket attach:
+        - role on_connect() lifecycle hooks
+        """
+        if self._connection is not None:
+            raise RuntimeError(
+                f"Cannot cold-preinitialize roles for {self._client_id!r} while connected"
+            )
+
+        self._hard_detach_roles(call_disconnect_hooks=False)
+        self._set_identity_from_hello(client_info)
+        self._roles_warm_disconnected = False
+
+        for role_id in self._negotiated_roles:
+            role = create_role(role_id, self)
+            if role is None:
+                continue
+            self._roles[role.role_id] = role
+
+        self._roles_cold_preinitialized = True
+        self._rebuild_binary_handling_cache()
 
     def mark_connected(self) -> None:
         """Mark this client as fully connected (after initial client/state if required)."""
@@ -272,11 +338,18 @@ class SendspinClient:
         """Detach the current connection and apply BufferTracker reset policy."""
         self._connected = False
 
-        # Notify all roles about detachment
-        for role in self._roles.values():
-            role.on_disconnect()
-        self._roles.clear()
-        self._binary_handling_cache.clear()
+        warm_disconnect = goodbye_reason in {None, GoodbyeReason.RESTART}
+        if warm_disconnect:
+            # Keep role instances alive for reconnect-aware processing, but run
+            # role disconnect hooks so reconnect always preserves lifecycle order.
+            for role in self._roles.values():
+                role.on_disconnect()
+            self._binary_handling_cache.clear()
+            self._roles_warm_disconnected = True
+            self._roles_cold_preinitialized = False
+        else:
+            self._hard_detach_roles()
+            self._roles_warm_disconnected = False
 
         self._connection = None
 
@@ -333,8 +406,43 @@ class SendspinClient:
         if self._connected:
             # Client reconnected, don't clean up
             return
+        self._hard_detach_roles()
+        self._roles_warm_disconnected = False
         self._logger.debug("Cleaning up client from registry")
         create_task(self._server.remove_client(self._client_id))
+
+    def _hard_detach_roles(self, *, call_disconnect_hooks: bool = True) -> None:
+        """Run role disconnect hooks and clear role-related caches."""
+        if call_disconnect_hooks:
+            for role in self._roles.values():
+                role.on_disconnect()
+        self._roles.clear()
+        self._binary_handling_cache.clear()
+        self._roles_cold_preinitialized = False
+
+    def _set_identity_from_hello(
+        self,
+        client_info: ClientHelloPayload,
+        *,
+        active_roles: list[str] | None = None,
+    ) -> None:
+        """Store hello identity/capabilities with optional explicit negotiated roles."""
+        self._info = client_info
+        self._name = client_info.name
+        if active_roles is None:
+            self._negotiated_roles = negotiate_active_roles(client_info.supported_roles)
+        else:
+            self._negotiated_roles = active_roles
+
+    def _rebuild_binary_handling_cache(self) -> None:
+        """Build binary handling cache for fast lookup."""
+        self._binary_handling_cache.clear()
+        for msg_type in BinaryMessageType:
+            for role in self._roles.values():
+                handling = role.get_binary_handling(msg_type.value)
+                if handling is not None:
+                    self._binary_handling_cache[msg_type.value] = (handling, role)
+                    break  # First role that handles it wins
 
     # ---- Messaging (delegates to connection) ----
 
