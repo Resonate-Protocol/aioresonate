@@ -13,6 +13,8 @@ from aiosendspin.models import pack_binary_header_raw
 from aiosendspin.models.core import (
     ServerTimeMessage,
     ServerTimePayload,
+    StreamEndMessage,
+    StreamEndPayload,
     StreamStartMessage,
     StreamStartPayload,
 )
@@ -329,6 +331,61 @@ async def test_role_stream_start_is_sent_before_binary_for_same_role() -> None:
         await asyncio.sleep(0)
 
     assert send_order[:2] == ["json", "binary"]
+
+    await conn.disconnect(retry_connection=False)
+
+
+@pytest.mark.asyncio
+async def test_role_stream_lifecycle_json_is_sent_before_older_binary() -> None:
+    """Binary with older playback ts must not overtake queued stream lifecycle JSON."""
+    loop = asyncio.get_running_loop()
+    server = _DummyServer(loop=loop, clock=LoopClock(loop))
+
+    send_order: list[str] = []
+
+    async def _record_json(_payload: str) -> None:
+        send_order.append("json")
+
+    async def _record_binary(_payload: bytes) -> None:
+        send_order.append("binary")
+
+    wsock = MagicMock()
+    wsock.closed = False
+    wsock.send_str = AsyncMock(side_effect=_record_json)
+    wsock.send_bytes = AsyncMock(side_effect=_record_binary)
+
+    conn = SendspinConnection(server, wsock_client=wsock)
+    await conn._setup_connection()  # noqa: SLF001
+
+    conn.send_role_message("player", StreamEndMessage(payload=StreamEndPayload(roles=None)))
+    conn.send_role_message(
+        "player",
+        StreamStartMessage(
+            payload=StreamStartPayload(
+                player=StreamStartPlayer(
+                    codec=AudioCodec.PCM,
+                    sample_rate=44_100,
+                    channels=2,
+                    bit_depth=16,
+                    codec_header=None,
+                )
+            )
+        ),
+    )
+    # Timestamp intentionally older than stream lifecycle sort timestamp.
+    conn.send_binary(
+        pack_binary_header_raw(BinaryMessageType.AUDIO_CHUNK.value, 1) + b"audio",
+        role="player",
+        timestamp_us=1,
+        message_type=BinaryMessageType.AUDIO_CHUNK.value,
+    )
+
+    for _ in range(50):
+        if len(send_order) >= 3:
+            break
+        await asyncio.sleep(0)
+
+    assert send_order[:3] == ["json", "json", "binary"]
 
     await conn.disconnect(retry_connection=False)
 

@@ -973,6 +973,84 @@ async def test_historical_audio_raises_on_active_channel(mock_loop: Any) -> None
 
 
 @pytest.mark.asyncio
+async def test_historical_audio_allows_synthetic_timing_channel() -> None:
+    """Historical audio is allowed when channel timing exists but no audio was committed on it."""
+    group = _DummyGroup(clients=[])
+    other_channel = UUID("99999999-9999-9999-9999-999999999999")
+    role_main = _DummyRole(
+        AudioRequirements(
+            sample_rate=48000,
+            bit_depth=16,
+            channels=2,
+            transformer=None,
+            channel_id=MAIN_CHANNEL,
+            frame_duration_us=25_000,
+        )
+    )
+    role_other = _DummyRole(
+        AudioRequirements(
+            sample_rate=48000,
+            bit_depth=16,
+            channels=2,
+            transformer=None,
+            channel_id=other_channel,
+            frame_duration_us=25_000,
+        )
+    )
+    group.clients.extend([_DummyClient([role_main]), _DummyClient([role_other])])
+
+    loop = asyncio.get_running_loop()
+    clock = ManualClock()
+    stream = PushStream(loop=loop, clock=clock, group=group)
+    fmt = AudioFormat(sample_rate=48000, bit_depth=16, channels=2)
+
+    # Commit MAIN only: other_channel gets synthetic timing, but no committed audio.
+    stream.prepare_audio(bytes(4800), fmt, channel_id=MAIN_CHANNEL)
+    await stream.commit_audio()
+
+    synthetic_tail_us = stream._channel_timing[other_channel]  # noqa: SLF001
+    assert synthetic_tail_us > 0
+
+    # Should not raise: channel has synthetic timing only.
+    stream.prepare_historical_audio(bytes(4800), fmt, channel_id=other_channel)
+    await stream.commit_audio()
+
+    assert role_other.received
+    first_hist = role_other.received[0]
+    assert first_hist.timestamp_us + first_hist.duration_us == synthetic_tail_us
+    assert stream._channel_timing[other_channel] == synthetic_tail_us  # noqa: SLF001
+
+
+@pytest.mark.asyncio
+async def test_historical_audio_raises_after_historical_commit_on_channel() -> None:
+    """Reject historical injection after the channel has committed historical audio."""
+    group = _DummyGroup(clients=[])
+    channel = UUID("88888888-8888-8888-8888-888888888888")
+    role = _DummyRole(
+        AudioRequirements(
+            sample_rate=48000,
+            bit_depth=16,
+            channels=2,
+            transformer=None,
+            channel_id=channel,
+            frame_duration_us=25_000,
+        )
+    )
+    group.clients.append(_DummyClient([role]))
+
+    loop = asyncio.get_running_loop()
+    clock = ManualClock()
+    stream = PushStream(loop=loop, clock=clock, group=group)
+    fmt = AudioFormat(sample_rate=48000, bit_depth=16, channels=2)
+
+    stream.prepare_historical_audio(bytes(4800), fmt, channel_id=channel)
+    await stream.commit_audio()
+
+    with pytest.raises(ValueError, match="already has active timing"):
+        stream.prepare_historical_audio(bytes(4800), fmt, channel_id=channel)
+
+
+@pytest.mark.asyncio
 async def test_historical_audio_respects_explicit_start_time() -> None:
     """Historical audio can be anchored to an explicit start timestamp."""
     group = _DummyGroup(clients=[])
@@ -1008,6 +1086,41 @@ async def test_historical_audio_respects_explicit_start_time() -> None:
     assert role.received
     assert role.received[0].timestamp_us == explicit_start_us
     assert role.received[1].timestamp_us == explicit_start_us + role.received[0].duration_us
+
+
+@pytest.mark.asyncio
+async def test_historical_audio_skips_stale_delivery_but_advances_timing() -> None:
+    """Historical chunks that are already stale are not delivered to active roles."""
+    group = _DummyGroup(clients=[])
+    channel = UUID("abababab-abab-abab-abab-aaaaaaaaaaaa")
+    role = _DummyRole(
+        AudioRequirements(
+            sample_rate=48000,
+            bit_depth=16,
+            channels=2,
+            transformer=None,
+            channel_id=channel,
+            frame_duration_us=25_000,
+        )
+    )
+    group.clients.append(_DummyClient([role]))
+
+    loop = asyncio.get_running_loop()
+    clock = ManualClock(now_us_value=1_000_000)
+    stream = PushStream(loop=loop, clock=clock, group=group)
+
+    fmt = AudioFormat(sample_rate=48000, bit_depth=16, channels=2)
+    stream.prepare_historical_audio(bytes(4800), fmt, channel_id=channel, start_time_us=100_000)
+    stream.prepare_historical_audio(bytes(4800), fmt, channel_id=channel)
+
+    await stream.commit_audio()
+
+    # Delivery is skipped because chunks are fully before now + DEFAULT_INITIAL_DELAY_US.
+    assert not role.received
+    assert role.started == 0
+
+    # Timing/cache still advance so future live chunks stay aligned.
+    assert stream._channel_timing[channel] == 150_000  # noqa: SLF001
 
 
 @pytest.mark.asyncio
@@ -1179,6 +1292,55 @@ async def test_missing_channel_commits_keep_channel_timing_aligned() -> None:
     assert play_start_3 == play_start_2 + 25_000
     assert role_other.received
     assert role_other.received[0].timestamp_us == play_start_3
+
+
+@pytest.mark.asyncio
+async def test_late_introduced_channel_aligns_with_existing_timeline() -> None:
+    """A channel added late should start on the same timeline as existing channels."""
+    group = _DummyGroup(clients=[])
+    other_channel = UUID("cdcdcdcd-cdcd-cdcd-cdcd-cdcdcdcdcdcd")
+    role_main = _DummyRole(
+        AudioRequirements(
+            sample_rate=48000,
+            bit_depth=16,
+            channels=2,
+            transformer=None,
+            channel_id=MAIN_CHANNEL,
+            frame_duration_us=25_000,
+        )
+    )
+    group.clients.append(_DummyClient([role_main]))
+
+    loop = asyncio.get_running_loop()
+    clock = ManualClock()
+    stream = PushStream(loop=loop, clock=clock, group=group)
+    fmt = AudioFormat(sample_rate=48000, bit_depth=16, channels=2)
+
+    # Let MAIN_CHANNEL get far ahead of wall clock (no clock advancement).
+    for _ in range(40):
+        stream.prepare_audio(bytes(4800), fmt, channel_id=MAIN_CHANNEL)
+        await stream.commit_audio()
+
+    role_other = _DummyRole(
+        AudioRequirements(
+            sample_rate=48000,
+            bit_depth=16,
+            channels=2,
+            transformer=None,
+            channel_id=other_channel,
+            frame_duration_us=25_000,
+        )
+    )
+    group.clients.append(_DummyClient([role_other]))
+    stream.on_role_join(role_other)
+
+    stream.prepare_audio(bytes(4800), fmt, channel_id=MAIN_CHANNEL)
+    stream.prepare_audio(bytes(4800), fmt, channel_id=other_channel)
+    await stream.commit_audio()
+
+    assert role_main.received
+    assert role_other.received
+    assert role_main.received[-1].timestamp_us == role_other.received[-1].timestamp_us
 
 
 @pytest.mark.asyncio
