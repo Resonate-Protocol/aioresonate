@@ -12,7 +12,7 @@ from aiosendspin.server.roles.player.types import PlayerRoleProtocol
 from aiosendspin.server.roles.player.v1 import PlayerV1Role
 from aiosendspin.server.roles.registry import register_group_role, register_role
 
-register_group_role("player", lambda group: PlayerGroupRole(group))
+register_group_role("player", PlayerGroupRole)
 register_role("player@v1", lambda client: PlayerV1Role(client=client))
 
 __all__ = [

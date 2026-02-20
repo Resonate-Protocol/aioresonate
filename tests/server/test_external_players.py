@@ -269,7 +269,7 @@ async def test_cold_preinitialized_custom_role_can_receive_audio_without_warm_fl
         def on_audio_chunk(self, chunk: AudioChunk) -> None:
             self._chunks.append(chunk)
 
-    monkeypatch.setitem(ROLE_FACTORIES, "customaudio@v1", lambda client: _CustomAudioRole(client))
+    monkeypatch.setitem(ROLE_FACTORIES, "customaudio@v1", _CustomAudioRole)
 
     server = _make_server()
     player = server.register_external_player(

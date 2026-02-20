@@ -10,7 +10,7 @@ from aiosendspin.server.roles.artwork.types import ArtworkRoleProtocol
 from aiosendspin.server.roles.artwork.v1 import ArtworkV1Role
 from aiosendspin.server.roles.registry import register_group_role, register_role
 
-register_group_role("artwork", lambda group: ArtworkGroupRole(group))
+register_group_role("artwork", ArtworkGroupRole)
 register_role("artwork@v1", lambda client: ArtworkV1Role(client=client))
 
 __all__ = [
