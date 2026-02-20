@@ -252,7 +252,13 @@ class SendspinClient:
             for role in self._roles.values():
                 role.on_connect()
         else:
-            self._hard_detach_roles()
+            if self._roles_warm_disconnected:
+                # Roles already received on_disconnect() during detach_connection();
+                # just clear the mappings to avoid invoking disconnect hooks twice.
+                self._roles.clear()
+                self._binary_handling_cache.clear()
+            else:
+                self._hard_detach_roles()
 
             # Create and register active roles via registry.
             for role_id in self._negotiated_roles:

@@ -75,7 +75,6 @@ def _make_server() -> SendspinServer:
 
 async def _flush_asyncio_callbacks() -> None:
     await asyncio.sleep(0)
-    await asyncio.sleep(0)
 
 
 @pytest.mark.asyncio
