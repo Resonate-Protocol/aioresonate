@@ -56,6 +56,7 @@ class ClientListener:
         path: str = DEFAULT_PATH,
         host: str = DEFAULT_HOST,
         advertise_mdns: bool = True,
+        client_name: str | None = None,
     ) -> None:
         """
         Initialize the ClientListener.
@@ -71,6 +72,7 @@ class ClientListener:
             host: Host/IP address to bind to (default: 0.0.0.0). Use "127.0.0.1"
                 for local-only access.
             advertise_mdns: Whether to advertise via mDNS (default: True).
+            client_name: Optional friendly name for this client (advertised via mDNS).
         """
         self._client_id = client_id
         self._on_connection = on_connection
@@ -78,6 +80,7 @@ class ClientListener:
         self._path = path
         self._host = host
         self._advertise_mdns = advertise_mdns
+        self._client_name = client_name
 
         self._app: web.Application | None = None
         self._runner: web.AppRunner | None = None
@@ -164,7 +167,9 @@ class ClientListener:
             addresses = [local_ip]
 
         service_type = "_sendspin._tcp.local."
-        properties = {"path": self._path}
+        properties: dict[str, str] = {"path": self._path}
+        if self._client_name is not None:
+            properties["name"] = self._client_name
 
         self._mdns_service = AsyncServiceInfo(
             type_=service_type,
