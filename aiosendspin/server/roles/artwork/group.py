@@ -65,7 +65,8 @@ class ArtworkGroupRole(GroupRole):
         channel_config: ArtworkChannel,
     ) -> None:
         """Schedule artwork send as a background task."""
-        create_task(self._send_artwork_to_role_channel(role, image, channel, channel_config))
+        # Pillow images are not safe to share across concurrent encode tasks.
+        create_task(self._send_artwork_to_role_channel(role, image.copy(), channel, channel_config))
 
     async def _send_artwork_to_role_channel(
         self,
@@ -75,15 +76,18 @@ class ArtworkGroupRole(GroupRole):
         channel_config: ArtworkChannel,
     ) -> None:
         """Send artwork to a specific role channel."""
-        timestamp_us = self._group._server.clock.now_us()  # noqa: SLF001
-        img_data = await asyncio.to_thread(
-            self._process_and_encode_image,
-            image,
-            channel_config.media_width,
-            channel_config.media_height,
-            channel_config.format,
-        )
-        role.send_artwork(channel, img_data, timestamp_us)
+        try:
+            timestamp_us = self._group._server.clock.now_us()  # noqa: SLF001
+            img_data = await asyncio.to_thread(
+                self._process_and_encode_image,
+                image,
+                channel_config.media_width,
+                channel_config.media_height,
+                channel_config.format,
+            )
+            role.send_artwork(channel, img_data, timestamp_us)
+        except Exception:
+            logger.exception("Failed to send artwork update")
 
     def get_album_artwork(self) -> Image.Image | None:
         """Return current album artwork, or None if not set."""
@@ -130,14 +134,15 @@ class ArtworkGroupRole(GroupRole):
                         timestamp_us = self._group._server.clock.now_us()  # noqa: SLF001
                         role.send_artwork_cleared(channel_num, timestamp_us)
                     else:
+                        # Pillow images are not safe to share across concurrent encode tasks.
                         send_tasks.append(
                             self._send_artwork_to_role_channel(
-                                role, image, channel_num, channel_config
+                                role, image.copy(), channel_num, channel_config
                             )
                         )
 
         if send_tasks:
-            await asyncio.gather(*send_tasks, return_exceptions=True)
+            await asyncio.gather(*send_tasks)
 
         if image is None:
             self.emit_group_event(
