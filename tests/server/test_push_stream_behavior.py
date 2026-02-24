@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections import deque
 from dataclasses import dataclass
 from typing import Any
 from unittest.mock import MagicMock
@@ -28,7 +29,7 @@ from aiosendspin.server.audio_transformers import TransformerPool
 from aiosendspin.server.channels import MAIN_CHANNEL
 from aiosendspin.server.client import SendspinClient
 from aiosendspin.server.clock import LoopClock, ManualClock
-from aiosendspin.server.push_stream import CachedChunk, PushStream
+from aiosendspin.server.push_stream import CachedChunk, CachedPCMChunk, PushStream
 from aiosendspin.server.roles import AudioChunk, AudioRequirements
 from aiosendspin.server.roles.player.audio_transformers import PcmPassthrough
 
@@ -387,6 +388,151 @@ async def test_pcm_cache_catchup_for_uncached_codec() -> None:
 
     assert role2.started == 1
     assert role2.received
+
+
+@pytest.mark.asyncio
+async def test_non_main_pcm_catchup_does_not_anchor_to_far_channel_tail() -> None:
+    """Non-main PCM catch-up should start near now, not at a far-ahead channel tail."""
+
+    class TransformerA:
+        pending_timestamp_us: int | None = None
+
+        @property
+        def frame_duration_us(self) -> int:
+            return 25_000
+
+        def process(self, pcm: bytes, _ts: int, _dur: int) -> list[bytes]:
+            return [pcm]
+
+        def flush(self) -> list[bytes]:
+            return []
+
+        def get_header(self) -> bytes | None:
+            return None
+
+        def reset(self) -> None:
+            return
+
+    class TransformerB(TransformerA):
+        pass
+
+    channel_id = UUID("77777777-7777-7777-7777-777777777777")
+    group = _DummyGroup(clients=[])
+    role1 = _DummyRole(
+        AudioRequirements(
+            sample_rate=48000,
+            bit_depth=16,
+            channels=2,
+            transformer=TransformerA(),
+            channel_id=channel_id,
+            frame_duration_us=25_000,
+        )
+    )
+    group.clients.append(_DummyClient([role1]))
+
+    loop = asyncio.get_running_loop()
+    clock = ManualClock()
+    stream = PushStream(loop=loop, clock=clock, group=group)
+    stream.enable_pcm_cache_for_channel(channel_id)
+
+    now_us = clock.now_us()
+    frame_duration_us = 25_000
+
+    # Simulate ~31s of cached PCM spanning near-now through far future.
+    # Reconnect catch-up should start near now, not at the channel tail.
+    pcm_chunks = deque[CachedPCMChunk]()
+    for i in range(1240):
+        ts = now_us - 100_000 + i * frame_duration_us
+        pcm_chunks.append(
+            CachedPCMChunk(
+                timestamp_us=ts,
+                duration_us=frame_duration_us,
+                pcm_data=bytes(4800),
+                sample_rate=48000,
+                bit_depth=16,
+                channels=2,
+            )
+        )
+    stream._pcm_chunk_cache[channel_id.int] = pcm_chunks  # noqa: SLF001
+    stream._channel_timing[channel_id] = now_us + 30_000_000  # noqa: SLF001
+
+    role2 = _DummyRole(
+        AudioRequirements(
+            sample_rate=48000,
+            bit_depth=16,
+            channels=2,
+            transformer=TransformerB(),
+            channel_id=channel_id,
+            frame_duration_us=25_000,
+        )
+    )
+    group.clients.append(_DummyClient([role2]))
+
+    stream.on_role_join(role2)
+    for _ in range(50):
+        if role2.received:
+            break
+        await asyncio.sleep(0)
+
+    assert role2.started == 1
+    assert role2.received
+    assert role2.received[0].timestamp_us - now_us < 500_000
+
+
+@pytest.mark.asyncio
+async def test_non_main_join_without_cache_rebases_far_ahead_tail() -> None:
+    """When no catch-up cache exists, non-main rejoin should not wait at a far channel tail."""
+
+    class Transformer:
+        pending_timestamp_us: int | None = None
+
+        @property
+        def frame_duration_us(self) -> int:
+            return 25_000
+
+        def process(self, pcm: bytes, _ts: int, _dur: int) -> list[bytes]:
+            return [pcm]
+
+        def flush(self) -> list[bytes]:
+            return []
+
+        def get_header(self) -> bytes | None:
+            return None
+
+        def reset(self) -> None:
+            return
+
+    channel_id = UUID("66666666-6666-6666-6666-666666666666")
+    role = _DummyRole(
+        AudioRequirements(
+            sample_rate=48000,
+            bit_depth=16,
+            channels=2,
+            transformer=Transformer(),
+            channel_id=channel_id,
+            frame_duration_us=25_000,
+        )
+    )
+    group = _DummyGroup(clients=[_DummyClient([role])])
+
+    loop = asyncio.get_running_loop()
+    clock = ManualClock()
+    stream = PushStream(loop=loop, clock=clock, group=group)
+
+    now_us = clock.now_us()
+    stream._channel_timing[channel_id] = now_us + 30_000_000  # noqa: SLF001
+
+    stream.on_role_join(role)
+    stream.prepare_audio(
+        bytes(4800),
+        AudioFormat(sample_rate=48000, bit_depth=16, channels=2),
+        channel_id=channel_id,
+    )
+    await stream.commit_audio()
+
+    assert role.started == 1
+    assert role.received
+    assert role.received[0].timestamp_us - now_us < 500_000
 
 
 @pytest.mark.asyncio

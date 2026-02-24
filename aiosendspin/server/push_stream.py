@@ -503,8 +503,12 @@ class PushStream:
         target_us = now_us + max(0, min_lead_us)
         if align_to_channel_tail and channel_id is not None and channel_id in self._channel_timing:
             # For channels that currently have no other subscribers, anchor catch-up
-            # to that channel's own live tail instead of forcing an extra lead offset.
-            return max(now_us, self._channel_timing[channel_id])
+            # to that channel's own live tail when it is near real time. If that tail
+            # drifted far ahead (e.g., reconnect with large server-side buffering),
+            # use the standard near-now target to avoid long audible startup delays.
+            channel_tail_us = max(now_us, self._channel_timing[channel_id])
+            if channel_tail_us <= now_us + DEFAULT_INITIAL_DELAY_US:
+                return channel_tail_us
         return target_us
 
     async def commit_audio(self, *, play_start_us: int | None = None) -> int:
@@ -1236,6 +1240,7 @@ class PushStream:
                         channel_pcm_cache[-1].timestamp_us + channel_pcm_cache[-1].duration_us
                     )
                     if latest_cached_end_us <= late_join_target_us:
+                        self._rebase_far_ahead_join_tail(channel_id, role)
                         if self._channel_timing:
                             self._ensure_role_started(role)
                         return
@@ -1248,6 +1253,7 @@ class PushStream:
                 return
 
             if self._channel_timing:
+                self._rebase_far_ahead_join_tail(channel_id, role)
                 self._ensure_role_started(role)
             return
 
@@ -1327,6 +1333,18 @@ class PushStream:
         reference_timing_us = min(other_channel_timings)
         self._channel_timing[channel_id] = max(
             self._channel_timing[channel_id], reference_timing_us
+        )
+
+    def _rebase_far_ahead_join_tail(self, channel_id: UUID, joining_role: Role) -> None:
+        """Clamp far-ahead solo-channel timing so a rejoin can resume promptly."""
+        if channel_id not in self._channel_timing:
+            return
+        if self._channel_has_other_audio_roles(channel_id, joining_role):
+            return
+        now_us = self._clock.now_us()
+        max_resume_start_us = now_us + DEFAULT_INITIAL_DELAY_US
+        self._channel_timing[channel_id] = min(
+            self._channel_timing[channel_id], max_resume_start_us
         )
 
     def _encode_pcm_sequence(
