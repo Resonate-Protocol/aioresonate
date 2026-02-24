@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -97,6 +97,15 @@ def _custom_audio_hello(client_id: str) -> ClientHelloPayload:
         name=client_id,
         version=1,
         supported_roles=["customaudio@v1"],
+    )
+
+
+def _custom_role_hello(client_id: str, role_id: str) -> ClientHelloPayload:
+    return ClientHelloPayload(
+        client_id=client_id,
+        name=client_id,
+        version=1,
+        supported_roles=[role_id],
     )
 
 
@@ -318,6 +327,142 @@ async def test_add_external_player_to_active_group_requests_external_connect() -
 
     assert len(callback_calls) == 1
     assert callback_calls[0].client_id == "external-2"
+
+
+@pytest.mark.asyncio
+async def test_add_external_preconnect_player_to_active_group_replays_cached_audio(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Disconnected preconnect roles should get late-join replay on active stream add."""
+
+    class _PreconnectAudioRole(Role):
+        def __init__(self, client: SendspinClient) -> None:
+            self._client = client
+            self._chunks: list[AudioChunk] = []
+
+        @property
+        def role_id(self) -> str:
+            return "preconnectaudio@v1"
+
+        @property
+        def role_family(self) -> str:
+            return "preconnectaudio"
+
+        @property
+        def chunk_count(self) -> int:
+            return len(self._chunks)
+
+        def get_audio_requirements(self) -> AudioRequirements | None:
+            return AudioRequirements(sample_rate=48000, bit_depth=16, channels=2)
+
+        def supports_preconnect_audio(self) -> bool:
+            return True
+
+        def on_connect(self) -> None:
+            return
+
+        def on_disconnect(self) -> None:
+            return
+
+        def on_audio_chunk(self, chunk: AudioChunk) -> None:
+            self._chunks.append(chunk)
+
+    monkeypatch.setitem(ROLE_FACTORIES, "preconnectaudio@v1", _PreconnectAudioRole)
+
+    server = _make_server()
+    callback_calls: list[ExternalStreamStartRequest] = []
+
+    owner = SendspinClient(server, client_id="owner-preconnect")
+    SendspinGroup(server, owner)
+    owner.attach_connection(
+        _DummyConnection(),
+        client_info=_player_hello("owner-preconnect"),
+        active_roles=[Roles.PLAYER.value],
+    )
+    owner.mark_connected()
+    stream = owner.group.start_stream()
+    stream.prepare_audio(
+        bytes(48000 * 2 * 2),
+        AudioFormat(sample_rate=48000, bit_depth=16, channels=2),
+    )
+    await stream.commit_audio()
+
+    external = server.register_external_player(
+        _custom_role_hello("external-preconnect", "preconnectaudio@v1"),
+        on_stream_start=callback_calls.append,
+    )
+    role = external.role("preconnectaudio@v1")
+    assert isinstance(role, _PreconnectAudioRole)
+    assert role.chunk_count == 0
+
+    await owner.group.add_client(external)
+
+    assert len(callback_calls) == 1
+    assert callback_calls[0].client_id == "external-preconnect"
+
+    for _ in range(50):
+        if role.chunk_count > 0:
+            break
+        await asyncio.sleep(0.01)
+    assert role.chunk_count > 0
+
+
+@pytest.mark.asyncio
+async def test_add_external_non_preconnect_player_to_active_group_skips_role_join(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Disconnected external roles without preconnect support should not run role join."""
+
+    class _ColdAudioRole(Role):
+        def __init__(self, client: SendspinClient) -> None:
+            self._client = client
+
+        @property
+        def role_id(self) -> str:
+            return "coldaudio@v1"
+
+        @property
+        def role_family(self) -> str:
+            return "coldaudio"
+
+        def get_audio_requirements(self) -> AudioRequirements | None:
+            return AudioRequirements(sample_rate=48000, bit_depth=16, channels=2)
+
+        def supports_preconnect_audio(self) -> bool:
+            return False
+
+        def on_connect(self) -> None:
+            return
+
+        def on_disconnect(self) -> None:
+            return
+
+    monkeypatch.setitem(ROLE_FACTORIES, "coldaudio@v1", _ColdAudioRole)
+
+    server = _make_server()
+    callback_calls: list[ExternalStreamStartRequest] = []
+
+    owner = SendspinClient(server, client_id="owner-cold")
+    SendspinGroup(server, owner)
+    owner.attach_connection(
+        _DummyConnection(),
+        client_info=_player_hello("owner-cold"),
+        active_roles=[Roles.PLAYER.value],
+    )
+    owner.mark_connected()
+    stream = owner.group.start_stream()
+
+    external = server.register_external_player(
+        _custom_role_hello("external-cold", "coldaudio@v1"),
+        on_stream_start=callback_calls.append,
+    )
+
+    with patch.object(stream, "on_role_join") as mock_on_role_join:
+        await owner.group.add_client(external)
+
+    assert len(callback_calls) == 1
+    assert callback_calls[0].client_id == "external-cold"
+    mock_on_role_join.assert_not_called()
 
 
 @pytest.mark.asyncio
