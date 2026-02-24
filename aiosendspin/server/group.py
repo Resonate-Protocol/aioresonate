@@ -430,8 +430,8 @@ class SendspinGroup:
                 # Defensive fallback for programmatic moves of retained/disconnected clients:
                 # when joining an active group, try to reclaim the client for playback.
                 self._server.request_client_playback_connection(client.client_id)
-                # External/cold-preinitialized roles that explicitly opt into preconnect
-                # audio must also run through late-join catch-up on group add.
+                # Disconnected roles that explicitly opt into preconnect audio must also
+                # run through late-join catch-up on group add.
                 for role in client.active_roles:
                     if role.get_audio_requirements() is None:
                         continue

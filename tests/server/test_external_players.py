@@ -339,6 +339,7 @@ async def test_add_external_preconnect_player_to_active_group_replays_cached_aud
         def __init__(self, client: SendspinClient) -> None:
             self._client = client
             self._chunks: list[AudioChunk] = []
+            self.got_chunk = asyncio.Event()
 
         @property
         def role_id(self) -> str:
@@ -366,6 +367,7 @@ async def test_add_external_preconnect_player_to_active_group_replays_cached_aud
 
         def on_audio_chunk(self, chunk: AudioChunk) -> None:
             self._chunks.append(chunk)
+            self.got_chunk.set()
 
     monkeypatch.setitem(ROLE_FACTORIES, "preconnectaudio@v1", _PreconnectAudioRole)
 
@@ -400,10 +402,7 @@ async def test_add_external_preconnect_player_to_active_group_replays_cached_aud
     assert len(callback_calls) == 1
     assert callback_calls[0].client_id == "external-preconnect"
 
-    for _ in range(50):
-        if role.chunk_count > 0:
-            break
-        await asyncio.sleep(0.01)
+    await asyncio.wait_for(role.got_chunk.wait(), timeout=2.0)
     assert role.chunk_count > 0
 
 
