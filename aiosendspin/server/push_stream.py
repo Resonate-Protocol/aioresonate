@@ -408,7 +408,8 @@ class PushStream:
         """Sleep until the furthest-ahead active channel is at most max_buffer_us ahead of now.
 
         Only considers channels with active audio roles; stale channels from ungrouped
-        players are ignored.
+        players are ignored. Falls back to all channel timings when no roles are active
+        to prevent a tight loop that starves the event loop.
 
         :param max_buffer_us: Maximum allowed buffer depth in microseconds.
         """
@@ -416,6 +417,12 @@ class PushStream:
             return
         active_channels = self._get_active_audio_channels()
         active_timings = [t for ch, t in self._channel_timing.items() if ch in active_channels]
+        if not active_timings:
+            # Fall back to all channel timings when no audio roles are active yet
+            # (e.g. client connected but handshake not complete). Without this,
+            # the caller's commit loop never sleeps, starving the event loop and
+            # preventing the handshake from completing.
+            active_timings = list(self._channel_timing.values())
         if not active_timings:
             return
         max_timing_us = max(active_timings)
@@ -642,12 +649,21 @@ class PushStream:
         # Auto-calculate mode (existing behavior).
         now_us = self._clock.now_us()
         target_min_us = now_us + DEFAULT_INITIAL_DELAY_US
+        # Limit timeline sharing/rebase inputs to channels participating in this commit
+        # (active subscribers + prepared payloads). This excludes stale timing entries
+        # from inactive channels.
+        active_or_prepared_channels = self._get_active_audio_channels() | set(prepared)
         for channel_id in prepared:
             if channel_id not in self._channel_timing:
-                if self._channel_timing:
+                shared_candidates = [
+                    self._channel_timing[cid]
+                    for cid in active_or_prepared_channels
+                    if cid in self._channel_timing
+                ]
+                if shared_candidates:
                     # Late-introduced channels should join the shared timeline
                     # instead of restarting from now+delay behind active channels.
-                    shared_timing_us = min(self._channel_timing.values())
+                    shared_timing_us = min(shared_candidates)
                     self._channel_timing[channel_id] = max(shared_timing_us, target_min_us)
                 else:
                     self._channel_timing[channel_id] = target_min_us
@@ -655,7 +671,16 @@ class PushStream:
         # If audio production stalls (e.g., the upstream source blocks), the scheduled
         # play timeline can drift into the past. Rebase the timeline so new audio is
         # always scheduled with at least the default initial delay from "now".
-        min_timing_us = min(self._channel_timing.values())
+        rebase_candidates = [
+            self._channel_timing[cid]
+            for cid in active_or_prepared_channels
+            if cid in self._channel_timing
+        ]
+        if not rebase_candidates:
+            # During reconnect/handshake edges there may be no active/prepared channels.
+            # Fall back to all timings to keep existing behavior in that case.
+            rebase_candidates = list(self._channel_timing.values())
+        min_timing_us = min(rebase_candidates)
         if min_timing_us < target_min_us:
             shift_us = target_min_us - min_timing_us
             for channel_id in self._channel_timing:
@@ -704,7 +729,18 @@ class PushStream:
             elif self._channel_timing:
                 # Align injected history so it ends at the current shared timeline.
                 # This avoids leaving newly injected channels permanently behind live.
-                anchor_timing_us = min(self._channel_timing.values())
+                # Prefer active-channel timings so inactive stale entries do not
+                # pull historical injection behind the live timeline.
+                active_channels = self._get_active_audio_channels()
+                anchor_candidates = [
+                    self._channel_timing[cid]
+                    for cid in active_channels
+                    if cid in self._channel_timing
+                ]
+                if not anchor_candidates:
+                    # Fallback preserves historical-only behavior when no roles are active.
+                    anchor_candidates = list(self._channel_timing.values())
+                anchor_timing_us = min(anchor_candidates)
                 self._channel_timing[channel_id] = max(0, anchor_timing_us - total_duration_us)
             else:
                 self._channel_timing[channel_id] = now_us + DEFAULT_INITIAL_DELAY_US
@@ -1084,6 +1120,12 @@ class PushStream:
             if ch in self._channel_buffers:
                 continue
             if ch in self._historical_buffers:
+                continue
+            if ch in self._channels_with_committed_audio:
+                # Keep timing for channels that have received real audio so the
+                # timeline continues to advance. Without this, timing is reset
+                # on every commit when no roles are active, preventing
+                # sleep_to_limit_buffer from throttling the commit loop.
                 continue
             del self._channel_timing[ch]
             self._channels_with_committed_audio.discard(ch)

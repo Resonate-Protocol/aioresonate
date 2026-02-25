@@ -1377,6 +1377,7 @@ async def test_historical_on_one_channel_live_on_another() -> None:
     """Historical on one channel, live-only on another in same commit."""
     group = _DummyGroup(clients=[])
     hist_channel = UUID("dddddddd-dddd-dddd-dddd-dddddddddddd")
+    stale_channel = UUID("eeeeeeee-0000-0000-0000-eeeeeeeeeeee")
 
     role_hist = _DummyRole(
         AudioRequirements(
@@ -1401,9 +1402,16 @@ async def test_historical_on_one_channel_live_on_another() -> None:
     group.clients.extend([_DummyClient([role_hist]), _DummyClient([role_live])])
 
     loop = asyncio.get_running_loop()
-    stream = PushStream(loop=loop, clock=LoopClock(loop), group=group)
+    clock = ManualClock(now_us_value=1_000_000)
+    stream = PushStream(loop=loop, clock=clock, group=group)
 
     fmt = AudioFormat(sample_rate=48000, bit_depth=16, channels=2)
+
+    # Seed main timeline, then add stale committed timing from an inactive channel.
+    stream.prepare_audio(bytes(4800), fmt, channel_id=MAIN_CHANNEL)
+    await stream.commit_audio()
+    stream._channel_timing[stale_channel] = 900_000  # noqa: SLF001
+    stream._channels_with_committed_audio.add(stale_channel)  # noqa: SLF001
 
     # Historical on hist_channel, live on MAIN_CHANNEL
     stream.prepare_historical_audio(bytes(4800), fmt, channel_id=hist_channel)
@@ -1415,6 +1423,10 @@ async def test_historical_on_one_channel_live_on_another() -> None:
     assert role_hist.received
     assert role_live.started == 1
     assert role_live.received
+    assert (
+        role_hist.received[-1].timestamp_us + role_hist.received[-1].duration_us
+        == role_live.received[-1].timestamp_us
+    )
 
 
 @pytest.mark.asyncio
@@ -1514,6 +1526,44 @@ async def test_late_introduced_channel_aligns_with_existing_timeline() -> None:
     assert role_main.received
     assert role_other.received
     assert role_main.received[-1].timestamp_us == role_other.received[-1].timestamp_us
+
+
+@pytest.mark.asyncio
+async def test_stale_committed_channel_does_not_inflate_active_timeline() -> None:
+    """Stale committed timing must not force larger-than-audio timeline rebases."""
+    group = _DummyGroup(clients=[])
+    stale_channel = UUID("efeefeee-eeee-eeee-eeee-eeeeeeeeeeee")
+    role_main = _DummyRole(
+        AudioRequirements(
+            sample_rate=48000,
+            bit_depth=16,
+            channels=2,
+            transformer=None,
+            channel_id=MAIN_CHANNEL,
+            frame_duration_us=25_000,
+        )
+    )
+    group.clients.append(_DummyClient([role_main]))
+
+    loop = asyncio.get_running_loop()
+    clock = ManualClock(now_us_value=1_000_000)
+    stream = PushStream(loop=loop, clock=clock, group=group)
+    fmt = AudioFormat(sample_rate=48000, bit_depth=16, channels=2)
+
+    # Seed a stale committed channel with no active subscribers.
+    stream._channel_timing[stale_channel] = 1_250_000  # noqa: SLF001
+    stream._channels_with_committed_audio.add(stale_channel)  # noqa: SLF001
+
+    stream.prepare_audio(bytes(4800), fmt, channel_id=MAIN_CHANNEL)
+    play_start_1 = await stream.commit_audio()
+    clock.advance_us(25_000)
+    stream.prepare_audio(bytes(4800), fmt, channel_id=MAIN_CHANNEL)
+    play_start_2 = await stream.commit_audio()
+
+    # Timeline should advance by chunk duration (25ms), not by stale-channel rebases.
+    assert play_start_2 == play_start_1 + 25_000
+    assert len(role_main.received) == 2
+    assert role_main.received[1].timestamp_us == role_main.received[0].timestamp_us + 25_000
 
 
 @pytest.mark.asyncio
