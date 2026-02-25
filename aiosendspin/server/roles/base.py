@@ -119,6 +119,10 @@ class GroupRole(ABC):
 
         Called for ALL clients, not just those with matching roles.
         Use for cross-role coordination (e.g., controller subscribing to player volume).
+
+        May fire multiple times for the same client (initial group assignment,
+        then again after role negotiation on connect/reconnect). Implementations
+        must be idempotent; ``negotiated_roles`` may be empty on the first call.
         """
 
     def on_client_removed(self, client: SendspinClient) -> None:  # noqa: B027
