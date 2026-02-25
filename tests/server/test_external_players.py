@@ -528,9 +528,11 @@ async def test_reclaim_timeout_full_unregisters_disconnected_client(
     server = _make_server()
     added_client_ids: list[str] = []
     server.add_event_listener(
-        lambda _server, event: added_client_ids.append(event.client_id)
-        if isinstance(event, ClientAddedEvent)
-        else None
+        lambda _server, event: (
+            added_client_ids.append(event.client_id)
+            if isinstance(event, ClientAddedEvent)
+            else None
+        )
     )
 
     server.get_or_create_client("speaker-timeout")
