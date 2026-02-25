@@ -289,6 +289,14 @@ class SendspinClient:
         if self._group is None:
             raise RuntimeError("SendspinClient.group must be initialized by the server")
 
+        # Re-register client events now that roles are negotiated.
+        # The initial _set_group() call during get_or_create_client() runs before
+        # attach_connection(), so negotiated_roles is empty at that point and
+        # cross-role hooks (e.g. ControllerGroupRole subscribing to player volume
+        # events) are skipped. Re-registering here ensures they are set up.
+        # Guard: individual on_client_added() implementations are idempotent.
+        self._group._register_client_events(self)  # noqa: SLF001
+
     def preload_hello(self, client_info: ClientHelloPayload) -> None:
         """Seed persistent client identity/capabilities without an active connection."""
         self._set_identity_from_hello(client_info)

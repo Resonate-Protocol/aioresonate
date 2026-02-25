@@ -43,6 +43,9 @@ class _DummyGroup:
     def on_client_connected(self, client: Any) -> None:  # noqa: ARG002
         return
 
+    def _register_client_events(self, client: Any) -> None:  # noqa: ARG002
+        return
+
     def group_role(self, family: str) -> None:  # noqa: ARG002
         return None
 
