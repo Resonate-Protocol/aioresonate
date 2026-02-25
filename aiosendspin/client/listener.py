@@ -167,9 +167,10 @@ class ClientListener:
             addresses = [local_ip]
 
         service_type = "_sendspin._tcp.local."
-        properties: dict[str, str] = {"path": self._path}
+        properties: dict[str, str] = {}
         if self._client_name is not None:
             properties["name"] = self._client_name
+        properties["path"] = self._path
 
         self._mdns_service = AsyncServiceInfo(
             type_=service_type,
