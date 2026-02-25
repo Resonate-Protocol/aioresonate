@@ -179,8 +179,14 @@ class SendspinServer:
             client = SendspinClient(self, client_id=client_id)
             self._clients[client_id] = client
             SendspinGroup(self, client)
-            self._signal_event(ClientAddedEvent(client_id))
         return client
+
+    def on_client_first_connect(self, client_id: str) -> None:
+        """Fire ClientAddedEvent when a client completes its first handshake."""
+        client = self._clients.get(client_id)
+        if client is not None and not client._added_event_fired:  # noqa: SLF001
+            client._added_event_fired = True  # noqa: SLF001
+            self._signal_event(ClientAddedEvent(client_id))
 
     async def remove_client(self, client_id: str) -> None:
         """Remove a client from the persistent registry."""

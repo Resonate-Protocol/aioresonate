@@ -458,6 +458,7 @@ class SendspinConnection:
         if self._client is not None:
             self._initial_state_received = True
             self._client.mark_connected()
+            self._server.on_client_first_connect(self._client.client_id)
 
     @staticmethod
     def _first_custom_role_id(
@@ -671,6 +672,7 @@ class SendspinConnection:
                 )
             else:
                 client.mark_connected()
+                self._server.on_client_first_connect(client.client_id)
             return
 
         if isinstance(message, ClientTimeMessage):
@@ -697,6 +699,7 @@ class SendspinConnection:
                     self._initial_state_timeout_handle.cancel()
                     self._initial_state_timeout_handle = None
                 self._client.mark_connected()
+                self._server.on_client_first_connect(self._client.client_id)
 
             new_state = payload.state
             if new_state is not None and new_state != self._client.client_state:

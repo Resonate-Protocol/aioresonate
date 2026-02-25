@@ -89,6 +89,7 @@ class SendspinClient:
 
         self._connection: SendspinConnection | None = None
         self._connected: bool = False
+        self._added_event_fired: bool = False
         self._roles_warm_disconnected: bool = False
         self._roles_cold_preinitialized: bool = False
 
