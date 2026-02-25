@@ -16,7 +16,7 @@ from aiosendspin.models.types import (
     PlayerCommand,
     Roles,
 )
-from aiosendspin.server import ExternalStreamStartRequest, SendspinServer
+from aiosendspin.server import ClientAddedEvent, ExternalStreamStartRequest, SendspinServer
 from aiosendspin.server.audio import AudioFormat
 from aiosendspin.server.client import SendspinClient
 from aiosendspin.server.group import SendspinGroup
@@ -131,6 +131,13 @@ async def test_register_external_player_preloads_identity_and_fires_on_start_str
     """External player should be visible and trigger callback on stream start."""
     server = _make_server()
     callback_calls: list[ExternalStreamStartRequest] = []
+    added_client_ids: list[str] = []
+
+    def _on_server_event(_server: SendspinServer, event: object) -> None:
+        if isinstance(event, ClientAddedEvent):
+            added_client_ids.append(event.client_id)
+
+    server.add_event_listener(_on_server_event)
 
     player = server.register_external_player(
         _player_hello("external-1"),
@@ -142,6 +149,11 @@ async def test_register_external_player_preloads_identity_and_fires_on_start_str
     assert player.info.client_id == "external-1"
     assert not player.is_connected
     assert server.is_external_player("external-1")
+    assert added_client_ids == ["external-1"]
+
+    # External clients should not emit ClientAddedEvent again on later handshake.
+    server.on_client_first_connect("external-1")
+    assert added_client_ids == ["external-1"]
 
     player.group.start_stream()
 
@@ -514,7 +526,18 @@ async def test_reclaim_timeout_full_unregisters_disconnected_client(
 ) -> None:
     """Reclaim timeout removes client when reconnect never succeeds."""
     server = _make_server()
+    added_client_ids: list[str] = []
+    server.add_event_listener(
+        lambda _server, event: added_client_ids.append(event.client_id)
+        if isinstance(event, ClientAddedEvent)
+        else None
+    )
+
     server.get_or_create_client("speaker-timeout")
+    assert added_client_ids == []
+    server.on_client_first_connect("speaker-timeout")
+    assert added_client_ids == ["speaker-timeout"]
+
     server.register_client_url("speaker-timeout", "ws://127.0.0.1:9000/sendspin")
 
     connect_calls: list[tuple[str, ConnectionReason]] = []

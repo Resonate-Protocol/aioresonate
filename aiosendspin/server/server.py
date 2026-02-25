@@ -184,9 +184,8 @@ class SendspinServer:
     def on_client_first_connect(self, client_id: str) -> None:
         """Fire ClientAddedEvent when a client completes its first handshake."""
         client = self._clients.get(client_id)
-        if client is not None and not client._added_event_fired:  # noqa: SLF001
-            client._added_event_fired = True  # noqa: SLF001
-            self._signal_event(ClientAddedEvent(client_id))
+        if client is not None:
+            self._fire_client_added_event_once(client)
 
     async def remove_client(self, client_id: str) -> None:
         """Remove a client from the persistent registry."""
@@ -233,6 +232,7 @@ class SendspinServer:
                 f"Cannot register external player {hello.client_id!r} while client is connected"
             )
         client.preinitialize_client_from_hello(hello)
+        self._fire_client_added_event_once(client)
         self._external_stream_start_cbs[hello.client_id] = on_stream_start
         self._cancel_reclaim_timeout(hello.client_id)
         if timeout_s > 0:
@@ -240,6 +240,13 @@ class SendspinServer:
         else:
             self._cancel_external_registration_timeout(hello.client_id)
         return client
+
+    def _fire_client_added_event_once(self, client: SendspinClient) -> None:
+        """Fire ClientAddedEvent once per persistent client lifetime."""
+        if client._added_event_fired:  # noqa: SLF001
+            return
+        client._added_event_fired = True  # noqa: SLF001
+        self._signal_event(ClientAddedEvent(client.client_id))
 
     def unregister_external_player(self, client_id: str) -> None:
         """Remove external stream-start callback for a registered client."""
