@@ -408,7 +408,8 @@ class PushStream:
         """Sleep until the furthest-ahead active channel is at most max_buffer_us ahead of now.
 
         Only considers channels with active audio roles; stale channels from ungrouped
-        players are ignored.
+        players are ignored. Falls back to all channel timings when no roles are active
+        to prevent a tight loop that starves the event loop.
 
         :param max_buffer_us: Maximum allowed buffer depth in microseconds.
         """
@@ -416,6 +417,12 @@ class PushStream:
             return
         active_channels = self._get_active_audio_channels()
         active_timings = [t for ch, t in self._channel_timing.items() if ch in active_channels]
+        if not active_timings:
+            # Fall back to all channel timings when no audio roles are active yet
+            # (e.g. client connected but handshake not complete). Without this,
+            # the caller's commit loop never sleeps, starving the event loop and
+            # preventing the handshake from completing.
+            active_timings = list(self._channel_timing.values())
         if not active_timings:
             return
         max_timing_us = max(active_timings)
@@ -1084,6 +1091,12 @@ class PushStream:
             if ch in self._channel_buffers:
                 continue
             if ch in self._historical_buffers:
+                continue
+            if ch in self._channels_with_committed_audio:
+                # Keep timing for channels that have received real audio so the
+                # timeline continues to advance. Without this, timing is reset
+                # on every commit when no roles are active, preventing
+                # sleep_to_limit_buffer from throttling the commit loop.
                 continue
             del self._channel_timing[ch]
             self._channels_with_committed_audio.discard(ch)
