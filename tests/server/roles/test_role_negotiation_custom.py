@@ -1,4 +1,4 @@
-"""Tests for negotiating custom role IDs registered at runtime."""
+"""Tests for role negotiation: custom roles and server-defined ordering."""
 
 from __future__ import annotations
 
@@ -10,6 +10,38 @@ from aiosendspin.server.roles.registry import ROLE_FACTORIES
 
 def _factory(_client: Any) -> object:
     return object()
+
+
+# --- Server-defined activation order ---
+
+
+def test_negotiate_orders_player_before_controller() -> None:
+    """Player must be activated before controller regardless of client order."""
+    active = negotiate_active_roles(["controller@v1", "player@v1"])
+    assert active == ["player@v1", "controller@v1"]
+
+
+def test_negotiate_orders_player_before_controller_with_metadata() -> None:
+    """Player before controller even when other families are present."""
+    active = negotiate_active_roles(["metadata@v1", "controller@v1", "player@v1"])
+    assert active == ["player@v1", "controller@v1", "metadata@v1"]
+
+
+def test_negotiate_preserves_order_when_client_matches_server() -> None:
+    """No reordering needed when client already sends player first."""
+    active = negotiate_active_roles(["player@v1", "controller@v1"])
+    assert active == ["player@v1", "controller@v1"]
+
+
+def test_negotiate_unlisted_families_come_after_listed(monkeypatch: Any) -> None:
+    """Families not in _FAMILY_ORDER sort after listed families."""
+    monkeypatch.setitem(ROLE_FACTORIES, "customfoo@v1", _factory)
+    active = negotiate_active_roles(["customfoo@v1", "controller@v1", "player@v1"])
+    assert active[:2] == ["player@v1", "controller@v1"]
+    assert "customfoo@v1" in active
+
+
+# --- Custom role selection ---
 
 
 def test_negotiate_accepts_registered_custom_role_in_known_family(
