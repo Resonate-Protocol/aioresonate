@@ -41,6 +41,7 @@ from .types import (
 )
 from .visualizer import (
     ClientHelloVisualizerSupport,
+    StreamRequestFormatVisualizer,
     StreamStartVisualizer,
 )
 
@@ -97,7 +98,7 @@ class ClientHelloPayload(DataClassORJSONMixin):
     artwork_support: Annotated[ClientHelloArtworkSupport | None, Alias("artwork@v1_support")] = None
     """Artwork support configuration - only if artwork role is in supported_roles."""
     visualizer_support: Annotated[
-        ClientHelloVisualizerSupport | None, Alias("visualizer@v1_support")
+        ClientHelloVisualizerSupport | None, Alias("visualizer@_draft_r1_support")
     ] = None
     """Visualizer support configuration - only if visualizer role is in supported_roles."""
 
@@ -131,6 +132,11 @@ class ClientHelloPayload(DataClassORJSONMixin):
 
     def __post_init__(self) -> None:
         """Enforce that support configs match supported roles."""
+        if isinstance(self.visualizer_support, dict):
+            self.visualizer_support = ClientHelloVisualizerSupport.from_dict(
+                self.visualizer_support
+            )
+
         # Validate player role and support configuration
         # Require support objects only for the exact role version we parse (e.g. "player@v1").
         # Clients may advertise newer versions (e.g. "player@v2") which this server may not
@@ -158,8 +164,8 @@ class ClientHelloPayload(DataClassORJSONMixin):
         visualizer_role_supported = Roles.VISUALIZER.value in self.supported_roles
         if visualizer_role_supported and self.visualizer_support is None:
             raise ValueError(
-                "visualizer@v1_support (visualizer_support alias) must be provided when "
-                "'visualizer@v1' is in supported_roles"
+                "visualizer@_draft_r1_support (visualizer_support alias) must be "
+                "provided when 'visualizer@_draft_r1' is in supported_roles"
             )
         if not visualizer_role_supported:
             self.visualizer_support = None
@@ -474,6 +480,8 @@ class StreamRequestFormatPayload(DataClassORJSONMixin):
     """Player format request (only for clients with player role)."""
     artwork: StreamRequestFormatArtwork | None = None
     """Artwork format request (only for clients with artwork role)."""
+    visualizer: StreamRequestFormatVisualizer | None = None
+    """Visualizer format request (only for clients with visualizer role)."""
 
     class Config(BaseConfig):
         """Config for parsing json messages."""
