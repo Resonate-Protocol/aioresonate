@@ -60,17 +60,6 @@ def _merge_optional_dataclass_fields(existing: Any, incoming: Any) -> Any:
     return type(existing)(**merged_values)
 
 
-# This server implementation accidentally used incorrect field names (player_support, etc.)
-# instead of the spec-compliant names (player@v1_support, etc.). This alias mapping allows
-# deserialization of JSON using either the old or new field names.
-# DEPRECATED(before-spec-1.0): Remove this mapping once all clients use spec-compliant names.
-_CLIENT_HELLO_LEGACY_FIELD_ALIASES: dict[str, str] = {
-    "player_support": "player@v1_support",
-    "artwork_support": "artwork@v1_support",
-    "visualizer_support": "visualizer@v1_support",
-}
-
-
 @dataclass
 class DeviceInfo(DataClassORJSONMixin):
     """Optional information about the device."""
@@ -114,12 +103,21 @@ class ClientHelloPayload(DataClassORJSONMixin):
 
     @classmethod
     def __pre_deserialize__(cls, d: dict[str, Any]) -> dict[str, Any]:
-        """Accept both legacy and spec-compliant field names."""
+        """Normalize legacy role support keys to versioned names."""
         legacy_fields_used: list[tuple[str, str]] = []
-        for legacy_name, spec_name in _CLIENT_HELLO_LEGACY_FIELD_ALIASES.items():
-            if legacy_name in d and spec_name not in d:
-                legacy_fields_used.append((legacy_name, spec_name))
-                d[spec_name] = d.pop(legacy_name)
+        normalized = dict(d)
+        for key in list(normalized.keys()):
+            if not key.endswith("_support"):
+                continue
+            role_id = key[: -len("_support")]
+            if "@" in role_id:
+                continue
+            # FIXME: Drop v1 fallback.  # noqa: FIX001, TD001
+            normalized_key = f"{role_id}@v1_support"
+            if normalized_key in normalized:
+                continue
+            legacy_fields_used.append((key, normalized_key))
+            normalized[normalized_key] = normalized.pop(key)
         if legacy_fields_used:
             old_names = ", ".join(old for old, _ in legacy_fields_used)
             new_names = ", ".join(new for _, new in legacy_fields_used)
@@ -129,7 +127,7 @@ class ClientHelloPayload(DataClassORJSONMixin):
                 old_names,
                 new_names,
             )
-        return d
+        return normalized
 
     def __post_init__(self) -> None:
         """Enforce that support configs match supported roles."""
