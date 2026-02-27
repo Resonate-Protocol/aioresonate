@@ -268,6 +268,7 @@ class CachedPCMChunk:
     sample_rate: int
     bit_depth: int
     channels: int
+    sample_type: Literal["int", "float"] = "int"
 
 
 class StreamStoppedError(Exception):
@@ -613,6 +614,7 @@ class PushStream:
                 sample_rate=fmt.sample_rate,
                 bit_depth=fmt.bit_depth,
                 channels=fmt.channels,
+                sample_type=fmt.sample_type,
             )
             self._pcm_chunk_cache.setdefault(channel_int, deque()).append(pcm_chunk)
 
@@ -764,6 +766,7 @@ class PushStream:
                         sample_rate=fmt.sample_rate,
                         bit_depth=fmt.bit_depth,
                         channels=fmt.channels,
+                        sample_type=fmt.sample_type,
                     )
                     self._pcm_chunk_cache.setdefault(channel_int, deque()).append(pcm_chunk)
 
@@ -1412,6 +1415,7 @@ class PushStream:
                 sample_rate=chunk.sample_rate,
                 bit_depth=chunk.bit_depth,
                 channels=chunk.channels,
+                sample_type=chunk.sample_type,
             )
             if (
                 resampler_state is None
