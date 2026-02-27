@@ -9,7 +9,9 @@ import logging
 import weakref
 from collections import defaultdict, deque
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Literal, NamedTuple
+from errno import EAGAIN
+from functools import lru_cache
+from typing import TYPE_CHECKING, Literal, NamedTuple, Protocol, cast
 from uuid import UUID
 
 from aiosendspin.server.audio import (
@@ -43,6 +45,114 @@ ENCODER_CATCHUP_WARMUP_US = 120_000
 # timestamp before we discard the transformer's timeline. Normal codec buffering delays are
 # < 100ms; this threshold catches the accumulated drift from timeline rebasing.
 _TRANSFORMER_DRIFT_THRESHOLD_US = 500_000  # 500ms
+
+
+class _AudioFilterGraph(Protocol):
+    """Subset of PyAV filter graph API used by PushStream."""
+
+    def push(self, frame: av.AudioFrame) -> None:
+        """Push one audio frame into the graph."""
+        ...
+
+    def pull(self) -> av.AudioFrame:
+        """Pull one audio frame from the graph sink."""
+        ...
+
+
+def _drain_audio_graph(graph: _AudioFilterGraph) -> list[av.AudioFrame]:
+    """Pull all currently available audio frames from a configured filter graph."""
+    out_frames: list[av.AudioFrame] = []
+    while True:
+        try:
+            out_frames.append(graph.pull())
+        except EOFError:
+            break
+        except OSError as exc:  # pragma: no cover - depends on FFmpeg/PyAV build details
+            if exc.errno == EAGAIN:
+                break
+            raise
+    return out_frames
+
+
+@lru_cache(maxsize=1)
+def _supports_soxr_resampler() -> bool:
+    """Return True when this runtime FFmpeg build supports libsoxr in aresample."""
+    av = _get_av()
+
+    graph = av.filter.Graph()
+    try:
+        graph.link_nodes(
+            graph.add_abuffer(format="s16", sample_rate=48_000, layout="stereo"),
+            graph.add("aresample", "resampler=soxr:precision=30"),
+            graph.add("abuffersink"),
+        ).configure()
+    except (OSError, RuntimeError, ValueError) as exc:  # pragma: no cover
+        _LOGGER.debug("libsoxr not available for aresample; using swr fallback: %s", exc)
+        return False
+    return True
+
+
+def _build_resample_graph(
+    *,
+    source_av_format: str,
+    source_layout: str,
+    source_sample_rate: int,
+    target_av_format: str,
+    target_layout: str,
+    target_sample_rate: int,
+) -> _AudioFilterGraph:
+    """Create an audio filter graph for resampling with soxr (or swr fallback)."""
+    av = _get_av()
+
+    preferred_resampler = (
+        "resampler=soxr:precision=30" if _supports_soxr_resampler() else "resampler=swr"
+    )
+
+    graph = av.filter.Graph()
+    try:
+        graph.link_nodes(
+            graph.add_abuffer(
+                format=source_av_format,
+                sample_rate=source_sample_rate,
+                layout=source_layout,
+            ),
+            graph.add("aresample", preferred_resampler),
+            graph.add(
+                "aformat",
+                (
+                    f"sample_fmts={target_av_format}:"
+                    f"sample_rates={target_sample_rate}:"
+                    f"channel_layouts={target_layout}"
+                ),
+            ),
+            graph.add("abuffersink"),
+        ).configure()
+    except (OSError, RuntimeError, ValueError):
+        if preferred_resampler != "resampler=soxr:precision=30":
+            raise
+    else:
+        return cast("_AudioFilterGraph", graph)
+
+    _LOGGER.warning("Falling back to swr resampler after soxr graph setup failure")
+    graph = av.filter.Graph()
+    graph.link_nodes(
+        graph.add_abuffer(
+            format=source_av_format,
+            sample_rate=source_sample_rate,
+            layout=source_layout,
+        ),
+        graph.add("aresample", "resampler=swr"),
+        graph.add(
+            "aformat",
+            (
+                f"sample_fmts={target_av_format}:"
+                f"sample_rates={target_sample_rate}:"
+                f"channel_layouts={target_layout}"
+            ),
+        ),
+        graph.add("abuffersink"),
+    ).configure()
+    return cast("_AudioFilterGraph", graph)
 
 
 def _encode_for_transform_key(
@@ -91,12 +201,14 @@ class _ResamplerState:
 
     key: _ResamplerKey
     """Resampler key for identification."""
-    resampler: av.AudioResampler
-    """PyAV audio resampler."""
+    graph: _AudioFilterGraph
+    """PyAV audio filter graph used for resampling."""
     source_av_format: str
     """PyAV format string for source."""
     source_av_layout: str
     """PyAV channel layout for source."""
+    source_sample_rate: int
+    """Source sample rate used when configuring the filter graph."""
     target_av_format: str
     """PyAV format string for target (after resampling)."""
     target_layout: str
@@ -127,8 +239,6 @@ def _create_resampler_state(
     target_format: AudioFormat,
 ) -> _ResamplerState:
     """Create a new resampler state. Thread-safe (no shared state)."""
-    av = _get_av()
-
     _source_wire_bytes, source_av_format, source_layout, _source_av_bytes = (
         source_format.resolve_av_format()
     )
@@ -136,17 +246,21 @@ def _create_resampler_state(
         target_format.resolve_av_format()
     )
 
-    resampler = av.AudioResampler(
-        format=target_av_format,
-        layout=target_layout,
-        rate=target_format.sample_rate,
+    graph = _build_resample_graph(
+        source_av_format=source_av_format,
+        source_layout=source_layout,
+        source_sample_rate=source_format.sample_rate,
+        target_av_format=target_av_format,
+        target_layout=target_layout,
+        target_sample_rate=target_format.sample_rate,
     )
 
     return _ResamplerState(
         key=key,
-        resampler=resampler,
+        graph=graph,
         source_av_format=source_av_format,
         source_av_layout=source_layout,
+        source_sample_rate=source_format.sample_rate,
         target_av_format=target_av_format,
         target_layout=target_layout,
         target_wire_frame_stride=target_wire_bytes * target_format.channels,
@@ -186,10 +300,13 @@ def _resample_pcm_standalone(
         drift_us = abs(resampler_state.pending_timestamp_us - input_timestamp_us)
         if drift_us > 20_000:
             resampler_state.pending_timestamp_us = input_timestamp_us
-            resampler_state.resampler = av.AudioResampler(
-                format=resampler_state.target_av_format,
-                layout=resampler_state.target_layout,
-                rate=resampler_state.key.target_sample_rate,
+            resampler_state.graph = _build_resample_graph(
+                source_av_format=resampler_state.source_av_format,
+                source_layout=resampler_state.source_av_layout,
+                source_sample_rate=resampler_state.source_sample_rate,
+                target_av_format=resampler_state.target_av_format,
+                target_layout=resampler_state.target_layout,
+                target_sample_rate=resampler_state.key.target_sample_rate,
             )
 
     # Calculate sample count from input
@@ -215,7 +332,8 @@ def _resample_pcm_standalone(
     frame.planes[0].update(source_pcm)
 
     # Resample
-    out_frames = resampler_state.resampler.resample(frame)
+    resampler_state.graph.push(frame)
+    out_frames = _drain_audio_graph(resampler_state.graph)
     out_pcm = bytearray()
     output_sample_count = 0
     for out_frame in out_frames:
