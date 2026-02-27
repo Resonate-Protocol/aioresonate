@@ -24,6 +24,7 @@ from aiosendspin.models.player import (
     SupportedAudioFormat,
 )
 from aiosendspin.models.types import AudioCodec, PlayerCommand, Roles
+from aiosendspin.server import push_stream as push_stream_module
 from aiosendspin.server.audio import AudioFormat
 from aiosendspin.server.audio_transformers import TransformerPool
 from aiosendspin.server.channels import MAIN_CHANNEL
@@ -223,6 +224,139 @@ async def test_commit_audio_sends_stream_start_and_binary(mock_loop: Any) -> Non
     buffer_tracker = role.get_buffer_tracker()
     assert buffer_tracker is not None
     assert buffer_tracker.buffered_bytes > 0
+
+
+@pytest.mark.asyncio
+async def test_commit_audio_float_input_quantizes_at_output_edge(
+    mock_loop: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Float input should be quantized at the output edge for integer player requirements."""
+    group = _DummyGroup(clients=[])
+    _client, conn = _make_connected_player(mock_loop, group, "p1")
+
+    quantize_calls = 0
+    original_quantizer = PushStream._quantize_float_pcm_for_output  # noqa: SLF001
+
+    def _counted_quantizer(self: PushStream, **kwargs: Any) -> object:
+        nonlocal quantize_calls
+        quantize_calls += 1
+        return original_quantizer(self, **kwargs)
+
+    monkeypatch.setattr(PushStream, "_quantize_float_pcm_for_output", _counted_quantizer)
+
+    stream = PushStream(loop=mock_loop, clock=LoopClock(mock_loop), group=group)
+    stream.prepare_audio(
+        bytes(9600),  # 25ms @ 48kHz stereo f32
+        AudioFormat(sample_rate=48_000, bit_depth=32, channels=2, sample_type="float"),
+    )
+    await stream.commit_audio()
+
+    assert quantize_calls > 0
+    assert conn.sent_binary
+
+
+def test_quantize_float_to_s16_uses_triangular_hp_dither(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Float to s16 quantization should request triangular_hp dithering."""
+    captured_dither_methods: list[str | None] = []
+    original_build_resample_graph = push_stream_module._build_resample_graph  # noqa: SLF001
+
+    def _record_build_resample_graph(
+        *,
+        source_av_format: str,
+        source_layout: str,
+        source_sample_rate: int,
+        target_av_format: str,
+        target_layout: str,
+        target_sample_rate: int,
+        dither_method: str | None = None,
+    ) -> object:
+        if source_av_format == "flt" and target_av_format == "s16":
+            captured_dither_methods.append(dither_method)
+        return original_build_resample_graph(
+            source_av_format=source_av_format,
+            source_layout=source_layout,
+            source_sample_rate=source_sample_rate,
+            target_av_format=target_av_format,
+            target_layout=target_layout,
+            target_sample_rate=target_sample_rate,
+            dither_method=dither_method,
+        )
+
+    monkeypatch.setattr(push_stream_module, "_build_resample_graph", _record_build_resample_graph)
+
+    group = _DummyGroup(clients=[])
+    stream = PushStream(loop=MagicMock(), clock=ManualClock(), group=group)
+    stream._quantize_float_pcm_for_output(  # noqa: SLF001
+        channel_id=MAIN_CHANNEL,
+        pcm_data=bytes(9600),  # 25ms @ 48kHz stereo f32
+        output_ts=0,
+        sample_rate=48_000,
+        channels=2,
+        target_bit_depth=16,
+    )
+
+    assert captured_dither_methods
+    assert captured_dither_methods[-1] == "triangular_hp"
+
+
+def test_quantize_float_to_s16_preserves_dither_on_resampler_reset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Drift-triggered graph rebuild must preserve triangular_hp dithering."""
+    captured_dither_methods: list[str | None] = []
+    original_build_resample_graph = push_stream_module._build_resample_graph  # noqa: SLF001
+
+    def _record_build_resample_graph(
+        *,
+        source_av_format: str,
+        source_layout: str,
+        source_sample_rate: int,
+        target_av_format: str,
+        target_layout: str,
+        target_sample_rate: int,
+        dither_method: str | None = None,
+    ) -> object:
+        if source_av_format == "flt" and target_av_format == "s16":
+            captured_dither_methods.append(dither_method)
+        return original_build_resample_graph(
+            source_av_format=source_av_format,
+            source_layout=source_layout,
+            source_sample_rate=source_sample_rate,
+            target_av_format=target_av_format,
+            target_layout=target_layout,
+            target_sample_rate=target_sample_rate,
+            dither_method=dither_method,
+        )
+
+    monkeypatch.setattr(push_stream_module, "_build_resample_graph", _record_build_resample_graph)
+
+    group = _DummyGroup(clients=[])
+    stream = PushStream(loop=MagicMock(), clock=ManualClock(), group=group)
+    # First call creates the quantizer graph. Second call with stale timestamp creates >20ms
+    # drift, forcing graph rebuild in _resample_pcm_standalone.
+    stream._quantize_float_pcm_for_output(  # noqa: SLF001
+        channel_id=MAIN_CHANNEL,
+        pcm_data=bytes(9600),  # 25ms @ 48kHz stereo f32
+        output_ts=0,
+        sample_rate=48_000,
+        channels=2,
+        target_bit_depth=16,
+    )
+    stream._quantize_float_pcm_for_output(  # noqa: SLF001
+        channel_id=MAIN_CHANNEL,
+        pcm_data=bytes(9600),  # 25ms @ 48kHz stereo f32
+        output_ts=0,
+        sample_rate=48_000,
+        channels=2,
+        target_bit_depth=16,
+    )
+
+    assert len(captured_dither_methods) >= 2
+    assert captured_dither_methods[0] == "triangular_hp"
+    assert captured_dither_methods[-1] == "triangular_hp"
 
 
 @pytest.mark.asyncio
