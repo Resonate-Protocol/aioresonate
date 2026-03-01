@@ -7,7 +7,8 @@ from uuid import uuid4
 
 from aiosendspin.models import AudioCodec, unpack_binary_header
 from aiosendspin.models.core import StreamClearMessage, StreamEndMessage, StreamStartMessage
-from aiosendspin.models.types import BinaryMessageType
+from aiosendspin.models.player import ClientHelloPlayerSupport, SupportedAudioFormat
+from aiosendspin.models.types import BinaryMessageType, PlayerCommand
 from aiosendspin.server.audio import AudioFormat
 from aiosendspin.server.roles import PlayerV1Role
 from aiosendspin.server.roles.base import AudioChunk, AudioRequirements, StreamRequirements
@@ -550,3 +551,118 @@ def test_player_role_on_group_changed_resets_buffer_and_timing() -> None:
     assert role._stream_started is False  # noqa: SLF001
     assert role._pending_stream_start is False  # noqa: SLF001
     assert role._stream_start_time_us is None  # noqa: SLF001
+
+
+# --- _ensure_preferred_format ---
+
+
+def _make_player_support(*formats: SupportedAudioFormat) -> ClientHelloPlayerSupport:
+    return ClientHelloPlayerSupport(
+        supported_formats=list(formats),
+        buffer_capacity=65536,
+        supported_commands=[PlayerCommand.VOLUME],
+    )
+
+
+def test_ensure_preferred_format_sets_format_from_compatible_list() -> None:
+    """_ensure_preferred_format() picks compatible[0] as the preferred format."""
+    client = _make_client_stub()
+    client.info.player_support = _make_player_support(
+        SupportedAudioFormat(codec=AudioCodec.FLAC, channels=2, sample_rate=48000, bit_depth=16),
+    )
+    role = PlayerV1Role(client=client)
+
+    role._ensure_preferred_format()  # noqa: SLF001
+
+    assert role._preferred_format == AudioFormat(sample_rate=48000, bit_depth=16, channels=2)  # noqa: SLF001
+    assert role._preferred_codec == AudioCodec.FLAC  # noqa: SLF001
+
+
+def test_ensure_preferred_format_resets_to_new_priority_on_reconnect() -> None:
+    """On reconnect, _ensure_preferred_format() always resets to the new first priority.
+
+    This holds even when the previously stored format is still in the compatible list.
+    """
+    client = _make_client_stub()
+
+    # First connect: FLAC is first priority
+    client.info.player_support = _make_player_support(
+        SupportedAudioFormat(codec=AudioCodec.FLAC, channels=2, sample_rate=48000, bit_depth=16),
+        SupportedAudioFormat(codec=AudioCodec.PCM, channels=2, sample_rate=96000, bit_depth=24),
+    )
+    role = PlayerV1Role(client=client)
+    role._ensure_preferred_format()  # noqa: SLF001
+
+    assert role._preferred_codec == AudioCodec.FLAC  # noqa: SLF001
+
+    # Reconnect: client reorders — PCM 96k/24 is now first (e.g. user passed --audio-format)
+    # FLAC is still in the list (compatible), but must no longer be preferred
+    client.info.player_support = _make_player_support(
+        SupportedAudioFormat(codec=AudioCodec.PCM, channels=2, sample_rate=96000, bit_depth=24),
+        SupportedAudioFormat(codec=AudioCodec.FLAC, channels=2, sample_rate=48000, bit_depth=16),
+    )
+    role._ensure_preferred_format()  # noqa: SLF001
+
+    assert role._preferred_format == AudioFormat(sample_rate=96000, bit_depth=24, channels=2)  # noqa: SLF001
+    assert role._preferred_codec == AudioCodec.PCM  # noqa: SLF001
+
+
+def test_ensure_preferred_format_noop_when_no_player_support() -> None:
+    """_ensure_preferred_format() does nothing when player_support is None."""
+    client = _make_client_stub()
+    client.info.player_support = None
+    role = PlayerV1Role(client=client)
+    role._preferred_format = AudioFormat(sample_rate=44100, bit_depth=16, channels=2)  # noqa: SLF001
+
+    role._ensure_preferred_format()  # noqa: SLF001
+
+    # Unchanged — no support info yet
+    assert role._preferred_format == AudioFormat(sample_rate=44100, bit_depth=16, channels=2)  # noqa: SLF001
+
+
+def test_ensure_preferred_format_noop_when_no_compatible_formats() -> None:
+    """_ensure_preferred_format() does nothing when all formats are unsupported by server."""
+    client = _make_client_stub()
+    # 999-channel format is not encodable by the server
+    client.info.player_support = _make_player_support(
+        SupportedAudioFormat(codec=AudioCodec.FLAC, channels=2, sample_rate=48000, bit_depth=8),
+    )
+    role = PlayerV1Role(client=client)
+    role._preferred_format = AudioFormat(sample_rate=44100, bit_depth=16, channels=2)  # noqa: SLF001
+
+    role._ensure_preferred_format()  # noqa: SLF001
+
+    # Unchanged — no compatible formats found; warning logged
+    assert role._preferred_format == AudioFormat(sample_rate=44100, bit_depth=16, channels=2)  # noqa: SLF001
+
+
+def test_preferred_format_override_used_as_fallback_when_no_client_support() -> None:
+    """preferred_format returns _preferred_format_override when _preferred_format is None."""
+    client = _make_client_stub()
+    client.info.player_support = None
+    override = AudioFormat(sample_rate=44100, bit_depth=16, channels=2)
+    role = PlayerV1Role(client=client, preferred_format=override)
+
+    # _ensure_preferred_format() is a no-op without player_support, so override is used
+    role._ensure_preferred_format()  # noqa: SLF001
+
+    assert role.preferred_format is override
+
+
+def test_preferred_format_override_superseded_after_client_hello() -> None:
+    """Once client sends supported_formats, _ensure_preferred_format() uses the client list.
+
+    The constructor override becomes irrelevant after the first client/hello.
+    """
+    client = _make_client_stub()
+    override = AudioFormat(sample_rate=44100, bit_depth=16, channels=2)
+    client.info.player_support = _make_player_support(
+        SupportedAudioFormat(codec=AudioCodec.FLAC, channels=2, sample_rate=48000, bit_depth=16),
+    )
+    role = PlayerV1Role(client=client, preferred_format=override)
+
+    role._ensure_preferred_format()  # noqa: SLF001
+
+    # _preferred_format now set from client hello, so override is shadowed
+    assert role._preferred_format == AudioFormat(sample_rate=48000, bit_depth=16, channels=2)  # noqa: SLF001
+    assert role.preferred_format == AudioFormat(sample_rate=48000, bit_depth=16, channels=2)

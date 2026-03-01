@@ -575,8 +575,6 @@ class PlayerV1Role(Role):
         self.preferred_format = requested_format
         self.preferred_codec = requested_codec
 
-        state = self._state()
-
         stream_active = self._client.group.has_active_stream
         if stream_active:
             # Mid-stream format change: rebuild requirements and defer stream/start
