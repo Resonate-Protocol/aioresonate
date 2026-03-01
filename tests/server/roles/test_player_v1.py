@@ -110,7 +110,7 @@ def test_player_role_get_audio_requirements_refreshes_when_channel_changes() -> 
         channel_id=refreshed_channel,
     )
 
-    def _refresh(_state: object, *, force: bool = False) -> None:
+    def _refresh(*, force: bool = False) -> None:
         assert force is True
         role._audio_requirements = refreshed_req  # noqa: SLF001
 
