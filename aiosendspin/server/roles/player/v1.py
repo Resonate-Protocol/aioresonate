@@ -640,27 +640,20 @@ class PlayerV1Role(Role):
             )
             return
 
-        # Use client's first compatible format (client priority order)
+        # The spec defines supported_formats as "in priority order (first is preferred)".
+        # On every (re)connect the client sends a fresh client/hello with its current
+        # priority, so compatible[0] represents the client's authoritative preference
+        # for this connection. Always reset to it so that a client which reconnects with
+        # a different first format (e.g. after the user changes --audio-format) is
+        # honoured immediately, rather than silently keeping a stale stored format that
+        # happens to still be somewhere in the list.
         preferred_supported = compatible[0]
-        default_format = AudioFormat(
+        state.preferred_format = AudioFormat(
             sample_rate=preferred_supported.sample_rate,
             bit_depth=preferred_supported.bit_depth,
             channels=preferred_supported.channels,
         )
-        default_codec = preferred_supported.codec
-
-        current_codec = state.preferred_codec or default_codec
-        current_format = state.preferred_format
-        is_supported = current_format is not None and any(
-            fmt.codec == current_codec
-            and fmt.sample_rate == current_format.sample_rate
-            and fmt.bit_depth == current_format.bit_depth
-            and fmt.channels == current_format.channels
-            for fmt in compatible
-        )
-        if not is_supported:
-            state.preferred_format = default_format
-            state.preferred_codec = default_codec
+        state.preferred_codec = preferred_supported.codec
 
     def _ensure_audio_requirements(
         self, state: PlayerPersistentState, *, force: bool = False
