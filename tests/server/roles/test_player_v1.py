@@ -607,6 +607,43 @@ def test_ensure_preferred_format_resets_to_new_priority_on_reconnect() -> None:
     assert role._preferred_codec == AudioCodec.PCM  # noqa: SLF001
 
 
+def test_set_preferred_format_persists_across_reconnect() -> None:
+    """set_preferred_format() remains active after reconnect until cleared."""
+    client = _make_client_stub()
+    client.info.player_support = _make_player_support(
+        SupportedAudioFormat(codec=AudioCodec.FLAC, channels=2, sample_rate=48000, bit_depth=16),
+        SupportedAudioFormat(codec=AudioCodec.PCM, channels=2, sample_rate=96000, bit_depth=24),
+    )
+    role = PlayerV1Role(client=client)
+    role._ensure_preferred_format()  # noqa: SLF001
+
+    assert role.set_preferred_format(
+        AudioFormat(sample_rate=96000, bit_depth=24, channels=2),
+        AudioCodec.PCM,
+    )
+
+    # Reconnect with FLAC still first priority - sticky override should still win.
+    role._ensure_preferred_format()  # noqa: SLF001
+    assert role._preferred_format == AudioFormat(sample_rate=96000, bit_depth=24, channels=2)  # noqa: SLF001
+    assert role._preferred_codec == AudioCodec.PCM  # noqa: SLF001
+
+
+def test_set_preferred_format_codec_only_uses_first_matching_codec_format() -> None:
+    """Codec-only override picks first compatible format for that codec."""
+    client = _make_client_stub()
+    client.info.player_support = _make_player_support(
+        SupportedAudioFormat(codec=AudioCodec.FLAC, channels=2, sample_rate=44100, bit_depth=16),
+        SupportedAudioFormat(codec=AudioCodec.PCM, channels=2, sample_rate=96000, bit_depth=24),
+        SupportedAudioFormat(codec=AudioCodec.FLAC, channels=2, sample_rate=48000, bit_depth=16),
+    )
+    role = PlayerV1Role(client=client)
+    role._ensure_preferred_format()  # noqa: SLF001
+
+    assert role.set_preferred_format(None, AudioCodec.FLAC)
+    assert role._preferred_format == AudioFormat(sample_rate=44100, bit_depth=16, channels=2)  # noqa: SLF001
+    assert role._preferred_codec == AudioCodec.FLAC  # noqa: SLF001
+
+
 def test_ensure_preferred_format_noop_when_no_player_support() -> None:
     """_ensure_preferred_format() does nothing when player_support is None."""
     client = _make_client_stub()
