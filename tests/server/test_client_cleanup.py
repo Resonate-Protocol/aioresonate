@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -15,6 +15,7 @@ from aiosendspin.server import client as client_module
 from aiosendspin.server.client import SendspinClient
 from aiosendspin.server.clock import LoopClock
 from aiosendspin.server.group import SendspinGroup
+from aiosendspin.server.server import SendspinServer
 
 
 @dataclass
@@ -296,3 +297,19 @@ async def test_cleanup_skipped_if_reconnected_before_callback(
 
     # Cleanup should have been cancelled by attach_connection
     mock_server.remove_client.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_remove_solo_client_does_not_create_new_group() -> None:
+    """Removing the only client in a group should not instantiate a new SendspinGroup."""
+    loop = asyncio.get_running_loop()
+    server = SendspinServer(
+        loop=loop, server_id="srv", server_name="server", client_session=AsyncMock()
+    )
+    client = server.get_or_create_client("player-1")
+    assert len(client.group.clients) == 1
+
+    original_init = SendspinGroup.__init__
+    with patch.object(SendspinGroup, "__init__", wraps=original_init) as mock_init:
+        await server.remove_client("player-1")
+        mock_init.assert_not_called()

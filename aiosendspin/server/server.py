@@ -197,7 +197,9 @@ class SendspinServer:
         client = self._clients.pop(client_id, None)
         if client is None:
             return
-        await client.group.remove_client(client)
+        # Solo groups are garbage collected with the client; only detach from multi-client groups.
+        if len(client.group.clients) > 1:
+            await client.group.remove_client(client)
         self._signal_event(ClientRemovedEvent(client_id))
 
     def register_external_player(
