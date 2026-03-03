@@ -36,7 +36,7 @@ numpy = [
 [dependency-groups]
 dev = [
   "codespell==2.4.1",
-  "isort==8.0.0",
+  "isort==8.0.1",
   "mypy==1.19.1",
   "numpy>=1.26.0",
   "pre-commit==4.5.1",
