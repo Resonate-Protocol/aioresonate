@@ -303,6 +303,8 @@ class PushStream:
         self._clock = clock
         self._group = group
         self._is_stopped = False
+        # Monotonic lifecycle token used to invalidate in-flight commit work on stop().
+        self._stream_generation = 0
         # Pending audio per channel: channel_id -> (pcm_bytes, audio_format)
         self._channel_buffers: dict[UUID, tuple[bytes, AudioFormat]] = {}
         # Per-channel timing: channel_id -> next_chunk_start_us
@@ -338,6 +340,18 @@ class PushStream:
     def is_stopped(self) -> bool:
         """Whether this stream has been stopped."""
         return self._is_stopped
+
+    def _is_generation_active(self, generation: int | None) -> bool:
+        """Return True when stream lifecycle still matches the captured generation."""
+        if generation is None:
+            return not self._is_stopped
+        return not self._is_stopped and self._stream_generation == generation
+
+    def _stopped_commit_return_value(self) -> int:
+        """Return a stable timestamp for commits interrupted by stop()."""
+        if self._channel_timing:
+            return min(self._channel_timing.values())
+        return self._clock.now_us() + DEFAULT_INITIAL_DELAY_US
 
     @staticmethod
     def _client_in_audio_pipeline(client: SendspinClient) -> bool:
@@ -542,6 +556,7 @@ class PushStream:
         # Check if stopped
         if self._is_stopped:
             raise StreamStoppedError("Cannot commit audio on a stopped stream")
+        commit_generation = self._stream_generation
 
         # Drain historical buffers
         historical = dict(self._historical_buffers)
@@ -560,7 +575,13 @@ class PushStream:
         # This initializes _channel_timing for historical channels so the live chunk
         # (if any) continues seamlessly after.
         if historical:
-            await self._process_historical_buffers(historical, historical_start_us)
+            await self._process_historical_buffers(
+                historical,
+                historical_start_us,
+                commit_generation=commit_generation,
+            )
+            if not self._is_generation_active(commit_generation):
+                return self._stopped_commit_return_value()
 
         # Drain live channel buffers
         prepared = dict(self._channel_buffers)
@@ -619,7 +640,13 @@ class PushStream:
             self._pcm_chunk_cache.setdefault(channel_int, deque()).append(pcm_chunk)
 
         # Role-based audio delivery via hooks
-        role_cache_results = await self._deliver_audio_to_roles(prepared, channel_play_start)
+        role_cache_results = await self._deliver_audio_to_roles(
+            prepared,
+            channel_play_start,
+            commit_generation=commit_generation,
+        )
+        if not self._is_generation_active(commit_generation):
+            return self._stopped_commit_return_value()
         # Merge role-based cache results into the cache
         for cache_key, chunks in role_cache_results.items():
             self._role_chunk_cache[cache_key].extend(chunks)
@@ -696,6 +723,8 @@ class PushStream:
         self,
         historical: dict[UUID, list[tuple[bytes, AudioFormat]]],
         historical_start_us: dict[UUID, int] | None = None,
+        *,
+        commit_generation: int | None = None,
     ) -> None:
         """Process historical audio buffers, assigning timestamps consecutively.
 
@@ -711,6 +740,8 @@ class PushStream:
         min_delivery_timestamp_us = now_us + DEFAULT_INITIAL_DELAY_US
 
         for channel_id, chunks in historical.items():
+            if not self._is_generation_active(commit_generation):
+                return
             total_duration_us = 0
             for pcm_bytes, fmt in chunks:
                 bytes_per_sample = fmt.bit_depth // 8
@@ -782,7 +813,13 @@ class PushStream:
                 # Encode and deliver to roles
                 prepared = {channel_id: (pcm_bytes, fmt)}
                 play_start = {channel_id: chunk_start_us}
-                role_cache_results = await self._deliver_audio_to_roles(prepared, play_start)
+                role_cache_results = await self._deliver_audio_to_roles(
+                    prepared,
+                    play_start,
+                    commit_generation=commit_generation,
+                )
+                if not self._is_generation_active(commit_generation):
+                    return
                 for cache_key, cached_chunks in role_cache_results.items():
                     self._role_chunk_cache[cache_key].extend(cached_chunks)
                 # Yield so historical injection doesn't starve the event loop.
@@ -980,6 +1017,8 @@ class PushStream:
             tuple[UUID, int, int, int], list[tuple[SendspinClient, Role, AudioRequirements]]
         ],
         resampled_pcm: dict[tuple[UUID, int, int, int], _ResampledPCM],
+        *,
+        commit_generation: int | None = None,
     ) -> dict[TransformKey, list[CachedChunk]]:
         """Transform PCM, deliver live chunks to roles, and return cache results.
 
@@ -1026,6 +1065,8 @@ class PushStream:
             for processed, (tkey, (transformer, pcm_data, output_ts, duration_us)) in enumerate(
                 encode_tasks.items(), start=1
             ):
+                if not self._is_generation_active(commit_generation):
+                    return {}
                 transformed[tkey] = self._encode_transform_for_key(
                     tkey,
                     transformer,
@@ -1036,6 +1077,8 @@ class PushStream:
                 if processed % 2 == 0:
                     # Keep the loop responsive during large multi-role commits.
                     await asyncio.sleep(0)
+                    if not self._is_generation_active(commit_generation):
+                        return {}
 
         cache_results: defaultdict[TransformKey, list[CachedChunk]] = defaultdict(list)
 
@@ -1070,6 +1113,8 @@ class PushStream:
         self,
         prepared: dict[UUID, tuple[bytes, AudioFormat]],
         channel_play_start: dict[UUID, int],
+        *,
+        commit_generation: int | None = None,
     ) -> dict[TransformKey, list[CachedChunk]]:
         """
         Deliver audio to roles using the hook-based flow.
@@ -1086,8 +1131,16 @@ class PushStream:
         if not roles_by_pcm:
             return {}
 
+        if not self._is_generation_active(commit_generation):
+            return {}
         resampled = await self._resample_for_roles(roles_by_pcm, prepared, channel_play_start)
-        return await self._transform_and_deliver(roles_by_pcm, resampled)
+        if not self._is_generation_active(commit_generation):
+            return {}
+        return await self._transform_and_deliver(
+            roles_by_pcm,
+            resampled,
+            commit_generation=commit_generation,
+        )
 
     def _prune_role_chunk_cache(self) -> None:
         """Remove old chunks from the role-based cache."""
@@ -1615,6 +1668,7 @@ class PushStream:
         if self._is_stopped:
             return
         self._is_stopped = True
+        self._stream_generation += 1
 
         # Flush remaining audio from transformers and reset them
         roles_by_transform: defaultdict[TransformKey, list[Role]] = defaultdict(list)

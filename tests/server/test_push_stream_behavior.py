@@ -249,6 +249,54 @@ async def test_stop_sends_stream_end_and_resets_buffer_tracker(mock_loop: Any) -
 
 
 @pytest.mark.asyncio
+async def test_stop_during_inflight_commit_suppresses_audio_delivery(mock_loop: Any) -> None:
+    """Stopping during an in-flight commit should not deliver post-stop audio chunks."""
+    group = _DummyGroup(clients=[])
+    _, conn = _make_connected_player(mock_loop, group, "p1")
+    stream = PushStream(loop=mock_loop, clock=LoopClock(mock_loop), group=group)
+
+    entered_delivery = asyncio.Event()
+    release_delivery = asyncio.Event()
+    original_deliver = stream._deliver_audio_to_roles  # noqa: SLF001
+
+    async def _gated_deliver(
+        prepared: dict[UUID, tuple[bytes, AudioFormat]],
+        channel_play_start: dict[UUID, int],
+        *,
+        commit_generation: int | None = None,
+    ) -> dict[object, list[CachedChunk]]:
+        entered_delivery.set()
+        await release_delivery.wait()
+        return await original_deliver(
+            prepared,
+            channel_play_start,
+            commit_generation=commit_generation,
+        )
+
+    stream._deliver_audio_to_roles = _gated_deliver  # type: ignore[method-assign]  # noqa: SLF001
+
+    stream.prepare_audio(
+        bytes(4800),
+        AudioFormat(sample_rate=48000, bit_depth=16, channels=2),
+    )
+    commit_task = asyncio.create_task(stream.commit_audio())
+    await asyncio.wait_for(entered_delivery.wait(), timeout=1.0)
+
+    stream.stop()
+    release_delivery.set()
+    await commit_task
+
+    assert any(isinstance(m, StreamEndMessage) for m in conn.sent_json)
+    assert not conn.sent_binary
+
+    stream_end_index = next(
+        i for i, message in enumerate(conn.sent_json) if isinstance(message, StreamEndMessage)
+    )
+    post_end_messages = conn.sent_json[stream_end_index + 1 :]
+    assert not any(isinstance(message, StreamStartMessage) for message in post_end_messages)
+
+
+@pytest.mark.asyncio
 async def test_clear_sends_stream_clear(mock_loop: Any) -> None:
     """Clear sends stream/clear to connected players."""
     group = _DummyGroup(clients=[])
