@@ -343,6 +343,7 @@ def test_player_role_on_audio_chunk_sends_on_success() -> None:
 
     role = PlayerV1Role(client=client)
     role._client.connection = MagicMock()  # noqa: SLF001
+    role._stream_started = True  # noqa: SLF001
 
     chunk = AudioChunk(data=b"audio", timestamp_us=1000, duration_us=25000, byte_count=5)
     result = role.on_audio_chunk(chunk)
@@ -364,6 +365,7 @@ def test_player_role_on_audio_chunk_packs_binary_header() -> None:
 
     role = PlayerV1Role(client=client)
     role._client.connection = MagicMock()  # noqa: SLF001
+    role._stream_started = True  # noqa: SLF001
 
     chunk = AudioChunk(data=b"\x01\x02\x03", timestamp_us=123_456, duration_us=25000, byte_count=3)
     role.on_audio_chunk(chunk)
@@ -382,6 +384,7 @@ def test_player_role_on_audio_chunk_passes_buffer_metadata() -> None:
 
     role = PlayerV1Role(client=client)
     role._client.connection = MagicMock()  # noqa: SLF001
+    role._stream_started = True  # noqa: SLF001
 
     chunk = AudioChunk(data=b"audio", timestamp_us=1000, duration_us=25000, byte_count=100)
     role.on_audio_chunk(chunk)
@@ -399,11 +402,30 @@ def test_player_role_on_audio_chunk_ignores_send_return_value() -> None:
 
     role = PlayerV1Role(client=client)
     role._client.connection = MagicMock()  # noqa: SLF001
+    role._stream_started = True  # noqa: SLF001
 
     chunk = AudioChunk(data=b"audio", timestamp_us=1000, duration_us=25000, byte_count=5)
     result = role.on_audio_chunk(chunk)
 
     assert result is None
+
+
+def test_player_role_on_audio_chunk_drops_when_stream_not_started() -> None:
+    """on_audio_chunk() drops stale chunks after lifecycle reset."""
+    client = MagicMock()
+    client.send_binary.return_value = True
+    client.send_role_message = MagicMock()
+
+    role = PlayerV1Role(client=client)
+    role._client.connection = MagicMock()  # noqa: SLF001
+    role._stream_started = False  # noqa: SLF001
+    role._pending_stream_start = False  # noqa: SLF001
+
+    chunk = AudioChunk(data=b"audio", timestamp_us=1000, duration_us=25000, byte_count=5)
+    role.on_audio_chunk(chunk)
+
+    client.send_role_message.assert_not_called()
+    client.send_binary.assert_not_called()
 
 
 # --- on_stream_clear ---
@@ -531,6 +553,26 @@ def test_player_role_on_stream_end_noop_without_transport() -> None:
     role.on_stream_end()
 
     client.send_role_message.assert_not_called()
+
+
+def test_player_role_drops_audio_chunk_after_stream_end() -> None:
+    """Chunks arriving after stream/end must be suppressed."""
+    client = MagicMock()
+    client.send_binary.return_value = True
+    client.send_message = MagicMock()
+
+    role = PlayerV1Role(client=client)
+    role._client.connection = MagicMock()  # noqa: SLF001
+    role._stream_started = True  # noqa: SLF001
+
+    role.on_stream_end()
+    role.on_audio_chunk(
+        AudioChunk(data=b"audio", timestamp_us=1000, duration_us=25000, byte_count=5)
+    )
+
+    # only stream/end should be sent
+    client.send_role_message.assert_called_once()
+    client.send_binary.assert_not_called()
 
 
 def test_player_role_on_group_changed_resets_buffer_and_timing() -> None:

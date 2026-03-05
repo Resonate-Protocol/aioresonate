@@ -1081,6 +1081,7 @@ class PushStream:
                         return {}
 
         cache_results: defaultdict[TransformKey, list[CachedChunk]] = defaultdict(list)
+        active_roles = {role for _client, role in self._get_audio_roles()}
 
         for tkey, frame_list in transformed.items():
             cached_for_key: list[CachedChunk] = []
@@ -1096,7 +1097,11 @@ class PushStream:
             # Deliver live chunks directly; connection layer enforces late-drop/backpressure.
             roles = roles_by_transform.get(tkey, [])
             for role in roles:
+                if role not in active_roles:
+                    continue
                 self._ensure_role_started(role)
+                if role not in self._started_roles:
+                    continue
                 for cached_chunk in cached_for_key:
                     role.on_audio_chunk(
                         AudioChunk(

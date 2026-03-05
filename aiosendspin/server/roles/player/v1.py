@@ -310,6 +310,14 @@ class PlayerV1Role(Role):
             self._send_stream_start_message()
             self._pending_stream_start = False
 
+        # Guard against stale delivery after stream/end or stream/clear.
+        if not self._stream_started:
+            self._client._logger.debug(  # noqa: SLF001
+                "Dropping player audio chunk because stream is not started for %s",
+                self._client.client_id,
+            )
+            return
+
         # Pack binary header and send
         message_type = BinaryMessageType.AUDIO_CHUNK.value
         header = pack_binary_header_raw(message_type, chunk.timestamp_us)
