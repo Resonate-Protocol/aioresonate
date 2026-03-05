@@ -33,6 +33,21 @@ class _DummyConnection:
     async def disconnect(self, *, retry_connection: bool = True) -> None:  # noqa: ARG002
         return
 
+    def send_message(self, message: object) -> None:  # noqa: ARG002
+        return
+
+    def send_binary(
+        self,
+        data: bytes,  # noqa: ARG002
+        *,
+        role: str,  # noqa: ARG002
+        timestamp_us: int,  # noqa: ARG002
+        message_type: int,  # noqa: ARG002
+        buffer_end_time_us: int | None = None,  # noqa: ARG002
+        buffer_byte_count: int | None = None,  # noqa: ARG002
+    ) -> bool:
+        return True
+
 
 class _DetachingConnection:
     """Connection that mirrors SendspinConnection's detach logic (including the guard from PR #168).
@@ -276,7 +291,7 @@ async def test_stale_connection_disconnect_does_not_wipe_newer_connection() -> N
         client_info=_player_hello("player-1"),
         active_roles=[Roles.PLAYER.value],
     )
-    old_conn._client = client  # mirror what SendspinConnection sets after attach
+    old_conn._client = client  # mirror what SendspinConnection sets after attach  # noqa: SLF001
     client.mark_connected()
     assert client.connection is old_conn
     assert client.is_connected
@@ -290,7 +305,7 @@ async def test_stale_connection_disconnect_does_not_wipe_newer_connection() -> N
         client_info=_player_hello("player-1"),
         active_roles=[Roles.PLAYER.value],
     )
-    new_conn._client = client  # mirror what SendspinConnection sets after attach
+    new_conn._client = client  # mirror what SendspinConnection sets after attach  # noqa: SLF001
     client.mark_connected()
     assert client.connection is new_conn
 
