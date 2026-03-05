@@ -33,6 +33,26 @@ class _DummyConnection:
     async def disconnect(self, *, retry_connection: bool = True) -> None:  # noqa: ARG002
         return
 
+
+class _DetachingConnection:
+    """Connection that mirrors SendspinConnection's detach logic (including the guard from PR #168).
+
+    An ``await asyncio.sleep(0)`` before the detach call simulates the real async gap
+    (e.g. awaiting wsock.close()) that makes the race condition possible.
+    """
+
+    def __init__(self) -> None:
+        self._client: SendspinClient | None = None
+        self.detach_called = False
+
+    async def disconnect(self, *, retry_connection: bool = True) -> None:  # noqa: ARG002
+        await asyncio.sleep(0)  # yield, as the real implementation does before detach
+        if self._client is not None:
+            if self._client.connection is self:
+                self._client.detach_connection(None)
+                self.detach_called = True
+            self._client = None
+
     def send_message(self, message: object) -> None:  # noqa: ARG002
         return
 
@@ -230,3 +250,58 @@ async def test_hard_disconnect_clears_roles() -> None:
     client.detach_connection(GoodbyeReason.USER_REQUEST)
     assert not client.has_warm_disconnected_roles
     assert client.role("player@v1") is None
+
+
+@pytest.mark.asyncio
+async def test_stale_connection_disconnect_does_not_wipe_newer_connection() -> None:
+    """Old async disconnect must not detach a newer replacement connection (PR #168 regression).
+
+    Race condition:
+      1. Client has ``old_conn`` (e.g. discovery connection).
+      2. ``new_conn`` arrives; ``attach_connection()`` schedules ``old_conn.disconnect()``
+         as an async task and immediately sets ``client._connection = new_conn``.
+      3. ``new_conn`` completes its handshake (``mark_connected()``).
+      4. ``old_conn.disconnect()`` resumes after an async gap and must NOT call
+         ``detach_connection()`` because ``client.connection`` is now ``new_conn``, not ``self``.
+    """
+    loop = asyncio.get_running_loop()
+    server = _DummyServer(loop=loop, clock=LoopClock(loop))
+    client = SendspinClient(server, client_id="player-1")
+    SendspinGroup(server, client)
+
+    # Step 1: attach first connection.
+    old_conn = _DetachingConnection()
+    client.attach_connection(
+        old_conn,
+        client_info=_player_hello("player-1"),
+        active_roles=[Roles.PLAYER.value],
+    )
+    old_conn._client = client  # mirror what SendspinConnection sets after attach
+    client.mark_connected()
+    assert client.connection is old_conn
+    assert client.is_connected
+
+    # Step 2: new connection replaces old one.
+    # attach_connection() schedules old_conn.disconnect() as a task (eager_start may
+    # begin it immediately, but it suspends at the first await inside disconnect()).
+    new_conn = _DetachingConnection()
+    client.attach_connection(
+        new_conn,
+        client_info=_player_hello("player-1"),
+        active_roles=[Roles.PLAYER.value],
+    )
+    new_conn._client = client  # mirror what SendspinConnection sets after attach
+    client.mark_connected()
+    assert client.connection is new_conn
+
+    # Step 3: let old_conn.disconnect() run to completion.
+    await asyncio.sleep(0)
+
+    # The new connection must still be the active one.
+    assert client.connection is new_conn, (
+        "Old connection's async disconnect wiped the newer live connection (PR #168 regression)"
+    )
+    assert client.is_connected
+    assert not old_conn.detach_called, (
+        "detach_connection was incorrectly called from the stale old connection"
+    )
