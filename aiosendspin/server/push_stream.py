@@ -913,21 +913,32 @@ class PushStream:
         self, req: AudioRequirements, channel_id: UUID, role: Role | None = None
     ) -> TransformKey:
         # Cache by (role_id, channel_id_int); invalidated by on_role_format_changed()
+        transformer_type = type(req.transformer) if req.transformer is not None else type(None)
+        frame_duration_us = self._resolve_frame_duration_us(req)
+        options = normalize_options(req.transform_options)
+
         if role is not None:
             cache_key = (id(role), channel_id.int)
             cached = self._transform_key_cache.get(cache_key)
-            if cached is not None:
+            if (
+                cached is not None
+                and cached.transformer_type == transformer_type
+                and cached.sample_rate == req.sample_rate
+                and cached.bit_depth == req.bit_depth
+                and cached.channels == req.channels
+                and cached.frame_duration_us == frame_duration_us
+                and cached.options == options
+            ):
                 return cached
 
-        transformer_type = type(req.transformer) if req.transformer is not None else type(None)
         tkey = TransformKey(
             channel_id=channel_id.int,  # Use int for faster hashing
             transformer_type=transformer_type,
             sample_rate=req.sample_rate,
             bit_depth=req.bit_depth,
             channels=req.channels,
-            frame_duration_us=self._resolve_frame_duration_us(req),
-            options=normalize_options(req.transform_options),
+            frame_duration_us=frame_duration_us,
+            options=options,
         )
 
         if role is not None:
@@ -1205,11 +1216,10 @@ class PushStream:
     def on_role_format_changed(self, role: Role) -> None:
         """Invalidate caches after a role's audio format changed mid-stream.
 
-        Unlike on_role_leave(), this does NOT touch _started_roles or epoch.
+        Unlike on_role_leave(), this does not reset channel tracking state.
         The role stays active; only stale caches are cleared so the next
         commit_audio() picks up the new AudioRequirements.
         """
-        # Invalidate transform key cache entries for this role
         role_id = id(role)
         stale_transform_keys: set[TransformKey] = set()
         for cache_key in list(self._transform_key_cache.keys()):

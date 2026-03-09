@@ -194,7 +194,7 @@ class PlayerV1Role(Role):
         if state.buffer_tracker is not None:
             state.buffer_tracker.reset()
         self._ensure_preferred_format()
-        self._ensure_audio_requirements()
+        self._ensure_audio_requirements(force=True)
 
     def on_disconnect(self) -> None:
         """Clean up, apply delayed buffer reset policy, and unsubscribe from PlayerGroupRole."""
