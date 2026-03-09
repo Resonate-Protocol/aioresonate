@@ -15,6 +15,8 @@ from aiosendspin.models.core import (
     ClientHelloMessage,
     ClientHelloPayload,
     ServerHelloMessage,
+    ServerStateMessage,
+    ServerStatePayload,
 )
 from aiosendspin.models.player import ClientHelloPlayerSupport, SupportedAudioFormat
 from aiosendspin.models.types import AudioCodec, ConnectionReason, PlayerCommand, Roles
@@ -237,6 +239,60 @@ class TestConnectionSendsCorrectReason:
 
         server_hello = next(m for m in sent_messages if isinstance(m, ServerHelloMessage))
         assert server_hello.payload.connection_reason == ConnectionReason.DISCOVERY
+
+
+class TestHandshakeOrdering:
+    """Tests for server/hello ordering relative to role messages."""
+
+    @pytest.mark.asyncio
+    async def test_server_hello_queued_before_role_messages(
+        self, mock_server: _MockServer, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """server/hello must be enqueued before any role-scoped server messages."""
+        conn = SendspinConnection(mock_server, wsock_client=AsyncMock())
+        call_order: list[str] = []
+
+        original_priority_send = conn.send_priority_message
+        original_role_send = conn.send_role_message
+
+        def capture_priority_send(msg: ServerMessage) -> None:
+            call_order.append(msg.type)
+            original_priority_send(msg)
+
+        def capture_role_send(role: str, msg: ServerMessage) -> None:
+            call_order.append(msg.type)
+            original_role_send(role, msg)
+
+        conn.send_priority_message = capture_priority_send  # type: ignore[method-assign]
+        conn.send_role_message = capture_role_send  # type: ignore[method-assign]
+
+        original_attach_connection = SendspinClient.attach_connection
+
+        def attach_with_early_role_message(
+            self: SendspinClient,
+            connection: SendspinConnection,
+            *,
+            client_info: ClientHelloPayload,
+            active_roles: list[str],
+        ) -> None:
+            connection.send_role_message(
+                "metadata",
+                ServerStateMessage(payload=ServerStatePayload()),
+            )
+            original_attach_connection(
+                self, connection, client_info=client_info, active_roles=active_roles
+            )
+
+        monkeypatch.setattr(SendspinClient, "attach_connection", attach_with_early_role_message)
+
+        await conn._handle_message(  # noqa: SLF001
+            ClientHelloMessage(payload=_player_hello("client-1")),
+            timestamp_us=0,
+        )
+
+        assert call_order
+        assert call_order[0] == "server/hello"
+        assert call_order.index("server/state") > 0
 
 
 class TestCustomRoleSupportParsing:
