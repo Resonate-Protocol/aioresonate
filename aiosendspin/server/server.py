@@ -493,10 +493,10 @@ class SendspinServer:
                             first_connection_succeeded = True
                             self._initial_connect_succeeded.add(url)
                             self._resolve_initial_connect_waiters(url)
-                        connected_started = time.monotonic()
+                        connection_started_s = time.monotonic()
                         conn = SendspinConnection(self, wsock_client=wsock, url=url)
                         await conn._handle_client()  # noqa: SLF001
-                        session_duration_s = time.monotonic() - connected_started
+                        session_duration_s = time.monotonic() - connection_started_s
 
                     if session_duration_s >= STABLE_SERVER_INITIATED_SESSION_S:
                         backoff = 1.0
