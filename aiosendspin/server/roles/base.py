@@ -18,13 +18,14 @@ from uuid import UUID
 if TYPE_CHECKING:
     from collections.abc import Coroutine
 
+    from aiosendspin.models import AudioCodec
     from aiosendspin.models.core import (
         ClientCommandPayload,
         ClientStatePayload,
         StreamRequestFormatPayload,
     )
     from aiosendspin.models.types import ClientStateType, ServerMessage
-    from aiosendspin.server.audio import BufferTracker
+    from aiosendspin.server.audio import AudioFormat, BufferTracker
     from aiosendspin.server.audio_transformers import AudioTransformer
     from aiosendspin.server.client import SendspinClient
     from aiosendspin.server.events import GroupRoleEvent
@@ -289,10 +290,10 @@ class Role(ABC):
 
     def set_preferred_format(
         self,
-        audio_format: Any,  # noqa: ARG002
-        codec: Any,  # noqa: ARG002
+        audio_format: AudioFormat | None,  # noqa: ARG002
+        codec: AudioCodec | None = None,  # noqa: ARG002
     ) -> bool:
-        """Set preferred format if compatible. Returns True on success."""
+        """Set or clear preferred format override. Returns True on success."""
         return False
 
     def reset_binary_timing(self) -> None:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -193,6 +194,68 @@ async def test_server_initiated_stops_retrying_on_another_server_goodbye(
         pytest.fail("Connection task was not cleaned up after ANOTHER_SERVER goodbye")
 
     assert session.calls == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("monotonic_values", "expected_sleeps"),
+    [
+        # Repeated unstable sessions should grow backoff: 1s -> 2s -> 4s.
+        ([0.0, 5.0, 6.0, 9.0, 10.0, 13.0, 14.0, 16.0], [1.0, 2.0, 4.0]),
+        # Unstable then stable should reset, then unstable grows again.
+        ([0.0, 5.0, 6.0, 18.0, 19.0, 23.0, 24.0, 27.0], [1.0, 1.0, 2.0]),
+        # Repeated stable sessions should keep reconnect delay at 1s.
+        ([0.0, 12.0, 13.0, 24.0, 25.0, 35.0, 36.0, 49.0], [1.0, 1.0, 1.0]),
+    ],
+)
+async def test_server_initiated_backoff_resets_only_after_stable_session(
+    monkeypatch: pytest.MonkeyPatch,
+    monotonic_values: list[float],
+    expected_sleeps: list[float],
+) -> None:
+    """Reconnect backoff should reset only after sufficiently long sessions."""
+    session = _PersistentSuccessfulSession()
+    server = _make_server(session)
+    url = "ws://127.0.0.1:9999/sendspin"
+    max_attempts = len(monotonic_values) // 2
+    attempts = 0
+    sleep_calls: list[float] = []
+    monotonic_iter = iter(monotonic_values)
+
+    class _FakeConnection:
+        closing = False
+
+        def __init__(
+            self,
+            _server: SendspinServer,
+            *,
+            wsock_client: object,  # noqa: ARG002
+            url: str | None = None,  # noqa: ARG002
+        ) -> None:
+            nonlocal attempts
+            attempts += 1
+            self.should_retry_server_initiated_connection = attempts < max_attempts
+            self.goodbye_reason = None
+
+        async def _handle_client(self) -> None:
+            return
+
+    async def _fake_sleep(delay: float) -> None:
+        sleep_calls.append(delay)
+
+    def _fake_monotonic() -> float:
+        return next(monotonic_iter)
+
+    monkeypatch.setattr("aiosendspin.server.server.SendspinConnection", _FakeConnection)
+    monkeypatch.setattr(
+        "aiosendspin.server.server.time",
+        SimpleNamespace(monotonic=_fake_monotonic),
+    )
+    monkeypatch.setattr("aiosendspin.server.server.asyncio.sleep", _fake_sleep)
+
+    await server._handle_client_connection(url)  # noqa: SLF001
+
+    assert sleep_calls == expected_sleeps
 
 
 @pytest.mark.asyncio
