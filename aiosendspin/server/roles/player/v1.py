@@ -440,6 +440,9 @@ class PlayerV1Role(Role):
                 self._persistent_preferred_codec = None
                 self._ensure_preferred_format()
                 self._ensure_audio_requirements(force=True)
+                if self._client.group.has_active_stream:
+                    self._pending_stream_start = True
+                    self._client.group.on_role_format_changed(self)
                 return True
 
         if codec is None:
