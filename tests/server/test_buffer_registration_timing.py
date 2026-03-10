@@ -107,6 +107,7 @@ async def test_buffer_tracker_does_not_backpressure_until_send() -> None:
 
     role = client.role("player@v1")
     assert role is not None
+    role._stream_started = True  # noqa: SLF001
     buffer_tracker = role.get_buffer_tracker()
     assert buffer_tracker is not None
 
