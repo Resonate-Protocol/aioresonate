@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -14,6 +14,7 @@ from aiosendspin.models.types import AudioCodec, GoodbyeReason, PlayerCommand, R
 from aiosendspin.server import client as client_module
 from aiosendspin.server.client import SendspinClient
 from aiosendspin.server.clock import LoopClock
+from aiosendspin.server.connection import SendspinConnection
 from aiosendspin.server.group import SendspinGroup
 from aiosendspin.server.roles.player.v1 import PlayerPersistentState
 
@@ -230,3 +231,74 @@ async def test_hard_disconnect_clears_roles() -> None:
     client.detach_connection(GoodbyeReason.USER_REQUEST)
     assert not client.has_warm_disconnected_roles
     assert client.role("player@v1") is None
+
+
+@pytest.mark.asyncio
+async def test_stale_connection_disconnect_does_not_wipe_newer_connection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Old async disconnect must not detach a newer replacement connection (PR #168 regression).
+
+    Race condition:
+      1. Client has ``old_conn`` (e.g. discovery connection).
+      2. ``new_conn`` arrives; ``attach_connection()`` schedules ``old_conn.disconnect()``
+         as an async task and immediately sets ``client._connection = new_conn``.
+      3. ``new_conn`` completes its handshake (``mark_connected()``).
+      4. ``old_conn.disconnect()`` resumes after an async gap and must NOT call
+         ``detach_connection()`` because ``client.connection`` is now ``new_conn``, not ``self``.
+    """
+    loop = asyncio.get_running_loop()
+    server = _DummyServer(loop=loop, clock=LoopClock(loop))
+    client = SendspinClient(server, client_id="player-1")
+    SendspinGroup(server, client)
+
+    # Step 1: attach first connection.
+    old_wsock = MagicMock()
+    old_wsock.closed = False
+    old_wsock.close = AsyncMock()
+    old_conn = SendspinConnection(server, wsock_client=old_wsock)
+    client.attach_connection(
+        old_conn,
+        client_info=_player_hello("player-1"),
+        active_roles=[Roles.PLAYER.value],
+    )
+    old_conn._client = client  # mirror what SendspinConnection sets after attach  # noqa: SLF001
+    client.mark_connected()
+    assert client.connection is old_conn
+    assert client.is_connected
+
+    stale_disconnect_done = asyncio.Event()
+    old_disconnect = old_conn.disconnect
+
+    async def _disconnect_and_signal(*, retry_connection: bool = True) -> None:
+        try:
+            await old_disconnect(retry_connection=retry_connection)
+        finally:
+            stale_disconnect_done.set()
+
+    monkeypatch.setattr(old_conn, "disconnect", _disconnect_and_signal)
+
+    # Step 2: new connection replaces old one.
+    # attach_connection() schedules old_conn.disconnect() as a task (eager_start may
+    # begin it immediately, but it suspends at the first await inside disconnect()).
+    new_wsock = MagicMock()
+    new_wsock.closed = False
+    new_wsock.close = AsyncMock()
+    new_conn = SendspinConnection(server, wsock_client=new_wsock)
+    client.attach_connection(
+        new_conn,
+        client_info=_player_hello("player-1"),
+        active_roles=[Roles.PLAYER.value],
+    )
+    new_conn._client = client  # mirror what SendspinConnection sets after attach  # noqa: SLF001
+    client.mark_connected()
+    assert client.connection is new_conn
+
+    # Step 3: wait for old_conn.disconnect() to run to completion.
+    await asyncio.wait_for(stale_disconnect_done.wait(), timeout=1.0)
+
+    # The new connection must still be the active one.
+    assert client.connection is new_conn, (
+        "Old connection's async disconnect wiped the newer live connection (PR #168 regression)"
+    )
+    assert client.is_connected
