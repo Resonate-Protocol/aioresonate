@@ -222,3 +222,56 @@ def test_metadata_group_role_skips_unchanged() -> None:
     # Should not have sent again
     member.send_message.assert_not_called()
     group._signal_event.assert_called_once()  # noqa: SLF001
+
+
+def test_metadata_group_role_freeze_progress_snapshots_elapsed_position() -> None:
+    """freeze_progress() should snapshot live progress and stop extrapolation."""
+    group = _make_group_stub()
+    mgr = MetadataGroupRole(group)
+    group.has_active_stream = True
+
+    mgr.set_metadata(
+        Metadata(
+            title="Test",
+            track_progress=30_000,
+            track_duration=180_000,
+            playback_speed=1000,
+        )
+    )
+
+    group._server.clock.now_us.return_value = 11_000_000  # noqa: SLF001
+    mgr.freeze_progress()
+
+    assert mgr.metadata is not None
+    assert mgr.metadata.track_progress == 40_000
+    assert mgr.metadata.playback_speed == 0
+
+
+def test_metadata_group_role_member_join_does_not_rewind_after_freeze() -> None:
+    """Frozen progress should be sent unchanged after the stream becomes inactive."""
+    group = _make_group_stub()
+    mgr = MetadataGroupRole(group)
+    group.has_active_stream = True
+
+    mgr.set_metadata(
+        Metadata(
+            title="Test",
+            track_progress=30_000,
+            track_duration=180_000,
+            playback_speed=1000,
+        )
+    )
+
+    group._server.clock.now_us.return_value = 11_000_000  # noqa: SLF001
+    mgr.freeze_progress()
+    group.has_active_stream = False
+
+    new_member = MagicMock()
+    mgr.on_member_join(new_member)
+
+    msg = new_member.send_message.call_args.args[0]
+    assert isinstance(msg, ServerStateMessage)
+    assert msg.payload.metadata is not None
+    assert msg.payload.metadata.progress is not None
+    assert msg.payload.metadata.progress.track_progress == 40_000
+    assert msg.payload.metadata.progress.playback_speed == 0

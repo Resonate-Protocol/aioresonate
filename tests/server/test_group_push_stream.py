@@ -14,6 +14,8 @@ from aiosendspin.server.clock import LoopClock
 from aiosendspin.server.events import GroupStateChangedEvent
 from aiosendspin.server.group import SendspinGroup
 from aiosendspin.server.push_stream import PushStream, StreamStoppedError
+from aiosendspin.server.roles.metadata import Metadata
+from aiosendspin.server.roles.metadata.group import MetadataGroupRole
 
 
 class TestGroupStartStream:
@@ -134,6 +136,35 @@ class TestGroupStartStream:
         await group.stop()
 
         assert group.state == PlaybackStateType.STOPPED
+
+    @pytest.mark.asyncio
+    async def test_group_stop_freezes_metadata_progress(
+        self,
+        mock_server: MagicMock,
+        mock_client: MagicMock,
+    ) -> None:
+        """stop() should snapshot current progress before the stream becomes inactive."""
+        group = SendspinGroup(mock_server, mock_client)
+        metadata_role = group.group_role("metadata")
+        assert isinstance(metadata_role, MetadataGroupRole)
+
+        group.start_stream()
+        metadata_role.set_metadata(
+            Metadata(
+                title="Test",
+                track_progress=30_000,
+                track_duration=180_000,
+                playback_speed=1000,
+            )
+        )
+
+        mock_server.loop.time.return_value = 1010.0
+
+        await group.stop()
+
+        assert metadata_role.metadata is not None
+        assert metadata_role.metadata.track_progress == 40_000
+        assert metadata_role.metadata.playback_speed == 0
 
     def test_multiple_start_stream_returns_new_instances(
         self,
