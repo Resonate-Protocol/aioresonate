@@ -234,7 +234,9 @@ async def test_hard_disconnect_clears_roles() -> None:
 
 
 @pytest.mark.asyncio
-async def test_stale_connection_disconnect_does_not_wipe_newer_connection() -> None:
+async def test_stale_connection_disconnect_does_not_wipe_newer_connection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Old async disconnect must not detach a newer replacement connection (PR #168 regression).
 
     Race condition:
@@ -265,6 +267,17 @@ async def test_stale_connection_disconnect_does_not_wipe_newer_connection() -> N
     assert client.connection is old_conn
     assert client.is_connected
 
+    stale_disconnect_done = asyncio.Event()
+    old_disconnect = old_conn.disconnect
+
+    async def _disconnect_and_signal(*, retry_connection: bool = True) -> None:
+        try:
+            await old_disconnect(retry_connection=retry_connection)
+        finally:
+            stale_disconnect_done.set()
+
+    monkeypatch.setattr(old_conn, "disconnect", _disconnect_and_signal)
+
     # Step 2: new connection replaces old one.
     # attach_connection() schedules old_conn.disconnect() as a task (eager_start may
     # begin it immediately, but it suspends at the first await inside disconnect()).
@@ -281,8 +294,8 @@ async def test_stale_connection_disconnect_does_not_wipe_newer_connection() -> N
     client.mark_connected()
     assert client.connection is new_conn
 
-    # Step 3: let old_conn.disconnect() run to completion.
-    await asyncio.sleep(0)
+    # Step 3: wait for old_conn.disconnect() to run to completion.
+    await asyncio.wait_for(stale_disconnect_done.wait(), timeout=1.0)
 
     # The new connection must still be the active one.
     assert client.connection is new_conn, (
