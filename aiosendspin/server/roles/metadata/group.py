@@ -96,22 +96,20 @@ class MetadataGroupRole(GroupRole):
 
     def freeze_progress(self) -> None:
         """Snapshot current progress and stop further client-side progress extrapolation."""
-        if self._current_metadata is None:
-            return
+        metadata = self._current_metadata
         if (
-            self._current_metadata.track_progress is None
-            or self._current_metadata.track_duration is None
-            or self._current_metadata.playback_speed is None
+            metadata is None
+            or metadata.track_progress is None
+            or metadata.track_duration is None
+            or metadata.playback_speed is None
+            or (current_progress := self._get_current_track_progress()) is None
         ):
             return
 
         timestamp = self._group._server.clock.now_us()  # noqa: SLF001
-        current_progress = self._get_current_track_progress()
-        if current_progress is None:
-            return
 
         frozen_metadata = replace(
-            self._current_metadata,
+            metadata,
             track_progress=current_progress,
             playback_speed=0,
             timestamp_us=timestamp,
