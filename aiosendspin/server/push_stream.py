@@ -549,9 +549,13 @@ class PushStream:
 
         Returns:
             The earliest play_start_us timestamp across all channels.
+            If stop() is called while this commit is already in-flight, the
+            commit aborts remaining work and returns a stable timestamp without
+            delivering any additional audio after the stop.
 
         Raises:
-            StreamStoppedError: If the stream has been stopped.
+            StreamStoppedError: If the stream is already stopped when commit
+                begins.
         """
         # Check if stopped
         if self._is_stopped:
