@@ -94,6 +94,30 @@ class MetadataGroupRole(GroupRole):
 
         return self._current_metadata.track_progress
 
+    def freeze_progress(self) -> None:
+        """Snapshot current progress and stop further client-side progress extrapolation."""
+        if self._current_metadata is None:
+            return
+        if (
+            self._current_metadata.track_progress is None
+            or self._current_metadata.track_duration is None
+            or self._current_metadata.playback_speed is None
+        ):
+            return
+
+        timestamp = self._group._server.clock.now_us()  # noqa: SLF001
+        current_progress = self._get_current_track_progress()
+        if current_progress is None:
+            return
+
+        frozen_metadata = replace(
+            self._current_metadata,
+            track_progress=current_progress,
+            playback_speed=0,
+            timestamp_us=timestamp,
+        )
+        self.set_metadata(frozen_metadata)
+
     def set_metadata(self, metadata: Metadata | None) -> None:
         """Set metadata and push updates to all subscribed roles.
 
