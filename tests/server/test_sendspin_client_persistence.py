@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -14,6 +14,7 @@ from aiosendspin.models.types import AudioCodec, GoodbyeReason, PlayerCommand, R
 from aiosendspin.server import client as client_module
 from aiosendspin.server.client import SendspinClient
 from aiosendspin.server.clock import LoopClock
+from aiosendspin.server.connection import SendspinConnection
 from aiosendspin.server.group import SendspinGroup
 from aiosendspin.server.roles.player.v1 import PlayerPersistentState
 
@@ -32,41 +33,6 @@ class _DummyServer:
 class _DummyConnection:
     async def disconnect(self, *, retry_connection: bool = True) -> None:  # noqa: ARG002
         return
-
-    def send_message(self, message: object) -> None:  # noqa: ARG002
-        return
-
-    def send_binary(
-        self,
-        data: bytes,  # noqa: ARG002
-        *,
-        role: str,  # noqa: ARG002
-        timestamp_us: int,  # noqa: ARG002
-        message_type: int,  # noqa: ARG002
-        buffer_end_time_us: int | None = None,  # noqa: ARG002
-        buffer_byte_count: int | None = None,  # noqa: ARG002
-    ) -> bool:
-        return True
-
-
-class _DetachingConnection:
-    """Connection that mirrors SendspinConnection's detach logic (including the guard from PR #168).
-
-    An ``await asyncio.sleep(0)`` before the detach call simulates the real async gap
-    (e.g. awaiting wsock.close()) that makes the race condition possible.
-    """
-
-    def __init__(self) -> None:
-        self._client: SendspinClient | None = None
-        self.detach_called = False
-
-    async def disconnect(self, *, retry_connection: bool = True) -> None:  # noqa: ARG002
-        await asyncio.sleep(0)  # yield, as the real implementation does before detach
-        if self._client is not None:
-            if self._client.connection is self:
-                self._client.detach_connection(None)
-                self.detach_called = True
-            self._client = None
 
     def send_message(self, message: object) -> None:  # noqa: ARG002
         return
@@ -285,7 +251,10 @@ async def test_stale_connection_disconnect_does_not_wipe_newer_connection() -> N
     SendspinGroup(server, client)
 
     # Step 1: attach first connection.
-    old_conn = _DetachingConnection()
+    old_wsock = MagicMock()
+    old_wsock.closed = False
+    old_wsock.close = AsyncMock()
+    old_conn = SendspinConnection(server, wsock_client=old_wsock)
     client.attach_connection(
         old_conn,
         client_info=_player_hello("player-1"),
@@ -299,7 +268,10 @@ async def test_stale_connection_disconnect_does_not_wipe_newer_connection() -> N
     # Step 2: new connection replaces old one.
     # attach_connection() schedules old_conn.disconnect() as a task (eager_start may
     # begin it immediately, but it suspends at the first await inside disconnect()).
-    new_conn = _DetachingConnection()
+    new_wsock = MagicMock()
+    new_wsock.closed = False
+    new_wsock.close = AsyncMock()
+    new_conn = SendspinConnection(server, wsock_client=new_wsock)
     client.attach_connection(
         new_conn,
         client_info=_player_hello("player-1"),
@@ -317,6 +289,3 @@ async def test_stale_connection_disconnect_does_not_wipe_newer_connection() -> N
         "Old connection's async disconnect wiped the newer live connection (PR #168 regression)"
     )
     assert client.is_connected
-    assert not old_conn.detach_called, (
-        "detach_connection was incorrectly called from the stale old connection"
-    )
