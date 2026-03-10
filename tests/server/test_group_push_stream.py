@@ -144,11 +144,6 @@ class TestGroupStartStream:
         mock_client: MagicMock,
     ) -> None:
         """stop() should snapshot current progress before the stream becomes inactive."""
-        mock_client.is_connected = True
-        mock_client.active_roles = []
-        mock_client.send_message = MagicMock()
-        mock_client._set_group = MagicMock()  # noqa: SLF001
-
         group = SendspinGroup(mock_server, mock_client)
         metadata_role = group.group_role("metadata")
         assert isinstance(metadata_role, MetadataGroupRole)
