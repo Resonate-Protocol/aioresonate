@@ -8,10 +8,11 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from aiosendspin.models.core import ClientHelloPayload
+from aiosendspin.models.core import ClientHelloPayload, StreamStartMessage
 from aiosendspin.models.player import ClientHelloPlayerSupport, SupportedAudioFormat
 from aiosendspin.models.types import AudioCodec, GoodbyeReason, PlayerCommand, Roles
 from aiosendspin.server import client as client_module
+from aiosendspin.server.audio import AudioFormat
 from aiosendspin.server.client import SendspinClient
 from aiosendspin.server.clock import LoopClock
 from aiosendspin.server.group import SendspinGroup
@@ -30,40 +31,56 @@ class _DummyServer:
 
 
 class _DummyConnection:
+    def __init__(self) -> None:
+        self.sent_json: list[object] = []
+        self.sent_binary: list[bytes] = []
+
     async def disconnect(self, *, retry_connection: bool = True) -> None:  # noqa: ARG002
         return
 
-    def send_message(self, message: object) -> None:  # noqa: ARG002
-        return
+    def send_message(self, message: object) -> None:
+        self.sent_json.append(message)
+
+    def send_role_message(self, role: str, message: object) -> None:  # noqa: ARG002
+        self.sent_json.append(message)
 
     def send_binary(
         self,
-        data: bytes,  # noqa: ARG002
+        data: bytes,
         *,
         role: str,  # noqa: ARG002
         timestamp_us: int,  # noqa: ARG002
         message_type: int,  # noqa: ARG002
         buffer_end_time_us: int | None = None,  # noqa: ARG002
         buffer_byte_count: int | None = None,  # noqa: ARG002
+        duration_us: int | None = None,  # noqa: ARG002
     ) -> bool:
+        self.sent_binary.append(data)
         return True
 
 
-def _player_hello(client_id: str) -> ClientHelloPayload:
+def _player_hello(
+    client_id: str,
+    *,
+    supported_formats: list[SupportedAudioFormat] | None = None,
+) -> ClientHelloPayload:
+    if supported_formats is None:
+        supported_formats = [
+            SupportedAudioFormat(
+                codec=AudioCodec.PCM,
+                channels=2,
+                sample_rate=48000,
+                bit_depth=16,
+            )
+        ]
+
     return ClientHelloPayload(
         client_id=client_id,
         name=client_id,
         version=1,
         supported_roles=[Roles.PLAYER.value],
         player_support=ClientHelloPlayerSupport(
-            supported_formats=[
-                SupportedAudioFormat(
-                    codec=AudioCodec.PCM,
-                    channels=2,
-                    sample_rate=48000,
-                    bit_depth=16,
-                )
-            ],
+            supported_formats=supported_formats,
             buffer_capacity=100_000,
             supported_commands=[PlayerCommand.VOLUME, PlayerCommand.MUTE],
         ),
@@ -158,6 +175,137 @@ async def test_reconnect_resets_buffer_tracker() -> None:
     # Buffer tracker should be reset immediately on reconnect
     # (client's actual buffer is empty after reconnect)
     assert state.buffer_tracker.buffered_bytes == 0
+
+
+@pytest.mark.asyncio
+async def test_reconnect_refreshes_audio_requirements_from_new_hello() -> None:
+    """Warm reconnect should rebuild cached audio requirements from the new hello."""
+    loop = asyncio.get_running_loop()
+    server = _DummyServer(loop=loop, clock=LoopClock(loop))
+    client = SendspinClient(server, client_id="player-1")
+    SendspinGroup(server, client)
+
+    client.attach_connection(
+        _DummyConnection(),
+        client_info=_player_hello(
+            "player-1",
+            supported_formats=[
+                SupportedAudioFormat(
+                    codec=AudioCodec.FLAC,
+                    channels=2,
+                    sample_rate=48_000,
+                    bit_depth=32,
+                )
+            ],
+        ),
+        active_roles=[Roles.PLAYER.value],
+    )
+    client.mark_connected()
+
+    role = client.role("player@v1")
+    assert role is not None
+    first_req = role.get_audio_requirements()
+    assert first_req is not None
+    assert first_req.sample_rate == 48_000
+    assert first_req.bit_depth == 32
+    assert first_req.channels == 2
+
+    client.detach_connection(None)
+
+    client.attach_connection(
+        _DummyConnection(),
+        client_info=_player_hello(
+            "player-1",
+            supported_formats=[
+                SupportedAudioFormat(
+                    codec=AudioCodec.FLAC,
+                    channels=2,
+                    sample_rate=48_000,
+                    bit_depth=24,
+                )
+            ],
+        ),
+        active_roles=[Roles.PLAYER.value],
+    )
+    client.mark_connected()
+
+    reconnected_role = client.role("player@v1")
+    assert reconnected_role is role
+
+    refreshed_req = reconnected_role.get_audio_requirements()
+    assert refreshed_req is not None
+    assert refreshed_req.sample_rate == 48_000
+    assert refreshed_req.bit_depth == 24
+    assert refreshed_req.channels == 2
+
+
+@pytest.mark.asyncio
+async def test_reconnect_with_new_format_drops_stale_cached_audio() -> None:
+    """Warm reconnect with changed requirements should not replay old-format backlog."""
+    mock_loop = MagicMock()
+    mock_loop.time.return_value = 1000.0
+    server = _DummyServer(loop=mock_loop, clock=LoopClock(mock_loop))
+    client = SendspinClient(server, client_id="player-1")
+    group = SendspinGroup(server, client)
+
+    first_conn = _DummyConnection()
+    client.attach_connection(
+        first_conn,
+        client_info=_player_hello(
+            "player-1",
+            supported_formats=[
+                SupportedAudioFormat(
+                    codec=AudioCodec.PCM,
+                    channels=2,
+                    sample_rate=48_000,
+                    bit_depth=16,
+                )
+            ],
+        ),
+        active_roles=[Roles.PLAYER.value],
+    )
+    client.mark_connected()
+
+    stream = group.start_stream()
+    stream.prepare_audio(
+        bytes(4_800),
+        AudioFormat(sample_rate=48_000, bit_depth=16, channels=2),
+    )
+    await stream.commit_audio()
+
+    client.detach_connection(None)
+
+    # Keep producing old-format backlog while the role is warm-disconnected.
+    stream.prepare_audio(
+        bytes(4_800),
+        AudioFormat(sample_rate=48_000, bit_depth=16, channels=2),
+    )
+    await stream.commit_audio()
+
+    reconnect_conn = _DummyConnection()
+    client.attach_connection(
+        reconnect_conn,
+        client_info=_player_hello(
+            "player-1",
+            supported_formats=[
+                SupportedAudioFormat(
+                    codec=AudioCodec.PCM,
+                    channels=2,
+                    sample_rate=48_000,
+                    bit_depth=24,
+                )
+            ],
+        ),
+        active_roles=[Roles.PLAYER.value],
+    )
+    client.mark_connected()
+
+    stream_starts = [msg for msg in reconnect_conn.sent_json if isinstance(msg, StreamStartMessage)]
+    assert len(stream_starts) == 1
+    assert stream_starts[0].payload.player is not None
+    assert stream_starts[0].payload.player.bit_depth == 24
+    assert reconnect_conn.sent_binary
+    assert all(len(chunk) == 7_209 for chunk in reconnect_conn.sent_binary)
 
 
 @pytest.mark.asyncio
