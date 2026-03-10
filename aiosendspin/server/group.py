@@ -236,7 +236,7 @@ class SendspinGroup:
             )
 
             metadata_group_role = self.group_role("metadata")
-            if metadata_group_role is not None and hasattr(metadata_group_role, "freeze_progress"):
+            if metadata_group_role is not None:
                 metadata_group_role.freeze_progress()
 
             # Stop the push stream if active
