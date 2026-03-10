@@ -106,13 +106,10 @@ class MetadataGroupRole(GroupRole):
         ):
             return
 
-        timestamp = self._group._server.clock.now_us()  # noqa: SLF001
-
         frozen_metadata = replace(
             metadata,
             track_progress=current_progress,
             playback_speed=0,
-            timestamp_us=timestamp,
         )
         self.set_metadata(frozen_metadata)
 
