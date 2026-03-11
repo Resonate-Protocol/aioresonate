@@ -412,12 +412,10 @@ def test_player_role_on_audio_chunk_ignores_send_return_value() -> None:
 
 def test_player_role_on_audio_chunk_drops_when_stream_not_started() -> None:
     """on_audio_chunk() drops stale chunks after lifecycle reset."""
-    client = MagicMock()
-    client.send_binary.return_value = True
-    client.send_role_message = MagicMock()
+    client = _make_client_stub()
+    client.connection = MagicMock()
 
     role = PlayerV1Role(client=client)
-    role._client.connection = MagicMock()  # noqa: SLF001
     role._stream_started = False  # noqa: SLF001
     role._pending_stream_start = False  # noqa: SLF001
 
@@ -426,6 +424,26 @@ def test_player_role_on_audio_chunk_drops_when_stream_not_started() -> None:
 
     client.send_role_message.assert_not_called()
     client.send_binary.assert_not_called()
+    client._logger.debug.assert_called_once_with(  # noqa: SLF001
+        "Dropping stale player audio chunk without active stream for %s",
+        client.client_id,
+    )
+
+
+def test_player_role_on_audio_chunk_drops_silently_when_disconnected() -> None:
+    """Disconnected stale chunks should be ignored without misleading logs."""
+    client = _make_client_stub()
+
+    role = PlayerV1Role(client=client)
+    role._stream_started = False  # noqa: SLF001
+    role._pending_stream_start = False  # noqa: SLF001
+
+    chunk = AudioChunk(data=b"audio", timestamp_us=1000, duration_us=25000, byte_count=5)
+    role.on_audio_chunk(chunk)
+
+    client.send_role_message.assert_not_called()
+    client.send_binary.assert_not_called()
+    client._logger.debug.assert_not_called()  # noqa: SLF001
 
 
 # --- on_stream_clear ---

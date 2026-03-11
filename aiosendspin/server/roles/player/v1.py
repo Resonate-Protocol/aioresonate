@@ -314,10 +314,11 @@ class PlayerV1Role(Role):
 
         # Guard against stale delivery after stream/end or stream/clear.
         if not self._stream_started:
-            self._client._logger.debug(  # noqa: SLF001
-                "Dropping player audio chunk because stream is not started for %s",
-                self._client.client_id,
-            )
+            if self.has_connection():
+                self._client._logger.debug(  # noqa: SLF001
+                    "Dropping stale player audio chunk without active stream for %s",
+                    self._client.client_id,
+                )
             return
 
         # Pack binary header and send
