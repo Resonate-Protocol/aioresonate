@@ -239,7 +239,7 @@ class SendspinConnection:
     @property
     def should_retry_server_initiated_connection(self) -> bool:
         """Whether the server should reconnect this URL after disconnect."""
-        return self._last_goodbye_reason != GoodbyeReason.ANOTHER_SERVER
+        return not self._closing and self._last_goodbye_reason != GoodbyeReason.ANOTHER_SERVER
 
     @property
     def goodbye_reason(self) -> GoodbyeReason | None:
