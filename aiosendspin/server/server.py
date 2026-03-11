@@ -364,7 +364,10 @@ class SendspinServer:
 
     def register_client_url(self, client_id: str, url: str) -> None:
         """Record the URL used to connect to a client."""
+        previous_url = self._client_urls.get(client_id)
         self._client_urls[client_id] = url
+        if previous_url is not None and previous_url != url:
+            self.disconnect_from_client(previous_url)
 
     def get_client_url(self, client_id: str) -> str | None:
         """Get the URL for a client (for reconnection)."""
@@ -553,6 +556,7 @@ class SendspinServer:
             self._connection_tasks.pop(url, None)
             self._retry_events.pop(url, None)
             self._initial_connect_succeeded.discard(url)
+            self._connection_reasons.pop(url, None)
 
     async def start_server(
         self,
