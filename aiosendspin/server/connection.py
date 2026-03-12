@@ -401,7 +401,9 @@ class SendspinConnection:
                 await wsock.close()
 
         if self._client is not None:
-            self._client.detach_connection(self._last_goodbye_reason)
+            # Only detach if this connection is still the active one.
+            if self._client.connection is self:
+                self._client.detach_connection(self._last_goodbye_reason)
             self._client = None
 
         self._logger.debug("Connection disconnected")
@@ -613,14 +615,6 @@ class SendspinConnection:
             self._logger = logger.getChild(self._client_id)
             self._logger.debug("Received client/hello: %s", client_info)
 
-            client = self._server.get_or_create_client(self._client_id)
-            client.attach_connection(self, client_info=client_info, active_roles=self._active_roles)
-            self._client = client
-
-            # Register client_id → URL mapping for server-initiated connections
-            if self._url is not None:
-                self._server.register_client_url(client_info.client_id, self._url)
-
             # Look up connection reason for server-initiated connections
             connection_reason = (
                 self._server.get_connection_reason(self._url)
@@ -628,7 +622,7 @@ class SendspinConnection:
                 else ConnectionReason.DISCOVERY
             )
 
-            self.send_message(
+            self.send_priority_message(
                 ServerHelloMessage(
                     payload=ServerHelloPayload(
                         server_id=self._server.id,
@@ -640,6 +634,14 @@ class SendspinConnection:
                 )
             )
             self._server_hello_sent = True
+
+            client = self._server.get_or_create_client(self._client_id)
+            client.attach_connection(self, client_info=client_info, active_roles=self._active_roles)
+            self._client = client
+
+            # Register client_id → URL mapping for server-initiated connections
+            if self._url is not None:
+                self._server.register_client_url(client_info.client_id, self._url)
 
             if self.requires_initial_state():
                 self._initial_state_timeout_handle = self._server.loop.call_later(

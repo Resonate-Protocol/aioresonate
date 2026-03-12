@@ -22,7 +22,7 @@ from aiosendspin.server.events import (
     GroupMemberRemovedEvent,
     GroupStateChangedEvent,
 )
-from aiosendspin.server.roles import GroupRole
+from aiosendspin.server.roles import GroupRole, MetadataGroupRole
 from aiosendspin.server.roles.registry import create_group_roles
 
 from .audio_transformers import TransformerPool
@@ -234,6 +234,10 @@ class SendspinGroup:
                 "Stopping playback for group with clients: %s",
                 [c.client_id for c in self._clients],
             )
+
+            metadata_group_role = self.group_role("metadata")
+            if isinstance(metadata_group_role, MetadataGroupRole):
+                metadata_group_role.freeze_progress()
 
             # Stop the push stream if active
             if self._push_stream is not None:

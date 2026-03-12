@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import dataclass
@@ -36,6 +37,13 @@ from .connection import SendspinConnection
 from .group import SendspinGroup
 
 logger = logging.getLogger(__name__)
+
+
+# Abort reconnection attempts after exponential backoff reaches this ceiling
+MAX_RECONNECT_BACKOFF_S = 300.0
+# Only consider a connection stable if it lasts at least this long, otherwise
+# a successful but broken session may cause a reconnection every second.
+STABLE_SERVER_INITIATED_SESSION_S = 10.0
 
 
 class SendspinEvent:
@@ -355,8 +363,15 @@ class SendspinServer:
         return self._connection_reasons.get(url, ConnectionReason.DISCOVERY)
 
     def register_client_url(self, client_id: str, url: str) -> None:
-        """Record the URL used to connect to a client."""
+        """Record the URL used to connect to a client.
+
+        If the client was previously registered with a different URL, the
+        connection to that stale URL is cancelled.
+        """
+        previous_url = self._client_urls.get(client_id)
         self._client_urls[client_id] = url
+        if previous_url is not None and previous_url != url:
+            self.disconnect_from_client(previous_url)
 
     def get_client_url(self, client_id: str) -> str | None:
         """Get the URL for a client (for reconnection)."""
@@ -470,7 +485,6 @@ class SendspinServer:
     async def _handle_client_connection(self, url: str) -> None:  # noqa: PLR0915
         """Handle a server-initiated WebSocket connection task."""
         backoff = 1.0
-        max_backoff = 300.0
         first_connection_succeeded = False
 
         try:
@@ -486,9 +500,13 @@ class SendspinServer:
                             first_connection_succeeded = True
                             self._initial_connect_succeeded.add(url)
                             self._resolve_initial_connect_waiters(url)
-                        backoff = 1.0
+                        connection_started_s = time.monotonic()
                         conn = SendspinConnection(self, wsock_client=wsock, url=url)
                         await conn._handle_client()  # noqa: SLF001
+                        session_duration_s = time.monotonic() - connection_started_s
+
+                    if session_duration_s >= STABLE_SERVER_INITIATED_SESSION_S:
+                        backoff = 1.0
 
                     if not conn.should_retry_server_initiated_connection:
                         if conn.goodbye_reason == GoodbyeReason.ANOTHER_SERVER:
@@ -518,7 +536,7 @@ class SendspinServer:
                         return
                     logger.debug("Connection task for %s failed: %s", url, err)
 
-                if backoff >= max_backoff:
+                if backoff >= MAX_RECONNECT_BACKOFF_S:
                     break
 
                 logger.debug("Trying to reconnect to client at %s in %.1fs", url, backoff)
@@ -542,6 +560,7 @@ class SendspinServer:
             self._connection_tasks.pop(url, None)
             self._retry_events.pop(url, None)
             self._initial_connect_succeeded.discard(url)
+            self._connection_reasons.pop(url, None)
 
     async def start_server(
         self,

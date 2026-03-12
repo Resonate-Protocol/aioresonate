@@ -78,6 +78,7 @@ def test_player_role_on_audio_chunk_packs_header_and_tracks_duration() -> None:
     client.send_role_message = MagicMock()
 
     role = PlayerV1Role(client=client)
+    role._stream_started = True  # noqa: SLF001
     payload = b"\x01\x02\x03"
     timestamp_us = 123_000
     duration_us = 40_000
@@ -185,6 +186,7 @@ def test_player_role_on_audio_chunk_sends_binary() -> None:
 
     role = PlayerV1Role(client=client)
     role._client.connection = MagicMock()  # noqa: SLF001
+    role._stream_started = True  # noqa: SLF001
 
     chunk = AudioChunk(data=b"audio", timestamp_us=1000, duration_us=25000, byte_count=5)
     result = role.on_audio_chunk(chunk)

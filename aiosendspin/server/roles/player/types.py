@@ -42,6 +42,10 @@ class PlayerRoleProtocol(Protocol):
         """Return formats both client and server support, in client priority order."""
         ...
 
-    def set_preferred_format(self, audio_format: AudioFormat, codec: AudioCodec) -> bool:
-        """Set preferred format if compatible. Returns True on success."""
+    def set_preferred_format(
+        self,
+        audio_format: AudioFormat | None,
+        codec: AudioCodec | None = None,
+    ) -> bool:
+        """Set or clear preferred format override. Returns True on success."""
         ...

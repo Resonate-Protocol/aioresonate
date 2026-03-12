@@ -9,7 +9,7 @@ import sys
 import types
 from collections import deque
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, NamedTuple
+from typing import TYPE_CHECKING, Literal, NamedTuple
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +52,8 @@ class AudioFormat:
     """Bit depth in bits per sample (16, 24, or 32)."""
     channels: int
     """Number of audio channels (1 for mono, 2 for stereo)."""
+    sample_type: Literal["int", "float"] = "int"
+    """PCM sample type. Use ``float`` to represent 32-bit floating-point PCM input."""
 
     def resolve_av_format(self) -> tuple[int, str, str, int]:
         """Resolve helper data for this audio format.
@@ -59,14 +61,23 @@ class AudioFormat:
         Returns:
             A tuple of (wire_bytes_per_sample, av_format, layout, av_bytes_per_sample) where:
             - wire_bytes_per_sample: Number of bytes per audio sample on the wire
-            - av_format: PyAV sample format string ("s16" or "s32")
+            - av_format: PyAV sample format string ("s16", "s32", or "flt")
             - layout: Channel layout string ("mono" or "stereo")
             - av_bytes_per_sample: Number of bytes per sample produced/consumed by PyAV
 
         Raises:
-            ValueError: If bit_depth is not 16/24/32, or channels is not 1 or 2.
+            ValueError: If bit_depth/channels/sample_type combination is unsupported.
         """
-        if self.bit_depth == 16:
+        if self.sample_type not in ("int", "float"):
+            raise ValueError("sample_type must be 'int' or 'float'")
+
+        if self.sample_type == "float":
+            if self.bit_depth != 32:
+                raise ValueError("Only 32-bit float PCM is supported")
+            wire_bytes_per_sample = 4
+            av_format = "flt"
+            av_bytes_per_sample = 4
+        elif self.bit_depth == 16:
             wire_bytes_per_sample = 2
             av_format = "s16"
             av_bytes_per_sample = 2

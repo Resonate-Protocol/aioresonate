@@ -38,6 +38,25 @@ def test_resolve_audio_format_32_bit_is_supported() -> None:
     assert av_bytes == 4
 
 
+def test_resolve_audio_format_32_bit_float_uses_flt_in_pyav() -> None:
+    """32-bit float PCM should map to flt for PyAV processing."""
+    wire_bytes, av_format, layout, av_bytes = AudioFormat(
+        sample_rate=44_100, bit_depth=32, channels=2, sample_type="float"
+    ).resolve_av_format()
+    assert wire_bytes == 4
+    assert av_format == "flt"
+    assert layout == "stereo"
+    assert av_bytes == 4
+
+
+def test_resolve_audio_format_float_requires_32_bit() -> None:
+    """Float PCM should reject non-32-bit configurations."""
+    with pytest.raises(ValueError, match="32-bit float"):
+        AudioFormat(
+            sample_rate=48_000, bit_depth=16, channels=2, sample_type="float"
+        ).resolve_av_format()
+
+
 def test_convert_s32_to_s24_drops_least_significant_byte_python_impl(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

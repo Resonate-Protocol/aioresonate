@@ -56,8 +56,6 @@ class PlayerPersistentState:
 
     volume: int = 100
     muted: bool = False
-    preferred_format: AudioFormat | None = None
-    preferred_codec: AudioCodec | None = None
     buffer_tracker: BufferTracker | None = None
     buffer_capacity_scale: float = 1.0
     max_duration_us: int = 30_000_000
@@ -94,6 +92,10 @@ class PlayerV1Role(Role):
             raise ValueError(msg)
         self._client = client
         self._preferred_format_override = preferred_format
+        self._preferred_format: AudioFormat | None = None
+        self._preferred_codec: AudioCodec | None = None
+        self._persistent_preferred_format: AudioFormat | None = None
+        self._persistent_preferred_codec: AudioCodec | None = None
         self._audio_requirements = audio_requirements
         self._stream_started = False
         self._buffer_tracker = None
@@ -119,21 +121,20 @@ class PlayerV1Role(Role):
     @property
     def preferred_format(self) -> AudioFormat | None:
         """Return the preferred audio format for this player."""
-        state = self._state()
-        return state.preferred_format or self._preferred_format_override
+        return self._preferred_format or self._preferred_format_override
 
     @preferred_format.setter
     def preferred_format(self, value: AudioFormat | None) -> None:
-        self._state().preferred_format = value
+        self._preferred_format = value
 
     @property
     def preferred_codec(self) -> AudioCodec | None:
         """Return the preferred audio codec for this player."""
-        return self._state().preferred_codec
+        return self._preferred_codec
 
     @preferred_codec.setter
     def preferred_codec(self, value: AudioCodec | None) -> None:
-        self._state().preferred_codec = value
+        self._preferred_codec = value
 
     # --- Declarations ---
 
@@ -157,7 +158,7 @@ class PlayerV1Role(Role):
         channel_id = self._client.group.get_channel_for_player(self._client.client_id)
 
         if channel_id != req.channel_id:
-            self._ensure_audio_requirements(self._state(), force=True)
+            self._ensure_audio_requirements(force=True)
 
         return self._audio_requirements
 
@@ -194,8 +195,8 @@ class PlayerV1Role(Role):
         # Reset buffer tracker on (re)connect - client buffer is empty after reconnect
         if state.buffer_tracker is not None:
             state.buffer_tracker.reset()
-        self._ensure_preferred_format(state)
-        self._ensure_audio_requirements(state)
+        self._ensure_preferred_format()
+        self._ensure_audio_requirements(force=True)
 
     def on_disconnect(self) -> None:
         """Clean up, apply delayed buffer reset policy, and unsubscribe from PlayerGroupRole."""
@@ -242,7 +243,7 @@ class PlayerV1Role(Role):
         self._stream_started = False
         self._pending_stream_start = False
         self.reset_binary_timing()
-        self._ensure_audio_requirements(state, force=True)
+        self._ensure_audio_requirements(force=True)
 
     # --- Stream lifecycle hooks ---
 
@@ -254,7 +255,7 @@ class PlayerV1Role(Role):
         """
         req = self.get_audio_requirements()
         if req is None:
-            self._ensure_audio_requirements(self._state())
+            self._ensure_audio_requirements()
             req = self.get_audio_requirements()
         if req is None:
             return
@@ -310,6 +311,15 @@ class PlayerV1Role(Role):
         if self._pending_stream_start:
             self._send_stream_start_message()
             self._pending_stream_start = False
+
+        # Guard against stale delivery after stream/end or stream/clear.
+        if not self._stream_started:
+            if self.has_connection():
+                self._client._logger.debug(  # noqa: SLF001
+                    "Dropping stale player audio chunk without active stream for %s",
+                    self._client.client_id,
+                )
+            return
 
         # Pack binary header and send
         message_type = BinaryMessageType.AUDIO_CHUNK.value
@@ -404,16 +414,49 @@ class PlayerV1Role(Role):
             return None
         return filter_encodable_formats(support.supported_formats)
 
-    def set_preferred_format(self, audio_format: AudioFormat, codec: AudioCodec) -> bool:
-        """Set preferred format if compatible with both client and server.
+    def set_preferred_format(
+        self,
+        audio_format: AudioFormat | None,
+        codec: AudioCodec | None = None,
+    ) -> bool:
+        """Set or clear preferred format override.
 
         Args:
-            audio_format: The audio format to set (sample_rate, bit_depth, channels).
-            codec: The codec to use.
+            audio_format: The audio format to set, or None to clear the override.
+            codec: The codec to use when a format is provided. If audio_format is
+                None and codec is provided, the first compatible format for that
+                codec (in client priority order) is used.
 
         Returns:
-            True if the format was set, False if incompatible.
+            True if the override was set/cleared, False if incompatible/invalid.
         """
+        if audio_format is None:
+            if codec is not None:
+                support = self._client.info.player_support
+                if support is None:
+                    return False
+                compatible = filter_encodable_formats(support.supported_formats)
+                matched = next((fmt for fmt in compatible if fmt.codec == codec), None)
+                if matched is None:
+                    return False
+                audio_format = AudioFormat(
+                    sample_rate=matched.sample_rate,
+                    bit_depth=matched.bit_depth,
+                    channels=matched.channels,
+                )
+            else:
+                self._persistent_preferred_format = None
+                self._persistent_preferred_codec = None
+                self._ensure_preferred_format()
+                self._ensure_audio_requirements(force=True)
+                if self._client.group.has_active_stream:
+                    self._pending_stream_start = True
+                    self._client.group.on_role_format_changed(self)
+                return True
+
+        if codec is None:
+            return False
+
         support = self._client.info.player_support
         if support is None:
             return False
@@ -439,13 +482,22 @@ class PlayerV1Role(Role):
         if not can_encode_format(client_format):
             return False
 
-        # Set the preferred format
-        state = self._state()
-        state.preferred_format = audio_format
-        state.preferred_codec = codec
+        # Persist the server-side override across reconnects.
+        self._persistent_preferred_format = audio_format
+        self._persistent_preferred_codec = codec
+
+        # Set the preferred format for current session.
+        self._preferred_format = audio_format
+        self._preferred_codec = codec
 
         # Rebuild audio requirements with the new format
-        self._ensure_audio_requirements(state, force=True)
+        self._ensure_audio_requirements(force=True)
+
+        # Mid-stream server-driven format change: defer stream/start until next chunk
+        # and invalidate push-stream caches for this role.
+        if self._client.group.has_active_stream:
+            self._pending_stream_start = True
+            self._client.group.on_role_format_changed(self)
 
         return True
 
@@ -577,19 +629,17 @@ class PlayerV1Role(Role):
         self.preferred_format = requested_format
         self.preferred_codec = requested_codec
 
-        state = self._state()
-
         stream_active = self._client.group.has_active_stream
         if stream_active:
             # Mid-stream format change: rebuild requirements and defer stream/start
             # until the next audio chunk (which provides the codec header).
-            self._ensure_audio_requirements(state, force=True)
+            self._ensure_audio_requirements(force=True)
             self._pending_stream_start = True
             self._client.group.on_role_format_changed(self)
         else:
             # No active stream: also defer stream/start via _pending_stream_start
             # so codec header is included when the first chunk arrives.
-            self._ensure_audio_requirements(state, force=True)
+            self._ensure_audio_requirements(force=True)
             self._pending_stream_start = True
 
     # ---- Internal helpers ----
@@ -623,13 +673,10 @@ class PlayerV1Role(Role):
             state.buffer_tracker.max_duration_us = max_duration_us
         self._buffer_tracker = state.buffer_tracker
 
-    def _ensure_preferred_format(self, state: PlayerPersistentState) -> None:
+    def _ensure_preferred_format(self) -> None:
         support = self._client.info.player_support
         if support is None:
             return
-
-        if state.preferred_format is None and self._preferred_format_override is not None:
-            state.preferred_format = self._preferred_format_override
 
         # Filter to formats the server can actually encode
         compatible = filter_encodable_formats(support.supported_formats)
@@ -640,31 +687,45 @@ class PlayerV1Role(Role):
             )
             return
 
-        # Use client's first compatible format (client priority order)
+        # The spec defines supported_formats as "in priority order (first is preferred)".
+        # On every (re)connect the client sends a fresh client/hello with its current
+        # priority, so compatible[0] represents the client's authoritative preference
+        # for this connection.
+        # If a server-side override was explicitly set, keep it sticky across reconnects
+        # while still validating it against the latest client capabilities.
         preferred_supported = compatible[0]
-        default_format = AudioFormat(
+        persistent_format = self._persistent_preferred_format
+        persistent_codec = self._persistent_preferred_codec
+        if persistent_format is not None and persistent_codec is not None:
+            matched_persistent = next(
+                (
+                    fmt
+                    for fmt in compatible
+                    if fmt.codec == persistent_codec
+                    and fmt.sample_rate == persistent_format.sample_rate
+                    and fmt.bit_depth == persistent_format.bit_depth
+                    and fmt.channels == persistent_format.channels
+                ),
+                None,
+            )
+            if matched_persistent is not None:
+                preferred_supported = matched_persistent
+            else:
+                self._client._logger.warning(  # noqa: SLF001
+                    "Clearing incompatible preferred format override for client %s",
+                    self._client.client_id,
+                )
+                self._persistent_preferred_format = None
+                self._persistent_preferred_codec = None
+
+        self._preferred_format = AudioFormat(
             sample_rate=preferred_supported.sample_rate,
             bit_depth=preferred_supported.bit_depth,
             channels=preferred_supported.channels,
         )
-        default_codec = preferred_supported.codec
+        self._preferred_codec = preferred_supported.codec
 
-        current_codec = state.preferred_codec or default_codec
-        current_format = state.preferred_format
-        is_supported = current_format is not None and any(
-            fmt.codec == current_codec
-            and fmt.sample_rate == current_format.sample_rate
-            and fmt.bit_depth == current_format.bit_depth
-            and fmt.channels == current_format.channels
-            for fmt in compatible
-        )
-        if not is_supported:
-            state.preferred_format = default_format
-            state.preferred_codec = default_codec
-
-    def _ensure_audio_requirements(
-        self, state: PlayerPersistentState, *, force: bool = False
-    ) -> None:
+    def _ensure_audio_requirements(self, *, force: bool = False) -> None:
         if self._audio_requirements is not None and not force:
             return
 
@@ -673,8 +734,8 @@ class PlayerV1Role(Role):
             self._audio_requirements = None
             return
 
-        audio_format = state.preferred_format
-        audio_codec = state.preferred_codec
+        audio_format = self._preferred_format
+        audio_codec = self._preferred_codec
         if audio_format is None or audio_codec is None:
             self._audio_requirements = None
             return
