@@ -94,6 +94,10 @@ def _supports_soxr_resampler() -> bool:
     return True
 
 
+# Tracks format combos where soxr graph construction failed, to avoid retrying.
+_soxr_failed_configs: set[tuple[str, str, int, str, str, int]] = set()
+
+
 def _build_resample_graph(
     *,
     source_av_format: str,
@@ -107,9 +111,17 @@ def _build_resample_graph(
     """Create an audio filter graph for resampling with soxr (or swr fallback)."""
     av = _get_av()
 
-    preferred_resampler = (
-        "resampler=soxr:precision=30" if _supports_soxr_resampler() else "resampler=swr"
+    config_key = (
+        source_av_format,
+        source_layout,
+        source_sample_rate,
+        target_av_format,
+        target_layout,
+        target_sample_rate,
     )
+    use_soxr = _supports_soxr_resampler() and config_key not in _soxr_failed_configs
+
+    preferred_resampler = "resampler=soxr:precision=30" if use_soxr else "resampler=swr"
     preferred_aresample = (
         preferred_resampler
         if dither_method is None
@@ -136,11 +148,12 @@ def _build_resample_graph(
             graph.add("abuffersink"),
         ).configure()
     except (OSError, RuntimeError, ValueError):
-        if preferred_resampler != "resampler=soxr:precision=30":
+        if not use_soxr:
             raise
     else:
         return cast("_AudioFilterGraph", graph)
 
+    _soxr_failed_configs.add(config_key)
     _LOGGER.warning("Falling back to swr resampler after soxr graph setup failure")
     fallback_aresample = (
         "resampler=swr"

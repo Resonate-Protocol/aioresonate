@@ -236,14 +236,14 @@ async def test_commit_audio_float_input_quantizes_at_output_edge(
     _client, conn = _make_connected_player(mock_loop, group, "p1")
 
     quantize_calls = 0
-    original_quantizer = PushStream._quantize_float_pcm_for_output  # noqa: SLF001
+    original_quantizer = push_stream_module._quantize_float_pcm  # noqa: SLF001
 
-    def _counted_quantizer(self: PushStream, **kwargs: Any) -> object:
+    def _counted_quantizer(**kwargs: Any) -> object:
         nonlocal quantize_calls
         quantize_calls += 1
-        return original_quantizer(self, **kwargs)
+        return original_quantizer(**kwargs)
 
-    monkeypatch.setattr(PushStream, "_quantize_float_pcm_for_output", _counted_quantizer)
+    monkeypatch.setattr(push_stream_module, "_quantize_float_pcm", _counted_quantizer)
 
     stream = PushStream(loop=mock_loop, clock=LoopClock(mock_loop), group=group)
     stream.prepare_audio(
@@ -289,13 +289,14 @@ def test_quantize_float_to_s16_uses_triangular_hp_dither(
 
     group = _DummyGroup(clients=[])
     stream = PushStream(loop=MagicMock(), clock=ManualClock(), group=group)
-    stream._quantize_float_pcm_for_output(  # noqa: SLF001
+    push_stream_module._quantize_float_pcm(  # noqa: SLF001
         channel_id=MAIN_CHANNEL,
         pcm_data=bytes(9600),  # 25ms @ 48kHz stereo f32
         output_ts=0,
         sample_rate=48_000,
         channels=2,
         target_bit_depth=16,
+        resampler_cache=stream._resamplers,  # noqa: SLF001
     )
 
     assert captured_dither_methods
@@ -337,21 +338,23 @@ def test_quantize_float_to_s16_preserves_dither_on_resampler_reset(
     stream = PushStream(loop=MagicMock(), clock=ManualClock(), group=group)
     # First call creates the quantizer graph. Second call with stale timestamp creates >20ms
     # drift, forcing graph rebuild in _resample_pcm_standalone.
-    stream._quantize_float_pcm_for_output(  # noqa: SLF001
+    push_stream_module._quantize_float_pcm(  # noqa: SLF001
         channel_id=MAIN_CHANNEL,
         pcm_data=bytes(9600),  # 25ms @ 48kHz stereo f32
         output_ts=0,
         sample_rate=48_000,
         channels=2,
         target_bit_depth=16,
+        resampler_cache=stream._resamplers,  # noqa: SLF001
     )
-    stream._quantize_float_pcm_for_output(  # noqa: SLF001
+    push_stream_module._quantize_float_pcm(  # noqa: SLF001
         channel_id=MAIN_CHANNEL,
         pcm_data=bytes(9600),  # 25ms @ 48kHz stereo f32
         output_ts=0,
         sample_rate=48_000,
         channels=2,
         target_bit_depth=16,
+        resampler_cache=stream._resamplers,  # noqa: SLF001
     )
 
     assert len(captured_dither_methods) >= 2
@@ -2018,22 +2021,24 @@ def test_drift_rebuild_flushes_old_graph_before_replacing(
     pcm_25ms = bytes(9600)  # 25ms @ 48kHz stereo f32
 
     # First call: creates graph, advances pending_timestamp_us by ~25ms
-    stream._quantize_float_pcm_for_output(  # noqa: SLF001
+    push_stream_module._quantize_float_pcm(  # noqa: SLF001
         channel_id=MAIN_CHANNEL,
         pcm_data=pcm_25ms,
         output_ts=0,
         sample_rate=48_000,
         channels=2,
         target_bit_depth=16,
+        resampler_cache=stream._resamplers,  # noqa: SLF001
     )
     # Second call with same output_ts=0: drift > 20ms, triggers rebuild
-    stream._quantize_float_pcm_for_output(  # noqa: SLF001
+    push_stream_module._quantize_float_pcm(  # noqa: SLF001
         channel_id=MAIN_CHANNEL,
         pcm_data=pcm_25ms,
         output_ts=0,
         sample_rate=48_000,
         channels=2,
         target_bit_depth=16,
+        resampler_cache=stream._resamplers,  # noqa: SLF001
     )
 
     assert flush_calls, "Old graph should have been flushed with push(None) before rebuild"
@@ -2086,14 +2091,14 @@ async def test_multi_role_fanout_quantizes_once_per_pcm_key(
     group.clients.extend([_DummyClient([role1]), _DummyClient([role2])])
 
     quantize_calls = 0
-    original_quantizer = PushStream._quantize_float_pcm_for_output  # noqa: SLF001
+    original_quantizer = push_stream_module._quantize_float_pcm  # noqa: SLF001
 
-    def _counted_quantizer(self: PushStream, **kwargs: Any) -> object:
+    def _counted_quantizer(**kwargs: Any) -> object:
         nonlocal quantize_calls
         quantize_calls += 1
-        return original_quantizer(self, **kwargs)
+        return original_quantizer(**kwargs)
 
-    monkeypatch.setattr(PushStream, "_quantize_float_pcm_for_output", _counted_quantizer)
+    monkeypatch.setattr(push_stream_module, "_quantize_float_pcm", _counted_quantizer)
 
     stream = PushStream(loop=mock_loop, clock=LoopClock(mock_loop), group=group)
     stream.prepare_audio(
@@ -2247,3 +2252,65 @@ def test_noop_resample_bypasses_graph_construction(
     assert result.pcm_data == pcm_25ms, "No-op resample should return input PCM unchanged"
     assert result.sample_count == 1200  # 48000 * 0.025
     assert result.output_start_ts == 1_000_000
+
+
+def test_soxr_fallback_caches_failure_per_format(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """After soxr fails for a format combo, subsequent calls skip straight to swr."""
+    # Force _supports_soxr_resampler to return True
+    monkeypatch.setattr(push_stream_module, "_supports_soxr_resampler", lambda: True)
+
+    # Replace with a fresh set so test mutations don't leak; monkeypatch restores on teardown
+    monkeypatch.setattr(push_stream_module, "_soxr_failed_configs", set())
+
+    av_mod = push_stream_module._get_av()  # noqa: SLF001
+    OriginalGraph = av_mod.filter.Graph  # noqa: N806
+    soxr_attempt_count = 0
+
+    class _TrackingSoxrGraph:
+        """Graph wrapper that fails on soxr and tracks attempts."""
+
+        def __init__(self) -> None:
+            self._real = OriginalGraph()
+
+        def add_abuffer(self, **kwargs: Any) -> Any:
+            return self._real.add_abuffer(**kwargs)
+
+        def add(self, name: str, args: str = "") -> Any:
+            nonlocal soxr_attempt_count
+            if "soxr" in args:
+                soxr_attempt_count += 1
+                raise OSError("simulated soxr failure")
+            return self._real.add(name, args)
+
+        def link_nodes(self, *nodes: Any) -> Any:
+            return self._real.link_nodes(*nodes)
+
+    monkeypatch.setattr(av_mod.filter, "Graph", _TrackingSoxrGraph)
+
+    # First call: soxr fails, falls back to swr
+    push_stream_module._build_resample_graph(  # noqa: SLF001
+        source_av_format="s16",
+        source_layout="stereo",
+        source_sample_rate=44_100,
+        target_av_format="s16",
+        target_layout="stereo",
+        target_sample_rate=48_000,
+    )
+    first_soxr_attempts = soxr_attempt_count
+
+    # Second call with same format: should skip soxr entirely
+    push_stream_module._build_resample_graph(  # noqa: SLF001
+        source_av_format="s16",
+        source_layout="stereo",
+        source_sample_rate=44_100,
+        target_av_format="s16",
+        target_layout="stereo",
+        target_sample_rate=48_000,
+    )
+
+    assert first_soxr_attempts == 1, "First call should attempt soxr once"
+    assert soxr_attempt_count == 1, (
+        f"Second call should skip soxr (cached failure), but got {soxr_attempt_count} attempts"
+    )
