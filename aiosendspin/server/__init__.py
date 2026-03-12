@@ -27,6 +27,7 @@ __all__ = [
     "SendspinEvent",
     "SendspinGroup",
     "SendspinServer",
+    "StaticDelayChangedEvent",
     "VolumeChangedEvent",
 ]
 
@@ -48,7 +49,7 @@ from .events import (
 from .group import (
     SendspinGroup,
 )
-from .roles.player.events import VolumeChangedEvent
+from .roles.player.events import StaticDelayChangedEvent, VolumeChangedEvent
 from .server import (
     ClientAddedEvent,
     ClientRemovedEvent,

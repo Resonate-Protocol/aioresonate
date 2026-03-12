@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Protocol, runtime_checkable
 if TYPE_CHECKING:
     from aiosendspin.models import AudioCodec
     from aiosendspin.models.player import SupportedAudioFormat
+    from aiosendspin.models.types import PlayerCommand
     from aiosendspin.server.audio import AudioFormat
     from aiosendspin.server.client import SendspinClient
 
@@ -36,6 +37,19 @@ class PlayerRoleProtocol(Protocol):
 
     def set_player_mute(self, muted: bool) -> None:  # noqa: FBT001
         """Set the player mute state if supported."""
+        ...
+
+    def get_static_delay_ms(self) -> int:
+        """Return the player's static delay in milliseconds."""
+        ...
+
+    def set_static_delay(self, delay_ms: int) -> None:
+        """Set the player's static delay via server command."""
+        ...
+
+    @property
+    def state_supported_commands(self) -> list[PlayerCommand]:
+        """Commands supported via client/state."""
         ...
 
     def get_supported_formats(self) -> list[SupportedAudioFormat] | None:

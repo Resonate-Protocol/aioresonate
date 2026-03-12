@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from aiosendspin.models import AudioCodec, BinaryMessageType, pack_binary_header_raw
@@ -43,7 +43,7 @@ from aiosendspin.server.roles.player.audio_transformers import (
     PcmPassthrough,
 )
 from aiosendspin.server.roles.player.capabilities import can_encode_format, filter_encodable_formats
-from aiosendspin.server.roles.player.events import VolumeChangedEvent
+from aiosendspin.server.roles.player.events import StaticDelayChangedEvent, VolumeChangedEvent
 from aiosendspin.util import create_task
 
 if TYPE_CHECKING:
@@ -61,6 +61,8 @@ class PlayerPersistentState:
     max_duration_us: int = 30_000_000
     disconnect_time_us: int | None = None
     buffer_reset_handle: asyncio.TimerHandle | None = None
+    static_delay_ms: int = 0
+    state_supported_commands: list[PlayerCommand] = field(default_factory=list)
 
 
 class PlayerV1Role(Role):
@@ -325,7 +327,8 @@ class PlayerV1Role(Role):
         message_type = BinaryMessageType.AUDIO_CHUNK.value
         header = pack_binary_header_raw(message_type, chunk.timestamp_us)
         packed_data = header + chunk.data
-        chunk_end_us = chunk.timestamp_us + chunk.duration_us
+        static_delay_us = self.static_delay_ms * 1_000
+        chunk_end_us = chunk.timestamp_us + chunk.duration_us - static_delay_us
 
         self._client.send_binary(
             packed_data,
@@ -391,6 +394,24 @@ class PlayerV1Role(Role):
     def muted(self, value: bool) -> None:
         self._state().muted = value
 
+    @property
+    def static_delay_ms(self) -> int:
+        """Current static delay of this player in milliseconds (0-5000)."""
+        return self._state().static_delay_ms
+
+    @static_delay_ms.setter
+    def static_delay_ms(self, value: int) -> None:
+        self._state().static_delay_ms = value
+
+    @property
+    def state_supported_commands(self) -> list[PlayerCommand]:
+        """Commands supported via client/state (e.g., set_static_delay)."""
+        return self._state().state_supported_commands
+
+    @state_supported_commands.setter
+    def state_supported_commands(self, value: list[PlayerCommand]) -> None:
+        self._state().state_supported_commands = value
+
     def get_player_volume(self) -> int | None:
         """Return current volume for group aggregation."""
         return self.volume
@@ -406,6 +427,26 @@ class PlayerV1Role(Role):
     def set_player_mute(self, muted: bool) -> None:  # noqa: FBT001
         """Set player mute via role API."""
         self.set_mute(muted)
+
+    def get_static_delay_ms(self) -> int:
+        """Return static delay for protocol API."""
+        return self.static_delay_ms
+
+    def set_static_delay(self, delay_ms: int) -> None:
+        """Send set_static_delay command to client."""
+        if PlayerCommand.SET_STATIC_DELAY not in self.state_supported_commands:
+            return
+
+        self._client.send_message(
+            ServerCommandMessage(
+                payload=ServerCommandPayload(
+                    player=PlayerCommandPayload(
+                        command=PlayerCommand.SET_STATIC_DELAY,
+                        static_delay_ms=delay_ms,
+                    )
+                )
+            )
+        )
 
     def get_supported_formats(self) -> list[SupportedAudioFormat] | None:
         """Return formats both client and server support, in client priority order."""
@@ -571,6 +612,15 @@ class PlayerV1Role(Role):
         if changed:
             self._client._signal_event(  # noqa: SLF001
                 VolumeChangedEvent(volume=self.volume, muted=self.muted)
+            )
+
+        if state.supported_commands is not None:
+            self.state_supported_commands = state.supported_commands
+
+        if self.static_delay_ms != state.static_delay_ms:
+            self.static_delay_ms = state.static_delay_ms
+            self._client._signal_event(  # noqa: SLF001
+                StaticDelayChangedEvent(static_delay_ms=state.static_delay_ms)
             )
 
     def on_stream_request_format(self, payload: StreamRequestFormatPayload) -> None:
