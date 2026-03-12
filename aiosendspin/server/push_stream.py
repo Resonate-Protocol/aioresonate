@@ -1121,46 +1121,6 @@ class PushStream:
             results[pcm_key] = resampled
         return results
 
-    def _quantize_float_pcm_for_output(
-        self,
-        *,
-        channel_id: UUID,
-        pcm_data: bytes,
-        output_ts: int,
-        sample_rate: int,
-        channels: int,
-        target_bit_depth: int,
-    ) -> _ResampledPCM:
-        """Convert float32 PCM to integer output format at the final output edge."""
-        source_format = AudioFormat(
-            sample_rate=sample_rate,
-            bit_depth=32,
-            channels=channels,
-            sample_type="float",
-        )
-        target_format = AudioFormat(
-            sample_rate=sample_rate,
-            bit_depth=target_bit_depth,
-            channels=channels,
-            sample_type="int",
-        )
-        dither_method = _DITHER_METHOD_TRIANGULAR_HP if target_bit_depth == 16 else None
-
-        resampler_key = _ResamplerKey(
-            channel_id=channel_id,
-            source_format=source_format,
-            target_sample_rate=sample_rate,
-            target_channels=channels,
-            target_bit_depth=target_bit_depth,
-            target_sample_type="int",
-            dither_method=dither_method,
-        )
-        state = self._get_cached_resampler(resampler_key)
-        if state is None:
-            state = _create_resampler_state(resampler_key, source_format, target_format)
-            self._cache_resampler(state)
-        return _resample_pcm_standalone(state, pcm_data, source_format, output_ts)
-
     def _resolve_frame_duration_us(self, req: AudioRequirements) -> int:
         if req.frame_duration_us is not None:
             return req.frame_duration_us
@@ -1267,6 +1227,26 @@ class PushStream:
             pcm_data = resampled.pcm_data
             output_ts = resampled.output_start_ts
             duration_us = int(resampled.sample_count * 1_000_000 / rate) if rate > 0 else 0
+            needs_s32_to_s24_conversion = resampled.needs_s32_to_s24_conversion
+
+            # Quantize float PCM once per pcm_key — all TransformKeys sharing this
+            # pcm_key produce the same quantizer _ResamplerKey. Using the quantizer's
+            # output_start_ts and sample_count ensures downstream timestamps reflect
+            # any buffering/trimming by the quantizer graph (fixes issue #3).
+            if resampled.sample_type == "float":
+                edge_quantized = _quantize_float_pcm(
+                    channel_id=channel_id,
+                    pcm_data=pcm_data,
+                    output_ts=output_ts,
+                    sample_rate=rate,
+                    channels=_channels,
+                    target_bit_depth=depth,
+                    resampler_cache=self._resamplers,
+                )
+                pcm_data = edge_quantized.pcm_data
+                output_ts = edge_quantized.output_start_ts
+                duration_us = int(edge_quantized.sample_count * 1_000_000 / rate) if rate > 0 else 0
+                needs_s32_to_s24_conversion = edge_quantized.needs_s32_to_s24_conversion
 
             grouped_by_key: defaultdict[
                 TransformKey, list[tuple[SendspinClient, Role, AudioRequirements]]
@@ -1283,18 +1263,6 @@ class PushStream:
                     continue
                 transformer = grouped[0][2].transformer
                 transformed_pcm = pcm_data
-                needs_s32_to_s24_conversion = resampled.needs_s32_to_s24_conversion
-                if resampled.sample_type == "float":
-                    edge_quantized = self._quantize_float_pcm_for_output(
-                        channel_id=channel_id,
-                        pcm_data=transformed_pcm,
-                        output_ts=output_ts,
-                        sample_rate=rate,
-                        channels=_channels,
-                        target_bit_depth=depth,
-                    )
-                    transformed_pcm = edge_quantized.pcm_data
-                    needs_s32_to_s24_conversion = edge_quantized.needs_s32_to_s24_conversion
                 if (
                     needs_s32_to_s24_conversion
                     and depth == 24

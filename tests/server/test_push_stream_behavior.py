@@ -2037,3 +2037,72 @@ def test_drift_rebuild_flushes_old_graph_before_replacing(
     )
 
     assert flush_calls, "Old graph should have been flushed with push(None) before rebuild"
+
+
+@pytest.mark.asyncio
+async def test_multi_role_fanout_quantizes_once_per_pcm_key(
+    mock_loop: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Multiple TransformKeys sharing a pcm_key must quantize float PCM only once."""
+    group = _DummyGroup(clients=[])
+    pool = group.transformer_pool
+
+    # Two roles with different frame durations → different TransformKeys, same pcm_key
+    role1 = _DummyRole(
+        AudioRequirements(
+            sample_rate=48_000,
+            bit_depth=16,
+            channels=2,
+            transformer=pool.get_or_create(
+                PcmPassthrough,
+                channel_id=MAIN_CHANNEL.int,
+                sample_rate=48_000,
+                bit_depth=16,
+                channels=2,
+                frame_duration_us=25_000,
+            ),
+            channel_id=MAIN_CHANNEL,
+            frame_duration_us=25_000,
+        )
+    )
+    role2 = _DummyRole(
+        AudioRequirements(
+            sample_rate=48_000,
+            bit_depth=16,
+            channels=2,
+            transformer=pool.get_or_create(
+                PcmPassthrough,
+                channel_id=MAIN_CHANNEL.int,
+                sample_rate=48_000,
+                bit_depth=16,
+                channels=2,
+                frame_duration_us=50_000,
+            ),
+            channel_id=MAIN_CHANNEL,
+            frame_duration_us=50_000,
+        )
+    )
+    group.clients.extend([_DummyClient([role1]), _DummyClient([role2])])
+
+    quantize_calls = 0
+    original_quantizer = PushStream._quantize_float_pcm_for_output  # noqa: SLF001
+
+    def _counted_quantizer(self: PushStream, **kwargs: Any) -> object:
+        nonlocal quantize_calls
+        quantize_calls += 1
+        return original_quantizer(self, **kwargs)
+
+    monkeypatch.setattr(PushStream, "_quantize_float_pcm_for_output", _counted_quantizer)
+
+    stream = PushStream(loop=mock_loop, clock=LoopClock(mock_loop), group=group)
+    stream.prepare_audio(
+        bytes(9600),  # 25ms @ 48kHz stereo f32
+        AudioFormat(sample_rate=48_000, bit_depth=32, channels=2, sample_type="float"),
+    )
+    await stream.commit_audio()
+
+    assert quantize_calls == 1, f"Expected 1 quantize call per pcm_key, got {quantize_calls}"
+    assert role1.received, "role1 should have received audio chunks"
+    # role2 may not receive chunks yet because 25ms of data is below its
+    # 50ms frame duration — the important assertion is quantize_calls == 1.
