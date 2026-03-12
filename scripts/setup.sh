@@ -6,20 +6,8 @@ set -e
 
 cd "$(dirname "$0")/.."
 
-env_name=${1:-".venv"}
-
-if [ -d "$env_name" ]; then
-  echo "Virtual environment '$env_name' already exists."
-else
-  echo "Creating Virtual environment..."
-  python -m venv .venv
-fi
-echo "Activating virtual environment..."
-source .venv/bin/activate
-
 echo "Installing development and optional dependencies..."
+uv sync --group dev --extra numpy
 
-pip install --upgrade pip
-pip install --upgrade uv
-uv pip install -e ".[test,numpy]"
-pre-commit install
+echo "Installing pre-commit hooks..."
+uv run pre-commit install
