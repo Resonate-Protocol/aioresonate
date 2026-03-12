@@ -388,7 +388,7 @@ def test_player_role_on_audio_chunk_packs_binary_header() -> None:
 
 def test_player_role_on_audio_chunk_passes_buffer_metadata() -> None:
     """on_audio_chunk() passes buffer tracking metadata to send_binary."""
-    client = MagicMock()
+    client = _make_client_stub()
     client.send_binary.return_value = True
 
     role = PlayerV1Role(client=client)
