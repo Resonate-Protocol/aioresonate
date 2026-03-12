@@ -141,6 +141,7 @@ class PlayerCommand(Enum):
 
     VOLUME = "volume"
     MUTE = "mute"
+    SET_STATIC_DELAY = "set_static_delay"
 
 
 class MediaCommand(Enum):

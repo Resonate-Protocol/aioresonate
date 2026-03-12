@@ -80,11 +80,17 @@ class PlayerStatePayload(DataClassORJSONMixin):
     """Volume range 0-100, only included if 'volume' in supported_commands."""
     muted: bool | None = None
     """Mute state, only included if 'mute' in supported_commands."""
+    static_delay_ms: int = 0
+    """Static delay in milliseconds (0-5000), always present for players."""
+    supported_commands: list[PlayerCommand] | None = None
+    """Subset of: 'set_static_delay'. Commands this player supports via client/state."""
 
     def __post_init__(self) -> None:
         """Validate field values."""
         if self.volume is not None and not 0 <= self.volume <= 100:
             raise ValueError(f"Volume must be in range 0-100, got {self.volume}")
+        if not 0 <= self.static_delay_ms <= 5000:
+            raise ValueError(f"static_delay_ms must be in range 0-5000, got {self.static_delay_ms}")
 
     class Config(BaseConfig):
         """Config for parsing json messages."""
@@ -106,6 +112,8 @@ class PlayerCommandPayload(DataClassORJSONMixin):
     """Volume range 0-100, only set if command is volume."""
     mute: bool | None = None
     """True to mute, false to unmute, only set if command is mute."""
+    static_delay_ms: int | None = None
+    """Delay in milliseconds (0-5000), only set if command is set_static_delay."""
 
     def __post_init__(self) -> None:
         """Validate field values and command consistency."""
@@ -122,6 +130,20 @@ class PlayerCommandPayload(DataClassORJSONMixin):
                 raise ValueError("Mute must be provided when command is 'mute'")
         elif self.mute is not None:
             raise ValueError(f"Mute should not be provided for command '{self.command.value}'")
+
+        if self.command == PlayerCommand.SET_STATIC_DELAY:
+            if self.static_delay_ms is None:
+                raise ValueError(
+                    "static_delay_ms must be provided when command is 'set_static_delay'"
+                )
+            if not 0 <= self.static_delay_ms <= 5000:
+                raise ValueError(
+                    f"static_delay_ms must be in range 0-5000, got {self.static_delay_ms}"
+                )
+        elif self.static_delay_ms is not None:
+            raise ValueError(
+                f"static_delay_ms should not be provided for command '{self.command.value}'"
+            )
 
     class Config(BaseConfig):
         """Config for parsing json messages."""
