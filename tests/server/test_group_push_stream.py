@@ -427,6 +427,30 @@ class TestRoleJoinWithActiveStream:
 
         role.on_stream_end.assert_called_once()
 
+    @pytest.mark.asyncio
+    async def test_remove_last_client_without_active_stream_still_ends_role_streams(
+        self,
+        mock_server: MagicMock,
+    ) -> None:
+        """Removing a solo client from a no-stream PLAYING group should still emit stream/end."""
+        owner_client = MagicMock()
+        owner_client.client_id = "owner-client"
+        owner_client.check_role.return_value = True
+        role = MagicMock()
+        role.get_audio_requirements.return_value = MagicMock()
+        owner_client.active_roles = [role]
+
+        group = SendspinGroup(mock_server, owner_client)
+        group.start_stream()
+        group.stop_stream()
+        assert group.state == PlaybackStateType.PLAYING
+        assert not group.has_active_stream
+
+        role.on_stream_end.reset_mock()
+        await group.remove_client(owner_client)
+
+        role.on_stream_end.assert_called_once()
+
 
 class TestGroupTransformerPool:
     """Tests for SendspinGroup.transformer_pool property."""
