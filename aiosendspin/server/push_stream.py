@@ -286,8 +286,8 @@ def _create_resampler_state(
     is_passthrough = (
         source_format.sample_rate == target_format.sample_rate
         and source_format.channels == target_format.channels
-        and source_av_format == target_av_format
-        and not needs_s32_to_s24
+        and source_format.bit_depth == target_format.bit_depth
+        and source_format.sample_type == target_format.sample_type
         and key.dither_method is None
     )
 

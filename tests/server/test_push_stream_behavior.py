@@ -2254,6 +2254,40 @@ def test_noop_resample_bypasses_graph_construction(
     assert result.output_start_ts == 1_000_000
 
 
+def test_24bit_to_32bit_is_not_passthrough(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """24-bit packed PCM to 32-bit must not be treated as passthrough.
+
+    Both resolve to PyAV format 's32', but the wire byte widths differ
+    (3 vs 4 bytes per sample). Passthrough would corrupt framing.
+    """
+    build_calls = 0
+    original_build = push_stream_module._build_resample_graph  # noqa: SLF001
+
+    def _counting_build(**kwargs: Any) -> object:
+        nonlocal build_calls
+        build_calls += 1
+        return original_build(**kwargs)
+
+    monkeypatch.setattr(push_stream_module, "_build_resample_graph", _counting_build)
+
+    source = AudioFormat(sample_rate=48_000, bit_depth=24, channels=2, sample_type="int")
+    target = AudioFormat(sample_rate=48_000, bit_depth=32, channels=2, sample_type="int")
+    key = push_stream_module._ResamplerKey(  # noqa: SLF001
+        channel_id=MAIN_CHANNEL,
+        source_format=source,
+        target_sample_rate=48_000,
+        target_channels=2,
+        target_bit_depth=32,
+        target_sample_type="int",
+    )
+    state = push_stream_module._create_resampler_state(key, source, target)  # noqa: SLF001
+
+    assert not state.is_passthrough, "24-bit to 32-bit must not be passthrough"
+    assert build_calls == 1, "Graph should be built for 24-bit to 32-bit conversion"
+
+
 def test_soxr_fallback_caches_failure_per_format(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
