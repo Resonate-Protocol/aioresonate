@@ -363,7 +363,11 @@ class SendspinServer:
         return self._connection_reasons.get(url, ConnectionReason.DISCOVERY)
 
     def register_client_url(self, client_id: str, url: str) -> None:
-        """Record the URL used to connect to a client."""
+        """Record the URL used to connect to a client.
+
+        If the client was previously registered with a different URL, the
+        connection to that stale URL is cancelled.
+        """
         previous_url = self._client_urls.get(client_id)
         self._client_urls[client_id] = url
         if previous_url is not None and previous_url != url:
