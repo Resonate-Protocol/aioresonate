@@ -1984,3 +1984,56 @@ async def test_late_joiner_after_historical_injection() -> None:
 
     assert role2.started == 1
     assert role2.received
+
+
+def test_drift_rebuild_flushes_old_graph_before_replacing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Drift-triggered graph rebuild must flush the old graph before replacing it."""
+    flush_calls: list[bool] = []
+    original_build = push_stream_module._build_resample_graph  # noqa: SLF001
+
+    class _SpyGraph:
+        """Wraps a real graph to detect push(None) flush calls."""
+
+        def __init__(self, real_graph: object) -> None:
+            self._real = real_graph
+
+        def push(self, frame: object) -> None:
+            if frame is None:
+                flush_calls.append(True)
+            self._real.push(frame)  # type: ignore[union-attr]
+
+        def pull(self) -> object:
+            return self._real.pull()  # type: ignore[union-attr]
+
+    def _spy_build(**kwargs: Any) -> object:
+        graph = original_build(**kwargs)
+        return _SpyGraph(graph)
+
+    monkeypatch.setattr(push_stream_module, "_build_resample_graph", _spy_build)
+
+    group = _DummyGroup(clients=[])
+    stream = PushStream(loop=MagicMock(), clock=ManualClock(), group=group)
+    pcm_25ms = bytes(9600)  # 25ms @ 48kHz stereo f32
+
+    # First call: creates graph, advances pending_timestamp_us by ~25ms
+    stream._quantize_float_pcm_for_output(  # noqa: SLF001
+        channel_id=MAIN_CHANNEL,
+        pcm_data=pcm_25ms,
+        output_ts=0,
+        sample_rate=48_000,
+        channels=2,
+        target_bit_depth=16,
+    )
+    # Second call with same output_ts=0: drift > 20ms, triggers rebuild
+    stream._quantize_float_pcm_for_output(  # noqa: SLF001
+        channel_id=MAIN_CHANNEL,
+        pcm_data=pcm_25ms,
+        output_ts=0,
+        sample_rate=48_000,
+        channels=2,
+        target_bit_depth=16,
+    )
+
+    assert flush_calls, "Old graph should have been flushed with push(None) before rebuild"

@@ -52,8 +52,8 @@ _TRANSFORMER_DRIFT_THRESHOLD_US = 500_000  # 500ms
 class _AudioFilterGraph(Protocol):
     """Subset of PyAV filter graph API used by PushStream."""
 
-    def push(self, frame: av.AudioFrame) -> None:
-        """Push one audio frame into the graph."""
+    def push(self, frame: av.AudioFrame | None) -> None:
+        """Push one audio frame into the graph, or None to signal EOF/flush."""
         ...
 
     def pull(self) -> av.AudioFrame:
@@ -318,6 +318,13 @@ def _resample_pcm_standalone(
         # Resync if timestamp drifts too far (e.g., resampler was idle)
         drift_us = abs(resampler_state.pending_timestamp_us - input_timestamp_us)
         if drift_us > 20_000:
+            # Flush the old graph to release FIR filter tails cleanly.
+            # Flushed samples are discarded — they belong to the stale timeline.
+            try:
+                resampler_state.graph.push(None)
+                _drain_audio_graph(resampler_state.graph)
+            except (EOFError, OSError):
+                pass
             resampler_state.pending_timestamp_us = input_timestamp_us
             resampler_state.graph = _build_resample_graph(
                 source_av_format=resampler_state.source_av_format,
