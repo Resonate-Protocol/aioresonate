@@ -282,6 +282,40 @@ async def test_mdns_removal_cleans_retained_another_server_client() -> None:
 
 
 @pytest.mark.asyncio
+async def test_register_client_url_disconnects_stale_url() -> None:
+    """Registering a new URL for a client should cancel the connection to the old URL."""
+    session = _PersistentSuccessfulSession()
+    server = _make_server(session)
+    old_url = "ws://127.0.0.1:9998/sendspin"
+    new_url = "ws://127.0.0.1:9999/sendspin"
+
+    server.connect_to_client(old_url)
+    server.register_client_url("client-1", old_url)
+    old_task = server._connection_tasks.get(old_url)  # noqa: SLF001
+    assert old_task is not None
+
+    server.register_client_url("client-1", new_url)
+    assert old_url not in server._connection_tasks  # noqa: SLF001
+    assert old_task.cancelling() > 0
+
+
+@pytest.mark.asyncio
+async def test_register_client_url_keeps_connection_when_url_unchanged() -> None:
+    """Re-registering the same URL should not cancel the existing connection."""
+    session = _PersistentSuccessfulSession()
+    server = _make_server(session)
+    url = "ws://127.0.0.1:9999/sendspin"
+
+    server.connect_to_client(url)
+    task = server._connection_tasks.get(url)  # noqa: SLF001
+    assert task is not None
+
+    server.register_client_url("client-1", url)
+    assert server._connection_tasks.get(url) is task  # noqa: SLF001
+    assert not task.cancelled()
+
+
+@pytest.mark.asyncio
 async def test_mdns_removal_keeps_non_retained_client() -> None:
     """MDNS removal should not remove clients that are not marked for mDNS cleanup."""
     session = _PersistentSuccessfulSession()
