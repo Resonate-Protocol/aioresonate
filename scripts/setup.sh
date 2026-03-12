@@ -6,8 +6,14 @@ set -e
 
 cd "$(dirname "$0")/.."
 
-echo "Installing development and optional dependencies..."
-uv sync --group dev --extra numpy
+if ! command -v uv >/dev/null 2>&1; then
+    echo "Error: 'uv' is not installed or not on PATH." >&2
+    echo "Install it from https://github.com/astral-sh/uv and rerun this script." >&2
+    exit 1
+fi
+
+echo "Installing development dependencies..."
+uv sync --group dev
 
 echo "Installing pre-commit hooks..."
 uv run pre-commit install
