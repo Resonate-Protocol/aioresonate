@@ -8,12 +8,12 @@ import numpy as np
 
 from aiosendspin.models.types import BinaryMessageType
 from aiosendspin.models.visualizer import StreamStartVisualizer
-from aiosendspin.server.roles.visualizer.features import VisualizerFrame
+from aiosendspin.server.roles.visualizer.features import ExtractedFrame
 
 
 def pack_visualization_message(
     *,
-    frames: list[VisualizerFrame],
+    frames: list[ExtractedFrame],
     config: StreamStartVisualizer,
 ) -> bytes:
     """Pack a complete visualization data binary message (type 16).

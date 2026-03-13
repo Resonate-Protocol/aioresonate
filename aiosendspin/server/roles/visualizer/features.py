@@ -11,8 +11,8 @@ from aiosendspin.models.visualizer import StreamStartVisualizer
 
 
 @dataclass(frozen=True)
-class VisualizerFrame:
-    """Computed visualizer frame for one timestamp."""
+class ExtractedFrame:
+    """Computed visualizer features for one audio chunk."""
 
     timestamp_us: int
     loudness: int | None = None
@@ -51,7 +51,7 @@ class VisualizerFeatureExtractor:
         self._last_spectrum_ts_us = None
         self._last_spectrum = None
 
-    def process_chunk(self, pcm: bytes, timestamp_us: int) -> VisualizerFrame:
+    def process_chunk(self, pcm: bytes, timestamp_us: int) -> ExtractedFrame:
         """Compute a single frame from a PCM chunk."""
         mono = self._decode_pcm_to_mono_float32(pcm)
 
@@ -91,7 +91,7 @@ class VisualizerFeatureExtractor:
             if "spectrum" in self._config.types:
                 spectrum = self._maybe_compute_spectrum(freqs, compensated, timestamp_us)
 
-        return VisualizerFrame(
+        return ExtractedFrame(
             timestamp_us=timestamp_us,
             loudness=loudness,
             f_peak=f_peak,
