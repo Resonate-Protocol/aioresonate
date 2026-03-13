@@ -99,6 +99,7 @@ class VisualizerV1Role(Role):
             )
         else:
             self._buffer_tracker.capacity_bytes = capacity
+            self._buffer_tracker.reset()
 
     def on_connect(self) -> None:
         """Initialize stream config and subscribe to group role."""
