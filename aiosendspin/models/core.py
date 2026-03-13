@@ -133,7 +133,7 @@ class ClientHelloPayload(DataClassORJSONMixin):
     def __post_init__(self) -> None:
         """Enforce that support configs match supported roles."""
         if isinstance(self.visualizer_support, dict):
-            self.visualizer_support = ClientHelloVisualizerSupport.from_dict(
+            self.visualizer_support = ClientHelloVisualizerSupport.from_dict(  # type: ignore[unreachable]
                 self.visualizer_support
             )
 

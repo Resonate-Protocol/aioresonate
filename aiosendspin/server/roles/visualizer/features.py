@@ -113,7 +113,7 @@ class VisualizerFeatureExtractor:
         else:
             mono = raw.astype(np.float32)
 
-        return np.clip(mono / 32768.0, -1.0, 1.0)
+        return np.clip(mono / 32768.0, -1.0, 1.0)  # type: ignore[return-value]
 
     def _fft_magnitude(self, mono: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         """Return FFT frequency bins and normalized magnitudes."""
@@ -215,7 +215,7 @@ class VisualizerFeatureExtractor:
         n = freqs.size * 2 - 1  # original time-domain sample count
         ref = max(float(n) / 2.0, 1.0)
         normalized = np.clip(binned / ref, 0.0, 1.0)
-        return (normalized * 65535.0).astype(np.uint16)
+        return (normalized * 65535.0).astype(np.uint16)  # type: ignore[no-any-return]
 
     def _frequency_bin_edges(
         self, *, n_bins: int, f_min: int, f_max: int, scale: Literal["lin", "log", "mel"]

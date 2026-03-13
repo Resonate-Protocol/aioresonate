@@ -3,16 +3,17 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 from mashumaro.config import BaseConfig
 from mashumaro.mixins.orjson import DataClassORJSONMixin
 
 VisualizerType = Literal["loudness", "f_peak", "spectrum", "beat"]
+SupportedVisualizerType = Literal["loudness", "f_peak", "spectrum"]
 SpectrumScale = Literal["lin", "log", "mel"]
 
 # TODO: Add "beat" once wire format + extraction support is implemented.
-_SUPPORTED_TYPES: tuple[str, ...] = ("loudness", "f_peak", "spectrum")
+_SUPPORTED_TYPES: tuple[SupportedVisualizerType, ...] = ("loudness", "f_peak", "spectrum")
 
 
 # Client -> Server: client/hello visualizer support object
@@ -63,11 +64,7 @@ class ClientHelloVisualizerSupport(DataClassORJSONMixin):
         if isinstance(raw_types, list):
             deduped: list[str] = []
             for value in raw_types:
-                if (
-                    isinstance(value, str)
-                    and value in _SUPPORTED_TYPES
-                    and value not in deduped
-                ):
+                if isinstance(value, str) and value in _SUPPORTED_TYPES and value not in deduped:
                     deduped.append(value)
             payload = dict(payload)
             payload["types"] = deduped
@@ -98,7 +95,7 @@ class ClientHelloVisualizerSupport(DataClassORJSONMixin):
 class StreamStartVisualizer(DataClassORJSONMixin):
     """Negotiated draft visualizer stream config returned in stream/start."""
 
-    types: tuple[Literal["loudness", "f_peak", "spectrum"], ...]
+    types: tuple[SupportedVisualizerType, ...]
     batch_max: int
     spectrum: ClientHelloVisualizerSpectrum | None = None
 
@@ -109,7 +106,10 @@ class StreamStartVisualizer(DataClassORJSONMixin):
             raise ValueError("visualizer support must include 'types'")
         if support.batch_max is None:
             raise ValueError("visualizer support must include 'batch_max'")
-        stream_types = tuple(typed for typed in support.types if typed in _SUPPORTED_TYPES)  # type: ignore[misc]
+        stream_types = cast(
+            "tuple[SupportedVisualizerType, ...]",
+            tuple(typed for typed in support.types if typed in _SUPPORTED_TYPES),
+        )
         if not stream_types:
             raise ValueError("visualizer stream must contain at least one supported type")
         return cls(

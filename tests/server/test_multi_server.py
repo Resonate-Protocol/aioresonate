@@ -422,7 +422,9 @@ class TestCustomRoleSupportParsing:
         assert isinstance(msg, ClientHelloMessage)
         assert "client/hello message used deprecated field names" in caplog.text
 
-    def test_family_order_prefers_first_role_and_does_not_require_second_version_support(self) -> None:
+    def test_family_order_prefers_first_role_and_does_not_require_second_version_support(
+        self,
+    ) -> None:
         """When v1 is listed before v2, parser must not require v2 support key."""
         raw = orjson.dumps(
             {

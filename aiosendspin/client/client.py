@@ -9,7 +9,6 @@ import struct
 from collections.abc import Callable, Sequence
 from contextlib import suppress
 from dataclasses import dataclass
-from typing import Any
 
 from aiohttp import ClientSession, ClientWebSocketResponse, WSMessage, WSMsgType, web
 
@@ -895,8 +894,8 @@ class SendspinClient:
             self._notify_visualizer_callbacks(frames)
 
     @staticmethod
-    def _parse_visualization_frames(  # noqa: PLR0915
-        data: bytes, types_order: list[str], n_disp_bins: int
+    def _parse_visualization_frames(
+        data: bytes, types_order: Sequence[str], n_disp_bins: int
     ) -> list[VisualizerFrame]:
         """Parse visualization frames from binary data."""
         if len(data) < 1:

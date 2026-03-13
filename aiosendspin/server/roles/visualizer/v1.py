@@ -187,8 +187,6 @@ class VisualizerV1Role(Role):
         """Send stream/start with negotiated visualizer configuration."""
         if self._stream_config is None:
             return
-        message = StreamStartMessage(
-            payload=StreamStartPayload(visualizer=self._stream_config)
-        )
+        message = StreamStartMessage(payload=StreamStartPayload(visualizer=self._stream_config))
         self.send_message(message)
         self._stream_started = True
