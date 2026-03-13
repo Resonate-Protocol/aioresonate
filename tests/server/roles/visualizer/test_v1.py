@@ -89,12 +89,13 @@ def test_visualizer_role_on_connect_subscribes_to_group_role() -> None:
     group_role.subscribe.assert_called_once_with(role)
 
 
-def test_visualizer_role_on_connect_sends_stream_start() -> None:
-    """on_connect() sends stream/start with negotiated config."""
+def test_visualizer_role_on_stream_start_sends_stream_start() -> None:
+    """on_stream_start() sends stream/start with negotiated config."""
     client = _make_client_stub()
     role = VisualizerV1Role(client=client)
-
     role.on_connect()
+
+    role.on_stream_start()
 
     client.send_role_message.assert_called()
     _family, message = client.send_role_message.call_args.args
@@ -104,13 +105,26 @@ def test_visualizer_role_on_connect_sends_stream_start() -> None:
     assert message.payload.visualizer.batch_max == 8
 
 
-def test_visualizer_role_on_connect_accepts_legacy_support_object() -> None:
+def test_visualizer_role_on_connect_does_not_send_stream_start() -> None:
+    """on_connect() initializes config but does not send stream/start."""
+    client = _make_client_stub()
+    role = VisualizerV1Role(client=client)
+
+    role.on_connect()
+
+    # No stream/start should be sent until on_stream_start is called.
+    for call in client.send_role_message.call_args_list:
+        assert not isinstance(call.args[1], StreamStartMessage)
+
+
+def test_visualizer_role_accepts_legacy_support_object() -> None:
     """Legacy visualizer support shape still initializes draft role."""
     client = _make_client_stub()
     client.info.visualizer_support = ClientHelloVisualizerSupport(buffer_capacity=65536)
     role = VisualizerV1Role(client=client)
-
     role.on_connect()
+
+    role.on_stream_start()
 
     client.send_role_message.assert_called()
     _family, message = client.send_role_message.call_args.args
@@ -120,7 +134,7 @@ def test_visualizer_role_on_connect_accepts_legacy_support_object() -> None:
     assert message.payload.visualizer.batch_max == 8
 
 
-def test_visualizer_role_on_connect_preserves_draft_support_fields() -> None:
+def test_visualizer_role_preserves_draft_support_fields() -> None:
     """Draft support fields survive model parsing and are used in stream/start."""
     client = _make_client_stub()
     client.info.visualizer_support = ClientHelloVisualizerSupport(
@@ -136,8 +150,9 @@ def test_visualizer_role_on_connect_preserves_draft_support_fields() -> None:
         ),
     )
     role = VisualizerV1Role(client=client)
-
     role.on_connect()
+
+    role.on_stream_start()
 
     client.send_role_message.assert_called()
     _family, message = client.send_role_message.call_args.args
@@ -241,10 +256,7 @@ def test_visualizer_role_stream_start_is_resent_after_stream_end() -> None:
     role = VisualizerV1Role(client=client)
     role.on_connect()
 
-    # on_connect sends initial visualizer stream/start.
-    initial_calls = client.send_role_message.call_count
-    assert initial_calls >= 1
-
+    role.on_stream_start()
     role.on_stream_end()
     role.on_stream_start()
 
@@ -253,4 +265,4 @@ def test_visualizer_role_stream_start_is_resent_after_stream_end() -> None:
         for call in client.send_role_message.call_args_list
         if isinstance(call.args[1], StreamStartMessage)
     ]
-    assert len(stream_start_calls) >= 2
+    assert len(stream_start_calls) == 2

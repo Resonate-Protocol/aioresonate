@@ -80,8 +80,6 @@ class VisualizerV1Role(Role):
         """Initialize stream config and subscribe to group role."""
         self._init_stream_config()
         self._subscribe_to_group_role()
-        if self._stream_config is not None:
-            self._send_stream_start()
 
     def on_disconnect(self) -> None:
         """Unsubscribe from VisualizerGroupRole."""
