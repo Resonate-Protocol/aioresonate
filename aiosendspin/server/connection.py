@@ -424,7 +424,9 @@ class SendspinConnection:
             self._server.on_client_first_connect(self._client.client_id)
 
     @staticmethod
-    def _first_registered_role_id_in_family(supported_roles: list[str], *, family: str) -> str | None:
+    def _first_registered_role_id_in_family(
+        supported_roles: list[str], *, family: str
+    ) -> str | None:
         """Return first client-preferred, server-registered role id in a role family."""
         for role_id in supported_roles:
             if role_family(role_id) == family and role_id in ROLE_FACTORIES:
@@ -453,9 +455,11 @@ class SendspinConnection:
 
         custom_supports: dict[str, tuple[str, Any]] = {}
         for family in ROLE_SUPPORT_SPECS:
-            selected_role = cls._first_registered_role_id_in_family(
-                supported_roles, family=family
-            )
+            selected_role = cls._first_registered_role_id_in_family(supported_roles, family=family)
+            if selected_role is None:
+                # No registered role for this family — check if client advertises
+                # any custom role in the family so we still parse its support key.
+                selected_role = next((r for r in supported_roles if role_family(r) == family), None)
             if selected_role is None:
                 continue
             primary_role_id = cls._primary_role_id_for_family(family)
