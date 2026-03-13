@@ -44,28 +44,42 @@ class VisualizerFeatureExtractor:
         self._config = config
         self._last_spectrum_ts_us: int | None = None
         self._last_spectrum: np.ndarray | None = None
-        self._spectrum_peak_ref: float = 0.0
+        self._a_weight_cache: np.ndarray | None = None
 
     def reset(self) -> None:
         """Reset extractor state at stream boundaries."""
         self._last_spectrum_ts_us = None
         self._last_spectrum = None
-        self._spectrum_peak_ref = 0.0
 
     def process_chunk(self, pcm: bytes, timestamp_us: int) -> VisualizerFrame:
         """Compute a single frame from a PCM chunk."""
         mono = self._decode_pcm_to_mono_float32(pcm)
 
-        loudness: int | None = None
-        if "loudness" in self._config.types:
-            rms = float(np.sqrt(np.mean(np.square(mono, dtype=np.float32), dtype=np.float32)))
-            loudness = int(np.clip(rms, 0.0, 1.0) * 65535.0)
+        needs_fft = any(t in self._config.types for t in ("loudness", "f_peak", "spectrum"))
 
+        loudness: int | None = None
         f_peak: int | None = None
         spectrum: np.ndarray | None = None
-        if "f_peak" in self._config.types or "spectrum" in self._config.types:
+
+        if needs_fft:
             freqs, magnitude = self._fft_magnitude(mono)
             compensated = self._apply_psychoacoustic_compensation(freqs, magnitude)
+
+            if "loudness" in self._config.types:
+                # A-weighted RMS via Parseval's theorem: RMS of weighted frequency
+                # magnitudes equals time-domain A-weighted RMS (up to windowing).
+                if compensated.size == 0:
+                    loudness = 0
+                else:
+                    n = mono.size
+                    weighted_power = float(np.sum(np.square(compensated, dtype=np.float64)))
+                    rms = np.sqrt(weighted_power / max(n, 1)) / max(n, 1)
+                    # Normalize so a full-scale sine ≈ 65535. A full-scale sine has
+                    # peak magnitude N/2 after rfft; its RMS via this path is
+                    # (N/2) / N = 0.5 before A-weight gain (~1.0 at 1-4 kHz).
+                    normalized = float(np.clip(rms / 0.5, 0.0, 1.0))
+                    loudness = int(normalized * 65535.0)
+
             if "f_peak" in self._config.types:
                 if compensated.size == 0:
                     f_peak = 0
@@ -123,19 +137,19 @@ class VisualizerFeatureExtractor:
         if freqs.size == 0 or magnitude.size == 0:
             return magnitude
 
-        f = np.maximum(freqs.astype(np.float64), 1.0)
-        f2 = f * f
-        ra_num = (12194.0**2) * (f2**2)
-        ra_den = (
-            (f2 + 20.6**2)
-            * np.sqrt((f2 + 107.7**2) * (f2 + 737.9**2))
-            * (f2 + 12194.0**2)
-        )
-        ra = np.clip(ra_num / np.maximum(ra_den, 1e-20), 1e-12, None)
-        a_db = 2.0 + (20.0 * np.log10(ra))
-        a_db = np.clip(a_db, -50.0, 6.0)
-        gain = np.power(10.0, a_db / 20.0).astype(np.float32)
-        return magnitude * gain
+        # Cache A-weight gains for the current FFT size.
+        if self._a_weight_cache is None or self._a_weight_cache.size != freqs.size:
+            f = np.maximum(freqs.astype(np.float64), 1.0)
+            f2 = f * f
+            ra_num = (12194.0**2) * (f2**2)
+            ra_den = (f2 + 20.6**2) * np.sqrt((f2 + 107.7**2) * (f2 + 737.9**2)) * (f2 + 12194.0**2)
+            ra = np.clip(ra_num / np.maximum(ra_den, 1e-20), 1e-12, None)
+            a_db = 2.0 + (20.0 * np.log10(ra))
+            a_db = np.clip(a_db, -50.0, 6.0)
+            self._a_weight_cache = np.power(10.0, a_db / 20.0).astype(np.float32)
+
+        result: np.ndarray = magnitude * self._a_weight_cache
+        return result
 
     def _maybe_compute_spectrum(
         self, freqs: np.ndarray, magnitude: np.ndarray, timestamp_us: int
@@ -182,39 +196,24 @@ class VisualizerFeatureExtractor:
             return np.zeros(n_bins, dtype=np.uint16)
 
         edges = self._frequency_bin_edges(n_bins=n_bins, f_min=lo, f_max=hi, scale=scale)
-        binned = np.zeros(n_bins, dtype=np.float32)
 
-        for idx in range(n_bins):
-            left = edges[idx]
-            right = edges[idx + 1]
-            if idx == n_bins - 1:
-                mask = (freqs >= left) & (freqs <= right)
-            else:
-                mask = (freqs >= left) & (freqs < right)
-            if np.any(mask):
-                band = magnitude[mask]
-                binned[idx] = float(
-                    np.sqrt(np.mean(np.square(band, dtype=np.float32), dtype=np.float32))
-                )
+        # Vectorized binning via np.digitize.
+        bin_indices = np.digitize(freqs, edges) - 1
+        valid = (bin_indices >= 0) & (bin_indices < n_bins)
+        idx = bin_indices[valid]
+        mag = magnitude[valid]
 
-        peak = float(np.max(binned))
-        if peak <= 0:
-            return np.zeros(n_bins, dtype=np.uint16)
+        sq = mag.astype(np.float64) ** 2
+        sums = np.bincount(idx, weights=sq, minlength=n_bins).astype(np.float32)
+        counts = np.bincount(idx, minlength=n_bins).astype(np.float32)
+        counts = np.maximum(counts, 1.0)
+        binned = np.sqrt(sums / counts)
 
-        # Stabilize visual scaling across frames. Per-frame peak normalization
-        # causes noticeable flicker when spectral peaks vary abruptly.
-        if self._spectrum_peak_ref <= 0.0:
-            self._spectrum_peak_ref = peak
-        else:
-            attack = 0.6
-            release = 0.1
-            alpha = attack if peak >= self._spectrum_peak_ref else release
-            self._spectrum_peak_ref = (
-                (1.0 - alpha) * self._spectrum_peak_ref
-                + (alpha * peak)
-            )
-
-        ref = max(self._spectrum_peak_ref, 1e-6)
+        # Absolute normalization: a full-scale sine concentrates in one bin with
+        # magnitude N/2 (rfft convention). Use that as the reference so 65535
+        # corresponds to full scale.
+        n = freqs.size * 2 - 1  # original time-domain sample count
+        ref = max(float(n) / 2.0, 1.0)
         normalized = np.clip(binned / ref, 0.0, 1.0)
         return (normalized * 65535.0).astype(np.uint16)
 
