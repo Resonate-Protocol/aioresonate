@@ -43,7 +43,8 @@ def pack_visualization_message(
                 output.extend(struct.pack(">H", int(np.clip(value, 0, 65535))))
             elif typed == "spectrum":
                 if frame.spectrum is None:
-                    assert config.spectrum is not None
+                    if config.spectrum is None:
+                        raise ValueError("spectrum in config.types but config.spectrum is None")
                     zeros = np.zeros(config.spectrum.n_disp_bins, dtype=np.uint16)
                     output.extend(zeros.astype(">u2").tobytes())
                 else:

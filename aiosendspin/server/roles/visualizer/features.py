@@ -156,7 +156,8 @@ class VisualizerFeatureExtractor:
         self, freqs: np.ndarray, magnitude: np.ndarray, timestamp_us: int
     ) -> np.ndarray:
         spectrum_cfg = self._config.spectrum
-        assert spectrum_cfg is not None
+        if spectrum_cfg is None:
+            raise ValueError("spectrum in config.types but config.spectrum is None")
 
         if self._last_spectrum_ts_us is not None:
             min_delta_us = int(1_000_000 / spectrum_cfg.rate_max)
