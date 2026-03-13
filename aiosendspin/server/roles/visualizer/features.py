@@ -66,19 +66,19 @@ class VisualizerFeatureExtractor:
             compensated = self._apply_psychoacoustic_compensation(freqs, magnitude)
 
             if "loudness" in self._config.types:
-                # A-weighted RMS via Parseval's theorem: RMS of weighted frequency
-                # magnitudes equals time-domain A-weighted RMS (up to windowing).
+                # A-weighted RMS via Parseval's theorem for one-sided rfft:
+                # RMS ≈ sqrt(2 * sum(|X|^2)) / N
                 if compensated.size == 0:
                     loudness = 0
                 else:
                     n = mono.size
                     weighted_power = float(np.sum(np.square(compensated, dtype=np.float64)))
-                    rms = np.sqrt(weighted_power / max(n, 1)) / max(n, 1)
-                    # Normalize so a full-scale sine ≈ 65535. A full-scale sine has
-                    # rfft peak N/2, reduced to N/4 by Hanning (coherent gain 0.5);
-                    # RMS via this path is (N/4) / N = 0.25 before A-weight gain
-                    # (~1.0 at 1-4 kHz).
-                    normalized = float(np.clip(rms / 0.25, 0.0, 1.0))
+                    rms = np.sqrt(2.0 * weighted_power) / max(n, 1)
+                    # A full-scale sine through Hanning has RMS ≈ sqrt(3/16) ≈ 0.43
+                    # (amplitude 1.0, mean(sin^2)=0.5, mean(hann^2)=3/8).
+                    # A-weight gain ~1.0 at 1-4 kHz.
+                    ref = np.sqrt(3.0 / 16.0)
+                    normalized = float(np.clip(rms / ref, 0.0, 1.0))
                     loudness = int(normalized * 65535.0)
 
             if "f_peak" in self._config.types:
@@ -206,17 +206,17 @@ class VisualizerFeatureExtractor:
 
         sq = mag.astype(np.float64) ** 2
         sums = np.bincount(idx, weights=sq, minlength=n_bins).astype(np.float32)
-        counts = np.bincount(idx, minlength=n_bins).astype(np.float32)
-        counts = np.maximum(counts, 1.0)
-        binned = np.sqrt(sums / counts)
+        binned = np.sqrt(sums)
 
-        # Absolute normalization: a full-scale sine has rfft peak magnitude N/2,
-        # reduced to N/4 by the Hanning window (coherent gain 0.5). Use N/4 as
-        # the reference so 65535 corresponds to full scale.
+        # dB scale: map [-60 dB, 0 dB] relative to full-scale sine → [0, 65535].
+        # Full-scale sine has rfft peak N/2, reduced to N/4 by Hanning window.
         n = freqs.size * 2 - 1  # original time-domain sample count
         ref = max(float(n) / 4.0, 1.0)
-        normalized = np.clip(binned / ref, 0.0, 1.0)
-        return (normalized * 65535.0).astype(np.uint16)  # type: ignore[no-any-return]
+        ratio = np.maximum(binned / ref, 1e-10)
+        db = 20.0 * np.log10(ratio)
+        db_floor = -60.0
+        normalized = np.clip((db - db_floor) / -db_floor, 0.0, 1.0)
+        return (normalized * 65535.0).astype(np.uint16)
 
     def _frequency_bin_edges(
         self, *, n_bins: int, f_min: int, f_max: int, scale: Literal["lin", "log", "mel"]
