@@ -39,7 +39,8 @@ def _make_client_stub() -> MagicMock:
     }
     client.send_role_message = MagicMock()
     client.send_binary = MagicMock()
-    client._logger = MagicMock()  # noqa: SLF001
+    client._server = MagicMock()  # noqa: SLF001
+    client._server.clock.now_us.return_value = 0  # noqa: SLF001
     client.connection = MagicMock()
     return client
 
@@ -268,6 +269,52 @@ def test_visualizer_role_sends_buffer_tracking_metadata() -> None:
     assert kwargs["buffer_end_time_us"] == 1_025_000  # timestamp + 25ms frame duration
     assert kwargs["buffer_byte_count"] > 0
     assert kwargs["duration_us"] == 25_000
+
+
+def test_visualizer_role_creates_buffer_tracker_on_stream_start() -> None:
+    """on_stream_start() creates a BufferTracker with negotiated capacity."""
+    client = _make_client_stub()
+    role = VisualizerV1Role(client=client)
+    role.on_connect()
+
+    assert role.get_buffer_tracker() is None
+
+    role.on_stream_start()
+
+    tracker = role.get_buffer_tracker()
+    assert tracker is not None
+    assert tracker.capacity_bytes == 65536
+
+
+def test_visualizer_role_resets_buffer_tracker_on_stream_clear() -> None:
+    """on_stream_clear() resets the buffer tracker."""
+    client = _make_client_stub()
+    role = VisualizerV1Role(client=client)
+    role.on_connect()
+    role.on_stream_start()
+
+    tracker = role.get_buffer_tracker()
+    assert tracker is not None
+
+    role.on_stream_clear()
+    # Tracker still exists but was reset (buffered_bytes = 0)
+    assert role.get_buffer_tracker() is not None
+    assert role.get_buffer_tracker().buffered_bytes == 0  # type: ignore[union-attr]
+
+
+def test_visualizer_role_resets_buffer_tracker_on_stream_end() -> None:
+    """on_stream_end() resets the buffer tracker."""
+    client = _make_client_stub()
+    role = VisualizerV1Role(client=client)
+    role.on_connect()
+    role.on_stream_start()
+
+    tracker = role.get_buffer_tracker()
+    assert tracker is not None
+
+    role.on_stream_end()
+    assert role.get_buffer_tracker() is not None
+    assert role.get_buffer_tracker().buffered_bytes == 0  # type: ignore[union-attr]
 
 
 def test_visualizer_role_stream_start_is_resent_after_stream_end() -> None:

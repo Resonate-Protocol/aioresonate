@@ -17,6 +17,7 @@ from aiosendspin.models.visualizer import (
     ClientHelloVisualizerSupport,
     StreamStartVisualizer,
 )
+from aiosendspin.server.audio import BufferTracker
 from aiosendspin.server.roles.base import (
     AudioChunk,
     AudioRequirements,
@@ -75,6 +76,33 @@ class VisualizerV1Role(Role):
             return BinaryHandling(drop_late=True, grace_period_us=2_000_000, buffer_track=True)
         return None
 
+    def get_buffer_tracker(self) -> BufferTracker | None:
+        """Return the visualizer buffer tracker."""
+        return self._buffer_tracker
+
+    def _ensure_buffer_tracker(self) -> None:
+        """Create or update buffer tracker from negotiated config."""
+        support_raw = self._client.info.visualizer_support
+        if support_raw is None:
+            self._buffer_tracker = None
+            return
+        support = (
+            support_raw
+            if isinstance(support_raw, ClientHelloVisualizerSupport)
+            else ClientHelloVisualizerSupport.from_dict(
+                self._normalize_support_payload(support_raw)
+            )
+        )
+        capacity = max(1, support.buffer_capacity)
+        if self._buffer_tracker is None:
+            self._buffer_tracker = BufferTracker(
+                clock=self._client._server.clock,  # noqa: SLF001
+                client_id=self._client.client_id,
+                capacity_bytes=capacity,
+            )
+        else:
+            self._buffer_tracker.capacity_bytes = capacity
+
     def on_connect(self) -> None:
         """Initialize stream config and subscribe to group role."""
         self._init_stream_config()
@@ -90,6 +118,7 @@ class VisualizerV1Role(Role):
         """Start extractor state for a new audio stream."""
         if self._stream_config is None:
             return
+        self.reset_binary_timing()
         # stream/end clears client-side visualizer config, so resend stream/start
         # at each new stream boundary.
         self._send_stream_start()
@@ -100,6 +129,7 @@ class VisualizerV1Role(Role):
             config=self._stream_config,
         )
         self._stream_started = True
+        self._ensure_buffer_tracker()
 
     def on_audio_chunk(self, chunk: AudioChunk) -> None:
         """Process audio chunk and emit visualizer binary frame."""
@@ -131,6 +161,8 @@ class VisualizerV1Role(Role):
             self._extractor.reset()
         self.send_message(StreamClearMessage(payload=StreamClearPayload(roles=["visualizer"])))
         self.reset_binary_timing()
+        if self._buffer_tracker is not None:
+            self._buffer_tracker.reset()
 
     def on_stream_end(self) -> None:
         """Reset visualizer state and notify client that stream has ended."""
@@ -138,6 +170,8 @@ class VisualizerV1Role(Role):
         self._stream_started = False
         self.send_message(StreamEndMessage(payload=StreamEndPayload(roles=["visualizer"])))
         self.reset_binary_timing()
+        if self._buffer_tracker is not None:
+            self._buffer_tracker.reset()
 
     def on_stream_request_format(self, payload: object) -> None:  # noqa: ARG002
         """Ignore runtime visualizer renegotiation for now."""
