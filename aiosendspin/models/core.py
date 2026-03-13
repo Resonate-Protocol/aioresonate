@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, fields
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, ClassVar, Literal
 
 from mashumaro.config import BaseConfig
 from mashumaro.mixins.orjson import DataClassORJSONMixin
@@ -102,23 +102,22 @@ class ClientHelloPayload(DataClassORJSONMixin):
     ] = None
     """Visualizer support configuration - only if visualizer role is in supported_roles."""
 
+    # Static mapping: unversioned support key -> actual alias key.
+    _SUPPORT_KEY_ALIASES: ClassVar[dict[str, str]] = {
+        "player_support": "player@v1_support",
+        "artwork_support": "artwork@v1_support",
+        "visualizer_support": "visualizer@_draft_r1_support",
+    }
+
     @classmethod
     def __pre_deserialize__(cls, d: dict[str, Any]) -> dict[str, Any]:
         """Normalize legacy role support keys to versioned names."""
         legacy_fields_used: list[tuple[str, str]] = []
         normalized = dict(d)
-        for key in list(normalized.keys()):
-            if not key.endswith("_support"):
-                continue
-            role_id = key[: -len("_support")]
-            if "@" in role_id:
-                continue
-            # FIXME: Drop v1 fallback.  # noqa: FIX001, TD001
-            normalized_key = f"{role_id}@v1_support"
-            if normalized_key in normalized:
-                continue
-            legacy_fields_used.append((key, normalized_key))
-            normalized[normalized_key] = normalized.pop(key)
+        for legacy_key, versioned_key in cls._SUPPORT_KEY_ALIASES.items():
+            if legacy_key in normalized and versioned_key not in normalized:
+                legacy_fields_used.append((legacy_key, versioned_key))
+                normalized[versioned_key] = normalized.pop(legacy_key)
         if legacy_fields_used:
             old_names = ", ".join(old for old, _ in legacy_fields_used)
             new_names = ", ".join(new for _, new in legacy_fields_used)

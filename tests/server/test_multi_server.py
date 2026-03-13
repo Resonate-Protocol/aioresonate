@@ -422,6 +422,29 @@ class TestCustomRoleSupportParsing:
         assert isinstance(msg, ClientHelloMessage)
         assert "client/hello message used deprecated field names" in caplog.text
 
+    def test_legacy_visualizer_support_key_is_not_normalized_to_v1(self) -> None:
+        """Legacy visualizer_support must not be rewritten to visualizer@v1_support."""
+        raw = orjson.dumps(
+            {
+                "type": "client/hello",
+                "payload": {
+                    "client_id": "c1",
+                    "name": "Client",
+                    "version": 1,
+                    "supported_roles": ["visualizer@_draft_r1"],
+                    "visualizer_support": {
+                        "types": ["loudness", "f_peak"],
+                        "buffer_capacity": 65536,
+                        "batch_max": 8,
+                    },
+                },
+            }
+        ).decode()
+
+        msg = SendspinConnection._deserialize_client_message(raw)  # noqa: SLF001
+        assert isinstance(msg, ClientHelloMessage)
+        assert msg.payload.visualizer_support is not None
+
     def test_family_order_prefers_first_role_and_does_not_require_second_version_support(
         self,
     ) -> None:
