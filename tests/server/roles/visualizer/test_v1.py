@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import math
 import struct
 from unittest.mock import MagicMock
 
@@ -16,6 +15,7 @@ from aiosendspin.models.visualizer import (
 )
 from aiosendspin.server.roles.base import AudioChunk
 from aiosendspin.server.roles.visualizer.v1 import VisualizerV1Role
+from tests.server.roles.visualizer.conftest import sine_pcm_16bit
 
 
 def _make_client_stub() -> MagicMock:
@@ -43,17 +43,6 @@ def _make_client_stub() -> MagicMock:
     client._server.clock.now_us.return_value = 0  # noqa: SLF001
     client.connection = MagicMock()
     return client
-
-
-def _sine_pcm_16bit(*, sample_rate: int, channels: int, hz: float, duration_s: float) -> bytes:
-    sample_count = int(sample_rate * duration_s)
-    frame_bytes = bytearray()
-    for i in range(sample_count):
-        value = int(32767 * math.sin((2.0 * math.pi * hz * i) / sample_rate))
-        packed = struct.pack("<h", value)
-        for _ in range(channels):
-            frame_bytes.extend(packed)
-    return bytes(frame_bytes)
 
 
 def test_visualizer_role_has_role_id() -> None:
@@ -202,7 +191,7 @@ def test_visualizer_role_emits_binary_visualization_frame() -> None:
     role.on_connect()
     role.on_stream_start()
 
-    pcm = _sine_pcm_16bit(sample_rate=48_000, channels=2, hz=1000.0, duration_s=0.025)
+    pcm = sine_pcm_16bit(sample_rate=48_000, channels=2, hz=1000.0, duration_s=0.025)
     role.on_audio_chunk(
         AudioChunk(
             data=pcm,
@@ -256,7 +245,7 @@ def test_visualizer_role_sends_buffer_tracking_metadata() -> None:
     role.on_connect()
     role.on_stream_start()
 
-    pcm = _sine_pcm_16bit(sample_rate=48_000, channels=2, hz=1000.0, duration_s=0.025)
+    pcm = sine_pcm_16bit(sample_rate=48_000, channels=2, hz=1000.0, duration_s=0.025)
     role.on_audio_chunk(
         AudioChunk(
             data=pcm,
@@ -371,7 +360,7 @@ def test_visualizer_role_audio_chunk_without_stream_start_is_noop() -> None:
     role = VisualizerV1Role(client=client)
     role.on_connect()
 
-    pcm = _sine_pcm_16bit(sample_rate=48_000, channels=2, hz=1000.0, duration_s=0.025)
+    pcm = sine_pcm_16bit(sample_rate=48_000, channels=2, hz=1000.0, duration_s=0.025)
     role.on_audio_chunk(
         AudioChunk(
             data=pcm,

@@ -13,17 +13,7 @@ from aiosendspin.models.visualizer import (
 )
 from aiosendspin.server.roles.visualizer.features import VisualizerFeatureExtractor
 from aiosendspin.server.roles.visualizer.packing import pack_visualization_message
-
-
-def _sine_pcm_16bit(*, sample_rate: int, channels: int, hz: float, duration_s: float) -> bytes:
-    sample_count = int(sample_rate * duration_s)
-    frame_bytes = bytearray()
-    for i in range(sample_count):
-        value = int(32767 * math.sin((2.0 * math.pi * hz * i) / sample_rate))
-        packed = struct.pack("<h", value)
-        for _ in range(channels):
-            frame_bytes.extend(packed)
-    return bytes(frame_bytes)
+from tests.server.roles.visualizer.conftest import sine_pcm_16bit
 
 
 def _dual_sine_pcm_16bit(
@@ -60,7 +50,7 @@ def test_extractor_produces_loudness_peak_and_spectrum() -> None:
         ),
     )
     extractor = VisualizerFeatureExtractor(sample_rate=48_000, channels=2, config=config)
-    pcm = _sine_pcm_16bit(sample_rate=48_000, channels=2, hz=1000.0, duration_s=0.025)
+    pcm = sine_pcm_16bit(sample_rate=48_000, channels=2, hz=1000.0, duration_s=0.025)
 
     frame = extractor.process_chunk(pcm, 1_000_000)
 
@@ -82,7 +72,7 @@ def test_pack_visualization_message_binary_layout() -> None:
         spectrum=None,
     )
     extractor = VisualizerFeatureExtractor(sample_rate=48_000, channels=2, config=config)
-    pcm = _sine_pcm_16bit(sample_rate=48_000, channels=2, hz=500.0, duration_s=0.025)
+    pcm = sine_pcm_16bit(sample_rate=48_000, channels=2, hz=500.0, duration_s=0.025)
     frame = extractor.process_chunk(pcm, 1_234_000)
 
     packed = pack_visualization_message(frames=[frame], config=config)
