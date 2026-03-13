@@ -134,18 +134,14 @@ class VisualizerV1Role(Role):
 
     def on_audio_chunk(self, chunk: AudioChunk) -> None:
         """Process audio chunk and emit visualizer binary frame."""
-        if not self.has_connection() or self._stream_config is None:
+        if not self.has_connection() or self._stream_config is None or self._extractor is None:
             return
-
-        if self._extractor is None:
-            self.on_stream_start()
-            if self._extractor is None:
-                return
 
         frame = self._extractor.process_chunk(chunk.data, chunk.timestamp_us)
         message = pack_visualization_message(frames=[frame], config=self._stream_config)
         req = self.get_audio_requirements()
-        assert req.frame_duration_us is not None  # always set for visualizer
+        if req.frame_duration_us is None:
+            raise ValueError("visualizer audio requirements must specify frame_duration_us")
         self._client.send_binary(
             message,
             role_family=self.role_family,

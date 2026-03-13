@@ -200,6 +200,7 @@ def test_visualizer_role_emits_binary_visualization_frame() -> None:
     client = _make_client_stub()
     role = VisualizerV1Role(client=client)
     role.on_connect()
+    role.on_stream_start()
 
     pcm = _sine_pcm_16bit(sample_rate=48_000, channels=2, hz=1000.0, duration_s=0.025)
     role.on_audio_chunk(
@@ -253,6 +254,7 @@ def test_visualizer_role_sends_buffer_tracking_metadata() -> None:
     client = _make_client_stub()
     role = VisualizerV1Role(client=client)
     role.on_connect()
+    role.on_stream_start()
 
     pcm = _sine_pcm_16bit(sample_rate=48_000, channels=2, hz=1000.0, duration_s=0.025)
     role.on_audio_chunk(
@@ -361,3 +363,25 @@ def test_visualizer_role_resets_binary_timing_on_disconnect() -> None:
     role.on_disconnect()
 
     assert role._stream_start_time_us is None  # noqa: SLF001
+
+
+def test_visualizer_role_audio_chunk_without_stream_start_is_noop() -> None:
+    """on_audio_chunk() before on_stream_start() does not send data or self-initialize."""
+    client = _make_client_stub()
+    role = VisualizerV1Role(client=client)
+    role.on_connect()
+
+    pcm = _sine_pcm_16bit(sample_rate=48_000, channels=2, hz=1000.0, duration_s=0.025)
+    role.on_audio_chunk(
+        AudioChunk(
+            data=pcm,
+            timestamp_us=1_000_000,
+            duration_us=25_000,
+            byte_count=len(pcm),
+        )
+    )
+
+    # Should not have sent binary data or stream/start
+    client.send_binary.assert_not_called()
+    # Should not have self-initialized the extractor
+    assert role._extractor is None  # noqa: SLF001
