@@ -705,16 +705,15 @@ class SendspinClient:
                 logger.debug("Unhandled server message type: %s", type(message).__name__)
 
     def _handle_binary_message(self, payload: bytes) -> None:
-        try:
-            header = unpack_binary_header(payload)
-        except Exception:
-            logger.exception("Failed to unpack binary header")
+        if len(payload) < 1:
+            logger.warning("Empty binary message")
             return
 
+        raw_type = payload[0]
         try:
-            message_type = BinaryMessageType(header.message_type)
+            message_type = BinaryMessageType(raw_type)
         except ValueError:
-            logger.warning("Unknown binary message type: %s", header.message_type)
+            logger.warning("Unknown binary message type: %s", raw_type)
             return
 
         if not self._stream_active and not self._visualizer_stream_active:
@@ -724,9 +723,16 @@ class SendspinClient:
             return
 
         if message_type is BinaryMessageType.AUDIO_CHUNK:
+            try:
+                header = unpack_binary_header(payload)
+            except Exception:
+                logger.exception("Failed to unpack binary header")
+                return
             self._handle_audio_chunk(header.timestamp_us, payload[BINARY_HEADER_SIZE:])
         elif message_type is BinaryMessageType.VISUALIZATION_DATA:
-            self._handle_visualization_data(payload[BINARY_HEADER_SIZE:])
+            # Spec format: [type:1][frame_count:1][frames...]
+            # Pass payload[1:] so _parse_visualization_frames sees frame_count at data[0]
+            self._handle_visualization_data(payload[1:])
         else:
             logger.debug("Ignoring unsupported binary message type: %s", message_type)
 

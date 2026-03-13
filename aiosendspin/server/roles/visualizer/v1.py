@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from aiosendspin.models import pack_binary_header_raw
 from aiosendspin.models.core import (
     StreamClearMessage,
     StreamClearPayload,
@@ -26,7 +25,7 @@ from aiosendspin.server.roles.base import (
     StreamRequirements,
 )
 from aiosendspin.server.roles.visualizer.features import VisualizerFeatureExtractor
-from aiosendspin.server.roles.visualizer.packing import pack_visualizer_frames
+from aiosendspin.server.roles.visualizer.packing import pack_visualization_message
 
 if TYPE_CHECKING:
     from aiosendspin.server.client import SendspinClient
@@ -113,13 +112,9 @@ class VisualizerV1Role(Role):
                 return
 
         frame = self._extractor.process_chunk(chunk.data, chunk.timestamp_us)
-        body = pack_visualizer_frames(frames=[frame], config=self._stream_config)
-        header = pack_binary_header_raw(
-            BinaryMessageType.VISUALIZATION_DATA.value, frame.timestamp_us
-        )
-        packed = header + body
+        message = pack_visualization_message(frames=[frame], config=self._stream_config)
         self._client.send_binary(
-            packed,
+            message,
             role_family=self.role_family,
             timestamp_us=frame.timestamp_us,
             message_type=BinaryMessageType.VISUALIZATION_DATA.value,

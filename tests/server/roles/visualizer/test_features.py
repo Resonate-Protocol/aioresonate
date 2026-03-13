@@ -12,7 +12,7 @@ from aiosendspin.models.visualizer import (
     StreamStartVisualizer,
 )
 from aiosendspin.server.roles.visualizer.features import VisualizerFeatureExtractor
-from aiosendspin.server.roles.visualizer.packing import pack_visualizer_frames
+from aiosendspin.server.roles.visualizer.packing import pack_visualization_message
 
 
 def _sine_pcm_16bit(*, sample_rate: int, channels: int, hz: float, duration_s: float) -> bytes:
@@ -74,8 +74,8 @@ def test_extractor_produces_loudness_peak_and_spectrum() -> None:
     assert frame.spectrum.dtype == np.uint16
 
 
-def test_pack_visualizer_frames_binary_layout() -> None:
-    """Packed payload starts with frame count and then frame data."""
+def test_pack_visualization_message_binary_layout() -> None:
+    """Packed message starts with type byte, frame count, and then frame data."""
     config = StreamStartVisualizer(
         types=("loudness", "f_peak"),
         batch_max=4,
@@ -85,12 +85,13 @@ def test_pack_visualizer_frames_binary_layout() -> None:
     pcm = _sine_pcm_16bit(sample_rate=48_000, channels=2, hz=500.0, duration_s=0.025)
     frame = extractor.process_chunk(pcm, 1_234_000)
 
-    packed = pack_visualizer_frames(frames=[frame], config=config)
+    packed = pack_visualization_message(frames=[frame], config=config)
 
-    assert packed[0] == 1
-    assert struct.unpack(">q", packed[1:9])[0] == 1_234_000
-    # 2-byte loudness + 2-byte f_peak after timestamp.
-    assert len(packed) == 1 + 8 + 2 + 2
+    assert packed[0] == 16  # message type
+    assert packed[1] == 1  # frame count
+    assert struct.unpack(">q", packed[2:10])[0] == 1_234_000
+    # type(1) + count(1) + timestamp(8) + loudness(2) + f_peak(2) = 14
+    assert len(packed) == 1 + 1 + 8 + 2 + 2
 
 
 def test_peak_frequency_uses_compensated_magnitude() -> None:

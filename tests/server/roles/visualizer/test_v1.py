@@ -8,7 +8,6 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from aiosendspin.models import BINARY_HEADER_SIZE, unpack_binary_header
 from aiosendspin.models.core import StreamClearMessage, StreamEndMessage, StreamStartMessage
 from aiosendspin.models.types import BinaryMessageType
 from aiosendspin.models.visualizer import (
@@ -219,11 +218,9 @@ def test_visualizer_role_emits_binary_visualization_frame() -> None:
     assert kwargs["message_type"] == BinaryMessageType.VISUALIZATION_DATA.value
     assert kwargs["timestamp_us"] == 1_000_000
 
-    header = unpack_binary_header(payload)
-    assert header.message_type == BinaryMessageType.VISUALIZATION_DATA.value
-    assert header.timestamp_us == 1_000_000
-
-    assert payload[BINARY_HEADER_SIZE] == 1
+    assert payload[0] == BinaryMessageType.VISUALIZATION_DATA.value
+    assert payload[1] == 1  # frame count
+    assert struct.unpack(">q", payload[2:10])[0] == 1_000_000
 
 
 def test_visualizer_role_on_stream_clear_sends_clear_message() -> None:

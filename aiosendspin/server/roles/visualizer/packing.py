@@ -6,22 +6,30 @@ import struct
 
 import numpy as np
 
+from aiosendspin.models.types import BinaryMessageType
 from aiosendspin.models.visualizer import StreamStartVisualizer
 from aiosendspin.server.roles.visualizer.features import VisualizerFrame
 
 
-def pack_visualizer_frames(
+def pack_visualization_message(
     *,
     frames: list[VisualizerFrame],
     config: StreamStartVisualizer,
 ) -> bytes:
-    """Pack visualizer frames payload as [frame_count, frames...]."""
+    """Pack a complete visualization data binary message (type 16).
+
+    Wire format per spec:
+        Byte 0: message type 16 (uint8)
+        Byte 1: frame count (uint8)
+        Remaining: frames [...] each: [timestamp:8][data per types]
+    """
     if not frames:
         raise ValueError("cannot pack empty visualizer frame list")
     if len(frames) > 255:
         raise ValueError(f"max 255 frames per message, got {len(frames)}")
 
     output = bytearray()
+    output.append(BinaryMessageType.VISUALIZATION_DATA.value)
     output.append(len(frames))
 
     for frame in frames:
