@@ -72,7 +72,7 @@ class VisualizerV1Role(Role):
     def get_binary_handling(self, message_type: int) -> BinaryHandling | None:
         """Return handling policy for visualizer binary frames."""
         if message_type == BinaryMessageType.VISUALIZATION_DATA.value:
-            return BinaryHandling(drop_late=True, grace_period_us=2_000_000, buffer_track=False)
+            return BinaryHandling(drop_late=True, grace_period_us=2_000_000, buffer_track=True)
         return None
 
     def on_connect(self) -> None:
@@ -113,11 +113,16 @@ class VisualizerV1Role(Role):
 
         frame = self._extractor.process_chunk(chunk.data, chunk.timestamp_us)
         message = pack_visualization_message(frames=[frame], config=self._stream_config)
+        req = self.get_audio_requirements()
+        assert req.frame_duration_us is not None  # always set for visualizer
         self._client.send_binary(
             message,
             role_family=self.role_family,
             timestamp_us=frame.timestamp_us,
             message_type=BinaryMessageType.VISUALIZATION_DATA.value,
+            buffer_end_time_us=frame.timestamp_us + req.frame_duration_us,
+            buffer_byte_count=len(message),
+            duration_us=req.frame_duration_us,
         )
 
     def on_stream_clear(self) -> None:

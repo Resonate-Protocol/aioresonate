@@ -247,6 +247,29 @@ def test_visualizer_role_on_stream_end_sends_end_message() -> None:
     assert message.payload.roles == ["visualizer"]
 
 
+def test_visualizer_role_sends_buffer_tracking_metadata() -> None:
+    """send_binary must include buffer tracking parameters."""
+    client = _make_client_stub()
+    role = VisualizerV1Role(client=client)
+    role.on_connect()
+
+    pcm = _sine_pcm_16bit(sample_rate=48_000, channels=2, hz=1000.0, duration_s=0.025)
+    role.on_audio_chunk(
+        AudioChunk(
+            data=pcm,
+            timestamp_us=1_000_000,
+            duration_us=25_000,
+            byte_count=len(pcm),
+        )
+    )
+
+    client.send_binary.assert_called()
+    kwargs = client.send_binary.call_args.kwargs
+    assert kwargs["buffer_end_time_us"] == 1_025_000  # timestamp + 25ms frame duration
+    assert kwargs["buffer_byte_count"] > 0
+    assert kwargs["duration_us"] == 25_000
+
+
 def test_visualizer_role_stream_start_is_resent_after_stream_end() -> None:
     """A new stream/start must be sent again after stream/end."""
     client = _make_client_stub()
