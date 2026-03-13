@@ -333,3 +333,31 @@ def test_visualizer_role_stream_start_is_resent_after_stream_end() -> None:
         if isinstance(call.args[1], StreamStartMessage)
     ]
     assert len(stream_start_calls) == 2
+
+
+def test_visualizer_role_resets_binary_timing_on_stream_start() -> None:
+    """on_stream_start() resets binary timing for fresh grace window."""
+    client = _make_client_stub()
+    role = VisualizerV1Role(client=client)
+    role.on_connect()
+
+    # Simulate stale timing from a previous stream
+    role._stream_start_time_us = 1_000_000  # noqa: SLF001
+
+    role.on_stream_start()
+
+    assert role._stream_start_time_us is None  # noqa: SLF001
+
+
+def test_visualizer_role_resets_binary_timing_on_disconnect() -> None:
+    """on_disconnect() resets binary timing to avoid stale grace period."""
+    client = _make_client_stub()
+    role = VisualizerV1Role(client=client)
+    role.on_connect()
+    role.on_stream_start()
+
+    role._stream_start_time_us = 5_000_000  # noqa: SLF001
+
+    role.on_disconnect()
+
+    assert role._stream_start_time_us is None  # noqa: SLF001

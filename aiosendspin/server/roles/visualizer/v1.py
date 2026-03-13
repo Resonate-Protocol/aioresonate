@@ -113,6 +113,7 @@ class VisualizerV1Role(Role):
         self._unsubscribe_from_group_role()
         self._stream_started = False
         self._extractor = None
+        self.reset_binary_timing()
 
     def on_stream_start(self) -> None:
         """Start extractor state for a new audio stream."""
