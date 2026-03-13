@@ -48,6 +48,7 @@ class VisualizerV1Role(Role):
         self._stream_started = False
         self._buffer_tracker = None
         self._group_role = None
+        self._support: ClientHelloVisualizerSupport | None = None
         self._stream_config: StreamStartVisualizer | None = None
         self._extractor: VisualizerFeatureExtractor | None = None
 
@@ -86,18 +87,10 @@ class VisualizerV1Role(Role):
 
     def _ensure_buffer_tracker(self) -> None:
         """Create or update buffer tracker from negotiated config."""
-        support_raw = self._client.info.visualizer_support
-        if support_raw is None:
+        if self._support is None:
             self._buffer_tracker = None
             return
-        support = (
-            support_raw
-            if isinstance(support_raw, ClientHelloVisualizerSupport)
-            else ClientHelloVisualizerSupport.from_dict(
-                self._normalize_support_payload(support_raw)
-            )
-        )
-        capacity = max(1, support.buffer_capacity)
+        capacity = max(1, self._support.buffer_capacity)
         if self._buffer_tracker is None:
             self._buffer_tracker = BufferTracker(
                 clock=self._client._server.clock,  # noqa: SLF001
@@ -186,10 +179,10 @@ class VisualizerV1Role(Role):
         support_raw = self._client.info.visualizer_support
         if support_raw is None:
             raise ValueError("visualizer support object missing for draft visualizer role")
-        support = ClientHelloVisualizerSupport.from_dict(
+        self._support = ClientHelloVisualizerSupport.from_dict(
             self._normalize_support_payload(support_raw)
         )
-        self._stream_config = StreamStartVisualizer.from_support(support)
+        self._stream_config = StreamStartVisualizer.from_support(self._support)
 
     def _normalize_support_payload(self, support_raw: object) -> dict[str, object]:
         """Normalize legacy/minimal support payloads to draft visualizer schema."""
