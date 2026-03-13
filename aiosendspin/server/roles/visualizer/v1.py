@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING
 
 from aiosendspin.models.core import (
@@ -9,6 +10,7 @@ from aiosendspin.models.core import (
     StreamClearPayload,
     StreamEndMessage,
     StreamEndPayload,
+    StreamRequestFormatPayload,
     StreamStartMessage,
     StreamStartPayload,
 )
@@ -30,6 +32,8 @@ from aiosendspin.server.roles.visualizer.packing import pack_visualization_messa
 
 if TYPE_CHECKING:
     from aiosendspin.server.client import SendspinClient
+
+_LOGGER = logging.getLogger(__name__)
 
 
 class VisualizerV1Role(Role):
@@ -170,9 +174,9 @@ class VisualizerV1Role(Role):
         if self._buffer_tracker is not None:
             self._buffer_tracker.reset()
 
-    def on_stream_request_format(self, payload: object) -> None:  # noqa: ARG002
+    def on_stream_request_format(self, payload: StreamRequestFormatPayload) -> None:  # noqa: ARG002
         """Ignore runtime visualizer renegotiation for now."""
-        self._client._logger.debug(  # noqa: SLF001
+        _LOGGER.debug(
             "Ignoring visualizer stream/request-format from client %s",
             self._client.client_id,
         )
