@@ -75,9 +75,10 @@ class VisualizerFeatureExtractor:
                     weighted_power = float(np.sum(np.square(compensated, dtype=np.float64)))
                     rms = np.sqrt(weighted_power / max(n, 1)) / max(n, 1)
                     # Normalize so a full-scale sine ≈ 65535. A full-scale sine has
-                    # peak magnitude N/2 after rfft; its RMS via this path is
-                    # (N/2) / N = 0.5 before A-weight gain (~1.0 at 1-4 kHz).
-                    normalized = float(np.clip(rms / 0.5, 0.0, 1.0))
+                    # rfft peak N/2, reduced to N/4 by Hanning (coherent gain 0.5);
+                    # RMS via this path is (N/4) / N = 0.25 before A-weight gain
+                    # (~1.0 at 1-4 kHz).
+                    normalized = float(np.clip(rms / 0.25, 0.0, 1.0))
                     loudness = int(normalized * 65535.0)
 
             if "f_peak" in self._config.types:
@@ -209,11 +210,11 @@ class VisualizerFeatureExtractor:
         counts = np.maximum(counts, 1.0)
         binned = np.sqrt(sums / counts)
 
-        # Absolute normalization: a full-scale sine concentrates in one bin with
-        # magnitude N/2 (rfft convention). Use that as the reference so 65535
-        # corresponds to full scale.
+        # Absolute normalization: a full-scale sine has rfft peak magnitude N/2,
+        # reduced to N/4 by the Hanning window (coherent gain 0.5). Use N/4 as
+        # the reference so 65535 corresponds to full scale.
         n = freqs.size * 2 - 1  # original time-domain sample count
-        ref = max(float(n) / 2.0, 1.0)
+        ref = max(float(n) / 4.0, 1.0)
         normalized = np.clip(binned / ref, 0.0, 1.0)
         return (normalized * 65535.0).astype(np.uint16)  # type: ignore[no-any-return]
 
