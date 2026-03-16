@@ -48,7 +48,7 @@ dev = [
   "pytest-xdist==3.8.0",
   "syrupy==5.1.0",
   "tomli==2.4.0",
-  "ruff==0.15.5",
+  "ruff==0.15.6",
 ]
 
 [tool.setuptools.packages.find]
