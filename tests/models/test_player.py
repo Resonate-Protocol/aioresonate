@@ -70,3 +70,9 @@ def test_player_command_volume_rejects_static_delay() -> None:
     """VOLUME command rejects static_delay_ms parameter."""
     with pytest.raises(ValueError, match="static_delay_ms should not"):
         PlayerCommandPayload(command=PlayerCommand.VOLUME, volume=50, static_delay_ms=100)
+
+
+def test_player_state_rejects_invalid_supported_commands() -> None:
+    """State-level supported_commands only allows set_static_delay."""
+    with pytest.raises(ValueError, match="Invalid state-level"):
+        PlayerStatePayload(supported_commands=[PlayerCommand.VOLUME])

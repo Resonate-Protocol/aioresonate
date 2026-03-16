@@ -325,8 +325,7 @@ class SendspinClient:
 
     def set_static_delay_ms(self, delay_ms: float) -> None:
         """Update the static playback delay applied after clock synchronisation."""
-        if not 0 <= delay_ms <= 5000:
-            raise ValueError(f"static_delay_ms must be in range 0-5000, got {delay_ms}")
+        delay_ms = max(0.0, min(5000.0, delay_ms))
         delay_us = round(delay_ms * 1_000.0)
         if delay_us == self._static_delay_us:
             return

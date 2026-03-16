@@ -26,7 +26,7 @@ class PlayerGroupRole(GroupRole):
         All members of PlayerGroupRole are PlayerV1Role instances since only
         roles with role_family="player" subscribe to this GroupRole.
         """
-        return cast("list[PlayerRoleProtocol]", self._members)
+        return list(cast("list[PlayerRoleProtocol]", self._members))
 
     def get_group_volume(self) -> int | None:
         """Return current group volume (average of player volumes)."""

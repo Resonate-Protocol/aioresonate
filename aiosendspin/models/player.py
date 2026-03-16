@@ -91,6 +91,11 @@ class PlayerStatePayload(DataClassORJSONMixin):
             raise ValueError(f"Volume must be in range 0-100, got {self.volume}")
         if not 0 <= self.static_delay_ms <= 5000:
             raise ValueError(f"static_delay_ms must be in range 0-5000, got {self.static_delay_ms}")
+        VALID_STATE_COMMANDS = {PlayerCommand.SET_STATIC_DELAY}  # noqa: N806
+        if self.supported_commands:
+            invalid = [c for c in self.supported_commands if c not in VALID_STATE_COMMANDS]
+            if invalid:
+                raise ValueError(f"Invalid state-level supported_commands: {invalid}")
 
     class Config(BaseConfig):
         """Config for parsing json messages."""
