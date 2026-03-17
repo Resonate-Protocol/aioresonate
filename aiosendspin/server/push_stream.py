@@ -216,8 +216,8 @@ class _ResamplerState:
 
     key: _ResamplerKey
     """Resampler key for identification."""
-    graph: _AudioFilterGraph
-    """PyAV audio filter graph used for resampling."""
+    graph: _AudioFilterGraph | None
+    """PyAV audio filter graph used for resampling. None for passthrough."""
     source_av_format: str
     """PyAV format string for source."""
     source_av_layout: str
@@ -236,6 +236,8 @@ class _ResamplerState:
     """True when resampler output is s32 but wire PCM is packed s24."""
     pending_timestamp_us: int | None = None
     """Timestamp of the earliest audio sample not yet emitted by this resampler."""
+    is_passthrough: bool = False
+    """True when source and target formats are identical — skip graph processing."""
 
 
 @dataclass(frozen=True)
@@ -262,15 +264,31 @@ def _create_resampler_state(
         target_format.resolve_av_format()
     )
 
-    graph = _build_resample_graph(
-        source_av_format=source_av_format,
-        source_layout=source_layout,
-        source_sample_rate=source_format.sample_rate,
-        target_av_format=target_av_format,
-        target_layout=target_layout,
-        target_sample_rate=target_format.sample_rate,
-        dither_method=key.dither_method,
+    needs_s32_to_s24 = (
+        target_format.sample_type == "int"
+        and target_format.bit_depth == 24
+        and target_av_bytes != target_wire_bytes
     )
+
+    is_passthrough = (
+        source_format.sample_rate == target_format.sample_rate
+        and source_format.channels == target_format.channels
+        and source_av_format == target_av_format
+        and not needs_s32_to_s24
+        and key.dither_method is None
+    )
+
+    graph: _AudioFilterGraph | None = None
+    if not is_passthrough:
+        graph = _build_resample_graph(
+            source_av_format=source_av_format,
+            source_layout=source_layout,
+            source_sample_rate=source_format.sample_rate,
+            target_av_format=target_av_format,
+            target_layout=target_layout,
+            target_sample_rate=target_format.sample_rate,
+            dither_method=key.dither_method,
+        )
 
     return _ResamplerState(
         key=key,
@@ -282,11 +300,8 @@ def _create_resampler_state(
         target_layout=target_layout,
         target_wire_frame_stride=target_wire_bytes * target_format.channels,
         target_av_frame_stride=target_av_bytes * target_format.channels,
-        needs_s32_to_s24_conversion=(
-            target_format.sample_type == "int"
-            and target_format.bit_depth == 24
-            and target_av_bytes != target_wire_bytes
-        ),
+        needs_s32_to_s24_conversion=needs_s32_to_s24,
+        is_passthrough=is_passthrough,
     )
 
 
@@ -320,21 +335,22 @@ def _resample_pcm_standalone(
         if drift_us > 20_000:
             # Flush the old graph to release FIR filter tails cleanly.
             # Flushed samples are discarded — they belong to the stale timeline.
-            try:
-                resampler_state.graph.push(None)
-                _drain_audio_graph(resampler_state.graph)
-            except (EOFError, OSError):
-                pass
+            if resampler_state.graph is not None:
+                try:
+                    resampler_state.graph.push(None)
+                    _drain_audio_graph(resampler_state.graph)
+                except (EOFError, OSError):
+                    pass
+                resampler_state.graph = _build_resample_graph(
+                    source_av_format=resampler_state.source_av_format,
+                    source_layout=resampler_state.source_av_layout,
+                    source_sample_rate=resampler_state.source_sample_rate,
+                    target_av_format=resampler_state.target_av_format,
+                    target_layout=resampler_state.target_layout,
+                    target_sample_rate=resampler_state.key.target_sample_rate,
+                    dither_method=resampler_state.key.dither_method,
+                )
             resampler_state.pending_timestamp_us = input_timestamp_us
-            resampler_state.graph = _build_resample_graph(
-                source_av_format=resampler_state.source_av_format,
-                source_layout=resampler_state.source_av_layout,
-                source_sample_rate=resampler_state.source_sample_rate,
-                target_av_format=resampler_state.target_av_format,
-                target_layout=resampler_state.target_layout,
-                target_sample_rate=resampler_state.key.target_sample_rate,
-                dither_method=resampler_state.key.dither_method,
-            )
 
     # Calculate sample count from input
     bytes_per_sample = source_format.bit_depth // 8
@@ -349,6 +365,21 @@ def _resample_pcm_standalone(
             needs_s32_to_s24_conversion=resampler_state.needs_s32_to_s24_conversion,
             sample_type="float" if resampler_state.target_av_format == "flt" else "int",
         )
+
+    # Fast path: no conversion needed — return input PCM with timestamp tracking
+    if resampler_state.is_passthrough:
+        output_start_ts = resampler_state.pending_timestamp_us
+        duration_us = int(sample_count * 1_000_000 / resampler_state.key.target_sample_rate)
+        resampler_state.pending_timestamp_us += duration_us
+        return _ResampledPCM(
+            pcm_data=source_pcm,
+            output_start_ts=output_start_ts,
+            sample_count=sample_count,
+            needs_s32_to_s24_conversion=False,
+            sample_type=source_format.sample_type,
+        )
+
+    assert resampler_state.graph is not None  # guaranteed: not passthrough → graph was built
 
     # Create input frame
     frame = av.AudioFrame(

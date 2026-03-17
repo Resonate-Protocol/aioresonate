@@ -2211,3 +2211,39 @@ async def test_catchup_quantizer_does_not_share_live_cache(
         f"Expected 0 drift-triggered rebuilds during catch-up, got {catchup_drifts} "
         f"(likely shared quantizer cache causing timestamp jump)"
     )
+
+
+def test_noop_resample_bypasses_graph_construction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Resampling with identical source/target should skip graph construction."""
+    build_calls = 0
+    original_build = push_stream_module._build_resample_graph  # noqa: SLF001
+
+    def _counting_build(**kwargs: Any) -> object:
+        nonlocal build_calls
+        build_calls += 1
+        return original_build(**kwargs)
+
+    monkeypatch.setattr(push_stream_module, "_build_resample_graph", _counting_build)
+
+    source = AudioFormat(sample_rate=48_000, bit_depth=16, channels=2, sample_type="int")
+    key = push_stream_module._ResamplerKey(  # noqa: SLF001
+        channel_id=MAIN_CHANNEL,
+        source_format=source,
+        target_sample_rate=48_000,
+        target_channels=2,
+        target_bit_depth=16,
+        target_sample_type="int",
+    )
+    state = push_stream_module._create_resampler_state(key, source, source)  # noqa: SLF001
+
+    pcm_25ms = bytes(4800)  # 25ms @ 48kHz stereo s16
+    result = push_stream_module._resample_pcm_standalone(  # noqa: SLF001
+        state, pcm_25ms, source, 1_000_000
+    )
+
+    assert build_calls == 0, "No-op resample should not build a filter graph"
+    assert result.pcm_data == pcm_25ms, "No-op resample should return input PCM unchanged"
+    assert result.sample_count == 1200  # 48000 * 0.025
+    assert result.output_start_ts == 1_000_000
