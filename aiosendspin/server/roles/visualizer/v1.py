@@ -137,17 +137,14 @@ class VisualizerV1Role(Role):
 
         frame = self._extractor.process_chunk(chunk.data, chunk.timestamp_us)
         message = pack_visualization_message(frames=[frame], config=self._stream_config)
-        req = self.get_audio_requirements()
-        if req.frame_duration_us is None:
-            raise ValueError("visualizer audio requirements must specify frame_duration_us")
         self._client.send_binary(
             message,
             role_family=self.role_family,
             timestamp_us=frame.timestamp_us,
             message_type=BinaryMessageType.VISUALIZATION_DATA.value,
-            buffer_end_time_us=frame.timestamp_us + req.frame_duration_us,
+            buffer_end_time_us=chunk.timestamp_us + chunk.duration_us,
             buffer_byte_count=len(message),
-            duration_us=req.frame_duration_us,
+            duration_us=chunk.duration_us,
         )
 
     def on_stream_clear(self) -> None:
