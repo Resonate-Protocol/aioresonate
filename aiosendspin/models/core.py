@@ -131,11 +131,6 @@ class ClientHelloPayload(DataClassORJSONMixin):
 
     def __post_init__(self) -> None:
         """Enforce that support configs match supported roles."""
-        if isinstance(self.visualizer_support, dict):
-            self.visualizer_support = ClientHelloVisualizerSupport.from_dict(  # type: ignore[unreachable]
-                self.visualizer_support
-            )
-
         # Validate player role and support configuration
         # Require support objects only for the exact role version we parse (e.g. "player@v1").
         # Clients may advertise newer versions (e.g. "player@v2") which this server may not
