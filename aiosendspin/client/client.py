@@ -259,7 +259,7 @@ class SendspinClient:
                 is specified; raises ValueError if missing.
             artwork_support: Custom artwork capabilities. Required if ARTWORK
                 role is specified; raises ValueError if missing.
-            visualizer_support: Visualizer capabilities dict. Required if
+            visualizer_support: Visualizer capabilities. Required if
                 VISUALIZER role is specified; raises ValueError if missing.
             session: Optional aiohttp ClientSession. If None, a session is created
                 and managed by this client.
