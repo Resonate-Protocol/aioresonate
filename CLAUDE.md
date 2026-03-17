@@ -1,7 +1,7 @@
 # CLAUDE.md
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
-This guidance is aimed at Claude Code but may also be suitable for other AI tooling, such as Github Copilot and OpenAI Codex.
+This guidance is aimed at Claude Code but may also be suitable for other AI tooling, such as GitHub Copilot and OpenAI Codex.
 
 ## Commands
 
@@ -17,9 +17,9 @@ This guidance is aimed at Claude Code but may also be suitable for other AI tool
 
 **aiosendspin** is the async Python implementation of the [Sendspin Protocol](https://github.com/Sendspin-Protocol/spec) for synchronized audio streaming across networked devices.
 
-The package has three top-level modules: `server` (the protocol server), `client` (a Python SDK for building clients), and `models` (shared protocol messages and types).
+The package has three main subpackages: `server` (the protocol server), `client` (a Python SDK for building clients), and `models` (shared protocol messages and types).
 
-`SendspinClient` lifetime is decoupled from `SendspinConnection` (WebSocket transport). Clients persist across reconnects and disconnections; roles are retained across reconnections (warm reconnect) and only recreated when the negotiated role set changes (cold reconnect).
+Server-side `SendspinClient` (`server/client.py`) lifetime is decoupled from `SendspinConnection` (WebSocket transport). Clients persist across reconnects and disconnections; roles are retained across reconnections (warm reconnect) and only recreated when the negotiated role set changes (cold reconnect).
 
 ### Key Components
 
@@ -47,7 +47,7 @@ Two-level architecture: **`Role`** (per-connection) and **`GroupRole`** (per-gro
 - Identified by `role_id` (versioned, e.g. `"player@v1"`) and `role_family` (e.g. `"player"`)
 - Declares capabilities via `get_stream_requirements()`, `get_audio_requirements()`, `get_binary_handling()`
 - Lifecycle hooks: `on_connect()`, `on_disconnect()`, `on_stream_start()`, `on_audio_chunk()`, `on_stream_clear()`, `on_stream_end()`
-- Must call `_subscribe_to_group_role()` in `on_connect()` and `_unsubscribe_from_group_role()` in `on_disconnect()`
+- Implementations should call `_subscribe_to_group_role()` in `on_connect()` and `_unsubscribe_from_group_role()` in `on_disconnect()` (re-subscription on group changes is handled automatically via `on_group_changed()`)
 
 **GroupRole** (ABC in `server/roles/base.py`):
 - One instance per role family per group, coordinates across all member roles
