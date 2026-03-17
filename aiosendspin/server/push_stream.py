@@ -385,6 +385,47 @@ def _resample_pcm_standalone(
     )
 
 
+def _quantize_float_pcm(
+    *,
+    channel_id: UUID,
+    pcm_data: bytes,
+    output_ts: int,
+    sample_rate: int,
+    channels: int,
+    target_bit_depth: int,
+    resampler_cache: dict[_ResamplerKey, _ResamplerState],
+) -> _ResampledPCM:
+    """Convert float32 PCM to integer output format using the provided cache."""
+    source_format = AudioFormat(
+        sample_rate=sample_rate,
+        bit_depth=32,
+        channels=channels,
+        sample_type="float",
+    )
+    target_format = AudioFormat(
+        sample_rate=sample_rate,
+        bit_depth=target_bit_depth,
+        channels=channels,
+        sample_type="int",
+    )
+    dither_method = _DITHER_METHOD_TRIANGULAR_HP if target_bit_depth == 16 else None
+
+    resampler_key = _ResamplerKey(
+        channel_id=channel_id,
+        source_format=source_format,
+        target_sample_rate=sample_rate,
+        target_channels=channels,
+        target_bit_depth=target_bit_depth,
+        target_sample_type="int",
+        dither_method=dither_method,
+    )
+    state = resampler_cache.get(resampler_key)
+    if state is None:
+        state = _create_resampler_state(resampler_key, source_format, target_format)
+        resampler_cache[resampler_key] = state
+    return _resample_pcm_standalone(state, pcm_data, source_format, output_ts)
+
+
 def _processing_format_for_roles(
     source_format: AudioFormat,
     *,
@@ -1679,6 +1720,7 @@ class PushStream:
         cached: list[CachedChunk] = []
         resampler_state: _ResamplerState | None = None
         resampler_cache_key: _ResamplerKey | None = None
+        quantizer_cache: dict[_ResamplerKey, _ResamplerState] = {}
 
         for chunk in pcm_chunks:
             source_format = AudioFormat(
@@ -1724,34 +1766,37 @@ class PushStream:
 
             resampled_pcm = resampled.pcm_data
             needs_s32_to_s24_conversion = resampled.needs_s32_to_s24_conversion
+            output_start_ts = resampled.output_start_ts
+            sample_count = resampled.sample_count
+
             if resampled.sample_type == "float":
-                edge_quantized = self._quantize_float_pcm_for_output(
+                edge_quantized = _quantize_float_pcm(
                     channel_id=channel_id,
                     pcm_data=resampled_pcm,
                     output_ts=resampled.output_start_ts,
                     sample_rate=req.sample_rate,
                     channels=req.channels,
                     target_bit_depth=req.bit_depth,
+                    resampler_cache=quantizer_cache,
                 )
                 resampled_pcm = edge_quantized.pcm_data
                 needs_s32_to_s24_conversion = edge_quantized.needs_s32_to_s24_conversion
+                output_start_ts = edge_quantized.output_start_ts
+                sample_count = edge_quantized.sample_count
+
             if (
                 needs_s32_to_s24_conversion
                 and req.bit_depth == 24
                 and isinstance(encoder, PcmPassthrough)
             ):
                 resampled_pcm = _convert_s32_to_s24(resampled_pcm)
-            duration_us = (
-                int(resampled.sample_count * 1_000_000 / req.sample_rate)
-                if resampled.sample_count > 0
-                else 0
-            )
+            duration_us = int(sample_count * 1_000_000 / req.sample_rate) if sample_count > 0 else 0
 
             encoded_frames = self._encode_transform_for_key(
                 tkey,
                 encoder,
                 resampled_pcm,
-                resampled.output_start_ts,
+                output_start_ts,
                 duration_us,
             )
             for data, ts, dur in encoded_frames:

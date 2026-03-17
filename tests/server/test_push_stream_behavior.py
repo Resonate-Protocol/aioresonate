@@ -2106,3 +2106,108 @@ async def test_multi_role_fanout_quantizes_once_per_pcm_key(
     assert role1.received, "role1 should have received audio chunks"
     # role2 may not receive chunks yet because 25ms of data is below its
     # 50ms frame duration — the important assertion is quantize_calls == 1.
+
+
+@pytest.mark.asyncio
+async def test_catchup_quantizer_does_not_share_live_cache(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Catch-up path must use its own quantizer state, not the shared live cache."""
+    drift_rebuild_count = 0
+    original_resample = push_stream_module._resample_pcm_standalone  # noqa: SLF001
+
+    def _tracking_resample(state: Any, pcm: bytes, fmt: Any, ts: int) -> Any:
+        nonlocal drift_rebuild_count
+        if state.pending_timestamp_us is not None:
+            drift_us = abs(state.pending_timestamp_us - ts)
+            if drift_us > 20_000:
+                drift_rebuild_count += 1
+        return original_resample(state, pcm, fmt, ts)
+
+    monkeypatch.setattr(push_stream_module, "_resample_pcm_standalone", _tracking_resample)
+
+    class TransformerA:
+        pending_timestamp_us: int | None = None
+
+        @property
+        def frame_duration_us(self) -> int:
+            return 25_000
+
+        def process(self, pcm: bytes, _ts: int, _dur: int) -> list[bytes]:
+            return [pcm]
+
+        def flush(self) -> list[bytes]:
+            return []
+
+        def get_header(self) -> bytes | None:
+            return None
+
+        def reset(self) -> None:
+            return
+
+    class TransformerB(TransformerA):
+        pass
+
+    group = _DummyGroup(clients=[])
+
+    # role1 uses TransformerA — its live encoding builds quantizer state in self._resamplers
+    role1 = _DummyRole(
+        AudioRequirements(
+            sample_rate=48_000,
+            bit_depth=16,
+            channels=2,
+            transformer=TransformerA(),
+            channel_id=MAIN_CHANNEL,
+            frame_duration_us=25_000,
+        )
+    )
+    group.clients.append(_DummyClient([role1]))
+
+    loop = asyncio.get_running_loop()
+    clock = ManualClock(now_us_value=0)
+    stream = PushStream(loop=loop, clock=clock, group=group)
+    stream.enable_pcm_cache_for_channel(MAIN_CHANNEL)
+
+    # Commit several float PCM chunks — builds live quantizer state.
+    # Advance clock by 25ms (matching audio duration) between commits to
+    # keep resampler timestamps monotonic without drift-triggered rebuilds.
+    for _ in range(4):
+        stream.prepare_audio(
+            bytes(9600),  # 25ms @ 48kHz stereo f32
+            AudioFormat(sample_rate=48_000, bit_depth=32, channels=2, sample_type="float"),
+        )
+        await stream.commit_audio()
+        clock.advance_us(25_000)
+
+    # Count drift rebuilds so far (live path — should be 0 with ManualClock)
+    live_drifts = drift_rebuild_count
+
+    # Add a late-joining role with TransformerB — different TransformKey, triggers PCM catch-up
+    role2 = _DummyRole(
+        AudioRequirements(
+            sample_rate=48_000,
+            bit_depth=16,
+            channels=2,
+            transformer=TransformerB(),
+            channel_id=MAIN_CHANNEL,
+            frame_duration_us=25_000,
+        )
+    )
+    group.clients.append(_DummyClient([role2]))
+    stream.on_role_join(role2)
+
+    # Wait for the async catch-up task to complete
+    for _ in range(50):
+        if role2.received:
+            break
+        await asyncio.sleep(0.01)
+
+    # Catch-up should NOT trigger drift-rebuilds in the shared quantizer cache.
+    # With separate cache: fresh quantizer state, no drift detection.
+    # With shared cache: the jump from live timestamps (~350ms) to historical
+    # timestamps (~250ms) causes drift > 20ms, triggering a graph rebuild.
+    catchup_drifts = drift_rebuild_count - live_drifts
+    assert catchup_drifts == 0, (
+        f"Expected 0 drift-triggered rebuilds during catch-up, got {catchup_drifts} "
+        f"(likely shared quantizer cache causing timestamp jump)"
+    )
