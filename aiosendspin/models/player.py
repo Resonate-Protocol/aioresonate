@@ -60,6 +60,12 @@ class ClientHelloPlayerSupport(DataClassORJSONMixin):
         if not self.supported_formats:
             raise ValueError("supported_formats cannot be empty")
 
+        valid_hello_commands = {PlayerCommand.VOLUME, PlayerCommand.MUTE}
+        if self.supported_commands:
+            invalid = [c for c in self.supported_commands if c not in valid_hello_commands]
+            if invalid:
+                raise ValueError(f"Invalid hello supported_commands: {invalid}")
+
 
 # Client -> Server: client/state player object
 @dataclass
