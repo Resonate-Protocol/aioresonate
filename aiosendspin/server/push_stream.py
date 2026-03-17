@@ -1459,6 +1459,10 @@ class PushStream:
             return
         if self._channel_has_other_audio_roles(channel_id, joining_role):
             return
+        if channel_id in self._channels_with_committed_audio:
+            # Do not rebase if the channel already has committed audio, as changing the timing
+            # will de-sync it from other clients.
+            return
         now_us = self._clock.now_us()
         max_resume_start_us = now_us + DEFAULT_INITIAL_DELAY_US
         self._channel_timing[channel_id] = min(

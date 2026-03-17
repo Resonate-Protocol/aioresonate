@@ -634,6 +634,59 @@ async def test_non_main_join_without_cache_rebases_far_ahead_tail() -> None:
 
 
 @pytest.mark.asyncio
+async def test_non_main_join_with_committed_timeline_does_not_rebase_backward() -> None:
+    """Cache-miss rejoin must keep committed dedicated channels on shared timeline."""
+    channel_id = UUID("55555555-5555-5555-5555-555555555555")
+    role_main = _DummyRole(
+        AudioRequirements(
+            sample_rate=48000,
+            bit_depth=16,
+            channels=2,
+            transformer=None,
+            channel_id=MAIN_CHANNEL,
+            frame_duration_us=25_000,
+        )
+    )
+    role_join = _DummyRole(
+        AudioRequirements(
+            sample_rate=48000,
+            bit_depth=16,
+            channels=2,
+            transformer=None,
+            channel_id=channel_id,
+            frame_duration_us=25_000,
+        )
+    )
+    group = _DummyGroup(clients=[_DummyClient([role_main]), _DummyClient([role_join])])
+
+    loop = asyncio.get_running_loop()
+    clock = ManualClock(now_us_value=1_000_000)
+    stream = PushStream(loop=loop, clock=clock, group=group)
+    fmt = AudioFormat(sample_rate=48000, bit_depth=16, channels=2)
+
+    # Simulate an established shared timeline where both channels already committed audio.
+    shared_start_us = clock.now_us() + 500_000
+    stream._channel_timing[MAIN_CHANNEL] = shared_start_us  # noqa: SLF001
+    stream._channel_timing[channel_id] = shared_start_us  # noqa: SLF001
+    stream._channels_with_committed_audio.add(MAIN_CHANNEL)  # noqa: SLF001
+    stream._channels_with_committed_audio.add(channel_id)  # noqa: SLF001
+
+    stream.on_role_join(role_join)
+
+    # Rejoin must not rewind dedicated-channel timing toward now.
+    assert stream._channel_timing[channel_id] == shared_start_us  # noqa: SLF001
+
+    stream.prepare_audio(bytes(4800), fmt, channel_id=MAIN_CHANNEL)
+    stream.prepare_audio(bytes(4800), fmt, channel_id=channel_id)
+    await stream.commit_audio()
+
+    assert role_main.received
+    assert role_join.received
+    assert role_join.started == 1
+    assert role_join.received[0].timestamp_us == role_main.received[0].timestamp_us
+
+
+@pytest.mark.asyncio
 async def test_transform_dedup_uses_transform_key_not_instance(mock_loop: Any) -> None:
     """Transformer dedupe should be based on TransformKey, not instance id."""
 

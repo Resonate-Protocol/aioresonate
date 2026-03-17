@@ -348,8 +348,15 @@ class SendspinGroup:
         # Cancel any pending delayed join for this client
         logger.debug("removing %s from group with members: %s", client.client_id, self._clients)
         if len(self._clients) == 1:
+            had_active_stream = self.has_active_stream
             # Delete this group if that was the last client
             await self.stop()
+            if not had_active_stream:
+                # Group can be PLAYING without a stream during track transitions.
+                # stop() only fires on_stream_end via PushStream, so without one
+                # we must signal roles directly to invalidate stale binary.
+                for role in client.active_roles:
+                    role.on_stream_end()
             self._clients = []
         else:
             self._clients.remove(client)

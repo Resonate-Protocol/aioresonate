@@ -7,9 +7,10 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from aiohttp import ClientConnectionError
+from aiohttp import ClientConnectionError, ClientWebSocketResponse
 
 from aiosendspin.models.types import GoodbyeReason
+from aiosendspin.server.connection import SendspinConnection
 from aiosendspin.server.server import SendspinServer
 
 
@@ -256,6 +257,14 @@ async def test_server_initiated_backoff_resets_only_after_stable_session(
     await server._handle_client_connection(url)  # noqa: SLF001
 
     assert sleep_calls == expected_sleeps
+
+
+def test_should_retry_false_when_closing() -> None:
+    """should_retry_server_initiated_connection must be False after disconnect(retry=False)."""
+    conn = SendspinConnection(MagicMock(), wsock_client=MagicMock(spec=ClientWebSocketResponse))
+    assert conn.should_retry_server_initiated_connection is True
+    conn._closing = True  # noqa: SLF001
+    assert conn.should_retry_server_initiated_connection is False
 
 
 @pytest.mark.asyncio
