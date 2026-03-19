@@ -34,8 +34,8 @@ class _DummyServer:
 
     events: list[object] = dataclasses.field(default_factory=list)
 
-    def _signal_event(self, event: object) -> None:
-        self.events.append(event)
+    def _signal_client_updated(self, client_id: str) -> None:
+        self.events.append(ClientUpdatedEvent(client_id))
 
 
 class _DummyConnection:

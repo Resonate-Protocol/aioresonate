@@ -246,11 +246,7 @@ class SendspinClient:
         previous_roles = list(self._negotiated_roles)
         self._set_identity_from_hello(client_info, active_roles=active_roles)
         if previous_info is not None and previous_info != client_info:
-            from .server import ClientUpdatedEvent  # noqa: PLC0415
-
-            self._server._signal_event(  # noqa: SLF001
-                ClientUpdatedEvent(self._client_id)
-            )
+            self._server._signal_client_updated(self._client_id)  # noqa: SLF001
         self._logger = logger.getChild(self._client_id)
         expected_role_ids = set(self._negotiated_roles)
 

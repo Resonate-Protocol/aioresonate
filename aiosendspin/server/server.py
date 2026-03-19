@@ -296,6 +296,10 @@ class SendspinServer:
             except Exception:
                 logger.exception("Error in event listener")
 
+    def _signal_client_updated(self, client_id: str) -> None:
+        """Emit a ClientUpdatedEvent (called from SendspinClient)."""
+        self._signal_event(ClientUpdatedEvent(client_id))
+
     async def on_client_connect(self, request: web.Request) -> web.StreamResponse:
         """Handle an incoming WebSocket connection from a Sendspin client."""
         logger.debug("Incoming client connection from %s", request.remote)
