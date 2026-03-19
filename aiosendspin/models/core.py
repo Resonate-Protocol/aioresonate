@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, fields
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, ClassVar, Literal
 
 from mashumaro.config import BaseConfig
 from mashumaro.mixins.orjson import DataClassORJSONMixin
@@ -41,6 +41,7 @@ from .types import (
 )
 from .visualizer import (
     ClientHelloVisualizerSupport,
+    StreamRequestFormatVisualizer,
     StreamStartVisualizer,
 )
 
@@ -58,17 +59,6 @@ def _merge_optional_dataclass_fields(existing: Any, incoming: Any) -> Any:
         for field in fields(existing)
     }
     return type(existing)(**merged_values)
-
-
-# This server implementation accidentally used incorrect field names (player_support, etc.)
-# instead of the spec-compliant names (player@v1_support, etc.). This alias mapping allows
-# deserialization of JSON using either the old or new field names.
-# DEPRECATED(before-spec-1.0): Remove this mapping once all clients use spec-compliant names.
-_CLIENT_HELLO_LEGACY_FIELD_ALIASES: dict[str, str] = {
-    "player_support": "player@v1_support",
-    "artwork_support": "artwork@v1_support",
-    "visualizer_support": "visualizer@v1_support",
-}
 
 
 @dataclass
@@ -108,18 +98,26 @@ class ClientHelloPayload(DataClassORJSONMixin):
     artwork_support: Annotated[ClientHelloArtworkSupport | None, Alias("artwork@v1_support")] = None
     """Artwork support configuration - only if artwork role is in supported_roles."""
     visualizer_support: Annotated[
-        ClientHelloVisualizerSupport | None, Alias("visualizer@v1_support")
+        ClientHelloVisualizerSupport | None, Alias("visualizer@_draft_r1_support")
     ] = None
     """Visualizer support configuration - only if visualizer role is in supported_roles."""
 
+    # Static mapping: unversioned support key -> actual alias key.
+    _SUPPORT_KEY_ALIASES: ClassVar[dict[str, str]] = {
+        "player_support": "player@v1_support",
+        "artwork_support": "artwork@v1_support",
+        "visualizer_support": "visualizer@_draft_r1_support",
+    }
+
     @classmethod
     def __pre_deserialize__(cls, d: dict[str, Any]) -> dict[str, Any]:
-        """Accept both legacy and spec-compliant field names."""
+        """Normalize legacy role support keys to versioned names."""
         legacy_fields_used: list[tuple[str, str]] = []
-        for legacy_name, spec_name in _CLIENT_HELLO_LEGACY_FIELD_ALIASES.items():
-            if legacy_name in d and spec_name not in d:
-                legacy_fields_used.append((legacy_name, spec_name))
-                d[spec_name] = d.pop(legacy_name)
+        normalized = dict(d)
+        for legacy_key, versioned_key in cls._SUPPORT_KEY_ALIASES.items():
+            if legacy_key in normalized and versioned_key not in normalized:
+                legacy_fields_used.append((legacy_key, versioned_key))
+                normalized[versioned_key] = normalized.pop(legacy_key)
         if legacy_fields_used:
             old_names = ", ".join(old for old, _ in legacy_fields_used)
             new_names = ", ".join(new for _, new in legacy_fields_used)
@@ -129,7 +127,7 @@ class ClientHelloPayload(DataClassORJSONMixin):
                 old_names,
                 new_names,
             )
-        return d
+        return normalized
 
     def __post_init__(self) -> None:
         """Enforce that support configs match supported roles."""
@@ -160,8 +158,8 @@ class ClientHelloPayload(DataClassORJSONMixin):
         visualizer_role_supported = Roles.VISUALIZER.value in self.supported_roles
         if visualizer_role_supported and self.visualizer_support is None:
             raise ValueError(
-                "visualizer@v1_support (visualizer_support alias) must be provided when "
-                "'visualizer@v1' is in supported_roles"
+                "visualizer@_draft_r1_support (visualizer_support alias) must be "
+                "provided when 'visualizer@_draft_r1' is in supported_roles"
             )
         if not visualizer_role_supported:
             self.visualizer_support = None
@@ -476,6 +474,8 @@ class StreamRequestFormatPayload(DataClassORJSONMixin):
     """Player format request (only for clients with player role)."""
     artwork: StreamRequestFormatArtwork | None = None
     """Artwork format request (only for clients with artwork role)."""
+    visualizer: StreamRequestFormatVisualizer | None = None
+    """Visualizer format request (only for clients with visualizer role)."""
 
     class Config(BaseConfig):
         """Config for parsing json messages."""

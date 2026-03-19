@@ -11,6 +11,7 @@ from .client import (
     ServerInfo,
     StreamEndCallback,
     StreamStartCallback,
+    VisualizerCallback,
 )
 from .listener import ClientListener
 from .time_sync import SendspinTimeFilter
@@ -28,4 +29,5 @@ __all__ = [
     "ServerInfo",
     "StreamEndCallback",
     "StreamStartCallback",
+    "VisualizerCallback",
 ]
