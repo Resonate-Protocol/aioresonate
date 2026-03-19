@@ -58,6 +58,13 @@ class ClientAddedEvent(SendspinEvent):
 
 
 @dataclass
+class ClientUpdatedEvent(SendspinEvent):
+    """A client's hello payload changed on reconnect."""
+
+    client_id: str
+
+
+@dataclass
 class ClientRemovedEvent(SendspinEvent):
     """A persistent client/device was removed from the server."""
 
