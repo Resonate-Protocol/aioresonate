@@ -51,14 +51,19 @@ logger = logging.getLogger(__name__)
 
 def _has_merge_value(value: Any) -> bool:
     """Return whether a field value should overwrite the existing value during merge."""
-    return value is not None and not isinstance(value, UndefinedField)
+    return not isinstance(value, UndefinedField)
 
 
 def _merge_optional_field_value(existing: Any, incoming: Any) -> Any:
     """Merge one field value, recursively merging nested dataclasses when both are present."""
     if not _has_merge_value(incoming):
         return existing
-    if _has_merge_value(existing) and is_dataclass(existing) and is_dataclass(incoming):
+    if (
+        incoming is not None
+        and _has_merge_value(existing)
+        and is_dataclass(existing)
+        and is_dataclass(incoming)
+    ):
         return _merge_optional_dataclass_fields(existing, incoming)
     return incoming
 
