@@ -9,7 +9,7 @@ synchronization, stream lifecycle management, and role-based state updates and c
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, fields, is_dataclass
 from typing import Annotated, Any, ClassVar, Literal
 
 from mashumaro.config import BaseConfig
@@ -38,6 +38,7 @@ from .types import (
     PlaybackStateType,
     Roles,
     ServerMessage,
+    UndefinedField,
 )
 from .visualizer import (
     ClientHelloVisualizerSupport,
@@ -48,13 +49,26 @@ from .visualizer import (
 logger = logging.getLogger(__name__)
 
 
+def _has_merge_value(value: Any) -> bool:
+    """Return whether a field value should overwrite the existing value during merge."""
+    return value is not None and not isinstance(value, UndefinedField)
+
+
+def _merge_optional_field_value(existing: Any, incoming: Any) -> Any:
+    """Merge one field value, recursively merging nested dataclasses when both are present."""
+    if not _has_merge_value(incoming):
+        return existing
+    if _has_merge_value(existing) and is_dataclass(existing) and is_dataclass(incoming):
+        return _merge_optional_dataclass_fields(existing, incoming)
+    return incoming
+
+
 def _merge_optional_dataclass_fields(existing: Any, incoming: Any) -> Any:
-    """Merge dataclass instances by preferring non-None incoming field values."""
+    """Merge dataclass instances by preferring incoming values that are actually present."""
     merged_values = {
-        field.name: (
-            incoming_value
-            if (incoming_value := getattr(incoming, field.name)) is not None
-            else getattr(existing, field.name)
+        field.name: _merge_optional_field_value(
+            getattr(existing, field.name),
+            getattr(incoming, field.name),
         )
         for field in fields(existing)
     }
