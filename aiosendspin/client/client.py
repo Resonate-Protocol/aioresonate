@@ -772,6 +772,11 @@ class SendspinClient:
             BinaryMessageType.ARTWORK_CHANNEL_2,
             BinaryMessageType.ARTWORK_CHANNEL_3,
         }:
+            try:
+                unpack_binary_header(payload)
+            except Exception:
+                logger.exception("Failed to unpack binary header")
+                return
             self._handle_artwork_chunk(message_type, payload[BINARY_HEADER_SIZE:])
         elif message_type is BinaryMessageType.VISUALIZATION_DATA:
             # Spec format: [type:1][frame_count:1][frames...]
