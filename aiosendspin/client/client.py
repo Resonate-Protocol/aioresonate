@@ -106,6 +106,9 @@ ControllerStateCallback = Callable[[ServerStatePayload], None]
 # Callback invoked when audio streaming begins.
 StreamStartCallback = Callable[[StreamStartMessage], None]
 
+# Callback invoked when server/hello is received.
+ServerHelloCallback = Callable[[ServerHelloPayload], None]
+
 # Callback invoked when audio streaming ends.
 # Receives list of roles to end, or None if all roles should be ended.
 StreamEndCallback = Callable[[list[str] | None], None]
@@ -125,6 +128,9 @@ ServerCommandCallback = Callable[[ServerCommandPayload], None]
 
 # Callback invoked when visualizer frames are received.
 VisualizerCallback = Callable[[list[VisualizerFrame]], None]
+
+# Callback invoked when artwork binary frames are received.
+ArtworkCallback = Callable[[int, bytes], None]
 
 
 @dataclass(slots=True)
@@ -195,6 +201,8 @@ class SendspinClient:
     """True if player stream is active."""
     _visualizer_stream_active: bool = False
     """True if visualizer stream is active."""
+    _artwork_stream_active: bool = False
+    """True if artwork stream is active."""
     _current_visualizer_config: StreamStartVisualizer | None = None
     """Current visualizer config from stream/start."""
 
@@ -211,6 +219,8 @@ class SendspinClient:
     """Callbacks invoked on server/state messages."""
     _stream_start_callbacks: list[StreamStartCallback]
     """Callbacks invoked when a stream starts."""
+    _server_hello_callbacks: list[ServerHelloCallback]
+    """Callbacks invoked when server hello is received."""
     _stream_end_callbacks: list[StreamEndCallback]
     """Callbacks invoked when a stream ends."""
     _stream_clear_callbacks: list[StreamClearCallback]
@@ -223,6 +233,8 @@ class SendspinClient:
     """Callbacks invoked when server sends player commands."""
     _visualizer_callbacks: list[VisualizerCallback]
     """Callbacks invoked when visualizer frames are received."""
+    _artwork_callbacks: list[ArtworkCallback]
+    """Callbacks invoked when artwork frames are received."""
 
     _initial_volume: int
     """Initial volume level for player role (0-100)."""
@@ -318,12 +330,14 @@ class SendspinClient:
         self._group_callbacks = []
         self._controller_callbacks = []
         self._stream_start_callbacks = []
+        self._server_hello_callbacks = []
         self._stream_end_callbacks = []
         self._stream_clear_callbacks = []
         self._audio_chunk_callbacks = []
         self._disconnect_callbacks = []
         self._server_command_callbacks = []
         self._visualizer_callbacks = []
+        self._artwork_callbacks = []
 
     @property
     def server_info(self) -> ServerInfo | None:
@@ -437,6 +451,7 @@ class SendspinClient:
         self._stream_active = False
         self._current_audio_format = None
         self._current_player = None
+        self._artwork_stream_active = False
         self._visualizer_stream_active = False
         self._current_visualizer_config = None
 
@@ -524,6 +539,15 @@ class SendspinClient:
         return lambda: (
             self._stream_start_callbacks.remove(callback)
             if callback in self._stream_start_callbacks
+            else None
+        )
+
+    def add_server_hello_listener(self, callback: ServerHelloCallback) -> Callable[[], None]:
+        """Add a listener for server/hello payloads."""
+        self._server_hello_callbacks.append(callback)
+        return lambda: (
+            self._server_hello_callbacks.remove(callback)
+            if callback in self._server_hello_callbacks
             else None
         )
 
@@ -615,6 +639,15 @@ class SendspinClient:
         return lambda: (
             self._visualizer_callbacks.remove(callback)
             if callback in self._visualizer_callbacks
+            else None
+        )
+
+    def add_artwork_listener(self, callback: ArtworkCallback) -> Callable[[], None]:
+        """Add a listener for artwork binary frame events."""
+        self._artwork_callbacks.append(callback)
+        return lambda: (
+            self._artwork_callbacks.remove(callback)
+            if callback in self._artwork_callbacks
             else None
         )
 
@@ -716,7 +749,11 @@ class SendspinClient:
             logger.warning("Unknown binary message type: %s", raw_type)
             return
 
-        if not self._stream_active and not self._visualizer_stream_active:
+        if (
+            not self._stream_active
+            and not self._visualizer_stream_active
+            and not self._artwork_stream_active
+        ):
             logger.debug(
                 "Ignoring binary message of type %s since no stream is active", message_type
             )
@@ -729,6 +766,13 @@ class SendspinClient:
                 logger.exception("Failed to unpack binary header")
                 return
             self._handle_audio_chunk(header.timestamp_us, payload[BINARY_HEADER_SIZE:])
+        elif message_type in {
+            BinaryMessageType.ARTWORK_CHANNEL_0,
+            BinaryMessageType.ARTWORK_CHANNEL_1,
+            BinaryMessageType.ARTWORK_CHANNEL_2,
+            BinaryMessageType.ARTWORK_CHANNEL_3,
+        }:
+            self._handle_artwork_chunk(message_type, payload[BINARY_HEADER_SIZE:])
         elif message_type is BinaryMessageType.VISUALIZATION_DATA:
             # Spec format: [type:1][frame_count:1][frames...]
             # Pass payload[1:] so _parse_visualization_frames sees frame_count at data[0]
@@ -742,6 +786,7 @@ class SendspinClient:
             name=payload.name,
             version=payload.version,
         )
+        self._notify_server_hello_callbacks(payload)
         if self._server_hello_event:
             self._server_hello_event.set()
         logger.info(
@@ -768,11 +813,13 @@ class SendspinClient:
         if message.payload.visualizer is not None:
             self._current_visualizer_config = message.payload.visualizer
             self._visualizer_stream_active = True
+        if message.payload.artwork is not None:
+            self._artwork_stream_active = True
 
         player = message.payload.player
         if player is None:
             # stream/start without player payload - may be for artwork/visualizer only
-            if message.payload.visualizer is not None:
+            if message.payload.visualizer is not None or message.payload.artwork is not None:
                 self._notify_stream_start(message)
             else:
                 logger.debug("Stream start message without player payload")
@@ -838,6 +885,8 @@ class SendspinClient:
         if roles is None or "visualizer" in roles:
             self._visualizer_stream_active = False
             self._current_visualizer_config = None
+        if roles is None or "artwork" in roles:
+            self._artwork_stream_active = False
 
         self._notify_stream_end(roles)
 
@@ -876,6 +925,15 @@ class SendspinClient:
                 callback(timestamp_us, payload, self._current_audio_format)
             except Exception:
                 logger.exception("Error in audio chunk callback %s", callback)
+
+    def _handle_artwork_chunk(self, message_type: BinaryMessageType, payload: bytes) -> None:
+        """Handle incoming artwork chunk and notify callbacks."""
+        channel = int(message_type.value - BinaryMessageType.ARTWORK_CHANNEL_0.value)
+        for callback in list(self._artwork_callbacks):
+            try:
+                callback(channel, payload)
+            except Exception:
+                logger.exception("Error in artwork callback %s", callback)
 
     def _handle_visualization_data(self, payload: bytes) -> None:
         """Handle incoming visualization data binary message."""
@@ -1039,6 +1097,13 @@ class SendspinClient:
                 callback(message)
             except Exception:
                 logger.exception("Error in stream start callback %s", callback)
+
+    def _notify_server_hello_callbacks(self, payload: ServerHelloPayload) -> None:
+        for callback in list(self._server_hello_callbacks):
+            try:
+                callback(payload)
+            except Exception:
+                logger.exception("Error in server hello callback %s", callback)
 
     def _notify_stream_end(self, roles: list[str] | None) -> None:
         for callback in list(self._stream_end_callbacks):
