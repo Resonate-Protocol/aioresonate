@@ -35,7 +35,6 @@ import heapq
 import logging
 import time
 from collections import defaultdict, deque
-from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast
@@ -43,7 +42,6 @@ from typing import TYPE_CHECKING, Any, cast
 import orjson
 from aiohttp import ClientWebSocketResponse, WSMsgType, web
 
-from aiosendspin.models.artwork import ClientHelloArtworkSupport
 from aiosendspin.models.core import (
     ClientCommandMessage,
     ClientGoodbyeMessage,
@@ -60,7 +58,6 @@ from aiosendspin.models.core import (
     StreamRequestFormatMessage,
     StreamStartMessage,
 )
-from aiosendspin.models.player import ClientHelloPlayerSupport
 from aiosendspin.models.types import (
     ClientMessage,
     ConnectionReason,
@@ -69,11 +66,11 @@ from aiosendspin.models.types import (
     ServerMessage,
     role_family,
 )
-from aiosendspin.models.visualizer import ClientHelloVisualizerSupport
 from aiosendspin.util import create_task
 
 from .client import SendspinClient
 from .roles.negotiation import negotiate_active_roles
+from .roles.registry import ROLE_FACTORIES, ROLE_SUPPORT_SPECS
 
 if TYPE_CHECKING:
     from .audio import BufferTracker
@@ -84,42 +81,6 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 MAX_PENDING_MSG = 4096  # Default queue cap (per role queues, and global control queues)
-
-
-@dataclass(frozen=True, slots=True)
-class _RoleSupportSpec:
-    """Support-key mapping for a role family in client/hello."""
-
-    attr_name: str
-    v1_role_id: str
-    v1_support_key: str
-    legacy_support_key: str
-    parse_support: Callable[[dict[str, Any]], object]
-
-
-_ROLE_SUPPORT_SPECS: dict[str, _RoleSupportSpec] = {
-    "player": _RoleSupportSpec(
-        attr_name="player_support",
-        v1_role_id=Roles.PLAYER.value,
-        v1_support_key="player@v1_support",
-        legacy_support_key="player_support",
-        parse_support=ClientHelloPlayerSupport.from_dict,
-    ),
-    "artwork": _RoleSupportSpec(
-        attr_name="artwork_support",
-        v1_role_id=Roles.ARTWORK.value,
-        v1_support_key="artwork@v1_support",
-        legacy_support_key="artwork_support",
-        parse_support=ClientHelloArtworkSupport.from_dict,
-    ),
-    "visualizer": _RoleSupportSpec(
-        attr_name="visualizer_support",
-        v1_role_id=Roles.VISUALIZER.value,
-        v1_support_key="visualizer@v1_support",
-        legacy_support_key="visualizer_support",
-        parse_support=ClientHelloVisualizerSupport.from_dict,
-    ),
-}
 
 
 @dataclass(frozen=True, slots=True)
@@ -463,13 +424,21 @@ class SendspinConnection:
             self._server.on_client_first_connect(self._client.client_id)
 
     @staticmethod
-    def _first_custom_role_id(
-        supported_roles: list[str], *, family: str, v1_role_id: str
+    def _first_registered_role_id_in_family(
+        supported_roles: list[str], *, family: str
     ) -> str | None:
-        """Return the first non-v1 role id for a role family."""
+        """Return first client-preferred, server-registered role id in a role family."""
         for role_id in supported_roles:
-            if role_family(role_id) == family and role_id != v1_role_id:
+            if role_family(role_id) == family and role_id in ROLE_FACTORIES:
                 return role_id
+        return None
+
+    @classmethod
+    def _primary_role_id_for_family(cls, family: str) -> str | None:
+        """Return built-in primary role id for a role family, if defined."""
+        for role in Roles:
+            if role_family(role.value) == family:
+                return role.value
         return None
 
     @classmethod
@@ -485,29 +454,39 @@ class SendspinConnection:
             return {}
 
         custom_supports: dict[str, tuple[str, Any]] = {}
-        for family, spec in _ROLE_SUPPORT_SPECS.items():
-            custom_role = cls._first_custom_role_id(
-                supported_roles, family=family, v1_role_id=spec.v1_role_id
-            )
-            if custom_role is None:
+        for family in ROLE_SUPPORT_SPECS:
+            selected_role = cls._first_registered_role_id_in_family(supported_roles, family=family)
+            if selected_role is None:
+                # No registered role for this family — check if client advertises
+                # any custom role in the family so we still parse its support key.
+                selected_role = next((r for r in supported_roles if role_family(r) == family), None)
+            if selected_role is None:
+                continue
+            primary_role_id = cls._primary_role_id_for_family(family)
+            if selected_role == primary_role_id:
                 continue
 
-            custom_support_key = f"{custom_role}_support"
+            custom_support_key = f"{selected_role}_support"
             custom_support = payload.get(custom_support_key)
+            primary_support_key = (
+                f"{primary_role_id}_support" if primary_role_id is not None else None
+            )
+            legacy_support_key = f"{family}_support"
             if custom_support is None and (
-                payload.get(spec.v1_support_key) is not None
-                or payload.get(spec.legacy_support_key) is not None
+                (primary_support_key is not None and payload.get(primary_support_key) is not None)
+                or payload.get(legacy_support_key) is not None
             ):
-                # If legacy/v1 support keys are present for custom role IDs, keep legacy behavior
-                # but make it explicit that custom roles must use their versioned support key.
+                # If built-in/legacy support keys are present for custom role IDs, keep
+                # legacy behavior but make it explicit that custom roles must use their
+                # versioned support key.
                 logger.warning(
                     "Ignoring %s/%s for custom role %s; expected %s",
-                    spec.v1_support_key,
-                    spec.legacy_support_key,
-                    custom_role,
+                    primary_support_key,
+                    legacy_support_key,
+                    selected_role,
                     custom_support_key,
                 )
-            custom_supports[spec.attr_name] = (custom_role, custom_support)
+            custom_supports[family] = (selected_role, custom_support)
         return custom_supports
 
     @classmethod
@@ -515,8 +494,8 @@ class SendspinConnection:
         cls, hello: ClientHelloPayload, custom_supports: dict[str, tuple[str, Any]]
     ) -> None:
         """Apply parsed custom role support objects onto ClientHelloPayload fields."""
-        for family, spec in _ROLE_SUPPORT_SPECS.items():
-            custom = custom_supports.get(spec.attr_name)
+        for family, spec in ROLE_SUPPORT_SPECS.items():
+            custom = custom_supports.get(family)
             if custom is None:
                 continue
             custom_role, raw_support = custom
@@ -529,7 +508,7 @@ class SendspinConnection:
                 raise TypeError(
                     f"{custom_role}_support must be an object for role family '{family}'"
                 )
-            setattr(hello, spec.attr_name, spec.parse_support(raw_support))
+            setattr(hello, f"{family}_support", spec.parse_support(raw_support))
 
     @classmethod
     def _deserialize_client_message(cls, raw_message: str) -> ClientMessage:

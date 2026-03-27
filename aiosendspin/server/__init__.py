@@ -14,6 +14,7 @@ __all__ = [
     "ClientGroupChangedEvent",
     "ClientRemovedEvent",
     "ClientRoleEvent",
+    "ClientUpdatedEvent",
     "DisconnectBehaviour",
     "ExternalStreamStartCallback",
     "ExternalStreamStartRequest",
@@ -53,6 +54,7 @@ from .roles.player.events import StaticDelayChangedEvent, VolumeChangedEvent
 from .server import (
     ClientAddedEvent,
     ClientRemovedEvent,
+    ClientUpdatedEvent,
     ExternalStreamStartCallback,
     ExternalStreamStartRequest,
     SendspinEvent,

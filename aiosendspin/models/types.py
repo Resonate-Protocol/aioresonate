@@ -67,7 +67,7 @@ class Roles(Enum):
     """Displays text metadata describing the currently playing audio."""
     ARTWORK = "artwork@v1"
     """Displays artwork images. Has preferred format for images."""
-    VISUALIZER = "visualizer@v1"
+    VISUALIZER = "visualizer@_draft_r1"
     """
     Visualizes music.
 
@@ -95,6 +95,8 @@ class BinaryMessageType(Enum):
     # Visualizer role (bits 00010xxx, IDs 16-23):
     VISUALIZATION_DATA = 16
     """Visualization data (Visualizer role, slot 0)."""
+    VISUALIZATION_BEAT = 17
+    """Visualization beat data (Visualizer role, slot 1)."""
 
 
 class RepeatMode(Enum):
