@@ -434,6 +434,8 @@ class SendspinClient:
 
     async def send_goodbye(self, reason: GoodbyeReason) -> None:
         """Send a client/goodbye message to the server before disconnecting."""
+        if not self.connected:
+            return
         message = ClientGoodbyeMessage(
             payload=ClientGoodbyePayload(reason=reason),
         )
