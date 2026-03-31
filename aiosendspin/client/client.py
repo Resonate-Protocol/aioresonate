@@ -18,6 +18,8 @@ from aiosendspin.models.controller import ControllerCommandPayload
 from aiosendspin.models.core import (
     ClientCommandMessage,
     ClientCommandPayload,
+    ClientGoodbyeMessage,
+    ClientGoodbyePayload,
     ClientHelloMessage,
     ClientHelloPayload,
     ClientStateMessage,
@@ -46,6 +48,8 @@ from aiosendspin.models.player import (
 )
 from aiosendspin.models.types import (
     AudioCodec,
+    ConnectionReason,
+    GoodbyeReason,
     MediaCommand,
     PlayerCommand,
     PlayerStateType,
@@ -147,6 +151,7 @@ class ServerInfo:
     server_id: str
     name: str
     version: int
+    connection_reason: ConnectionReason
 
 
 class SendspinClient:
@@ -434,6 +439,15 @@ class SendspinClient:
         await self._send_time_message()
         self._time_task = self._loop.create_task(self._time_sync_loop())
         logger.info("Handshake with server complete")
+
+    async def send_goodbye(self, reason: GoodbyeReason) -> None:
+        """Send a client/goodbye message to the server before disconnecting."""
+        if not self.connected:
+            return
+        message = ClientGoodbyeMessage(
+            payload=ClientGoodbyePayload(reason=reason),
+        )
+        await self._send_message(message.to_json())
 
     async def disconnect(self) -> None:
         """Disconnect from the server and release resources."""
@@ -810,6 +824,7 @@ class SendspinClient:
             server_id=payload.server_id,
             name=payload.name,
             version=payload.version,
+            connection_reason=payload.connection_reason,
         )
         self._notify_server_hello_callbacks(payload)
         if self._server_hello_event:
