@@ -114,6 +114,9 @@ class _DummyRole:
     def get_audio_requirements(self) -> AudioRequirements | None:
         return self._requirements
 
+    def get_static_delay_us(self) -> int:
+        return 0
+
     def get_join_delay_s(self) -> float:
         return 0.0
 

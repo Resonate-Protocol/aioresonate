@@ -21,7 +21,6 @@ from aiosendspin.server.audio_transformers import TransformKey, normalize_option
 from aiosendspin.server.channels import MAIN_CHANNEL
 from aiosendspin.server.roles import AudioChunk
 from aiosendspin.server.roles.player.audio_transformers import PcmPassthrough
-from aiosendspin.server.roles.player.timing import min_safe_raw_player_timestamp_us
 from aiosendspin.util import create_task
 
 if TYPE_CHECKING:
@@ -524,18 +523,15 @@ class PushStream:
     ) -> int:
         """Return a safe minimum playback timestamp for late-join replay."""
         now_us = self._clock.now_us()
-        target_us = min_safe_raw_player_timestamp_us(role, now_us, lead_us=min_lead_us)
+        delay_us = role.get_static_delay_us() if role is not None else 0
+        target_us = now_us + max(0, min_lead_us) + delay_us
         if align_to_channel_tail and channel_id is not None and channel_id in self._channel_timing:
             # For channels that currently have no other subscribers, anchor catch-up
             # to that channel's own live tail when it is near real time. If that tail
             # drifted far ahead (e.g., reconnect with large server-side buffering),
             # use the standard near-now target to avoid long audible startup delays.
             channel_tail_us = max(now_us, self._channel_timing[channel_id])
-            align_ceiling_us = min_safe_raw_player_timestamp_us(
-                role,
-                now_us,
-                lead_us=DEFAULT_INITIAL_DELAY_US,
-            )
+            align_ceiling_us = now_us + DEFAULT_INITIAL_DELAY_US + delay_us
             if channel_tail_us <= align_ceiling_us:
                 return max(channel_tail_us, target_us)
         return target_us
@@ -1473,11 +1469,7 @@ class PushStream:
             # will de-sync it from other clients.
             return
         now_us = self._clock.now_us()
-        max_resume_start_us = min_safe_raw_player_timestamp_us(
-            joining_role,
-            now_us,
-            lead_us=DEFAULT_INITIAL_DELAY_US,
-        )
+        max_resume_start_us = now_us + DEFAULT_INITIAL_DELAY_US + joining_role.get_static_delay_us()
         self._channel_timing[channel_id] = min(
             self._channel_timing[channel_id], max_resume_start_us
         )

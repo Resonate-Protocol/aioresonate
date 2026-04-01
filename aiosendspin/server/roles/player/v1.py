@@ -430,6 +430,10 @@ class PlayerV1Role(Role):
         """Set player mute via role API."""
         self.set_mute(muted)
 
+    def get_static_delay_us(self) -> int:
+        """Return transport delay in microseconds for timestamp offsetting."""
+        return max(self.static_delay_ms, 0) * 1_000
+
     def get_static_delay_ms(self) -> int:
         """Return static delay for protocol API."""
         return self.static_delay_ms
