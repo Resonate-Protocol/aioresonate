@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from aiosendspin.server.roles.base import GroupRole
 from aiosendspin.server.roles.player.events import (
@@ -26,7 +26,7 @@ class PlayerGroupRole(GroupRole):
         All members of PlayerGroupRole are PlayerV1Role instances since only
         roles with role_family="player" subscribe to this GroupRole.
         """
-        return list(self._members)
+        return list(cast("list[PlayerRoleProtocol]", self._members))
 
     def get_group_volume(self) -> int | None:
         """Return current group volume (average of player volumes)."""

@@ -3,14 +3,16 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 from dataclasses import dataclass
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from aiosendspin.models.core import ClientHelloPayload, StreamStartMessage
+from aiosendspin.models.core import ClientHelloPayload, DeviceInfo, StreamStartMessage
 from aiosendspin.models.player import ClientHelloPlayerSupport, SupportedAudioFormat
 from aiosendspin.models.types import AudioCodec, GoodbyeReason, PlayerCommand, Roles
+from aiosendspin.server import ClientUpdatedEvent
 from aiosendspin.server import client as client_module
 from aiosendspin.server.audio import AudioFormat
 from aiosendspin.server.client import SendspinClient
@@ -29,6 +31,11 @@ class _DummyServer:
 
     def is_external_player(self, client_id: str) -> bool:  # noqa: ARG002
         return False
+
+    events: list[object] = dataclasses.field(default_factory=list)
+
+    def _signal_client_updated(self, client_id: str) -> None:
+        self.events.append(ClientUpdatedEvent(client_id))
 
 
 class _DummyConnection:
@@ -450,3 +457,49 @@ async def test_stale_connection_disconnect_does_not_wipe_newer_connection(
         "Old connection's async disconnect wiped the newer live connection (PR #168 regression)"
     )
     assert client.is_connected
+
+
+@pytest.mark.asyncio
+async def test_client_updated_event_fires_when_hello_changes() -> None:
+    """ClientUpdatedEvent fires when the hello payload changes on reconnect."""
+    loop = asyncio.get_running_loop()
+    server = _DummyServer(loop=loop, clock=LoopClock(loop))
+    client = SendspinClient(server, client_id="player-1")
+    SendspinGroup(server, client)
+
+    hello_v1 = _player_hello("player-1")
+    hello_v1.device_info = DeviceInfo(software_version="1.0.0")
+
+    # First connect — no ClientUpdatedEvent.
+    client.attach_connection(
+        _DummyConnection(),
+        client_info=hello_v1,
+        active_roles=[Roles.PLAYER.value],
+    )
+    assert not any(isinstance(e, ClientUpdatedEvent) for e in server.events)
+
+    client.detach_connection(None)
+
+    # Reconnect with same hello — no ClientUpdatedEvent.
+    server.events.clear()
+    client.attach_connection(
+        _DummyConnection(),
+        client_info=hello_v1,
+        active_roles=[Roles.PLAYER.value],
+    )
+    assert not any(isinstance(e, ClientUpdatedEvent) for e in server.events)
+
+    client.detach_connection(None)
+
+    # Reconnect with changed device_info — ClientUpdatedEvent fires.
+    server.events.clear()
+    hello_v2 = _player_hello("player-1")
+    hello_v2.device_info = DeviceInfo(software_version="2.0.0")
+    client.attach_connection(
+        _DummyConnection(),
+        client_info=hello_v2,
+        active_roles=[Roles.PLAYER.value],
+    )
+    updated = [e for e in server.events if isinstance(e, ClientUpdatedEvent)]
+    assert len(updated) == 1
+    assert updated[0].client_id == "player-1"

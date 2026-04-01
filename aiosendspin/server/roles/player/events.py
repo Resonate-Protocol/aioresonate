@@ -15,6 +15,13 @@ class VolumeChangedEvent(ClientRoleEvent):
     muted: bool
 
 
+@dataclass
+class StaticDelayChangedEvent(ClientRoleEvent):
+    """The static delay of the player was changed."""
+
+    static_delay_ms: int
+
+
 class PlayerGroupEvent(GroupRoleEvent):
     """Base event type for player group role changes."""
 

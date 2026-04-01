@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
-from typing import Never
+from typing import Any, Never
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -20,15 +20,16 @@ from aiosendspin.models.core import (
 )
 from aiosendspin.models.player import StreamStartPlayer
 from aiosendspin.models.types import AudioCodec, BinaryMessageType
-from aiosendspin.server.clock import LoopClock
+from aiosendspin.server.clock import LoopClock, ManualClock
 from aiosendspin.server.connection import SendspinConnection, _BinaryData, _RoleQueueEntry
 from aiosendspin.server.roles.base import BinaryHandling
+from aiosendspin.server.roles.player.v1 import PlayerV1Role
 
 
 @dataclass(slots=True)
 class _DummyServer:
     loop: asyncio.AbstractEventLoop
-    clock: LoopClock
+    clock: Any
     id: str = "srv"
     name: str = "server"
 
@@ -37,6 +38,26 @@ class _DummyServer:
 
     def is_external_player(self, client_id: str) -> bool:  # noqa: ARG002
         return False
+
+
+def _make_player_client_stub() -> MagicMock:
+    client = MagicMock()
+    state_store: dict[str, object] = {}
+
+    def get_or_create_role_state(family: str, cls: type[object]) -> object:
+        state_store.setdefault(family, cls())
+        return state_store[family]
+
+    client.get_or_create_role_state.side_effect = get_or_create_role_state
+    client.info = MagicMock()
+    client.info.player_support = None
+    client.group = MagicMock()
+    client._server = MagicMock()  # noqa: SLF001
+    client._logger = MagicMock()  # noqa: SLF001
+    client.client_id = "test-player"
+    client.connection = None
+    client.send_role_message = MagicMock()
+    return client
 
 
 def test_binary_data_supports_buffer_registration_metadata() -> None:
@@ -242,9 +263,35 @@ async def test_writer_blocks_on_buffer_tracker_capacity() -> None:
         await asyncio.sleep(0)
 
     assert wsock.send_bytes.call_count == 0
-    mock_buffer_tracker.time_until_ready.assert_called_with(100, 50_000)
+    mock_buffer_tracker.time_until_ready.assert_called_with(
+        100,
+        50_000,
+        end_time_us=1_000_000,
+    )
 
     await conn.disconnect(retry_connection=False)
+
+
+def test_check_late_binary_uses_player_effective_timestamp() -> None:
+    """Static delay should make late-drop compare against effective play time."""
+    loop = asyncio.new_event_loop()
+    try:
+        clock = ManualClock(now_us_value=10_000_000)
+        server = _DummyServer(loop=loop, clock=clock)
+        wsock = MagicMock()
+        wsock.closed = False
+        conn = SendspinConnection(server, wsock_client=wsock)
+
+        role = PlayerV1Role(client=_make_player_client_stub())
+        role.static_delay_ms = 5_000
+        role._stream_start_time_us = 0  # noqa: SLF001
+
+        handling = BinaryHandling(drop_late=True, grace_period_us=2_000_000)
+
+        # Raw timestamp is still 4s in the future, but effective play time is 1s in the past.
+        assert conn._check_late_binary(handling, role, 14_000_000) is True  # noqa: SLF001
+    finally:
+        loop.close()
 
 
 @pytest.mark.asyncio

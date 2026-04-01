@@ -6,8 +6,17 @@ from unittest.mock import MagicMock
 from uuid import uuid4
 
 from aiosendspin.models import AudioCodec, unpack_binary_header
-from aiosendspin.models.core import StreamClearMessage, StreamEndMessage, StreamStartMessage
-from aiosendspin.models.player import ClientHelloPlayerSupport, SupportedAudioFormat
+from aiosendspin.models.core import (
+    ClientStatePayload,
+    StreamClearMessage,
+    StreamEndMessage,
+    StreamStartMessage,
+)
+from aiosendspin.models.player import (
+    ClientHelloPlayerSupport,
+    PlayerStatePayload,
+    SupportedAudioFormat,
+)
 from aiosendspin.models.types import BinaryMessageType, PlayerCommand
 from aiosendspin.server.audio import AudioFormat
 from aiosendspin.server.roles import PlayerV1Role
@@ -379,7 +388,7 @@ def test_player_role_on_audio_chunk_packs_binary_header() -> None:
 
 def test_player_role_on_audio_chunk_passes_buffer_metadata() -> None:
     """on_audio_chunk() passes buffer tracking metadata to send_binary."""
-    client = MagicMock()
+    client = _make_client_stub()
     client.send_binary.return_value = True
 
     role = PlayerV1Role(client=client)
@@ -393,6 +402,28 @@ def test_player_role_on_audio_chunk_passes_buffer_metadata() -> None:
     assert call_kwargs["buffer_end_time_us"] == 1000 + 25000
     assert call_kwargs["buffer_byte_count"] == 100
     assert call_kwargs["duration_us"] == 25000
+
+
+def test_player_role_on_audio_chunk_applies_static_delay_to_buffer_end() -> None:
+    """Buffer tracking end time should account for the player's static delay."""
+    client = _make_client_stub()
+    client.send_binary.return_value = True
+
+    role = PlayerV1Role(client=client)
+    role._client.connection = MagicMock()  # noqa: SLF001
+    role._stream_started = True  # noqa: SLF001
+    role.static_delay_ms = 500
+
+    chunk = AudioChunk(
+        data=b"audio",
+        timestamp_us=1_000_000,
+        duration_us=25_000,
+        byte_count=100,
+    )
+    role.on_audio_chunk(chunk)
+
+    call_kwargs = client.send_binary.call_args.kwargs
+    assert call_kwargs["buffer_end_time_us"] == 525_000
 
 
 def test_player_role_on_audio_chunk_ignores_send_return_value() -> None:
@@ -787,3 +818,60 @@ def test_preferred_format_override_superseded_after_client_hello() -> None:
     # _preferred_format now set from client hello, so override is shadowed
     assert role._preferred_format == AudioFormat(sample_rate=48000, bit_depth=16, channels=2)  # noqa: SLF001
     assert role.preferred_format == AudioFormat(sample_rate=48000, bit_depth=16, channels=2)
+
+
+# --- Static delay ---
+
+
+def test_static_delay_default_zero() -> None:
+    """Static delay defaults to 0."""
+    client = _make_client_stub()
+    role = PlayerV1Role(client=client)
+    assert role.static_delay_ms == 0
+
+
+def test_on_client_state_updates_static_delay() -> None:
+    """on_client_state() updates static_delay_ms and fires event."""
+    client = _make_client_stub()
+    role = PlayerV1Role(client=client)
+    payload = ClientStatePayload(player=PlayerStatePayload(static_delay_ms=300))
+    role.on_client_state(payload)
+    assert role.static_delay_ms == 300
+    client._signal_event.assert_called_once()  # noqa: SLF001
+
+
+def test_on_client_state_no_event_if_unchanged() -> None:
+    """on_client_state() does not fire event when delay is unchanged."""
+    client = _make_client_stub()
+    role = PlayerV1Role(client=client)
+    payload = ClientStatePayload(player=PlayerStatePayload(static_delay_ms=0))
+    role.on_client_state(payload)
+    client._signal_event.assert_not_called()  # noqa: SLF001
+
+
+def test_on_client_state_updates_supported_commands() -> None:
+    """on_client_state() updates state_supported_commands."""
+    client = _make_client_stub()
+    role = PlayerV1Role(client=client)
+    payload = ClientStatePayload(
+        player=PlayerStatePayload(supported_commands=[PlayerCommand.SET_STATIC_DELAY])
+    )
+    role.on_client_state(payload)
+    assert PlayerCommand.SET_STATIC_DELAY in role.state_supported_commands
+
+
+def test_set_static_delay_sends_command() -> None:
+    """set_static_delay() sends command when client supports it."""
+    client = _make_client_stub()
+    role = PlayerV1Role(client=client)
+    role.state_supported_commands = [PlayerCommand.SET_STATIC_DELAY]
+    role.set_static_delay(500)
+    client.send_message.assert_called_once()
+
+
+def test_set_static_delay_noop_without_support() -> None:
+    """set_static_delay() is a no-op when client doesn't support it."""
+    client = _make_client_stub()
+    role = PlayerV1Role(client=client)
+    role.set_static_delay(500)
+    client.send_message.assert_not_called()

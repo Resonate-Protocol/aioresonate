@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import TYPE_CHECKING
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any
 
 from aiosendspin.server.roles.base import GroupRole
 
@@ -14,9 +15,20 @@ if TYPE_CHECKING:
 
 RoleFactory = Callable[["SendspinClient"], "Role"]
 GroupRoleFactory = Callable[["SendspinGroup"], GroupRole]
+SupportParser = Callable[[dict[str, Any]], object]
 
 ROLE_FACTORIES: dict[str, RoleFactory] = {}
 GROUP_ROLE_FACTORIES: dict[str, GroupRoleFactory] = {}
+
+
+@dataclass(frozen=True, slots=True)
+class RoleSupportSpec:
+    """Parser for role-family support objects in client/hello."""
+
+    parse_support: SupportParser
+
+
+ROLE_SUPPORT_SPECS: dict[str, RoleSupportSpec] = {}
 
 
 def register_role(role_id: str, factory: RoleFactory) -> None:
@@ -30,6 +42,11 @@ def create_role(role_id: str, client: SendspinClient) -> Role | None:
     if factory is None:
         return None
     return factory(client)
+
+
+def register_role_support_spec(role_family: str, spec: RoleSupportSpec) -> None:
+    """Register support-object parsing metadata for a role family."""
+    ROLE_SUPPORT_SPECS[role_family] = spec
 
 
 def register_group_role(role_family: str, factory: GroupRoleFactory) -> None:

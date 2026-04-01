@@ -115,6 +115,9 @@ class _DummyRole:
     def get_audio_requirements(self) -> AudioRequirements | None:
         return self._requirements
 
+    def get_static_delay_us(self) -> int:
+        return 0
+
     def get_join_delay_s(self) -> float:
         return 0.0
 
@@ -142,9 +145,12 @@ def _make_connected_player(
     mock_loop: Any,
     group: _DummyGroup,
     client_id: str,
+    *,
+    clock: Any | None = None,
 ) -> tuple[SendspinClient, _FakeConnection]:
     """Create a connected player client with a fake connection."""
-    server = _DummyServer(loop=mock_loop, clock=LoopClock(mock_loop))
+    server_clock = clock or LoopClock(mock_loop)
+    server = _DummyServer(loop=mock_loop, clock=server_clock)
     client = SendspinClient(server, client_id=client_id)
     client._group = group  # noqa: SLF001
     group.clients.append(client)
@@ -200,6 +206,43 @@ def _make_connected_player(
         )
 
     return client, conn
+
+
+@pytest.mark.asyncio
+async def test_late_join_target_includes_player_static_delay() -> None:
+    """Late-join target should use raw timestamps far enough ahead for delayed players."""
+    loop = asyncio.get_running_loop()
+    clock = ManualClock(now_us_value=1_000_000)
+    group = _DummyGroup(clients=[])
+    client, _ = _make_connected_player(loop, group, "p1", clock=clock)
+    role = client.role("player@v1")
+    assert role is not None
+    role.static_delay_ms = 5_000
+
+    stream = PushStream(loop=loop, clock=clock, group=group)
+
+    assert stream.get_late_join_target_timestamp_us(role=role) == 6_100_000
+
+
+@pytest.mark.asyncio
+async def test_non_main_join_rebase_includes_player_static_delay() -> None:
+    """Solo-channel rejoin should clamp raw timing high enough for static delay."""
+    loop = asyncio.get_running_loop()
+    clock = ManualClock(now_us_value=1_000_000)
+    group = _DummyGroup(clients=[])
+    client, _ = _make_connected_player(loop, group, "p1", clock=clock)
+    role = client.role("player@v1")
+    assert role is not None
+    role.static_delay_ms = 5_000
+
+    channel_id = UUID("77777777-7777-7777-7777-777777777777")
+    stream = PushStream(loop=loop, clock=clock, group=group)
+    stream._channel_timing[channel_id] = clock.now_us() + 30_000_000  # noqa: SLF001
+    group.clients = [client]
+
+    stream._rebase_far_ahead_join_tail(channel_id, role)  # noqa: SLF001
+
+    assert stream._channel_timing[channel_id] == 6_250_000  # noqa: SLF001
 
 
 @pytest.mark.asyncio

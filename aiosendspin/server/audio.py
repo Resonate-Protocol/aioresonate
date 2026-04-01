@@ -246,6 +246,32 @@ class BufferTracker:
         # Wait for the excess duration to drain (audio plays at 1x real time)
         return projected_duration - self.max_duration_us
 
+    def time_until_end_time_capacity(self, end_time_us: int) -> int:
+        """
+        Calculate wait time until the buffer horizon can extend to end_time_us.
+
+        This preserves effective playback headroom based on the furthest buffered end time,
+        which is more accurate than summing durations when chunks are intentionally shifted
+        on the timeline (for example, player static delay).
+        """
+        if self.max_duration_us == 0:
+            return 0
+
+        now_us = self.prune_consumed()
+        if end_time_us <= now_us:
+            return 0
+
+        latest_end_us = now_us
+        if self.buffered_chunks:
+            # Chunks are appended in timestamp order, so the last entry is the furthest.
+            latest_end_us = max(now_us, self.buffered_chunks[-1].end_time_us)
+
+        projected_end_us = max(latest_end_us, end_time_us)
+        projected_horizon_us = projected_end_us - now_us
+        if projected_horizon_us <= self.max_duration_us:
+            return 0
+        return projected_horizon_us - self.max_duration_us
+
     def time_until_capacity(self, bytes_needed: int) -> int:
         """
         Calculate time in microseconds until the buffer can accept bytes_needed more bytes.
@@ -289,7 +315,13 @@ class BufferTracker:
             virtual_buffered_bytes -= chunk.byte_count
         return time_needed_us
 
-    def time_until_ready(self, bytes_needed: int, duration_needed_us: int) -> int:
+    def time_until_ready(
+        self,
+        bytes_needed: int,
+        duration_needed_us: int,
+        *,
+        end_time_us: int | None = None,
+    ) -> int:
         """
         Calculate time until buffer can accept both bytes and duration.
 
@@ -299,12 +331,16 @@ class BufferTracker:
         Args:
             bytes_needed: Number of bytes to check capacity for.
             duration_needed_us: Duration in microseconds to check capacity for.
+            end_time_us: Absolute end timestamp for horizon-based duration gating.
 
         Returns:
             Time in microseconds to wait, or 0 if ready immediately.
         """
         byte_wait = self.time_until_capacity(bytes_needed)
-        duration_wait = self.time_until_duration_capacity(duration_needed_us)
+        if end_time_us is not None:
+            duration_wait = self.time_until_end_time_capacity(end_time_us)
+        else:
+            duration_wait = self.time_until_duration_capacity(duration_needed_us)
         return max(byte_wait, duration_wait)
 
     # TODO: if unused delete

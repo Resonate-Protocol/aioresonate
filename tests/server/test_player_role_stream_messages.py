@@ -58,6 +58,13 @@ def test_player_role_on_audio_chunk_packs_header_and_tracks_duration() -> None:
 
     sent: list[bytes] = []
     client = MagicMock()
+    state_store: dict[str, object] = {}
+
+    def get_or_create_role_state(family: str, cls: type[object]) -> object:
+        state_store.setdefault(family, cls())
+        return state_store[family]
+
+    client.get_or_create_role_state.side_effect = get_or_create_role_state
 
     def _send_binary(
         data: bytes,

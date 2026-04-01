@@ -770,21 +770,24 @@ class PushStream:
     def get_late_join_target_timestamp_us(
         self,
         *,
+        role: Role | None = None,
         channel_id: UUID | None = None,
         align_to_channel_tail: bool = False,
         min_lead_us: int = LATE_JOINER_MIN_LEAD_US,
     ) -> int:
         """Return a safe minimum playback timestamp for late-join replay."""
         now_us = self._clock.now_us()
-        target_us = now_us + max(0, min_lead_us)
+        delay_us = role.get_static_delay_us() if role is not None else 0
+        target_us = now_us + max(0, min_lead_us) + delay_us
         if align_to_channel_tail and channel_id is not None and channel_id in self._channel_timing:
             # For channels that currently have no other subscribers, anchor catch-up
             # to that channel's own live tail when it is near real time. If that tail
             # drifted far ahead (e.g., reconnect with large server-side buffering),
             # use the standard near-now target to avoid long audible startup delays.
             channel_tail_us = max(now_us, self._channel_timing[channel_id])
-            if channel_tail_us <= now_us + DEFAULT_INITIAL_DELAY_US:
-                return channel_tail_us
+            align_ceiling_us = now_us + DEFAULT_INITIAL_DELAY_US + delay_us
+            if channel_tail_us <= align_ceiling_us:
+                return max(channel_tail_us, target_us)
         return target_us
 
     async def commit_audio(self, *, play_start_us: int | None = None) -> int:
@@ -1634,6 +1637,7 @@ class PushStream:
                 channel_pcm_cache = self._pcm_chunk_cache.get(channel_id.int)
                 if channel_pcm_cache:
                     late_join_target_us = self.get_late_join_target_timestamp_us(
+                        role=role,
                         channel_id=channel_id,
                         align_to_channel_tail=(channel_id != MAIN_CHANNEL),
                     )
@@ -1660,6 +1664,7 @@ class PushStream:
 
         now_us = self._clock.now_us()
         min_timestamp_us = self.get_late_join_target_timestamp_us(
+            role=role,
             channel_id=channel_id,
             align_to_channel_tail=False,
         )
@@ -1747,7 +1752,7 @@ class PushStream:
             # will de-sync it from other clients.
             return
         now_us = self._clock.now_us()
-        max_resume_start_us = now_us + DEFAULT_INITIAL_DELAY_US
+        max_resume_start_us = now_us + DEFAULT_INITIAL_DELAY_US + joining_role.get_static_delay_us()
         self._channel_timing[channel_id] = min(
             self._channel_timing[channel_id], max_resume_start_us
         )
@@ -1887,6 +1892,7 @@ class PushStream:
             pcm_chunks = list(self._pcm_chunk_cache.get(channel_int, []))
             align_to_channel_tail = channel_id != MAIN_CHANNEL
             target_ts = self.get_late_join_target_timestamp_us(
+                role=role,
                 channel_id=channel_id,
                 align_to_channel_tail=align_to_channel_tail,
             )

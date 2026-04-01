@@ -205,6 +205,22 @@ def test_time_until_duration_capacity_prunes_first() -> None:
     assert tracker.time_until_duration_capacity(400_000) == 0
 
 
+def test_time_until_end_time_capacity_uses_buffer_horizon() -> None:
+    """Horizon-based gating should respect the furthest effective end timestamp."""
+    clock = _FakeClock(now_us=0)
+    tracker = BufferTracker(
+        clock=clock,
+        client_id="test",
+        capacity_bytes=10000,
+        max_duration_us=1_000_000,  # 1 second max effective horizon
+    )
+
+    tracker.register(end_time_us=600_000, byte_count=1000, duration_us=100_000)
+
+    # Raw duration would fit, but an end timestamp at 1.5s pushes effective horizon to 1.5s.
+    assert tracker.time_until_ready(100, 100_000, end_time_us=1_500_000) == 500_000
+
+
 def test_buffered_horizon_us_tracks_furthest_end_from_now() -> None:
     """buffered_horizon_us() should report furthest scheduled end minus now."""
     clock = _FakeClock(now_us=0)

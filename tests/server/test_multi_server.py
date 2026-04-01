@@ -24,6 +24,7 @@ from aiosendspin.server.client import SendspinClient
 from aiosendspin.server.clock import LoopClock
 from aiosendspin.server.connection import SendspinConnection
 from aiosendspin.server.group import SendspinGroup
+from aiosendspin.server.roles.registry import ROLE_FACTORIES
 
 if TYPE_CHECKING:
     from aiosendspin.models.types import ServerMessage
@@ -420,6 +421,124 @@ class TestCustomRoleSupportParsing:
         msg = SendspinConnection._deserialize_client_message(raw)  # noqa: SLF001
         assert isinstance(msg, ClientHelloMessage)
         assert "client/hello message used deprecated field names" in caplog.text
+
+    def test_legacy_visualizer_support_key_is_not_normalized_to_v1(self) -> None:
+        """Legacy visualizer_support must not be rewritten to visualizer@v1_support."""
+        raw = orjson.dumps(
+            {
+                "type": "client/hello",
+                "payload": {
+                    "client_id": "c1",
+                    "name": "Client",
+                    "version": 1,
+                    "supported_roles": ["visualizer@_draft_r1"],
+                    "visualizer_support": {
+                        "types": ["loudness", "f_peak"],
+                        "buffer_capacity": 65536,
+                        "batch_max": 8,
+                    },
+                },
+            }
+        ).decode()
+
+        msg = SendspinConnection._deserialize_client_message(raw)  # noqa: SLF001
+        assert isinstance(msg, ClientHelloMessage)
+        assert msg.payload.visualizer_support is not None
+
+    def test_family_order_prefers_first_role_and_does_not_require_second_version_support(
+        self,
+    ) -> None:
+        """When v1 is listed before v2, parser must not require v2 support key."""
+        raw = orjson.dumps(
+            {
+                "type": "client/hello",
+                "payload": {
+                    "client_id": "c1",
+                    "name": "Client",
+                    "version": 1,
+                    "supported_roles": ["player@v1", "player@v2"],
+                    "player@v1_support": {
+                        "supported_formats": [
+                            {
+                                "codec": "pcm",
+                                "sample_rate": 48000,
+                                "bit_depth": 16,
+                                "channels": 2,
+                            }
+                        ],
+                        "buffer_capacity": 100_000,
+                        "supported_commands": [],
+                    },
+                },
+            }
+        ).decode()
+
+        msg = SendspinConnection._deserialize_client_message(raw)  # noqa: SLF001
+        assert isinstance(msg, ClientHelloMessage)
+        assert msg.payload.player_support is not None
+
+    def test_family_order_prefers_first_custom_role_and_requires_matching_support_key(self) -> None:
+        """When v2 is unregistered, parser falls back to first registered role in family."""
+        raw = orjson.dumps(
+            {
+                "type": "client/hello",
+                "payload": {
+                    "client_id": "c1",
+                    "name": "Client",
+                    "version": 1,
+                    "supported_roles": ["player@v2", "player@v1"],
+                    "player@v1_support": {
+                        "supported_formats": [
+                            {
+                                "codec": "pcm",
+                                "sample_rate": 48000,
+                                "bit_depth": 16,
+                                "channels": 2,
+                            }
+                        ],
+                        "buffer_capacity": 100_000,
+                        "supported_commands": [],
+                    },
+                },
+            }
+        ).decode()
+
+        msg = SendspinConnection._deserialize_client_message(raw)  # noqa: SLF001
+        assert isinstance(msg, ClientHelloMessage)
+        assert msg.payload.player_support is not None
+
+    def test_family_order_prefers_registered_v2_and_requires_matching_support_key(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """When v2 is registered and listed first, parser requires v2 support key."""
+        monkeypatch.setitem(ROLE_FACTORIES, "player@v2", lambda _client: None)  # type: ignore[arg-type]
+
+        raw = orjson.dumps(
+            {
+                "type": "client/hello",
+                "payload": {
+                    "client_id": "c1",
+                    "name": "Client",
+                    "version": 1,
+                    "supported_roles": ["player@v2", "player@v1"],
+                    "player@v1_support": {
+                        "supported_formats": [
+                            {
+                                "codec": "pcm",
+                                "sample_rate": 48000,
+                                "bit_depth": 16,
+                                "channels": 2,
+                            }
+                        ],
+                        "buffer_capacity": 100_000,
+                        "supported_commands": [],
+                    },
+                },
+            }
+        ).decode()
+
+        with pytest.raises(ValueError, match="player@v2_support"):
+            SendspinConnection._deserialize_client_message(raw)  # noqa: SLF001
 
 
 class TestClientUrlRegistration:

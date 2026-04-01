@@ -58,6 +58,13 @@ class ClientAddedEvent(SendspinEvent):
 
 
 @dataclass
+class ClientUpdatedEvent(SendspinEvent):
+    """A client's hello payload changed on reconnect."""
+
+    client_id: str
+
+
+@dataclass
 class ClientRemovedEvent(SendspinEvent):
     """A persistent client/device was removed from the server."""
 
@@ -288,6 +295,10 @@ class SendspinServer:
                 cb(self, event)
             except Exception:
                 logger.exception("Error in event listener")
+
+    def _signal_client_updated(self, client_id: str) -> None:
+        """Emit a ClientUpdatedEvent (called from SendspinClient)."""
+        self._signal_event(ClientUpdatedEvent(client_id))
 
     async def on_client_connect(self, request: web.Request) -> web.StreamResponse:
         """Handle an incoming WebSocket connection from a Sendspin client."""
