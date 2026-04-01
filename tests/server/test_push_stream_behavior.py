@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import sys
 from collections import deque
 from dataclasses import dataclass
 from typing import Any
@@ -32,7 +33,7 @@ from aiosendspin.server.client import SendspinClient
 from aiosendspin.server.clock import LoopClock, ManualClock
 from aiosendspin.server.push_stream import CachedChunk, CachedPCMChunk, PushStream
 from aiosendspin.server.roles import AudioChunk, AudioRequirements
-from aiosendspin.server.roles.player.audio_transformers import PcmPassthrough
+from aiosendspin.server.roles.player.audio_transformers import FlacEncoder, PcmPassthrough
 
 
 @dataclass(slots=True)
@@ -139,6 +140,18 @@ class _DummyClient:
         self.is_connected = True
         self.active_roles = roles
         self.connection = _FakeConnection()
+
+
+def _expand_packed_s24_to_s32(data: bytes) -> bytes:
+    """Expand packed s24 PCM to PyAV's left-aligned s32 representation."""
+    if sys.byteorder == "little":
+        return b"".join(b"\x00" + data[i : i + 3] for i in range(0, len(data), 3))
+    return b"".join(data[i : i + 3] + b"\x00" for i in range(0, len(data), 3))
+
+
+def _packed_s24_pcm_25ms() -> bytes:
+    """Build one 25ms stereo PCM chunk with a stable packed-s24 byte pattern."""
+    return bytes([0x11, 0x21, 0x31, 0x12, 0x22, 0x32]) * 1200
 
 
 def _make_connected_player(
@@ -2297,23 +2310,47 @@ def test_noop_resample_bypasses_graph_construction(
     assert result.output_start_ts == 1_000_000
 
 
-def test_24bit_to_32bit_is_not_passthrough(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """24-bit packed PCM to 32-bit must not be treated as passthrough.
+def test_24bit_passthrough_expands_to_s32_and_marks_wire_conversion() -> None:
+    """Packed s24 passthrough should still normalize to s32 for internal processing."""
+    source = AudioFormat(sample_rate=48_000, bit_depth=24, channels=2, sample_type="int")
+    key = push_stream_module._ResamplerKey(  # noqa: SLF001
+        channel_id=MAIN_CHANNEL,
+        source_format=source,
+        target_sample_rate=48_000,
+        target_channels=2,
+        target_bit_depth=24,
+        target_sample_type="int",
+    )
+    state = push_stream_module._create_resampler_state(key, source, source)  # noqa: SLF001
 
-    Both resolve to PyAV format 's32', but the wire byte widths differ
-    (3 vs 4 bytes per sample). Passthrough would corrupt framing.
-    """
-    build_calls = 0
-    original_build = push_stream_module._build_resample_graph  # noqa: SLF001
+    packed_pcm = bytes([0x11, 0x21, 0x31, 0x12, 0x22, 0x32]) * 2
+    result = push_stream_module._resample_pcm_standalone(  # noqa: SLF001
+        state, packed_pcm, source, 1_000_000
+    )
 
-    def _counting_build(**kwargs: Any) -> object:
-        nonlocal build_calls
-        build_calls += 1
-        return original_build(**kwargs)
+    assert state.is_passthrough
+    assert result.pcm_data == _expand_packed_s24_to_s32(packed_pcm)
+    assert result.sample_count == 2
+    assert result.needs_s32_to_s24_conversion is True
 
-    monkeypatch.setattr(push_stream_module, "_build_resample_graph", _counting_build)
+
+def test_24bit_input_expands_to_s32_before_graph(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Packed s24 input must be expanded before writing into an s32 PyAV frame."""
+    captured_input: bytes | None = None
+
+    class _CapturingGraph:
+        def push(self, frame: Any | None) -> None:
+            nonlocal captured_input
+            assert frame is not None
+            captured_input = bytes(frame.planes[0])
+
+        def pull(self) -> Any:
+            raise EOFError
+
+    def _build_capturing_graph(**_kwargs: Any) -> _CapturingGraph:
+        return _CapturingGraph()
+
+    monkeypatch.setattr(push_stream_module, "_build_resample_graph", _build_capturing_graph)
 
     source = AudioFormat(sample_rate=48_000, bit_depth=24, channels=2, sample_type="int")
     target = AudioFormat(sample_rate=48_000, bit_depth=32, channels=2, sample_type="int")
@@ -2327,8 +2364,91 @@ def test_24bit_to_32bit_is_not_passthrough(
     )
     state = push_stream_module._create_resampler_state(key, source, target)  # noqa: SLF001
 
-    assert not state.is_passthrough, "24-bit to 32-bit must not be passthrough"
-    assert build_calls == 1, "Graph should be built for 24-bit to 32-bit conversion"
+    packed_pcm = bytes([0x11, 0x21, 0x31, 0x12, 0x22, 0x32]) * 2
+    push_stream_module._resample_pcm_standalone(  # noqa: SLF001
+        state, packed_pcm, source, 1_000_000
+    )
+
+    assert captured_input == _expand_packed_s24_to_s32(packed_pcm)
+
+
+def test_encode_pcm_sequence_preserves_packed_s24_for_pcm_passthrough() -> None:
+    """Raw PCM output should convert internal s32 back to packed s24 on the wire."""
+    group = _DummyGroup(clients=[])
+    stream = PushStream(loop=MagicMock(), clock=ManualClock(), group=group)
+    encoder = PcmPassthrough(sample_rate=48_000, bit_depth=24, channels=2)
+    req = AudioRequirements(
+        sample_rate=48_000,
+        bit_depth=24,
+        channels=2,
+        transformer=encoder,
+        channel_id=MAIN_CHANNEL,
+        frame_duration_us=25_000,
+    )
+    packed_pcm = _packed_s24_pcm_25ms()
+    pcm_chunk = CachedPCMChunk(
+        timestamp_us=1_000_000,
+        duration_us=25_000,
+        pcm_data=packed_pcm,
+        sample_rate=48_000,
+        bit_depth=24,
+        channels=2,
+    )
+
+    encoded = stream._encode_pcm_sequence([pcm_chunk], encoder, req, MAIN_CHANNEL)  # noqa: SLF001
+
+    assert len(encoded) == 1
+    assert encoded[0].payload == packed_pcm
+
+
+def test_encode_pcm_sequence_expands_s24_before_flac_encoder(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """FLAC encoding should receive AV-format s32 bytes for 24-bit PCM."""
+    group = _DummyGroup(clients=[])
+    stream = PushStream(loop=MagicMock(), clock=ManualClock(), group=group)
+    encoder = FlacEncoder(sample_rate=48_000, bit_depth=24, channels=2)
+    captured_chunk: bytes | None = None
+
+    def _fake_ensure_initialized() -> None:
+        encoder._initialized = True  # noqa: SLF001
+        encoder._chunk_samples = 1200  # noqa: SLF001
+        encoder._chunk_duration_us = 25_000  # noqa: SLF001
+        encoder._frame_stride = 8  # noqa: SLF001
+        encoder._av_format = "s32"  # noqa: SLF001
+        encoder._av_layout = "stereo"  # noqa: SLF001
+
+    def _capture_chunk(chunk_pcm: bytes) -> bytes:
+        nonlocal captured_chunk
+        captured_chunk = chunk_pcm
+        return b"flac"
+
+    monkeypatch.setattr(encoder, "_ensure_initialized", _fake_ensure_initialized)
+    monkeypatch.setattr(encoder, "_encode_chunk", _capture_chunk)
+
+    req = AudioRequirements(
+        sample_rate=48_000,
+        bit_depth=24,
+        channels=2,
+        transformer=encoder,
+        channel_id=MAIN_CHANNEL,
+        frame_duration_us=25_000,
+    )
+    packed_pcm = _packed_s24_pcm_25ms()
+    pcm_chunk = CachedPCMChunk(
+        timestamp_us=1_000_000,
+        duration_us=25_000,
+        pcm_data=packed_pcm,
+        sample_rate=48_000,
+        bit_depth=24,
+        channels=2,
+    )
+
+    encoded = stream._encode_pcm_sequence([pcm_chunk], encoder, req, MAIN_CHANNEL)  # noqa: SLF001
+
+    assert len(encoded) == 1
+    assert encoded[0].payload == b"flac"
+    assert captured_chunk == _expand_packed_s24_to_s32(packed_pcm)
 
 
 def test_soxr_fallback_caches_failure_per_format(

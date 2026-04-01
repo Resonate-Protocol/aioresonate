@@ -395,6 +395,26 @@ class BufferTracker:
         return self.blocked_until_us - now_us
 
 
+def _convert_s24_to_s32(data: bytes) -> bytes:
+    """Expand packed 24-bit PCM samples to PyAV's left-aligned s32 representation."""
+    if len(data) % 3:
+        raise ValueError("s24 PCM buffer length must be a multiple of 3 bytes")
+
+    if np := _get_numpy():
+        arr = np.frombuffer(data, dtype=np.uint8).reshape(-1, 3)
+        zero_column = np.zeros((arr.shape[0], 1), dtype=np.uint8)
+        expanded = (
+            np.concatenate((zero_column, arr), axis=1)
+            if sys.byteorder == "little"
+            else np.concatenate((arr, zero_column), axis=1)
+        )
+        return bytes(expanded.tobytes())
+
+    if sys.byteorder == "little":
+        return b"".join(b"\x00" + data[i : i + 3] for i in range(0, len(data), 3))
+    return b"".join(data[i : i + 3] + b"\x00" for i in range(0, len(data), 3))
+
+
 def _convert_s32_to_s24(data: bytes) -> bytes:
     """Convert 32-bit PCM samples to packed 24-bit samples."""
     if len(data) % 4:
@@ -412,8 +432,17 @@ def _convert_s32_to_s24(data: bytes) -> bytes:
     return b"".join(data[i : i + 3] for i in range(0, len(data), 4))
 
 
+def _validate_pcm_buffer_length(data: bytes, *, expected: int, context: str) -> None:
+    """Fail fast when PCM byte counts do not match the expected frame shape."""
+    if len(data) != expected:
+        msg = f"{context} PCM buffer length {len(data)} does not match expected {expected} bytes"
+        raise ValueError(msg)
+
+
 __all__ = [
     "AudioFormat",
     "BufferTracker",
+    "_convert_s24_to_s32",
     "_convert_s32_to_s24",
+    "_validate_pcm_buffer_length",
 ]

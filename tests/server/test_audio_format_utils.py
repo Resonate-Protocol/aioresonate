@@ -5,7 +5,7 @@ import sys
 import pytest
 
 from aiosendspin.server import audio as audio_module
-from aiosendspin.server.audio import AudioFormat, _convert_s32_to_s24
+from aiosendspin.server.audio import AudioFormat, _convert_s24_to_s32, _convert_s32_to_s24
 
 S32_SAMPLES = bytes([0x01, 0x11, 0x21, 0x31, 0x02, 0x12, 0x22, 0x32])
 
@@ -14,6 +14,12 @@ def _expected_s24_samples() -> bytes:
     if sys.byteorder == "little":
         return bytes([0x11, 0x21, 0x31, 0x12, 0x22, 0x32])
     return bytes([0x01, 0x11, 0x21, 0x02, 0x12, 0x22])
+
+
+def _expected_s32_from_s24_samples() -> bytes:
+    if sys.byteorder == "little":
+        return bytes([0x00, 0x11, 0x21, 0x31, 0x00, 0x12, 0x22, 0x32])
+    return bytes([0x01, 0x11, 0x21, 0x00, 0x02, 0x12, 0x22, 0x00])
 
 
 def test_resolve_audio_format_24_bit_uses_s32_in_pyav() -> None:
@@ -66,6 +72,15 @@ def test_convert_s32_to_s24_drops_least_significant_byte_python_impl(
     assert converted == _expected_s24_samples()
 
 
+def test_convert_s24_to_s32_inserts_zero_lsb_python_impl(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """s24->s32 conversion should expand samples into left-aligned PyAV representation."""
+    monkeypatch.setattr(audio_module, "_get_numpy", lambda: None)
+    converted = _convert_s24_to_s32(_expected_s24_samples())
+    assert converted == _expected_s32_from_s24_samples()
+
+
 def test_convert_s32_to_s24_drops_least_significant_byte_numpy_impl(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -76,7 +91,29 @@ def test_convert_s32_to_s24_drops_least_significant_byte_numpy_impl(
     assert converted == _expected_s24_samples()
 
 
+def test_convert_s24_to_s32_inserts_zero_lsb_numpy_impl(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """s24->s32 conversion should expand samples into left-aligned PyAV representation."""
+    np = pytest.importorskip("numpy")
+    monkeypatch.setattr(audio_module, "_get_numpy", lambda: np)
+    converted = _convert_s24_to_s32(_expected_s24_samples())
+    assert converted == _expected_s32_from_s24_samples()
+
+
 def test_convert_s32_to_s24_rejects_invalid_length() -> None:
     """Invalid byte lengths must be rejected."""
     with pytest.raises(ValueError, match="multiple of 4"):
         _convert_s32_to_s24(b"\x00\x01\x02")
+
+
+def test_convert_s24_to_s32_rejects_invalid_length() -> None:
+    """Invalid byte lengths must be rejected."""
+    with pytest.raises(ValueError, match="multiple of 3"):
+        _convert_s24_to_s32(b"\x00\x01")
+
+
+def test_convert_s24_to_s32_round_trips_with_s32_to_s24() -> None:
+    """Round-tripping packed s24 through PyAV's s32 layout should preserve wire bytes."""
+    converted = _convert_s32_to_s24(_convert_s24_to_s32(_expected_s24_samples()))
+    assert converted == _expected_s24_samples()

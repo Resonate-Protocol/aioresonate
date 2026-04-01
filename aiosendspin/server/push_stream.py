@@ -16,8 +16,10 @@ from uuid import UUID
 
 from aiosendspin.server.audio import (
     AudioFormat,
+    _convert_s24_to_s32,
     _convert_s32_to_s24,
     _get_av,
+    _validate_pcm_buffer_length,
 )
 from aiosendspin.server.audio_transformers import TransformKey, normalize_options
 from aiosendspin.server.channels import MAIN_CHANNEL
@@ -248,6 +250,8 @@ class _ResamplerState:
     """PyAV channel layout for source."""
     source_sample_rate: int
     """Source sample rate used when configuring the filter graph."""
+    source_av_frame_stride: int
+    """Bytes per frame in PyAV representation for source PCM."""
     target_av_format: str
     """PyAV format string for target (after resampling)."""
     target_layout: str
@@ -325,6 +329,7 @@ def _create_resampler_state(
         source_av_format=source_av_format,
         source_av_layout=source_layout,
         source_sample_rate=source_format.sample_rate,
+        source_av_frame_stride=_source_av_bytes * source_format.channels,
         target_av_format=target_av_format,
         target_layout=target_layout,
         target_wire_frame_stride=target_wire_bytes * target_format.channels,
@@ -385,6 +390,13 @@ def _resample_pcm_standalone(
     bytes_per_sample = source_format.bit_depth // 8
     frame_stride = bytes_per_sample * source_format.channels
     sample_count = len(source_pcm) // frame_stride
+    av_input_pcm = (
+        _convert_s24_to_s32(source_pcm)
+        if source_format.sample_type == "int"
+        and source_format.bit_depth == 24
+        and resampler_state.source_av_format == "s32"
+        else source_pcm
+    )
 
     if sample_count == 0:
         return _ResampledPCM(
@@ -401,23 +413,28 @@ def _resample_pcm_standalone(
         duration_us = int(sample_count * 1_000_000 / resampler_state.key.target_sample_rate)
         resampler_state.pending_timestamp_us += duration_us
         return _ResampledPCM(
-            pcm_data=source_pcm,
+            pcm_data=av_input_pcm,
             output_start_ts=output_start_ts,
             sample_count=sample_count,
-            needs_s32_to_s24_conversion=False,
-            sample_type=source_format.sample_type,
+            needs_s32_to_s24_conversion=resampler_state.needs_s32_to_s24_conversion,
+            sample_type=resampler_state.target_sample_type,
         )
 
     assert resampler_state.graph is not None  # guaranteed: not passthrough → graph was built
 
     # Create input frame
+    _validate_pcm_buffer_length(
+        av_input_pcm,
+        expected=sample_count * resampler_state.source_av_frame_stride,
+        context="resampler input",
+    )
     frame = av.AudioFrame(
         format=resampler_state.source_av_format,
         layout=resampler_state.source_av_layout,
         samples=sample_count,
     )
     frame.sample_rate = source_format.sample_rate
-    frame.planes[0].update(source_pcm)
+    frame.planes[0].update(av_input_pcm)
 
     # Resample
     resampler_state.graph.push(frame)

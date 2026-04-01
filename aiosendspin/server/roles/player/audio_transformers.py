@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import TYPE_CHECKING
 
-from aiosendspin.server.audio import AudioFormat, _get_av
+from aiosendspin.server.audio import AudioFormat, _get_av, _validate_pcm_buffer_length
 
 if TYPE_CHECKING:
     import av
@@ -220,6 +220,11 @@ class FlacEncoder:
         """Encode a single chunk of PCM to FLAC."""
         assert self._encoder is not None
         av = _get_av()
+        _validate_pcm_buffer_length(
+            chunk_pcm,
+            expected=self._chunk_samples * self._frame_stride,
+            context="FLAC encoder input",
+        )
 
         frame = av.AudioFrame(
             format=self._av_format,
@@ -413,6 +418,11 @@ class OpusEncoder:
         """Encode a single chunk of PCM to Opus."""
         assert self._encoder is not None
         av = _get_av()
+        _validate_pcm_buffer_length(
+            chunk_pcm,
+            expected=self._chunk_samples * self._frame_stride,
+            context="Opus encoder input",
+        )
 
         frame = av.AudioFrame(
             format="s16",
