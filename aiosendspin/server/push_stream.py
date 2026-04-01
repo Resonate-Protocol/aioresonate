@@ -98,6 +98,40 @@ def _supports_soxr_resampler() -> bool:
 _soxr_failed_configs: set[tuple[str, str, int, str, str, int]] = set()
 
 
+def _assemble_resample_graph(
+    *,
+    source_av_format: str,
+    source_layout: str,
+    source_sample_rate: int,
+    target_av_format: str,
+    target_layout: str,
+    target_sample_rate: int,
+    aresample_args: str,
+) -> _AudioFilterGraph:
+    """Build and configure a PyAV graph for one resampling configuration."""
+    av = _get_av()
+
+    graph = av.filter.Graph()
+    graph.link_nodes(
+        graph.add_abuffer(
+            format=source_av_format,
+            sample_rate=source_sample_rate,
+            layout=source_layout,
+        ),
+        graph.add("aresample", aresample_args),
+        graph.add(
+            "aformat",
+            (
+                f"sample_fmts={target_av_format}:"
+                f"sample_rates={target_sample_rate}:"
+                f"channel_layouts={target_layout}"
+            ),
+        ),
+        graph.add("abuffersink"),
+    ).configure()
+    return cast("_AudioFilterGraph", graph)
+
+
 def _build_resample_graph(
     *,
     source_av_format: str,
@@ -109,8 +143,6 @@ def _build_resample_graph(
     dither_method: str | None = None,
 ) -> _AudioFilterGraph:
     """Create an audio filter graph for resampling with soxr (or swr fallback)."""
-    av = _get_av()
-
     config_key = (
         source_av_format,
         source_layout,
@@ -128,30 +160,19 @@ def _build_resample_graph(
         else f"{preferred_resampler}:osf={target_av_format}:dither_method={dither_method}"
     )
 
-    graph = av.filter.Graph()
     try:
-        graph.link_nodes(
-            graph.add_abuffer(
-                format=source_av_format,
-                sample_rate=source_sample_rate,
-                layout=source_layout,
-            ),
-            graph.add("aresample", preferred_aresample),
-            graph.add(
-                "aformat",
-                (
-                    f"sample_fmts={target_av_format}:"
-                    f"sample_rates={target_sample_rate}:"
-                    f"channel_layouts={target_layout}"
-                ),
-            ),
-            graph.add("abuffersink"),
-        ).configure()
+        return _assemble_resample_graph(
+            source_av_format=source_av_format,
+            source_layout=source_layout,
+            source_sample_rate=source_sample_rate,
+            target_av_format=target_av_format,
+            target_layout=target_layout,
+            target_sample_rate=target_sample_rate,
+            aresample_args=preferred_aresample,
+        )
     except (OSError, RuntimeError, ValueError):
         if not use_soxr:
             raise
-    else:
-        return cast("_AudioFilterGraph", graph)
 
     _soxr_failed_configs.add(config_key)
     _LOGGER.warning("Falling back to swr resampler after soxr graph setup failure")
@@ -160,25 +181,15 @@ def _build_resample_graph(
         if dither_method is None
         else f"resampler=swr:osf={target_av_format}:dither_method={dither_method}"
     )
-    graph = av.filter.Graph()
-    graph.link_nodes(
-        graph.add_abuffer(
-            format=source_av_format,
-            sample_rate=source_sample_rate,
-            layout=source_layout,
-        ),
-        graph.add("aresample", fallback_aresample),
-        graph.add(
-            "aformat",
-            (
-                f"sample_fmts={target_av_format}:"
-                f"sample_rates={target_sample_rate}:"
-                f"channel_layouts={target_layout}"
-            ),
-        ),
-        graph.add("abuffersink"),
-    ).configure()
-    return cast("_AudioFilterGraph", graph)
+    return _assemble_resample_graph(
+        source_av_format=source_av_format,
+        source_layout=source_layout,
+        source_sample_rate=source_sample_rate,
+        target_av_format=target_av_format,
+        target_layout=target_layout,
+        target_sample_rate=target_sample_rate,
+        aresample_args=fallback_aresample,
+    )
 
 
 def _encode_for_transform_key(
@@ -251,6 +262,11 @@ class _ResamplerState:
     """Timestamp of the earliest audio sample not yet emitted by this resampler."""
     is_passthrough: bool = False
     """True when source and target formats are identical — skip graph processing."""
+
+    @property
+    def target_sample_type(self) -> Literal["int", "float"]:
+        """PCM sample type produced by this resampler."""
+        return "float" if self.target_av_format == "flt" else "int"
 
 
 @dataclass(frozen=True)
@@ -376,7 +392,7 @@ def _resample_pcm_standalone(
             output_start_ts=resampler_state.pending_timestamp_us,
             sample_count=0,
             needs_s32_to_s24_conversion=resampler_state.needs_s32_to_s24_conversion,
-            sample_type="float" if resampler_state.target_av_format == "flt" else "int",
+            sample_type=resampler_state.target_sample_type,
         )
 
     # Fast path: no conversion needed — return input PCM with timestamp tracking
@@ -425,7 +441,7 @@ def _resample_pcm_standalone(
         output_start_ts=output_start_ts,
         sample_count=output_sample_count,
         needs_s32_to_s24_conversion=resampler_state.needs_s32_to_s24_conversion,
-        sample_type="float" if resampler_state.target_av_format == "flt" else "int",
+        sample_type=resampler_state.target_sample_type,
     )
 
 
@@ -1320,7 +1336,7 @@ class PushStream:
             # Quantize float PCM once per pcm_key — all TransformKeys sharing this
             # pcm_key produce the same quantizer _ResamplerKey. Using the quantizer's
             # output_start_ts and sample_count ensures downstream timestamps reflect
-            # any buffering/trimming by the quantizer graph (fixes issue #3).
+            # any buffering or trimming introduced by the quantizer graph.
             if resampled.sample_type == "float":
                 edge_quantized = _quantize_float_pcm(
                     channel_id=channel_id,
