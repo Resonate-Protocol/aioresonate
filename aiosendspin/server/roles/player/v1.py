@@ -327,6 +327,8 @@ class PlayerV1Role(Role):
         message_type = BinaryMessageType.AUDIO_CHUNK.value
         header = pack_binary_header_raw(message_type, chunk.timestamp_us)
         packed_data = header + chunk.data
+        # Raw timestamp already includes the static delay offset (shifted forward
+        # by PushStream), so subtract it to get the wall-clock buffer horizon.
         static_delay_us = self.static_delay_ms * 1_000
         chunk_end_us = chunk.timestamp_us + chunk.duration_us - static_delay_us
 

@@ -70,6 +70,7 @@ from aiosendspin.util import create_task
 
 from .client import SendspinClient
 from .roles.negotiation import negotiate_active_roles
+from .roles.player.timing import effective_player_timestamp_us
 from .roles.registry import ROLE_FACTORIES, ROLE_SUPPORT_SPECS
 
 if TYPE_CHECKING:
@@ -731,7 +732,8 @@ class SendspinConnection:
             role._stream_start_time_us = now  # noqa: SLF001
         elapsed = now - role._stream_start_time_us  # noqa: SLF001
         in_grace_period = elapsed < handling.grace_period_us
-        late_by_us = now - timestamp_us
+        effective_timestamp_us = effective_player_timestamp_us(role, timestamp_us)
+        late_by_us = now - effective_timestamp_us
 
         if late_by_us > 0 and not in_grace_period:
             role._late_skips_since_log += 1  # noqa: SLF001
@@ -1020,7 +1022,11 @@ class SendspinConnection:
                 duration_needed_us = entry.binary.duration_us or 0
                 wait_us = max(
                     wait_us,
-                    buffer_tracker.time_until_ready(bytes_needed, duration_needed_us),
+                    buffer_tracker.time_until_ready(
+                        bytes_needed,
+                        duration_needed_us,
+                        end_time_us=entry.binary.buffer_end_time_us,
+                    ),
                 )
 
         if wait_us > 0:

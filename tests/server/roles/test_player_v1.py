@@ -404,6 +404,28 @@ def test_player_role_on_audio_chunk_passes_buffer_metadata() -> None:
     assert call_kwargs["duration_us"] == 25000
 
 
+def test_player_role_on_audio_chunk_applies_static_delay_to_buffer_end() -> None:
+    """Buffer tracking end time should account for the player's static delay."""
+    client = _make_client_stub()
+    client.send_binary.return_value = True
+
+    role = PlayerV1Role(client=client)
+    role._client.connection = MagicMock()  # noqa: SLF001
+    role._stream_started = True  # noqa: SLF001
+    role.static_delay_ms = 500
+
+    chunk = AudioChunk(
+        data=b"audio",
+        timestamp_us=1_000_000,
+        duration_us=25_000,
+        byte_count=100,
+    )
+    role.on_audio_chunk(chunk)
+
+    call_kwargs = client.send_binary.call_args.kwargs
+    assert call_kwargs["buffer_end_time_us"] == 525_000
+
+
 def test_player_role_on_audio_chunk_ignores_send_return_value() -> None:
     """on_audio_chunk() is fire-and-forget and ignores send return values."""
     client = MagicMock()
