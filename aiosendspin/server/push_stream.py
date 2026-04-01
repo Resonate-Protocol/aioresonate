@@ -389,6 +389,12 @@ def _resample_pcm_standalone(
     # Calculate sample count from input
     bytes_per_sample = source_format.bit_depth // 8
     frame_stride = bytes_per_sample * source_format.channels
+    if len(source_pcm) % frame_stride != 0:
+        msg = (
+            f"source PCM buffer length {len(source_pcm)} does not align to "
+            f"{frame_stride}-byte frames"
+        )
+        raise ValueError(msg)
     sample_count = len(source_pcm) // frame_stride
     av_input_pcm = (
         _convert_s24_to_s32(source_pcm)
