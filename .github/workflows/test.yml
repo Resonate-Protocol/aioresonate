@@ -20,7 +20,7 @@ jobs:
         with:
           python-version: "3.12"
           enable-cache: true
-      - run: uv sync --dev
+      - run: uv sync --dev --extra server
       - name: Lint with pre-commit
         run: SKIP=no-commit-to-branch uv run pre-commit run --all-files
 
@@ -39,6 +39,6 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
           enable-cache: true
-      - run: uv sync --dev
+      - run: uv sync --dev --extra server
       - name: Pytest
         run: uv run pytest --durations 10 --cov-report term-missing --cov=aiosendspin --cov-report=xml tests/
