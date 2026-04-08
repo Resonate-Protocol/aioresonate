@@ -83,7 +83,7 @@ async def _commit_block(
 
 async def _maybe_remove(group: SendspinGroup, player: SendspinClient) -> None:
     if player in group.clients and len(group.clients) > 2:
-        await group.remove_client(player)
+        group.remove_client(player)
 
 
 async def _run_seeded_fuzz(seed: int) -> None:  # noqa: PLR0915
@@ -192,14 +192,14 @@ async def _run_seeded_fuzz(seed: int) -> None:  # noqa: PLR0915
         if join_player is not None and join_player not in group_a.clients:
             join_indices[join_player.client_id] = len(ctx_by_id[join_player.client_id].conn.events)
             join_times_us[join_player.client_id] = clock.now_us()
-            await group_a.add_client(join_player)
+            group_a.add_client(join_player)
 
         if regroup_enabled and step == remove_step:
             await _maybe_remove(group_a, player_b)
         if regroup_enabled and step == readd_step and player_b not in group_a.clients:
             join_indices[player_b.client_id] = len(conn_b.events)
             join_times_us[player_b.client_id] = clock.now_us()
-            await group_a.add_client(player_b)
+            group_a.add_client(player_b)
 
         duration_us = rng.choice([20_000, 25_000, 30_000, 100_000])
         channel_ids: set[UUID] = {MAIN_CHANNEL}

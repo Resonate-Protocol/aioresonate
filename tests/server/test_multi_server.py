@@ -669,7 +669,7 @@ class TestAutomaticReclaim:
         server._client_urls = {"speaker-2": "ws://192.168.1.51:8927/sendspin"}  # type: ignore[attr-defined]  # noqa: SLF001
 
         # Add disconnected client2 to group1 (which has active playback)
-        await group1.add_client(client2)
+        group1.add_client(client2)
 
         assert "speaker-2" in server._reclaim_calls  # noqa: SLF001
 
@@ -707,7 +707,7 @@ class TestAutomaticReclaim:
         server._reclaim_calls.clear()  # noqa: SLF001
 
         # Add connected client2 to group1
-        await group1.add_client(client2)
+        group1.add_client(client2)
 
         # Should not try to reclaim since client2 is connected
         assert "speaker-2" not in server._reclaim_calls  # noqa: SLF001
@@ -744,7 +744,7 @@ class TestAutomaticReclaim:
         client2.detach_connection(None)
 
         # Add disconnected client2 to group1 (no active playback)
-        await group1.add_client(client2)
+        group1.add_client(client2)
 
         # Should not try to reclaim since no active playback
         assert "speaker-2" not in server._reclaim_calls  # noqa: SLF001
@@ -762,7 +762,7 @@ class TestAutomaticReclaim:
         group1 = SendspinGroup(server, owner, stale)
         SendspinGroup(server, replacement)
 
-        await group1.add_client(replacement)
+        group1.add_client(replacement)
 
         # Group membership should contain only the replacement object for speaker-2.
         speaker2_members = [c for c in group1.clients if c.client_id == "speaker-2"]

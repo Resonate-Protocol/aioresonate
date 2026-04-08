@@ -335,7 +335,7 @@ async def test_add_external_player_to_active_group_requests_external_connect() -
         on_stream_start=callback_calls.append,
     )
 
-    await owner.group.add_client(external)
+    owner.group.add_client(external)
 
     assert len(callback_calls) == 1
     assert callback_calls[0].client_id == "external-2"
@@ -409,7 +409,7 @@ async def test_add_external_preconnect_player_to_active_group_replays_cached_aud
     assert isinstance(role, _PreconnectAudioRole)
     assert role.chunk_count == 0
 
-    await owner.group.add_client(external)
+    owner.group.add_client(external)
 
     assert len(callback_calls) == 1
     assert callback_calls[0].client_id == "external-preconnect"
@@ -469,7 +469,7 @@ async def test_add_external_non_preconnect_player_to_active_group_skips_role_joi
     )
 
     with patch.object(stream, "on_role_join") as mock_on_role_join:
-        await owner.group.add_client(external)
+        owner.group.add_client(external)
 
     assert len(callback_calls) == 1
     assert callback_calls[0].client_id == "external-cold"

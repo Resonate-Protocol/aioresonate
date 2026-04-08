@@ -281,12 +281,11 @@ async def test_mdns_removal_cleans_retained_another_server_client() -> None:
     server._clients = {"client-1": retained_client}  # noqa: SLF001
     server._client_urls = {"client-1": url}  # noqa: SLF001
     server._mdns_client_urls = {"service._sendspin._tcp.local.": url}  # noqa: SLF001
-    server.remove_client = AsyncMock()  # type: ignore[method-assign]
+    server.remove_client = MagicMock()  # type: ignore[method-assign]
 
     server._handle_service_removed("service._sendspin._tcp.local.")  # noqa: SLF001
-    await asyncio.sleep(0)
 
-    server.remove_client.assert_awaited_once_with("client-1")
+    server.remove_client.assert_called_once_with("client-1")
     assert "client-1" not in server._client_urls  # noqa: SLF001
 
 

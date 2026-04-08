@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import uuid
 from collections.abc import Callable
@@ -60,8 +59,6 @@ class SendspinGroup:
     """Friendly name for this group."""
     _play_start_time_us: int | None
     """Absolute timestamp in microseconds when playback started, None when not streaming."""
-    _playback_lock: asyncio.Lock
-    """Lock to serialize play_media() and stop() operations, preventing race conditions."""
     _push_stream: PushStream | None
     """Current PushStream for push-based streaming, None when not active."""
     _transformer_pool: TransformerPool
@@ -90,7 +87,6 @@ class SendspinGroup:
         self._group_id = str(uuid.uuid4())
         self._group_name: str | None = None
         self._play_start_time_us: int | None = None
-        self._playback_lock = asyncio.Lock()
         self._push_stream: PushStream | None = None
         self._transformer_pool = TransformerPool()
         self._group_roles = create_group_roles(self)
@@ -208,7 +204,7 @@ class SendspinGroup:
         self._signal_event(GroupStateChangedEvent(new_state))
         self._send_group_update_to_clients()
 
-    async def stop(self) -> bool:
+    def stop(self) -> bool:
         """
         Stop playback for the group and clean up resources.
 
@@ -223,29 +219,28 @@ class SendspinGroup:
             # An empty group cannot have active playback
             return False
 
-        async with self._playback_lock:
-            active = self._push_stream is not None and not self._push_stream.is_stopped
-            needs_cleanup = self._current_state != PlaybackStateType.STOPPED
+        active = self._push_stream is not None and not self._push_stream.is_stopped
+        needs_cleanup = self._current_state != PlaybackStateType.STOPPED
 
-            if not active and not needs_cleanup:
-                return False
+        if not active and not needs_cleanup:
+            return False
 
-            logger.debug(
-                "Stopping playback for group with clients: %s",
-                [c.client_id for c in self._clients],
-            )
+        logger.debug(
+            "Stopping playback for group with clients: %s",
+            [c.client_id for c in self._clients],
+        )
 
-            metadata_group_role = self.group_role("metadata")
-            if isinstance(metadata_group_role, MetadataGroupRole):
-                metadata_group_role.freeze_progress()
+        metadata_group_role = self.group_role("metadata")
+        if isinstance(metadata_group_role, MetadataGroupRole):
+            metadata_group_role.freeze_progress()
 
-            # Stop the push stream if active
-            if self._push_stream is not None:
-                self._push_stream.stop()
-                self._push_stream = None
+        # Stop the push stream if active
+        if self._push_stream is not None:
+            self._push_stream.stop()
+            self._push_stream = None
 
-            self._set_playback_state(PlaybackStateType.STOPPED)
-            return True
+        self._set_playback_state(PlaybackStateType.STOPPED)
+        return True
 
     @property
     def clients(self) -> list[SendspinClient]:
@@ -330,7 +325,7 @@ class SendspinGroup:
         """Current playback state of the group."""
         return self._current_state
 
-    async def remove_client(self, client: SendspinClient) -> None:
+    def remove_client(self, client: SendspinClient) -> None:
         """
         Remove a client from this group.
 
@@ -350,7 +345,7 @@ class SendspinGroup:
         if len(self._clients) == 1:
             had_active_stream = self.has_active_stream
             # Delete this group if that was the last client
-            await self.stop()
+            self.stop()
             if not had_active_stream:
                 # Group can be PLAYING without a stream during track transitions.
                 # stop() only fires on_stream_end via PushStream, so without one
@@ -376,7 +371,7 @@ class SendspinGroup:
         # Send group update to notify client of their new solo group
         new_group.on_client_connected(client)
 
-    async def add_client(self, client: SendspinClient) -> None:
+    def add_client(self, client: SendspinClient) -> None:
         """
         Add a client to this group.
 
@@ -397,7 +392,7 @@ class SendspinGroup:
                 old_group.has_active_stream,
                 [c.client_id for c in old_group.clients],
             )
-        stopped = await old_group.stop()
+        stopped = old_group.stop()
         if stopped and logger.isEnabledFor(logging.DEBUG):
             logger.debug(
                 "add_client(%s): previous group=%s stopped playback",
@@ -407,7 +402,7 @@ class SendspinGroup:
         if client in self._clients:
             return
         # Remove it from any existing group first
-        await client.ungroup()
+        client.ungroup()
 
         # Check for and remove any stale client with the same client_id
         # This handles the case where a client disconnects and reconnects

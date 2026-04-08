@@ -98,7 +98,7 @@ async def _scenario_existing_codec_main(
     for i in range(120):
         if i == 30:
             _set_instant_join(player_b)
-            await group_a.add_client(player_b)
+            group_a.add_client(player_b)
         play_start_us = await _commit_block(
             stream,
             next_play_start_us=next_play_start_us,
@@ -153,7 +153,7 @@ async def _scenario_new_codec_main(
     for i in range(70):
         if i == 12:
             _set_instant_join(player_b)
-            await group_a.add_client(player_b)
+            group_a.add_client(player_b)
 
         play_start_us = await _commit_block(
             stream,
@@ -203,7 +203,7 @@ async def _scenario_custom_channel_no_history(
     )
     _set_instant_join(player_b)
     join_index = len(conn_b.events)
-    await group_a.add_client(player_b)
+    group_a.add_client(player_b)
 
     next_play_start_us = clock.now_us() + 250_000
 
@@ -294,7 +294,7 @@ async def _scenario_custom_channel_with_history(
     )
     _set_instant_join(player_b)
     join_index = len(conn_b.events)
-    await group_a.add_client(player_b)
+    group_a.add_client(player_b)
 
     # First commit applies historical while main continues live.
     play_start_us = await _commit_block(
@@ -346,9 +346,9 @@ async def _scenario_custom_channel_with_history(
     return {"main-hist": conn_a, "custom-hist": conn_b}
 
 
-async def _maybe_remove(group: SendspinGroup, player: SendspinClient) -> None:
+def _maybe_remove(group: SendspinGroup, player: SendspinClient) -> None:
     if player in group.clients and len(group.clients) > 2:
-        await group.remove_client(player)
+        group.remove_client(player)
 
 
 async def _scenario_regroup_churn(
@@ -413,7 +413,7 @@ async def _scenario_regroup_churn(
     )
     next_play_start_us = clock.now_us() + 250_000
 
-    actions: dict[int, Callable[[], Awaitable[None]]] = {
+    actions: dict[int, Callable[[], None]] = {
         3: lambda: group_a.add_client(player_b),
         5: lambda: group_a.add_client(player_c),
         7: lambda: group_a.add_client(player_d),
@@ -439,7 +439,7 @@ async def _scenario_regroup_churn(
 
         action = actions.get(step)
         if action is not None:
-            await action()
+            action()
 
     for _ in range(15):
         play_start_us = await _commit_block(

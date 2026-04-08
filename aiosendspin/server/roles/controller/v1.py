@@ -7,11 +7,9 @@ This role handles bidirectional communication:
 
 from __future__ import annotations
 
-import asyncio
 import logging
-from collections.abc import Coroutine
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from aiosendspin.models.controller import ControllerCommandPayload
 from aiosendspin.models.types import (
@@ -21,7 +19,6 @@ from aiosendspin.models.types import (
     has_role_family,
 )
 from aiosendspin.server.roles.base import Role
-from aiosendspin.util import create_task
 
 if TYPE_CHECKING:
     from aiosendspin.models.core import ClientCommandPayload
@@ -64,7 +61,7 @@ class ControllerV1Role(Role):
         self._stream_started = False
         self._buffer_tracker = None
         self._group_role: ControllerGroupRole | None = None
-        self._switch_lock = asyncio.Lock()
+        self._switch_in_progress = False
         self._logger = logger.getChild(str(client.client_id))
 
     @property
@@ -89,13 +86,13 @@ class ControllerV1Role(Role):
         self,
         old_state: ClientStateType,  # noqa: ARG002
         new_state: ClientStateType,
-    ) -> Coroutine[Any, Any, None] | None:
+    ) -> None:
         """Handle external_source transitions by moving client to solo group."""
         if new_state != ClientStateType.EXTERNAL_SOURCE:
-            return None
-        return self._handle_external_source_transition()
+            return
+        self._handle_external_source_transition()
 
-    async def _handle_external_source_transition(self) -> None:
+    def _handle_external_source_transition(self) -> None:
         """Handle transition to external_source state.
 
         When transitioning to external_source:
@@ -112,12 +109,12 @@ class ControllerV1Role(Role):
                 "Storing previous group %s for external_source client",
                 state.previous_group_id,
             )
-            await self._client.group.remove_client(self._client)
+            self._client.group.remove_client(self._client)
             state.external_source_solo_group_id = self._client.group.group_id
             return
 
         self._logger.debug("Client already in solo group, stopping playback for external_source")
-        await self._client.group.stop()
+        self._client.group.stop()
 
     def on_command(self, payload: ClientCommandPayload) -> None:
         """Handle client/command payload."""
@@ -126,7 +123,7 @@ class ControllerV1Role(Role):
             return
 
         if controller_cmd.command == MediaCommand.SWITCH:
-            create_task(self._handle_switch_command())
+            self._handle_switch_command()
             return
 
         # Forward other commands to group role
@@ -148,23 +145,26 @@ class ControllerV1Role(Role):
         """Get or create persistent state for this role."""
         return self._client.get_or_create_role_state(self.role_family, ControllerRoleState)
 
-    async def _handle_switch_command(self) -> None:
+    def _handle_switch_command(self) -> None:
         """Handle the switch command to cycle through groups."""
-        if self._switch_lock.locked():
+        if self._switch_in_progress:
             self._logger.debug("Ignoring switch command; switch already in progress")
             return
-        async with self._switch_lock:
-            await self._handle_switch_command_locked()
+        self._switch_in_progress = True
+        try:
+            self._handle_switch_command_inner()
+        finally:
+            self._switch_in_progress = False
 
-    async def _handle_switch_command_locked(self) -> None:
-        """Handle the switch command to cycle through groups (locked)."""
+    def _handle_switch_command_inner(self) -> None:
+        """Handle the switch command to cycle through groups."""
         # Clients in external_source can't participate in playback
         if self._client.client_state == ClientStateType.EXTERNAL_SOURCE:
             self._logger.debug("Ignoring switch command while client is in external_source state")
             return
 
         # Check if client should rejoin previous group (external_source recovery priority)
-        if await self._try_rejoin_previous_group():
+        if self._try_rejoin_previous_group():
             return
 
         current_group = self._client.group
@@ -197,15 +197,15 @@ class ControllerV1Role(Role):
                 "Switching client %s to solo group",
                 self._client.client_id,
             )
-            await current_group.remove_client(self._client)
+            current_group.remove_client(self._client)
         elif next_group != current_group:
             self._logger.info(
                 "Switching client %s to group %s",
                 self._client.client_id,
                 next_group.group_id,
             )
-            await current_group.remove_client(self._client)
-            await next_group.add_client(self._client)
+            current_group.remove_client(self._client)
+            next_group.add_client(self._client)
 
     def _get_all_groups(self) -> list[SendspinGroup]:
         """Get all unique groups from all connected clients."""
@@ -284,7 +284,7 @@ class ControllerV1Role(Role):
             and len(self._client.group.clients) == 1  # Still in the solo group
         )
 
-    async def _try_rejoin_previous_group(self) -> bool:
+    def _try_rejoin_previous_group(self) -> bool:
         """Try to rejoin the previous group after external_source ended."""
         if not self._should_rejoin_previous_group():
             return False
@@ -302,8 +302,8 @@ class ControllerV1Role(Role):
                 "Rejoining previous group %s after external_source",
                 previous_group_id,
             )
-            await self._client.group.remove_client(self._client)
-            await previous_group.add_client(self._client)
+            self._client.group.remove_client(self._client)
+            previous_group.add_client(self._client)
             return True
         self._logger.debug(
             "Previous group %s no longer exists or is current group, "

@@ -117,7 +117,7 @@ class TestGroupStartStream:
         group = SendspinGroup(mock_server, mock_client)
         group.start_stream()
 
-        await group.stop()
+        group.stop()
 
         assert group._push_stream is None  # noqa: SLF001
 
@@ -133,7 +133,7 @@ class TestGroupStartStream:
 
         assert group.state == PlaybackStateType.PLAYING
 
-        await group.stop()
+        group.stop()
 
         assert group.state == PlaybackStateType.STOPPED
 
@@ -160,7 +160,7 @@ class TestGroupStartStream:
 
         mock_server.loop.time.return_value = 1010.0
 
-        await group.stop()
+        group.stop()
 
         assert metadata_role.metadata is not None
         assert metadata_role.metadata.track_progress == 40_000
@@ -344,7 +344,7 @@ class TestRoleJoinWithActiveStream:
 
         # Mock on_role_join to track calls
         with patch.object(stream, "on_role_join") as mock_on_role_join:
-            await group.add_client(mock_player_client)
+            group.add_client(mock_player_client)
 
             # Should be called once for each role with audio requirements
             mock_on_role_join.assert_called_once()
@@ -373,7 +373,7 @@ class TestRoleJoinWithActiveStream:
         visualizer_client.active_roles = [mock_role]
 
         with patch.object(stream, "on_role_join") as mock_on_role_join:
-            await group.add_client(visualizer_client)
+            group.add_client(visualizer_client)
 
             mock_on_role_join.assert_not_called()
 
@@ -389,7 +389,7 @@ class TestRoleJoinWithActiveStream:
         # No stream started
 
         # Should not raise
-        await group.add_client(mock_player_client)
+        group.add_client(mock_player_client)
 
     @pytest.mark.asyncio
     async def test_client_join_with_stopped_stream(
@@ -404,7 +404,7 @@ class TestRoleJoinWithActiveStream:
         stream.stop()  # Stop the stream
 
         with patch.object(stream, "on_role_join") as mock_on_role_join:
-            await group.add_client(mock_player_client)
+            group.add_client(mock_player_client)
 
             mock_on_role_join.assert_not_called()
 
@@ -417,13 +417,13 @@ class TestRoleJoinWithActiveStream:
     ) -> None:
         """remove_client() should call role.on_stream_end() for removed client roles."""
         group = SendspinGroup(mock_server, mock_owner_client)
-        await group.add_client(mock_player_client)
+        group.add_client(mock_player_client)
         group.start_stream()
 
         role = mock_player_client.active_roles[0]
         role.on_stream_end.reset_mock()
 
-        await group.remove_client(mock_player_client)
+        group.remove_client(mock_player_client)
 
         role.on_stream_end.assert_called_once()
 
@@ -447,7 +447,7 @@ class TestRoleJoinWithActiveStream:
         assert not group.has_active_stream
 
         role.on_stream_end.reset_mock()
-        await group.remove_client(owner_client)
+        group.remove_client(owner_client)
 
         role.on_stream_end.assert_called_once()
 

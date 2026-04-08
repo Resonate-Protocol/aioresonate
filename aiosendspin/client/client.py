@@ -61,6 +61,7 @@ from aiosendspin.models.visualizer import (
     StreamStartVisualizer,
     VisualizerFrame,
 )
+from aiosendspin.util import create_task
 
 from .time_sync import SendspinTimeFilter
 
@@ -419,7 +420,7 @@ class SendspinClient:
         """Perform the handshake with the server after connection is established."""
         self._server_hello_event = asyncio.Event()
 
-        self._reader_task = self._loop.create_task(self._reader_loop())
+        self._reader_task = create_task(self._reader_loop(), loop=self._loop)
         await self._send_client_hello()
 
         try:
@@ -437,7 +438,7 @@ class SendspinClient:
             )
 
         await self._send_time_message()
-        self._time_task = self._loop.create_task(self._time_sync_loop())
+        self._time_task = create_task(self._time_sync_loop(), loop=self._loop)
         logger.info("Handshake with server complete")
 
     async def send_goodbye(self, reason: GoodbyeReason) -> None:

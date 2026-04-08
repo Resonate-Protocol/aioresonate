@@ -202,15 +202,13 @@ class SendspinClient:
         """Return the current client operational state reported by `client/state`."""
         return self._client_state
 
-    async def handle_state_transition(self, new_state: ClientStateType) -> None:
+    def handle_state_transition(self, new_state: ClientStateType) -> None:
         """Handle client state transitions by notifying all roles."""
         old_state = self._client_state
         self._client_state = new_state
 
         for role in self._roles.values():
-            coro = role.on_state_transition(old_state, new_state)
-            if coro is not None:
-                await coro
+            role.on_state_transition(old_state, new_state)
 
     def check_role(self, role: Roles) -> bool:
         """Check if the client has a role active (by role family)."""
@@ -366,17 +364,17 @@ class SendspinClient:
         self._connection = None
 
         if goodbye_reason == GoodbyeReason.ANOTHER_SERVER:
-            create_task(self._handle_takeover_disconnect())
+            self._handle_takeover_disconnect()
 
         # Schedule client cleanup from registry
         self._schedule_cleanup(goodbye_reason)
 
-    async def _handle_takeover_disconnect(self) -> None:
+    def _handle_takeover_disconnect(self) -> None:
         """Handle ANOTHER_SERVER disconnect by ungrouping first, then stopping."""
         old_group_id = self.group.group_id
         try:
-            await self.ungroup()
-            await self.group.stop()
+            self.ungroup()
+            self.group.stop()
         except Exception:
             self._logger.exception(
                 "Takeover disconnect sequence failed for %s (old_group=%s)",
@@ -421,7 +419,7 @@ class SendspinClient:
         self._hard_detach_roles()
         self._roles_warm_disconnected = False
         self._logger.debug("Cleaning up client from registry")
-        create_task(self._server.remove_client(self._client_id))
+        self._server.remove_client(self._client_id)
 
     def _hard_detach_roles(self, *, call_disconnect_hooks: bool = True) -> None:
         """Run role disconnect hooks and clear role-related caches."""
@@ -544,7 +542,7 @@ class SendspinClient:
         for role in self._roles.values():
             role.on_group_changed(group)
 
-    async def ungroup(self) -> None:
+    def ungroup(self) -> None:
         """Remove the client from the group (no-op if already solo)."""
         if len(self.group.clients) > 1:
-            await self.group.remove_client(self)
+            self.group.remove_client(self)

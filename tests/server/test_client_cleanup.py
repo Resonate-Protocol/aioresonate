@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
-from unittest.mock import AsyncMock
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -25,7 +25,7 @@ class _MockServer:
     clock: LoopClock
     id: str = "srv"
     name: str = "server"
-    remove_client: AsyncMock = field(default_factory=AsyncMock)
+    remove_client: MagicMock = field(default_factory=MagicMock)
 
     def is_external_player(self, client_id: str) -> bool:  # noqa: ARG002
         return False
@@ -113,12 +113,10 @@ async def test_immediate_cleanup_on_explicit_disconnect(
     """Client is removed from registry immediately on SHUTDOWN/USER_REQUEST."""
     client.detach_connection(reason)
 
-    # Allow scheduled callback and resulting task to run
-    # (call_soon schedules _do_cleanup, which creates a task)
-    await asyncio.sleep(0)
+    # Allow scheduled call_soon callback to run
     await asyncio.sleep(0)
 
-    mock_server.remove_client.assert_awaited_once_with("player-1")
+    mock_server.remove_client.assert_called_once_with("player-1")
 
 
 @pytest.mark.asyncio
@@ -139,12 +137,12 @@ async def test_delayed_cleanup_on_reconnectable_disconnect(
     await asyncio.sleep(0)
 
     # Should not be cleaned up yet
-    mock_server.remove_client.assert_not_awaited()
+    mock_server.remove_client.assert_not_called()
 
     # Wait for the delayed cleanup
     await asyncio.sleep(client_module.CLIENT_CLEANUP_DELAY + 0.1)
 
-    mock_server.remove_client.assert_awaited_once_with("player-1")
+    mock_server.remove_client.assert_called_once_with("player-1")
 
 
 @pytest.mark.asyncio
@@ -157,7 +155,7 @@ async def test_no_cleanup_on_another_server_disconnect(
     await asyncio.sleep(0)
     await asyncio.sleep(client_module.CLIENT_CLEANUP_DELAY + 0.1)
 
-    mock_server.remove_client.assert_not_awaited()
+    mock_server.remove_client.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -167,18 +165,18 @@ async def test_another_server_disconnect_runs_ungroup_then_stop(
     """Takeover disconnect runs ungroup before stop."""
     other = SendspinClient(mock_server, client_id="player-2")
     SendspinGroup(mock_server, other)
-    await client.group.add_client(other)
+    client.group.add_client(other)
 
     call_order: list[str] = []
 
-    async def _record_ungroup() -> None:
+    def _record_ungroup() -> None:
         call_order.append("ungroup")
-        await original_ungroup()
+        original_ungroup()
 
-    async def _record_stop(group: SendspinGroup) -> bool:
+    def _record_stop(group: SendspinGroup) -> bool:
         if client in group.clients:
             call_order.append("stop")
-        return await original_stop(group)
+        return original_stop(group)
 
     original_ungroup = client.ungroup
     original_stop = SendspinGroup.stop
@@ -187,7 +185,6 @@ async def test_another_server_disconnect_runs_ungroup_then_stop(
 
     try:
         client.detach_connection(GoodbyeReason.ANOTHER_SERVER)
-        await asyncio.sleep(0)
     finally:
         SendspinGroup.stop = original_stop  # type: ignore[method-assign]
 
@@ -259,7 +256,7 @@ async def test_cleanup_cancelled_on_reconnect(
 
     # Wait some time but not until cleanup fires
     await asyncio.sleep(client_module.CLIENT_CLEANUP_DELAY / 2)
-    mock_server.remove_client.assert_not_awaited()
+    mock_server.remove_client.assert_not_called()
 
     # Client reconnects
     client.attach_connection(
@@ -273,7 +270,7 @@ async def test_cleanup_cancelled_on_reconnect(
     await asyncio.sleep(client_module.CLIENT_CLEANUP_DELAY)
 
     # Should not have been cleaned up
-    mock_server.remove_client.assert_not_awaited()
+    mock_server.remove_client.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -295,4 +292,4 @@ async def test_cleanup_skipped_if_reconnected_before_callback(
     await asyncio.sleep(0)
 
     # Cleanup should have been cancelled by attach_connection
-    mock_server.remove_client.assert_not_awaited()
+    mock_server.remove_client.assert_not_called()

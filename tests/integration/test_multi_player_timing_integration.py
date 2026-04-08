@@ -439,7 +439,7 @@ async def _add_client_and_track(
     if role is not None:
         role.get_join_delay_s = lambda: 0.0  # type: ignore[method-assign]
     joins.track(player.client_id, conn)
-    await group.add_client(player)
+    group.add_client(player)
 
 
 def _assert_join_delays(
@@ -579,7 +579,7 @@ async def test_multi_player_group_join_sync_stable_source() -> None:
     # Run 3 seconds virtual time; join B at t=1s.
     for i in range(120):  # 120 * 25ms = 3s
         if i == 40:
-            await group_a.add_client(player_b)
+            group_a.add_client(player_b)
         pcm = _pcm_s16le_stereo_for_range(
             next_play_start_us, sample_rate=source_fmt.sample_rate, frame_count=1200
         )
@@ -653,7 +653,7 @@ async def test_multi_player_sync_with_jittery_source_is_continuous() -> None:
     )
 
     stream = group_a.start_stream()
-    await group_a.add_client(player_b)
+    group_a.add_client(player_b)
 
     source_fmt = AudioFormat(sample_rate=48_000, bit_depth=16, channels=2)
 
@@ -837,7 +837,7 @@ async def test_four_players_regroup_fast_start_and_sync() -> None:  # noqa: PLR0
 
     async def _safe_remove(client: SendspinClient) -> None:
         if len(group_a.clients) > 2:
-            await group_a.remove_client(client)
+            group_a.remove_client(client)
 
     single_actions: dict[int, Callable[[], Awaitable[None]]] = {
         2: partial(_add_client_and_track, group_a, player=player_c, conn=conn_c, joins=joins),
@@ -971,7 +971,7 @@ async def test_first_time_join_unique_format_starts_under_1s_without_next_commit
     role_b = player_b.role("player@v1")
     assert role_b is not None
     role_b.get_join_delay_s = lambda: 0.0  # type: ignore[method-assign]
-    await group_a.add_client(player_b)
+    group_a.add_client(player_b)
 
     first_ts = None
     for _ in range(100):

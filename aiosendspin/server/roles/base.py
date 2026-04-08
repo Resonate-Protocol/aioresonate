@@ -16,8 +16,6 @@ from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
 if TYPE_CHECKING:
-    from collections.abc import Coroutine
-
     from aiosendspin.models import AudioCodec
     from aiosendspin.models.core import (
         ClientCommandPayload,
@@ -375,17 +373,16 @@ class Role(ABC):
         self._unsubscribe_from_group_role()
         self._subscribe_to_group_role()
 
-    def on_state_transition(
+    def on_state_transition(  # noqa: B027
         self,
-        old_state: ClientStateType,  # noqa: ARG002
-        new_state: ClientStateType,  # noqa: ARG002
-    ) -> Coroutine[Any, Any, None] | None:
+        old_state: ClientStateType,
+        new_state: ClientStateType,
+    ) -> None:
         """Handle client state transitions.
 
-        Return a coroutine if async work is needed, else None.
+        Handlers must be synchronous. For async operations, launch eager tasks.
         Called when client/state reports a new operational state.
         """
-        return None
 
     # --- Message hooks ---
 

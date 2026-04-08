@@ -684,7 +684,7 @@ class SendspinConnection:
 
             new_state = payload.state
             if new_state is not None and new_state != self._client.client_state:
-                await self._client.handle_state_transition(new_state)
+                self._client.handle_state_transition(new_state)
             for role in self._client.active_roles:
                 role.on_client_state(payload)
             return

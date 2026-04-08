@@ -202,7 +202,7 @@ class SendspinServer:
         if client is not None:
             self._fire_client_added_event_once(client)
 
-    async def remove_client(self, client_id: str) -> None:
+    def remove_client(self, client_id: str) -> None:
         """Remove a client from the persistent registry."""
         self._cancel_external_registration_timeout(client_id)
         self._cancel_reclaim_timeout(client_id)
@@ -212,7 +212,7 @@ class SendspinServer:
         client = self._clients.pop(client_id, None)
         if client is None:
             return
-        await client.group.remove_client(client)
+        client.group.remove_client(client)
         self._signal_event(ClientRemovedEvent(client_id))
 
     def register_external_player(
@@ -453,7 +453,7 @@ class SendspinServer:
         self._cancel_external_registration_timeout(client_id)
         self._external_registration_timeouts[client_id] = self._loop.call_later(
             timeout_s,
-            lambda: create_task(self._expire_external_registration(client_id)),
+            lambda: self._expire_external_registration(client_id),
         )
 
     def _schedule_reclaim_timeout(self, client_id: str, timeout_s: float) -> None:
@@ -461,26 +461,26 @@ class SendspinServer:
         self._cancel_reclaim_timeout(client_id)
         self._reclaim_timeouts[client_id] = self._loop.call_later(
             timeout_s,
-            lambda: create_task(self._expire_reclaim(client_id)),
+            lambda: self._expire_reclaim(client_id),
         )
 
-    async def _expire_external_registration(self, client_id: str) -> None:
+    def _expire_external_registration(self, client_id: str) -> None:
         """Handle external-registration timeout."""
         self._external_registration_timeouts.pop(client_id, None)
-        await self._full_unregister_disconnected_client(client_id)
+        self._full_unregister_disconnected_client(client_id)
 
-    async def _expire_reclaim(self, client_id: str) -> None:
+    def _expire_reclaim(self, client_id: str) -> None:
         """Handle reclaim timeout."""
         self._reclaim_timeouts.pop(client_id, None)
-        await self._full_unregister_disconnected_client(client_id)
+        self._full_unregister_disconnected_client(client_id)
 
-    async def _full_unregister_disconnected_client(self, client_id: str) -> None:
+    def _full_unregister_disconnected_client(self, client_id: str) -> None:
         """Fully unregister a client if it still has no active connection."""
         client = self._clients.get(client_id)
         if client is not None and client.connection is not None:
             return
         self.unregister_external_player(client_id)
-        await self.remove_client(client_id)
+        self.remove_client(client_id)
 
     def _resolve_initial_connect_waiters(self, url: str, err: BaseException | None = None) -> None:
         """Resolve or fail waiters for an initial connection attempt."""
@@ -769,9 +769,9 @@ class SendspinServer:
         url = self._mdns_client_urls.pop(name, None)
         if url is not None:
             self.disconnect_from_client(url)
-            create_task(self._cleanup_retained_clients_for_removed_mdns_url(url))
+            self._cleanup_retained_clients_for_removed_mdns_url(url)
 
-    async def _cleanup_retained_clients_for_removed_mdns_url(self, url: str) -> None:
+    def _cleanup_retained_clients_for_removed_mdns_url(self, url: str) -> None:
         """Remove retained ANOTHER_SERVER clients when their mDNS URL disappears."""
         client_ids = [
             client_id for client_id, known_url in self._client_urls.items() if known_url == url
@@ -785,7 +785,7 @@ class SendspinServer:
                 continue
 
             if client.cleanup_on_mdns_removal and not client.is_connected:
-                await self.remove_client(client_id)
+                self.remove_client(client_id)
 
     async def _stop_mdns(self) -> None:
         if self._zc is None:
