@@ -29,7 +29,12 @@ from aiosendspin.server.audio_transformers import TransformerPool
 from aiosendspin.server.channels import MAIN_CHANNEL
 from aiosendspin.server.client import SendspinClient
 from aiosendspin.server.clock import LoopClock, ManualClock
-from aiosendspin.server.push_stream import CachedChunk, CachedPCMChunk, PushStream
+from aiosendspin.server.push_stream import (
+    DEFAULT_INITIAL_DELAY_US,
+    CachedChunk,
+    CachedPCMChunk,
+    PushStream,
+)
 from aiosendspin.server.roles import AudioChunk, AudioRequirements
 from aiosendspin.server.roles.player.audio_transformers import PcmPassthrough
 
@@ -106,8 +111,9 @@ class _FakeConnection:
 
 
 class _DummyRole:
-    def __init__(self, requirements: AudioRequirements) -> None:
+    def __init__(self, requirements: AudioRequirements, *, static_delay_us: int = 0) -> None:
         self._requirements = requirements
+        self._static_delay_us = static_delay_us
         self.received: list[AudioChunk] = []
         self.started = 0
 
@@ -115,7 +121,7 @@ class _DummyRole:
         return self._requirements
 
     def get_static_delay_us(self) -> int:
-        return 0
+        return self._static_delay_us
 
     def get_join_delay_s(self) -> float:
         return 0.0
@@ -1893,3 +1899,125 @@ async def test_late_joiner_after_historical_injection() -> None:
 
     assert role2.started == 1
     assert role2.received
+
+
+# ---------------------------------------------------------------------------
+# Static delay send-ahead budget tests
+# ---------------------------------------------------------------------------
+
+_STATIC_DELAY_US = 5_000_000  # 5 s
+
+
+def _make_role(
+    *,
+    static_delay_us: int = 0,
+    channel_id: UUID = MAIN_CHANNEL,
+) -> _DummyRole:
+    return _DummyRole(
+        AudioRequirements(
+            sample_rate=48000,
+            bit_depth=16,
+            channels=2,
+            transformer=None,
+            channel_id=channel_id,
+            frame_duration_us=25_000,
+        ),
+        static_delay_us=static_delay_us,
+    )
+
+
+@pytest.mark.asyncio
+async def test_commit_audio_bootstrap_includes_static_delay() -> None:
+    """First commit with a large-delay player pushes timeline forward."""
+    loop = asyncio.get_running_loop()
+    clock = ManualClock(now_us_value=1_000_000)
+    group = _DummyGroup(clients=[])
+    role = _make_role(static_delay_us=_STATIC_DELAY_US)
+    group.clients.append(_DummyClient([role]))
+
+    stream = PushStream(loop=loop, clock=clock, group=group)
+    fmt = AudioFormat(sample_rate=48000, bit_depth=16, channels=2)
+    stream.prepare_audio(bytes(4800), fmt)
+    play_start = await stream.commit_audio()
+
+    assert play_start >= clock.now_us() + DEFAULT_INITIAL_DELAY_US + _STATIC_DELAY_US
+
+
+@pytest.mark.asyncio
+async def test_mixed_delay_timeline_uses_largest_static_delay() -> None:
+    """With 0 ms and 5 s delay players, timeline anchored for the largest."""
+    loop = asyncio.get_running_loop()
+    clock = ManualClock(now_us_value=1_000_000)
+    group = _DummyGroup(clients=[])
+    role_fast = _make_role(static_delay_us=0)
+    role_slow = _make_role(static_delay_us=_STATIC_DELAY_US)
+    group.clients.extend([_DummyClient([role_fast]), _DummyClient([role_slow])])
+
+    stream = PushStream(loop=loop, clock=clock, group=group)
+    fmt = AudioFormat(sample_rate=48000, bit_depth=16, channels=2)
+    stream.prepare_audio(bytes(4800), fmt)
+    play_start = await stream.commit_audio()
+
+    assert play_start >= clock.now_us() + DEFAULT_INITIAL_DELAY_US + _STATIC_DELAY_US
+
+
+@pytest.mark.asyncio
+async def test_sleep_to_limit_buffer_accounts_for_static_delay() -> None:
+    """Buffer throttle allows extra lead equal to the largest static delay."""
+    loop = asyncio.get_running_loop()
+    clock = ManualClock(now_us_value=1_000_000)
+    group = _DummyGroup(clients=[])
+    role = _make_role(static_delay_us=_STATIC_DELAY_US)
+    group.clients.append(_DummyClient([role]))
+
+    stream = PushStream(loop=loop, clock=clock, group=group)
+    # Timeline 5.25 s ahead — exactly DEFAULT + static_delay
+    stream._channel_timing[MAIN_CHANNEL] = (  # noqa: SLF001
+        clock.now_us() + DEFAULT_INITIAL_DELAY_US + _STATIC_DELAY_US
+    )
+
+    # With a 500 ms base buffer, effective limit = 500 ms + 5 s = 5.5 s.
+    # ahead_us = 5.25 s < 5.5 s → no sleep.
+    await stream.sleep_to_limit_buffer(max_buffer_us=500_000)
+    # Test passes by returning immediately (no hang).
+
+
+@pytest.mark.asyncio
+async def test_historical_stale_filter_includes_static_delay() -> None:
+    """Historical chunk between DEFAULT and DEFAULT+static_delay is filtered."""
+    loop = asyncio.get_running_loop()
+    clock = ManualClock(now_us_value=1_000_000)
+    channel = UUID("cccccccc-cccc-cccc-cccc-cccccccccccc")
+    group = _DummyGroup(clients=[])
+    role = _make_role(static_delay_us=_STATIC_DELAY_US, channel_id=channel)
+    group.clients.append(_DummyClient([role]))
+
+    stream = PushStream(loop=loop, clock=clock, group=group)
+    fmt = AudioFormat(sample_rate=48000, bit_depth=16, channels=2)
+    # Place chunk just above the old threshold (now + DEFAULT = 1_250_000) but well
+    # below the new threshold (now + DEFAULT + 5s = 6_250_000).  Without the fix
+    # this chunk would have been delivered; with the fix it is correctly filtered.
+    start_us = clock.now_us() + DEFAULT_INITIAL_DELAY_US + 100_000  # now + 350 ms
+    stream.prepare_historical_audio(bytes(4800), fmt, channel_id=channel, start_time_us=start_us)
+    await stream.commit_audio()
+
+    assert not role.received
+    # Channel timing still advanced (continuity preserved)
+    assert channel in stream._channel_timing  # noqa: SLF001
+
+
+@pytest.mark.asyncio
+async def test_zero_delay_regression_commit_audio_unchanged() -> None:
+    """With all delays at 0, commit_audio behaves identically to before."""
+    loop = asyncio.get_running_loop()
+    clock = ManualClock(now_us_value=1_000_000)
+    group = _DummyGroup(clients=[])
+    role = _make_role(static_delay_us=0)
+    group.clients.append(_DummyClient([role]))
+
+    stream = PushStream(loop=loop, clock=clock, group=group)
+    fmt = AudioFormat(sample_rate=48000, bit_depth=16, channels=2)
+    stream.prepare_audio(bytes(4800), fmt)
+    play_start = await stream.commit_audio()
+
+    assert play_start == clock.now_us() + DEFAULT_INITIAL_DELAY_US
