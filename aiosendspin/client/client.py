@@ -61,6 +61,7 @@ from aiosendspin.models.visualizer import (
     StreamStartVisualizer,
     VisualizerFrame,
 )
+from aiosendspin.server.clock import Clock, RawMonotonicClock
 
 from .time_sync import SendspinTimeFilter
 
@@ -270,6 +271,7 @@ class SendspinClient:
         initial_volume: int = 100,
         initial_muted: bool = False,
         state_supported_commands: list[PlayerCommand] | None = None,
+        clock: Clock | None = None,
     ) -> None:
         """
         Create a new Sendspin client instance.
@@ -309,6 +311,7 @@ class SendspinClient:
         self._client_name = client_name
         self._device_info = device_info
         self._roles = list(roles)
+        self._clock: Clock = clock or RawMonotonicClock()
 
         # Validate and store player support
         if Roles.PLAYER in self._roles:
@@ -1203,4 +1206,4 @@ class SendspinClient:
         return 0.2
 
     def _now_us(self) -> int:
-        return int(self._loop.time() * 1_000_000)
+        return self._clock.now_us()
