@@ -32,7 +32,17 @@ class RawMonotonicClock:
 
     Unlike CLOCK_MONOTONIC, CLOCK_MONOTONIC_RAW is not slewed by NTP/adjtime,
     so elapsed-microsecond measurements reflect hardware ticks. This matters
-    for audio sync: NTP slewing poisons the client-side time filter.
+    for audio sync since NTP slewing poisons the client-side time filter.
+
+    Note that asyncio scheduling primitives (``call_later``, ``asyncio.sleep``,
+    ``wait_for`` timeouts) are driven by the event loop's own clock, which on
+    Linux is CLOCK_MONOTONIC. Sendspin only passes relative durations to those
+    primitives and never compares a loop-clock value against a ``now_us()``
+    value, so the two clock domains never mix in a computation. During active
+    NTP slewing the kernel caps the rate mismatch at around 500 ppm, so a
+    one-second sleep measured in raw microseconds differs by at most ~500 us.
+    That is well below the timing tolerances of backpressure and writer-wait
+    loops.
     """
 
     def now_us(self) -> int:
