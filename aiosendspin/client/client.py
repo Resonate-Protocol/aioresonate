@@ -12,6 +12,7 @@ from dataclasses import dataclass
 
 from aiohttp import ClientSession, ClientWebSocketResponse, WSMessage, WSMsgType, web
 
+from aiosendspin.clock import Clock, RawMonotonicClock
 from aiosendspin.models import BINARY_HEADER_SIZE, BinaryMessageType, unpack_binary_header
 from aiosendspin.models.artwork import ClientHelloArtworkSupport
 from aiosendspin.models.controller import ControllerCommandPayload
@@ -61,7 +62,6 @@ from aiosendspin.models.visualizer import (
     StreamStartVisualizer,
     VisualizerFrame,
 )
-from aiosendspin.server.clock import Clock, RawMonotonicClock
 
 from .time_sync import SendspinTimeFilter
 

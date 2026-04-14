@@ -26,9 +26,9 @@ from aiosendspin.util import create_task
 if TYPE_CHECKING:
     import av
 
+    from aiosendspin.clock import Clock
     from aiosendspin.server.audio_transformers import AudioTransformer
     from aiosendspin.server.client import SendspinClient
-    from aiosendspin.server.clock import Clock
     from aiosendspin.server.group import SendspinGroup
     from aiosendspin.server.roles import AudioRequirements, Role
 

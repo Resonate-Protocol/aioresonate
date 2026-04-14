@@ -27,12 +27,12 @@ from zeroconf import (
 )
 from zeroconf.asyncio import AsyncServiceBrowser, AsyncServiceInfo, AsyncZeroconf
 
+from aiosendspin.clock import Clock, RawMonotonicClock
 from aiosendspin.models.core import ClientHelloPayload
 from aiosendspin.models.types import ConnectionReason, GoodbyeReason
 from aiosendspin.util import create_task, get_local_ip
 
 from .client import SendspinClient
-from .clock import Clock, RawMonotonicClock
 from .connection import SendspinConnection
 from .group import SendspinGroup
 
