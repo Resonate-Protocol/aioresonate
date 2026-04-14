@@ -336,6 +336,10 @@ class PushStream:
         # Optional start timestamps for historical channels (set on first historical chunk).
         self._historical_start_us: dict[UUID, int] = {}
 
+    def now_us(self) -> int:
+        """Return current timestamp from the stream's clock in microseconds."""
+        return self._clock.now_us()
+
     @property
     def is_stopped(self) -> bool:
         """Whether this stream has been stopped."""
