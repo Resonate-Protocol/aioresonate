@@ -1208,6 +1208,9 @@ class SendspinClient:
             return 0.5
         return 0.2
 
-    def _now_us(self) -> int:
-        """Return the current timestamp from the client's configured clock in microseconds."""
+    def now_us(self) -> int:
+        """Return current timestamp from the client's clock in microseconds."""
         return self._clock.now_us()
+
+    # Keep private alias for internal callers.
+    _now_us = now_us
