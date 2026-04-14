@@ -12,6 +12,7 @@ from dataclasses import dataclass
 
 from aiohttp import ClientSession, ClientWebSocketResponse, WSMessage, WSMsgType, web
 
+from aiosendspin.clock import Clock, RawMonotonicClock
 from aiosendspin.models import BINARY_HEADER_SIZE, BinaryMessageType, unpack_binary_header
 from aiosendspin.models.artwork import ClientHelloArtworkSupport
 from aiosendspin.models.controller import ControllerCommandPayload
@@ -270,6 +271,7 @@ class SendspinClient:
         initial_volume: int = 100,
         initial_muted: bool = False,
         state_supported_commands: list[PlayerCommand] | None = None,
+        clock: Clock | None = None,
     ) -> None:
         """
         Create a new Sendspin client instance.
@@ -299,6 +301,8 @@ class SendspinClient:
                 Sent automatically after handshake if PLAYER role is supported.
             state_supported_commands: Optional list of player commands advertised
                 in client/state messages. Defaults to None (empty list).
+            clock: Monotonic clock used for time sync timestamps. Defaults to
+                RawMonotonicClock.
 
         Raises:
             ValueError: If PLAYER in roles but player_support is None, if
@@ -309,6 +313,7 @@ class SendspinClient:
         self._client_name = client_name
         self._device_info = device_info
         self._roles = list(roles)
+        self._clock: Clock = clock or RawMonotonicClock()
 
         # Validate and store player support
         if Roles.PLAYER in self._roles:
@@ -619,7 +624,7 @@ class SendspinClient:
         - audio_data: Raw PCM audio bytes
         - format: PCMFormat describing the audio format
 
-        To convert server timestamps to client play time (monotonic loop time),
+        To convert server timestamps to client play time (monotonic client clock),
         use the compute_play_time() and compute_server_time() methods provided
         by this client instance. These handle time synchronization and static delay
         automatically.
@@ -714,7 +719,7 @@ class SendspinClient:
         await self._send_message(message.to_json())
 
     async def _send_message(self, payload: str) -> None:
-        if not self._ws:
+        if self._ws is None:
             raise RuntimeError("WebSocket is not connected")
         async with self._send_lock:
             await self._ws.send_str(payload)
@@ -1084,14 +1089,15 @@ class SendspinClient:
         Convert server timestamp to client play time with static delay applied.
 
         This method converts a server timestamp to the equivalent client timestamp
-        (based on monotonic loop time) and subtracts the configured static delay.
-        Use this to determine when audio should be played on the client.
+        (based on the client's monotonic clock) and subtracts the configured
+        static delay. Use this to determine when audio should be played on the
+        client.
 
         Args:
             server_timestamp_us: Server timestamp in microseconds.
 
         Returns:
-            Client play time in microseconds (monotonic loop time - static delay).
+            Client play time in microseconds (client monotonic clock - static delay).
         """
         if self._time_filter.is_synchronized:
             client_time = self._time_filter.compute_client_time(server_timestamp_us)
@@ -1103,11 +1109,11 @@ class SendspinClient:
         Convert client timestamp to server timestamp with static delay removed.
 
         This is the inverse of compute_play_time. It converts a client timestamp
-        (monotonic loop time) to the equivalent server timestamp, adding the
+        (client monotonic clock) to the equivalent server timestamp, adding the
         static delay back first.
 
         Args:
-            client_timestamp_us: Client timestamp in microseconds (monotonic loop time).
+            client_timestamp_us: Client timestamp in microseconds (client monotonic clock).
 
         Returns:
             Server timestamp in microseconds.
@@ -1202,5 +1208,9 @@ class SendspinClient:
             return 0.5
         return 0.2
 
-    def _now_us(self) -> int:
-        return int(self._loop.time() * 1_000_000)
+    def now_us(self) -> int:
+        """Return current timestamp from the client's clock in microseconds."""
+        return self._clock.now_us()
+
+    # Keep private alias for internal callers.
+    _now_us = now_us

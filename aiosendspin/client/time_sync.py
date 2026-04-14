@@ -115,7 +115,7 @@ class SendspinTimeFilter:
             self._offset = float(measurement)
 
             # Drift variance estimated from propagation of offset uncertainties
-            self._drift_covariance = (self._offset_covariance + measurement_variance) / dt
+            self._drift_covariance = (self._offset_covariance + measurement_variance) / (dt * dt)
             self._offset_covariance = measurement_variance
 
             self._current_time_element = TimeElement(
@@ -161,7 +161,7 @@ class SendspinTimeFilter:
         if self._count < 100:
             # Build sufficient history before enabling adaptive forgetting
             self._count += 1
-        elif residual > max_residual_cutoff:
+        elif abs(residual) > max_residual_cutoff:
             # Large prediction error detected - likely network disruption or clock adjustment
             # Apply forgetting factor to increase Kalman gain and accelerate convergence
             new_drift_covariance *= self._forget_variance_factor

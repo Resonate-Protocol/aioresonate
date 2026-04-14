@@ -27,12 +27,12 @@ from zeroconf import (
 )
 from zeroconf.asyncio import AsyncServiceBrowser, AsyncServiceInfo, AsyncZeroconf
 
+from aiosendspin.clock import Clock, RawMonotonicClock
 from aiosendspin.models.core import ClientHelloPayload
 from aiosendspin.models.types import ConnectionReason, GoodbyeReason
 from aiosendspin.util import create_task, get_local_ip
 
 from .client import SendspinClient
-from .clock import Clock, LoopClock
 from .connection import SendspinConnection
 from .group import SendspinGroup
 
@@ -115,7 +115,7 @@ class SendspinServer:
         self._loop = loop
         self._id = server_id
         self._name = server_name
-        self._clock: Clock = clock or LoopClock(loop)
+        self._clock: Clock = clock or RawMonotonicClock()
 
         self._clients: dict[str, SendspinClient] = {}
         self._event_cbs: list[Callable[[SendspinServer, SendspinEvent], None]] = []

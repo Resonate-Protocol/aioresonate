@@ -33,7 +33,7 @@ Server-side `SendspinClient` (`server/client.py`) lifetime is decoupled from `Se
 
 - **`server/connection.py`** (`SendspinConnection`): Transient WebSocket transport with priority-based message queues (priority → control → per-role min-heaps sorted by timestamp). Uses epoch-based invalidation to discard stale binary messages after stream boundaries.
 
-- **`server/clock.py`** (`Clock`): Clock protocol. `LoopClock` for production (asyncio loop time), `ManualClock` for deterministic tests.
+- **`clock.py`** (`Clock`): Clock protocol. `RawMonotonicClock` for production (`CLOCK_MONOTONIC_RAW` on Linux, `time.monotonic` elsewhere), `LoopClock` for tests with mock loops, `ManualClock` for deterministic tests.
 
 - **`server/channels.py`**: Multi-channel routing. `MAIN_CHANNEL` is the default; additional channels support independent playback timelines.
 

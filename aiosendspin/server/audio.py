@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Literal, NamedTuple
 logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
-    from aiosendspin.server.clock import Clock
+    from aiosendspin.clock import Clock
 
 
 def _get_av() -> types.ModuleType:
