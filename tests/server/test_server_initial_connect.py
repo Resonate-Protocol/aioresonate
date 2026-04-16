@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import suppress
 from types import SimpleNamespace
+from typing import ClassVar
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -71,6 +73,26 @@ class _PersistentSuccessfulSession:
 
     async def close(self) -> None:
         self.closed = True
+
+
+class _FakeAsyncServiceInfo:
+    """Configurable AsyncServiceInfo test double."""
+
+    addresses: ClassVar[list[str]] = []
+    port: ClassVar[int | None] = None
+    properties: ClassVar[dict[bytes, bytes] | None] = None
+
+    def __init__(self, _service_type: str, _name: str) -> None:
+        pass
+
+    def load_from_cache(self, _zeroconf: object) -> bool:
+        return True
+
+    async def async_request(self, _zeroconf: object, _timeout_ms: int) -> None:
+        return
+
+    def parsed_addresses(self) -> list[str]:
+        return list(self.addresses)
 
 
 def _make_server(client_session: object) -> SendspinServer:
@@ -344,3 +366,58 @@ async def test_mdns_removal_keeps_non_retained_client() -> None:
     await asyncio.sleep(0)
 
     server.remove_client.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    ("addresses", "port", "path", "has_task", "expected_url", "expect_reconnect"),
+    [
+        # Address reorder, old IP still advertised, task alive -> keep existing.
+        (["10.0.0.3", "10.0.0.2"], 9999, "/sendspin", True, "ws://10.0.0.2:9999/sendspin", False),
+        # Same IP, port/path changed -> reconnect.
+        (["10.0.0.2"], 10000, "/other", True, "ws://10.0.0.2:10000/other", True),
+        # Old IP gone from advertised set -> reconnect.
+        (["10.0.0.5"], 9999, "/sendspin", True, "ws://10.0.0.5:9999/sendspin", True),
+        # URL changed but no active task -> reconnect.
+        (["10.0.0.3"], 9999, "/sendspin", False, "ws://10.0.0.3:9999/sendspin", True),
+    ],
+)
+@pytest.mark.asyncio
+async def test_mdns_update_reconnect_decision(
+    monkeypatch: pytest.MonkeyPatch,
+    addresses: list[str],
+    port: int,
+    path: str,
+    has_task: bool,  # noqa: FBT001
+    expected_url: str,
+    expect_reconnect: bool,  # noqa: FBT001
+) -> None:
+    """Reconnect only when old endpoint no longer matches an active connection."""
+    server = _make_server(_PersistentSuccessfulSession())
+    service_name = "service._sendspin._tcp.local."
+    old_url = "ws://10.0.0.2:9999/sendspin"
+
+    _FakeAsyncServiceInfo.addresses = addresses
+    _FakeAsyncServiceInfo.port = port
+    _FakeAsyncServiceInfo.properties = {b"path": path.encode()}
+    monkeypatch.setattr("aiosendspin.server.server.AsyncServiceInfo", _FakeAsyncServiceInfo)
+
+    server._mdns_client_urls[service_name] = old_url  # noqa: SLF001
+    connection_task: asyncio.Task[None] | None = None
+    if has_task:
+        connection_task = asyncio.create_task(asyncio.sleep(3600))
+        server._connection_tasks[old_url] = connection_task  # noqa: SLF001
+    server.connect_to_client = MagicMock()  # type: ignore[method-assign]
+
+    try:
+        await server._handle_service_added(MagicMock(), "_sendspin._tcp.local.", service_name)  # noqa: SLF001
+    finally:
+        if connection_task is not None:
+            connection_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await connection_task
+
+    assert server._mdns_client_urls[service_name] == expected_url  # noqa: SLF001
+    if expect_reconnect:
+        server.connect_to_client.assert_called_once_with(expected_url)
+    else:
+        server.connect_to_client.assert_not_called()

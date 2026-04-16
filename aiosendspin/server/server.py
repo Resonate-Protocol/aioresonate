@@ -9,6 +9,7 @@ from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import dataclass
 from ipaddress import ip_address
+from urllib.parse import urlsplit
 
 from aiohttp import (
     ClientConnectionError,
@@ -740,10 +741,11 @@ class SendspinServer:
         if not info.load_from_cache(zeroconf):
             await info.async_request(zeroconf, 3000)
 
-        if not info.parsed_addresses():
+        addresses = info.parsed_addresses()
+        if not addresses:
             return
 
-        address = _get_first_valid_ip(info.parsed_addresses())
+        address = _get_first_valid_ip(addresses)
         if address is None:
             return
 
@@ -762,6 +764,28 @@ class SendspinServer:
             return
 
         url = f"ws://{address}:{port}{path}"
+        old_url = self._mdns_client_urls.get(name)
+        if old_url is not None and old_url != url and old_url in self._connection_tasks:
+            old_parts = urlsplit(old_url)
+            if (
+                old_parts.hostname in addresses
+                and old_parts.port == port
+                and old_parts.path == path
+            ):
+                logger.debug(
+                    "mDNS preferred address changed for %s (%s -> %s) "
+                    "but current address still advertised, keeping existing connection",
+                    name,
+                    old_url,
+                    url,
+                )
+                return
+            logger.debug(
+                "mDNS address changed for %s (%s -> %s), reconnecting",
+                name,
+                old_url,
+                url,
+            )
         self._mdns_client_urls[name] = url
         self.connect_to_client(url)
 
