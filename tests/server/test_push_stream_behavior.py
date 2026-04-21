@@ -2234,16 +2234,20 @@ async def test_catchup_quantizer_does_not_share_live_cache(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Catch-up path must use its own quantizer state, not the shared live cache."""
+    # Count real graph rebuilds by observing `state.graph` identity across the call,
+    # not by replaying the drift-condition check. The old output-cursor drift proxy
+    # would flag false positives under soxr (where FIR latency makes the output
+    # cursor lag the input by tens of ms even in steady state).
     drift_rebuild_count = 0
     original_resample = push_stream_module._resample_pcm_standalone  # noqa: SLF001
 
     def _tracking_resample(state: Any, pcm: bytes, fmt: Any, ts: int) -> Any:
         nonlocal drift_rebuild_count
-        if state.pending_timestamp_us is not None:
-            drift_us = abs(state.pending_timestamp_us - ts)
-            if drift_us > 20_000:
-                drift_rebuild_count += 1
-        return original_resample(state, pcm, fmt, ts)
+        graph_before = id(state.graph)
+        result = original_resample(state, pcm, fmt, ts)
+        if state.graph is not None and id(state.graph) != graph_before:
+            drift_rebuild_count += 1
+        return result
 
     monkeypatch.setattr(push_stream_module, "_resample_pcm_standalone", _tracking_resample)
 
