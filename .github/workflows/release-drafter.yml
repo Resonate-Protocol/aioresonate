@@ -4,11 +4,6 @@ on:
   push:
     branches:
       - main
-  pull_request:
-    branches:
-      - main
-    types:
-      - closed
 
 jobs:
   update_release_draft:
