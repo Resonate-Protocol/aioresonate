@@ -114,7 +114,7 @@ class VisualizerFeatureExtractor:
         else:
             mono = raw.astype(np.float32)
 
-        return np.clip(mono / 32768.0, -1.0, 1.0)  # type: ignore[return-value]
+        return np.asarray(np.clip(mono / 32768.0, -1.0, 1.0))
 
     def _fft_magnitude(self, mono: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         """Return FFT frequency bins and normalized magnitudes."""
