@@ -276,6 +276,8 @@ class _ResamplerState:
     and is used to detect genuine input-timeline gaps independent of resampler FIR
     latency, which can make the output-side `pending_timestamp_us` lag the input by
     tens of ms even during steady-state operation (notably with soxr precision=30)."""
+    pending_input_ts_residue: int = 0
+    """Input-side counterpart to `pending_ts_residue`. Reset on init and drift rebase."""
     is_passthrough: bool = False
     """True when source and target formats are identical — skip graph processing."""
 
@@ -382,6 +384,7 @@ def _resample_pcm_standalone(  # noqa: PLR0915
         resampler_state.pending_timestamp_us = input_timestamp_us
         resampler_state.pending_ts_residue = 0
         resampler_state.pending_input_timestamp_us = input_timestamp_us
+        resampler_state.pending_input_ts_residue = 0
     else:
         drift_us = abs(resampler_state.pending_input_timestamp_us - input_timestamp_us)
         if drift_us > 20_000:
@@ -407,6 +410,7 @@ def _resample_pcm_standalone(  # noqa: PLR0915
             # anchor and any carried fractional µs from the prior segment are stale.
             resampler_state.pending_ts_residue = 0
             resampler_state.pending_input_timestamp_us = input_timestamp_us
+            resampler_state.pending_input_ts_residue = 0
 
     # Both cursors are guaranteed initialized above — narrow for mypy.
     assert resampler_state.pending_timestamp_us is not None
@@ -422,7 +426,6 @@ def _resample_pcm_standalone(  # noqa: PLR0915
         )
         raise ValueError(msg)
     sample_count = len(source_pcm) // frame_stride
-    input_duration_us = int(sample_count * 1_000_000 / source_format.sample_rate)
     av_input_pcm = (
         _convert_s24_to_s32(source_pcm)
         if source_format.sample_type == "int"
@@ -440,6 +443,12 @@ def _resample_pcm_standalone(  # noqa: PLR0915
             sample_type=resampler_state.target_sample_type,
         )
 
+    # Drift-free input-cursor advance; mirrors `pending_ts_residue` on the output side.
+    resampler_state.pending_input_ts_residue += sample_count * 1_000_000
+    input_duration_us, resampler_state.pending_input_ts_residue = divmod(
+        resampler_state.pending_input_ts_residue,
+        source_format.sample_rate,
+    )
     resampler_state.pending_input_timestamp_us += input_duration_us
 
     # Fast path: no conversion needed — return input PCM with timestamp tracking

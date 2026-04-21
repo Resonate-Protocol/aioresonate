@@ -2843,3 +2843,54 @@ def test_resampler_graph_path_44100_no_cumulative_drift() -> None:
         f"({total_output_samples} output samples) — regression of the per-call "
         f"truncation bug at push_stream.py:574"
     )
+
+
+def test_resampler_pending_input_ts_has_zero_cumulative_drift_at_44100_source() -> None:
+    """`pending_input_timestamp_us` must be drift-free for non-clean source rates.
+
+    Plain `int(samples * 1e6 / source_rate)` truncation accumulates per-call error
+    at rates that don't divide 1e6 evenly (e.g. 44.1k). Left unchecked, the
+    input-side cursor would eventually lag the true input timeline past the
+    20 ms drift threshold and cause a spurious graph rebuild. The divmod residue
+    accumulator must match `total_samples * 1e6 // source_sample_rate` exactly.
+    """
+    source = AudioFormat(sample_rate=44_100, bit_depth=16, channels=2, sample_type="int")
+    target = AudioFormat(sample_rate=44_100, bit_depth=16, channels=2, sample_type="int")
+    key = push_stream_module._ResamplerKey(  # noqa: SLF001
+        channel_id=MAIN_CHANNEL,
+        source_format=source,
+        target_sample_rate=44_100,
+        target_channels=2,
+        target_bit_depth=16,
+        target_sample_type="int",
+    )
+    state = push_stream_module._create_resampler_state(key, source, target)  # noqa: SLF001
+    assert state.pending_input_ts_residue == 0
+
+    # 25 ms @ 44.1k = 1102 samples → 24988.66µs actual, rounds to 24988µs.
+    # Plain `int(...)` would drop 0.66µs per call. Over 40_800 calls (17 min)
+    # the old code would accumulate ~27 ms of input-side lag — enough to cross
+    # the 20 ms rebuild threshold spuriously.
+    samples_per_call = 1102
+    input_pcm = bytes(samples_per_call * 4)
+    n_calls = 40_800
+    # The caller's `input_timestamp_us` advances along the true input timeline,
+    # which is itself drift-free (we use the same divmod pattern here).
+    external_residue = 0
+    external_ts = 0
+    for _ in range(n_calls):
+        push_stream_module._resample_pcm_standalone(  # noqa: SLF001
+            state, input_pcm, source, external_ts
+        )
+        external_residue += samples_per_call * 1_000_000
+        delta, external_residue = divmod(external_residue, 44_100)
+        external_ts += delta
+
+    expected = n_calls * samples_per_call * 1_000_000 // 44_100
+    actual = state.pending_input_timestamp_us
+    drift = (actual or 0) - expected
+    assert drift == 0, (
+        f"pending_input_timestamp_us drifted {drift}µs over {n_calls} calls — "
+        "regression of the input-side residue accumulator. This would eventually "
+        "cross the 20ms drift threshold and trigger a spurious graph rebuild."
+    )
