@@ -271,6 +271,11 @@ class _ResamplerState:
     backward drift over time. We track the unconsumed numerator across calls so
     cumulative pending exactly matches sample-derived elapsed time. Reset to 0
     whenever pending is rebased onto a fresh anchor (drift_reset, init)."""
+    pending_input_timestamp_us: int | None = None
+    """Expected timestamp of the next input frame. Advances by input duration per call
+    and is used to detect genuine input-timeline gaps independent of resampler FIR
+    latency, which can make the output-side `pending_timestamp_us` lag the input by
+    tens of ms even during steady-state operation (notably with soxr precision=30)."""
     is_passthrough: bool = False
     """True when source and target formats are identical — skip graph processing."""
 
@@ -346,7 +351,7 @@ def _create_resampler_state(
     )
 
 
-def _resample_pcm_standalone(
+def _resample_pcm_standalone(  # noqa: PLR0915
     resampler_state: _ResamplerState,
     source_pcm: bytes,
     source_format: AudioFormat,
@@ -367,13 +372,18 @@ def _resample_pcm_standalone(
     """
     av = _get_av()
 
-    # Handle timestamp tracking
-    if resampler_state.pending_timestamp_us is None:
+    # Handle timestamp tracking.
+    # Drift detection compares the *input* timeline — `pending_input_timestamp_us`
+    # tracks where the next input sample is expected to land based on previously
+    # consumed input durations. Using the output timeline would mis-fire on every
+    # call because long-FIR resamplers (e.g. soxr precision=30) emit fewer samples
+    # than the rate-conversion ratio until the graph is warmed up.
+    if resampler_state.pending_input_timestamp_us is None:
         resampler_state.pending_timestamp_us = input_timestamp_us
         resampler_state.pending_ts_residue = 0
+        resampler_state.pending_input_timestamp_us = input_timestamp_us
     else:
-        # Resync if timestamp drifts too far (e.g., resampler was idle)
-        drift_us = abs(resampler_state.pending_timestamp_us - input_timestamp_us)
+        drift_us = abs(resampler_state.pending_input_timestamp_us - input_timestamp_us)
         if drift_us > 20_000:
             # Flush the old graph to release FIR filter tails cleanly.
             # Flushed samples are discarded — they belong to the stale timeline.
@@ -396,6 +406,11 @@ def _resample_pcm_standalone(
             # Reset the residue accumulator: pending has been rebased onto a fresh
             # anchor and any carried fractional µs from the prior segment are stale.
             resampler_state.pending_ts_residue = 0
+            resampler_state.pending_input_timestamp_us = input_timestamp_us
+
+    # Both cursors are guaranteed initialized above — narrow for mypy.
+    assert resampler_state.pending_timestamp_us is not None
+    assert resampler_state.pending_input_timestamp_us is not None
 
     # Calculate sample count from input
     bytes_per_sample = source_format.bit_depth // 8
@@ -407,6 +422,7 @@ def _resample_pcm_standalone(
         )
         raise ValueError(msg)
     sample_count = len(source_pcm) // frame_stride
+    input_duration_us = int(sample_count * 1_000_000 / source_format.sample_rate)
     av_input_pcm = (
         _convert_s24_to_s32(source_pcm)
         if source_format.sample_type == "int"
@@ -423,6 +439,8 @@ def _resample_pcm_standalone(
             needs_s32_to_s24_conversion=resampler_state.needs_s32_to_s24_conversion,
             sample_type=resampler_state.target_sample_type,
         )
+
+    resampler_state.pending_input_timestamp_us += input_duration_us
 
     # Fast path: no conversion needed — return input PCM with timestamp tracking
     if resampler_state.is_passthrough:

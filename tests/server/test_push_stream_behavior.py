@@ -424,6 +424,60 @@ def test_quantize_float_to_s16_preserves_dither_on_resampler_reset(
     assert captured_dither_methods[-1] == "triangular_hp"
 
 
+def test_resampler_drift_detection_uses_input_timeline() -> None:
+    """Drift detection must compare against an input-timeline reference.
+
+    Long-FIR resamplers (e.g. soxr precision=30) emit fewer samples than the
+    rate-conversion ratio until warmed up, so the output-side pending_timestamp_us
+    naturally lags input_timestamp_us by tens of ms even during steady-state
+    contiguous streaming. If drift detection compares that output-side cursor to
+    the input timestamp, every call exceeds the 20 ms threshold and rebuilds the
+    graph cold — which was the 5.1.0 regression that discarded ~35% of audio for
+    float@48k → flac@44.1k/16 (the MA Sendspin provider's default input path).
+    """
+    source = AudioFormat(sample_rate=48_000, bit_depth=32, channels=2, sample_type="float")
+    target = AudioFormat(sample_rate=44_100, bit_depth=32, channels=2, sample_type="float")
+    key = push_stream_module._ResamplerKey(  # noqa: SLF001
+        channel_id=MAIN_CHANNEL,
+        source_format=source,
+        target_sample_rate=44_100,
+        target_channels=2,
+        target_bit_depth=32,
+        target_sample_type="float",
+    )
+    state = push_stream_module._create_resampler_state(key, source, target)  # noqa: SLF001
+
+    chunk_samples = 4_800
+    chunk_bytes = bytes(chunk_samples * 2 * 4)  # stereo f32
+    input_duration_us = 100_000
+    first_input_ts = 250_000
+    input_ts = first_input_ts
+    num_chunks = 20
+
+    for _ in range(num_chunks):
+        push_stream_module._resample_pcm_standalone(  # noqa: SLF001
+            state, chunk_bytes, source, input_ts
+        )
+        input_ts += input_duration_us
+
+    # The input-side cursor must advance by exactly the cumulative input duration,
+    # independent of how many output samples the resampler has emitted so far.
+    expected_pending_input_us = first_input_ts + num_chunks * input_duration_us
+    assert state.pending_input_timestamp_us == expected_pending_input_us, (
+        "pending_input_timestamp_us must track the input timeline — drift detection "
+        "that uses pending_timestamp_us (which tracks output duration) mis-fires "
+        "on every call for long-FIR resamplers."
+    )
+
+    # The next contiguous call must not be flagged as drift.
+    drift_us = abs(state.pending_input_timestamp_us - input_ts)
+    assert drift_us == 0, (
+        f"Contiguous input stream should produce zero drift; got {drift_us}us. "
+        "This is the invariant that prevents the graph from being rebuilt on "
+        "every commit."
+    )
+
+
 @pytest.mark.asyncio
 async def test_stop_sends_stream_end_and_resets_buffer_tracker(mock_loop: Any) -> None:
     """Stop sends stream/end and resets BufferTracker state."""
