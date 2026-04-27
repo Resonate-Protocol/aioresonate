@@ -13,7 +13,7 @@ if ! command -v uv >/dev/null 2>&1; then
 fi
 
 echo "Installing development dependencies..."
-uv sync --group dev
+uv sync --group dev --all-extras
 
 echo "Installing pre-commit hooks..."
 uv run pre-commit install
