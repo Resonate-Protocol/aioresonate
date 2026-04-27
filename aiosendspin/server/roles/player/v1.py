@@ -361,8 +361,7 @@ class PlayerV1Role(Role):
         if not self.has_connection():
             return
 
-        # End all streams (roles omitted) for best client compatibility.
-        stream_end = StreamEndMessage(payload=StreamEndPayload(roles=None))
+        stream_end = StreamEndMessage(payload=StreamEndPayload(roles=["player"]))
         self.send_message(stream_end)
         self._stream_started = False
         self._pending_stream_start = False

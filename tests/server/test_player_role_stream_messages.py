@@ -27,7 +27,7 @@ def test_player_role_on_stream_clear_uses_role_family() -> None:
 
 
 def test_player_role_on_stream_end_uses_role_family() -> None:
-    """PlayerV1Role.on_stream_end() omits roles (end all streams)."""
+    """PlayerV1Role.on_stream_end() targets the player role family."""
     client = MagicMock()
     client.send_role_message = MagicMock()
 
@@ -38,7 +38,7 @@ def test_player_role_on_stream_end_uses_role_family() -> None:
 
     _role, msg = client.send_role_message.call_args.args
     assert isinstance(msg, StreamEndMessage)
-    assert msg.payload.roles is None
+    assert msg.payload.roles == ["player"]
 
 
 def test_player_role_on_audio_chunk_packs_header_and_tracks_duration() -> None:

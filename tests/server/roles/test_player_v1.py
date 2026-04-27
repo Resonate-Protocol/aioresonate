@@ -557,8 +557,7 @@ def test_player_role_on_stream_end_sends_message() -> None:
     client.send_role_message.assert_called_once()
     _role, msg = client.send_role_message.call_args.args
     assert isinstance(msg, StreamEndMessage)
-    # stream/end omits roles (ends all streams)
-    assert msg.payload.roles is None
+    assert msg.payload.roles == ["player"]
 
 
 def test_player_role_on_stream_end_resets_stream_started() -> None:
