@@ -90,6 +90,26 @@ class DeviceInfo(DataClassORJSONMixin):
     """Device manufacturer name."""
     software_version: str | None = None
     """Software version of the client (not the Sendspin version)."""
+    connections: list[tuple[str, str]] | None = None
+    """Optional list of ``(connection_type, value)`` tuples advertising the
+    device's hardware identity to the Sendspin server.
+
+    Mirrors Home Assistant's open-ended ``device_registry`` connections
+    shape — any string ``connection_type`` is valid; common values include
+    ``"mac"``, ``"bluetooth"``, ``"zigbee"``, ``"upnp"``, ``"cast"``, but
+    bridges may declare arbitrary types for transports the protocol has not
+    seen before. Servers that integrate with Home Assistant should forward
+    this list verbatim into HA's ``DeviceInfo.connections`` so HA's
+    device-registry can dedupe device cards across integrations that know
+    the same hardware (e.g. a Bluetooth bridge and HA's native ``bluetooth``
+    integration both pointing at the same speaker).
+
+    Example values:
+
+    - ``[("bluetooth", "AA:BB:CC:DD:EE:FF")]`` — BT-A2DP bridge.
+    - ``[("mac", "AA:BB:CC:DD:EE:FF")]`` — Wi-Fi bridge.
+    - ``[("zigbee", "00:0d:6f:00:00:00:11:22")]`` — future Zigbee transport.
+    """
 
     class Config(BaseConfig):
         """Config for parsing json messages."""
