@@ -582,3 +582,4 @@ class OpusEncoder:
         self._first_input_timestamp_us = None
         self._chunks_encoded_total = 0
         self._last_input_timestamp_us = None
+        self._lookahead_us = 0
