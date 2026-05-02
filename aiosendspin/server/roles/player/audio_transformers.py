@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+import struct
 from collections.abc import Mapping
 from typing import TYPE_CHECKING
 
@@ -9,6 +11,8 @@ from aiosendspin.server.audio import AudioFormat, _get_av, _validate_pcm_buffer_
 
 if TYPE_CHECKING:
     import av
+
+logger = logging.getLogger(__name__)
 
 
 class PcmPassthrough:
@@ -404,6 +408,8 @@ class OpusEncoder:
         self._chunks_encoded_total: int = 0
         # Track last input timestamp to detect production gaps
         self._last_input_timestamp_us: int | None = None
+        # libopus codec lookahead, populated from the OpusHead pre_skip after open()
+        self._lookahead_us: int = 0
 
     @property
     def frame_duration_us(self) -> int:
@@ -440,6 +446,23 @@ class OpusEncoder:
         if self._encoder.frame_size:
             self._chunk_samples = self._encoder.frame_size
             self._chunk_duration_us = int(self._chunk_samples / self._sample_rate * 1_000_000)
+
+        # Extract libopus's encoder lookahead from the OpusHead pre_skip field
+        # so the stream anchor can be shifted earlier to keep decoded audio aligned
+        # with input PCM. RFC 7845 §5.1 places pre_skip (LE u16, samples @ 48 kHz)
+        # at bytes 10-11 of the OpusHead, which FFmpeg's libopusenc populates from
+        # OPUS_GET_LOOKAHEAD. PyAV does not surface this via ctx.delay or
+        # ctx.initial_padding, but exposes the raw OpusHead via ctx.extradata.
+        extradata = self._encoder.extradata
+        if extradata and len(extradata) >= 12 and extradata[:8] == b"OpusHead":
+            pre_skip_samples = struct.unpack_from("<H", extradata, 10)[0]
+            self._lookahead_us = pre_skip_samples * 1_000_000 // 48_000
+        else:
+            logger.debug(
+                "Opus extradata missing or unrecognized; skipping lookahead "
+                "compensation (extradata=%r)",
+                extradata,
+            )
 
         self._initialized = True
 
@@ -511,8 +534,10 @@ class OpusEncoder:
                     # Exact rational arithmetic for encoder-delay compensation;
                     # see FlacEncoder for full rationale.
                     delay_samples = encoder_delay_chunks * self._chunk_samples
-                    self._stream_start_timestamp_us = self._first_input_timestamp_us + (
-                        delay_samples * 1_000_000 // self._sample_rate
+                    self._stream_start_timestamp_us = (
+                        self._first_input_timestamp_us
+                        + (delay_samples * 1_000_000 // self._sample_rate)
+                        - self._lookahead_us
                     )
                 frames.append(encoded)
                 self._output_frame_count += 1
