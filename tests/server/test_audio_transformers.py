@@ -2,12 +2,18 @@
 
 from __future__ import annotations
 
+import struct
+
 from aiosendspin.server.audio_transformers import (
     AudioTransformer,
     TransformerPool,
 )
 from aiosendspin.server.channels import MAIN_CHANNEL
-from aiosendspin.server.roles.player.audio_transformers import FlacEncoder, PcmPassthrough
+from aiosendspin.server.roles.player.audio_transformers import (
+    FlacEncoder,
+    OpusEncoder,
+    PcmPassthrough,
+)
 
 
 class TestAudioTransformerProtocol:
@@ -651,3 +657,73 @@ class TestFlacEncoder:
                 f"Frame {i}: gap={gap}us, expected {frame_dur}us. "
                 f"Timestamps around gap: {timestamps[max(0, i - 2) : i + 2]}"
             )
+
+
+class TestOpusEncoderLookaheadCompensation:
+    """Tests for OpusEncoder codec-lookahead timestamp compensation."""
+
+    def test_lookahead_matches_pre_skip_from_extradata(self) -> None:
+        """_lookahead_us is parsed from the OpusHead pre_skip field."""
+        encoder = OpusEncoder(sample_rate=48000, bit_depth=16, channels=2)
+        encoder._ensure_initialized()  # noqa: SLF001
+
+        extradata = encoder._encoder.extradata  # noqa: SLF001
+        assert extradata is not None
+        assert extradata[:8] == b"OpusHead"
+        pre_skip_samples = struct.unpack_from("<H", extradata, 10)[0]
+        assert pre_skip_samples > 0, "libopus should report a non-zero lookahead"
+        assert encoder._lookahead_us == pre_skip_samples * 1_000_000 // 48_000  # noqa: SLF001
+
+    def test_stream_anchor_shifted_earlier_by_lookahead(self) -> None:
+        """First emitted packet's anchor timestamp is pulled earlier by _lookahead_us."""
+        encoder = OpusEncoder(sample_rate=48000, bit_depth=16, channels=2)
+        encoder._ensure_initialized()  # noqa: SLF001
+        lookahead_us = encoder._lookahead_us  # noqa: SLF001
+        assert lookahead_us > 0
+
+        # Use a first input timestamp comfortably above the lookahead so the anchor
+        # remains positive regardless of libopus version.
+        first_input_ts = 1_000_000_000
+        chunk_size = encoder._chunk_samples * encoder._frame_stride  # noqa: SLF001
+        frames = encoder.process(bytes(chunk_size), first_input_ts, encoder.frame_duration_us)
+
+        # Anchor is only set once a packet is emitted; assert the precondition
+        # explicitly so a future change in libopus first-packet latency surfaces here.
+        assert frames, "Expected libopus to emit a packet on the first chunk"
+
+        # First packet has encoder_delay_chunks == 0, so the anchor reduces to
+        # first_input_ts - lookahead_us.
+        assert encoder._stream_start_timestamp_us == first_input_ts - lookahead_us  # noqa: SLF001
+        assert encoder.pending_timestamp_us == (
+            first_input_ts - lookahead_us + encoder.frame_duration_us
+        )
+
+    def test_lookahead_reapplied_after_production_gap(self) -> None:
+        """Lookahead shift is re-applied to the new anchor after a production-gap reset."""
+        encoder = OpusEncoder(sample_rate=48000, bit_depth=16, channels=2)
+        encoder._ensure_initialized()  # noqa: SLF001
+        lookahead_us = encoder._lookahead_us  # noqa: SLF001
+
+        chunk_size = encoder._chunk_samples * encoder._frame_stride  # noqa: SLF001
+        frame_dur = encoder.frame_duration_us
+
+        # First burst establishes the initial anchor.
+        first_ts = 1_000_000_000
+        frames = encoder.process(bytes(chunk_size), first_ts, frame_dur)
+        assert frames
+        assert encoder._stream_start_timestamp_us == first_ts - lookahead_us  # noqa: SLF001
+
+        # Second burst more than 1.5 s later triggers the production-gap reset path.
+        second_ts = first_ts + 2_000_000
+        frames = encoder.process(bytes(chunk_size), second_ts, frame_dur)
+        assert frames
+        assert encoder._stream_start_timestamp_us == second_ts - lookahead_us  # noqa: SLF001
+
+    def test_reset_clears_lookahead(self) -> None:
+        """reset() clears _lookahead_us so a re-init cannot reuse a stale value."""
+        encoder = OpusEncoder(sample_rate=48000, bit_depth=16, channels=2)
+        encoder._ensure_initialized()  # noqa: SLF001
+        assert encoder._lookahead_us > 0  # noqa: SLF001
+
+        encoder.reset()
+        assert encoder._lookahead_us == 0  # noqa: SLF001
