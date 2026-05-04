@@ -1139,19 +1139,16 @@ class PushStream:
             if not self._is_generation_active(commit_generation):
                 return
             # Avoid drifting by keeping track of the fraction, must match _advance_channel_timing
-            total_duration_us = 0
-            duration_residue_by_rate: dict[int, int] = {}
+            chunk_durations: list[int] = []
+            residue = 0
             for pcm_bytes, fmt in chunks:
                 bytes_per_sample = fmt.bit_depth // 8
                 frame_stride = bytes_per_sample * fmt.channels
                 sample_count = len(pcm_bytes) // frame_stride
-                numerator = (
-                    duration_residue_by_rate.get(fmt.sample_rate, 0) + sample_count * 1_000_000
-                )
-                chunk_duration_us, duration_residue_by_rate[fmt.sample_rate] = divmod(
-                    numerator, fmt.sample_rate
-                )
-                total_duration_us += chunk_duration_us
+                numerator = residue + sample_count * 1_000_000
+                chunk_duration_us, residue = divmod(numerator, fmt.sample_rate)
+                chunk_durations.append(chunk_duration_us)
+            total_duration_us = sum(chunk_durations)
 
             if historical_start_us is not None and channel_id in historical_start_us:
                 self._channel_timing[channel_id] = historical_start_us[channel_id]
