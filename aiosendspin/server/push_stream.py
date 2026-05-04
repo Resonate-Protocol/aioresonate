@@ -1041,8 +1041,9 @@ class PushStream:
             return min(channel_play_start.values())
         finally:
             self._commit_in_flight -= 1
-            # Resend cached audio only on success to avoid replaying from cache missing chunks
-            if commit_completed and self._pending_join_roles:
+            # Resend cached audio only on success to avoid replaying from cache missing chunks.
+            # In case there are multiple parallel commits, only flush once the last one finishes.
+            if commit_completed and self._commit_in_flight == 0 and self._pending_join_roles:
                 pending = list(self._pending_join_roles)
                 self._pending_join_roles.clear()
                 for role in pending:
