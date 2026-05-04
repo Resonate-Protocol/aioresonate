@@ -2977,3 +2977,196 @@ def test_advance_channel_timing_resets_residue_on_rate_change() -> None:
         f"residue from prior rate bled into new-rate computation: "
         f"got {delta2}µs, expected {1024 * 1_000_000 // 48_000}µs"
     )
+
+
+@pytest.mark.asyncio
+async def test_catchup_drain_advances_encoder_pending_to_live_tip() -> None:
+    """Drained FIR tail must advance encoder.pending_timestamp_us to the live tip.
+
+    Without draining, the resampler's FIR holds samples past the catchup tail and
+    `encoder.pending_timestamp_us` stays behind the live timeline. The next live
+    commit then back-shifts its first chunk via `candidate_base` in
+    `_encode_for_transform_key`, putting the joiner ahead of peers.
+    """
+
+    class Transformer:
+        def __init__(self) -> None:
+            self.pending_timestamp_us: int | None = None
+            self._buffer = bytearray()
+            self._frame_size = 25 * 44_100 * 2 * 2 // 1000  # 25ms @ 44.1kHz stereo s16
+
+        @property
+        def frame_duration_us(self) -> int:
+            return 25_000
+
+        def process(self, pcm: bytes, ts: int, _dur: int) -> list[bytes]:
+            if self.pending_timestamp_us is None:
+                self.pending_timestamp_us = ts
+            self._buffer.extend(pcm)
+            frames: list[bytes] = []
+            while len(self._buffer) >= self._frame_size:
+                frames.append(bytes(self._buffer[: self._frame_size]))
+                del self._buffer[: self._frame_size]
+                if self.pending_timestamp_us is not None:
+                    self.pending_timestamp_us += 25_000
+            return frames
+
+        def flush(self) -> list[bytes]:
+            return []
+
+        def get_header(self) -> bytes | None:
+            return None
+
+        def reset(self) -> None:
+            self._buffer.clear()
+            self.pending_timestamp_us = None
+
+    group = _DummyGroup(clients=[])
+    role1 = _DummyRole(
+        AudioRequirements(
+            sample_rate=48_000,
+            bit_depth=16,
+            channels=2,
+            transformer=Transformer(),
+            channel_id=MAIN_CHANNEL,
+            frame_duration_us=25_000,
+        )
+    )
+    group.clients.append(_DummyClient([role1]))
+
+    loop = asyncio.get_running_loop()
+    clock = ManualClock(now_us_value=0)
+    stream = PushStream(loop=loop, clock=clock, group=group)
+    stream.enable_pcm_cache_for_channel(MAIN_CHANNEL)
+
+    for _ in range(8):
+        stream.prepare_audio(
+            bytes(19_200),  # 100ms @ 48kHz stereo f32
+            AudioFormat(sample_rate=48_000, bit_depth=32, channels=2, sample_type="float"),
+        )
+        await stream.commit_audio()
+        clock.advance_us(100_000)
+
+    joining_transformer = Transformer()
+    role2 = _DummyRole(
+        AudioRequirements(
+            sample_rate=44_100,  # rate change forces a real soxr/swr FIR
+            bit_depth=16,
+            channels=2,
+            transformer=joining_transformer,
+            channel_id=MAIN_CHANNEL,
+            frame_duration_us=25_000,
+        )
+    )
+    group.clients.append(_DummyClient([role2]))
+    stream.on_role_join(role2)
+
+    for _ in range(50):
+        if role2.received:
+            break
+        await asyncio.sleep(0.01)
+
+    assert role2.received, "catchup produced no chunks"
+    catchup_last_end_us = role2.received[-1].timestamp_us + role2.received[-1].duration_us
+    channel_tip_us = stream._channel_timing[MAIN_CHANNEL]  # noqa: SLF001
+    # Without drain the gap is roughly one FIR group delay (a few ms with swr,
+    # ~20 ms with libsoxr at precision=30). With drain it should land within one
+    # encoder frame_dur of the live tip.
+    gap_us = channel_tip_us - catchup_last_end_us
+    assert 0 <= gap_us <= 25_000, (
+        f"catchup tail too far behind live tip after drain: "
+        f"channel_tip={channel_tip_us}, catchup_last_end={catchup_last_end_us}, "
+        f"gap={gap_us}µs"
+    )
+
+
+@pytest.mark.asyncio
+async def test_catchup_mid_pass_format_change_keeps_chunks_ordered() -> None:
+    """Source-format change mid-catchup must flush the prior resampler in place.
+
+    The PCM cache can hold chunks from multiple source formats (e.g. a sample-rate
+    change earlier in the stream). With end-of-pass-only draining, the prior
+    resampler's FIR tail would be appended after the new resampler's chunks,
+    producing out-of-order timestamps. Flushing on key switch keeps output ordered.
+    """
+
+    class Transformer:
+        pending_timestamp_us: int | None = None
+
+        @property
+        def frame_duration_us(self) -> int:
+            return 25_000
+
+        def process(self, pcm: bytes, _ts: int, _dur: int) -> list[bytes]:
+            return [pcm]
+
+        def flush(self) -> list[bytes]:
+            return []
+
+        def get_header(self) -> bytes | None:
+            return None
+
+        def reset(self) -> None:
+            return
+
+    group = _DummyGroup(clients=[])
+    role1 = _DummyRole(
+        AudioRequirements(
+            sample_rate=44_100,
+            bit_depth=16,
+            channels=2,
+            transformer=Transformer(),
+            channel_id=MAIN_CHANNEL,
+            frame_duration_us=25_000,
+        )
+    )
+    group.clients.append(_DummyClient([role1]))
+
+    loop = asyncio.get_running_loop()
+    clock = ManualClock(now_us_value=0)
+    stream = PushStream(loop=loop, clock=clock, group=group)
+    stream.enable_pcm_cache_for_channel(MAIN_CHANNEL)
+
+    # Two batches of 48k float, then 44.1k float, then back to 48k float — the
+    # PCM cache will end up with mixed source formats requiring two distinct
+    # resampler keys during catchup.
+    formats = [
+        (48_000, 4),
+        (44_100, 4),
+        (48_000, 4),
+    ]
+    for sample_rate, count in formats:
+        # 100 ms of stereo float32 at the chosen rate.
+        chunk_bytes = bytes(sample_rate * 2 * 4 // 10)
+        for _ in range(count):
+            stream.prepare_audio(
+                chunk_bytes,
+                AudioFormat(sample_rate=sample_rate, bit_depth=32, channels=2, sample_type="float"),
+            )
+            await stream.commit_audio()
+            clock.advance_us(100_000)
+
+    role2 = _DummyRole(
+        AudioRequirements(
+            sample_rate=44_100,
+            bit_depth=16,
+            channels=2,
+            transformer=Transformer(),
+            channel_id=MAIN_CHANNEL,
+            frame_duration_us=25_000,
+        )
+    )
+    group.clients.append(_DummyClient([role2]))
+    stream.on_role_join(role2)
+
+    for _ in range(50):
+        if role2.received:
+            break
+        await asyncio.sleep(0.01)
+
+    assert role2.received, "catchup produced no chunks"
+    for prev, nxt in zip(role2.received, role2.received[1:], strict=False):
+        assert nxt.timestamp_us >= prev.timestamp_us, (
+            f"timestamps out of order across format change: "
+            f"{prev.timestamp_us} -> {nxt.timestamp_us}"
+        )
