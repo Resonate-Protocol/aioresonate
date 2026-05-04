@@ -2898,3 +2898,62 @@ def test_resampler_pending_input_ts_has_zero_cumulative_drift_at_44100_source() 
         "regression of the input-side residue accumulator. This would eventually "
         "cross the 20ms drift threshold and trigger a spurious graph rebuild."
     )
+
+
+def test_advance_channel_timing_is_drift_free() -> None:
+    """Cumulative `_channel_timing` advance must equal `total_samples * 1e6 // rate`."""
+    group = _DummyGroup(clients=[])
+    stream = PushStream(loop=MagicMock(), clock=ManualClock(), group=group)
+    channel_id = MAIN_CHANNEL
+    stream._channel_timing[channel_id] = 0  # noqa: SLF001
+
+    # 1024 samples @ 44.1k ≈ 23219.95µs; lossy int(...) drops ≈0.95µs/chunk.
+    samples_per_chunk = 1024
+    sample_rate = 44_100
+    n_chunks = 1_000
+    total_added = 0
+    for _ in range(n_chunks):
+        total_added += stream._advance_channel_timing(  # noqa: SLF001
+            channel_id, samples_per_chunk, sample_rate
+        )
+
+    expected = n_chunks * samples_per_chunk * 1_000_000 // sample_rate
+    assert stream._channel_timing[channel_id] == expected  # noqa: SLF001
+    assert total_added == expected
+    lossy = n_chunks * (samples_per_chunk * 1_000_000 // sample_rate)
+    assert expected - lossy >= 1, "test rate must produce observable drift"
+
+
+@pytest.mark.asyncio
+async def test_commit_audio_advances_channel_timing_drift_free(mock_loop: Any) -> None:
+    """End-to-end: residue accumulator must carry truncation across `commit_audio` calls."""
+    group = _DummyGroup(clients=[])
+    _client, _conn = _make_connected_player(mock_loop, group, "p1")
+
+    clock = LoopClock(mock_loop)
+    stream = PushStream(loop=mock_loop, clock=clock, group=group)
+
+    samples_per_chunk = 1024
+    sample_rate = 44_100
+    pcm = bytes(samples_per_chunk * 4)
+    fmt = AudioFormat(sample_rate=sample_rate, bit_depth=16, channels=2)
+
+    n_commits = 100
+    timings: list[int] = []
+    for _ in range(n_commits):
+        stream.prepare_audio(pcm, fmt)
+        await stream.commit_audio()
+        timings.append(stream._channel_timing[MAIN_CHANNEL])  # noqa: SLF001
+
+    # Initial timing depends on wall clock (set by _resolve_channel_play_start);
+    # subtract the post-first-commit baseline to isolate the residue invariant.
+    elapsed = timings[-1] - timings[0]
+    total_after_n = (n_commits * samples_per_chunk * 1_000_000) // sample_rate
+    total_after_1 = (samples_per_chunk * 1_000_000) // sample_rate
+    expected = total_after_n - total_after_1
+    assert elapsed == expected, (
+        f"channel timing drifted: got {elapsed}µs, expected {expected}µs over "
+        f"{n_commits - 1} subsequent commits"
+    )
+    lossy = (n_commits - 1) * total_after_1
+    assert expected - lossy >= 1
