@@ -1998,6 +1998,7 @@ class PushStream:
             resamplers = {}
         if quantizers is None:
             quantizers = {}
+        prev_resampler_key: _ResamplerKey | None = None
 
         for chunk in pcm_chunks:
             source_format = AudioFormat(
@@ -2020,6 +2021,16 @@ class PushStream:
                 target_bit_depth=target_format.bit_depth,
                 target_sample_type=target_format.sample_type,
             )
+            # Format changed: flush prior resampler now to keep output timestamp-ordered.
+            if prev_resampler_key is not None and prev_resampler_key != current_resampler_key:
+                prev_state = resamplers.pop(prev_resampler_key, None)
+                if prev_state is not None:
+                    cached.extend(
+                        self._flush_resampler_to_chunks(
+                            prev_state, quantizers, encoder, req, channel_id
+                        )
+                    )
+
             resampler_state = resamplers.get(current_resampler_key)
             if resampler_state is None:
                 resampler_state = _create_resampler_state(
@@ -2028,6 +2039,7 @@ class PushStream:
                     target_format,
                 )
                 resamplers[current_resampler_key] = resampler_state
+            prev_resampler_key = current_resampler_key
 
             resampled = _resample_pcm_standalone(
                 resampler_state,
@@ -2104,6 +2116,67 @@ class PushStream:
             quantizers=quantizers,
         )
 
+    def _flush_resampler_to_chunks(
+        self,
+        resampler_state: _ResamplerState,
+        quantizers: dict[_ResamplerKey, _ResamplerState],
+        encoder: AudioTransformer | None,
+        req: AudioRequirements,
+        channel_id: UUID,
+    ) -> list[CachedChunk]:
+        """Drain one resampler's FIR tail and run it through quantizer/encoder."""
+        tkey = self._build_transform_key(req, channel_id)
+        drained = _flush_resampler(resampler_state)
+        if drained.sample_count == 0 or not drained.pcm_data:
+            return []
+
+        resampled_pcm = drained.pcm_data
+        needs_s32_to_s24_conversion = drained.needs_s32_to_s24_conversion
+        output_start_ts = drained.output_start_ts
+        sample_count = drained.sample_count
+
+        if drained.sample_type == "float":
+            edge_quantized = _quantize_float_pcm(
+                channel_id=channel_id,
+                pcm_data=resampled_pcm,
+                output_ts=output_start_ts,
+                sample_rate=req.sample_rate,
+                channels=req.channels,
+                target_bit_depth=req.bit_depth,
+                resampler_cache=quantizers,
+            )
+            resampled_pcm = edge_quantized.pcm_data
+            needs_s32_to_s24_conversion = edge_quantized.needs_s32_to_s24_conversion
+            output_start_ts = edge_quantized.output_start_ts
+            sample_count = edge_quantized.sample_count
+            if sample_count == 0 or not resampled_pcm:
+                return []
+
+        if (
+            needs_s32_to_s24_conversion
+            and req.bit_depth == 24
+            and isinstance(encoder, PcmPassthrough)
+        ):
+            resampled_pcm = _convert_s32_to_s24(resampled_pcm)
+        duration_us = int(sample_count * 1_000_000 / req.sample_rate) if sample_count > 0 else 0
+
+        encoded_frames = self._encode_transform_for_key(
+            tkey,
+            encoder,
+            resampled_pcm,
+            output_start_ts,
+            duration_us,
+        )
+        return [
+            CachedChunk(
+                timestamp_us=ts,
+                duration_us=dur,
+                payload=data,
+                byte_count=len(data),
+            )
+            for data, ts, dur in encoded_frames
+        ]
+
     def _drain_catchup_resamplers(
         self,
         resamplers: dict[_ResamplerKey, _ResamplerState],
@@ -2118,59 +2191,13 @@ class PushStream:
         tail, leaving a content gap before the first live chunk. Drain emits
         those held samples on the live timeline so live picks up seamlessly.
         """
-        tkey = self._build_transform_key(req, channel_id)
         cached: list[CachedChunk] = []
         for resampler_state in resamplers.values():
-            drained = _flush_resampler(resampler_state)
-            if drained.sample_count == 0 or not drained.pcm_data:
-                continue
-
-            resampled_pcm = drained.pcm_data
-            needs_s32_to_s24_conversion = drained.needs_s32_to_s24_conversion
-            output_start_ts = drained.output_start_ts
-            sample_count = drained.sample_count
-
-            if drained.sample_type == "float":
-                edge_quantized = _quantize_float_pcm(
-                    channel_id=channel_id,
-                    pcm_data=resampled_pcm,
-                    output_ts=output_start_ts,
-                    sample_rate=req.sample_rate,
-                    channels=req.channels,
-                    target_bit_depth=req.bit_depth,
-                    resampler_cache=quantizers,
+            cached.extend(
+                self._flush_resampler_to_chunks(
+                    resampler_state, quantizers, encoder, req, channel_id
                 )
-                resampled_pcm = edge_quantized.pcm_data
-                needs_s32_to_s24_conversion = edge_quantized.needs_s32_to_s24_conversion
-                output_start_ts = edge_quantized.output_start_ts
-                sample_count = edge_quantized.sample_count
-                if sample_count == 0 or not resampled_pcm:
-                    continue
-
-            if (
-                needs_s32_to_s24_conversion
-                and req.bit_depth == 24
-                and isinstance(encoder, PcmPassthrough)
-            ):
-                resampled_pcm = _convert_s32_to_s24(resampled_pcm)
-            duration_us = int(sample_count * 1_000_000 / req.sample_rate) if sample_count > 0 else 0
-
-            encoded_frames = self._encode_transform_for_key(
-                tkey,
-                encoder,
-                resampled_pcm,
-                output_start_ts,
-                duration_us,
             )
-            for data, ts, dur in encoded_frames:
-                cached.append(
-                    CachedChunk(
-                        timestamp_us=ts,
-                        duration_us=dur,
-                        payload=data,
-                        byte_count=len(data),
-                    )
-                )
         return cached
 
     async def _start_catchup_encoding(  # noqa: PLR0915
