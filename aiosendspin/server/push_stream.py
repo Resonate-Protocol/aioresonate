@@ -2225,7 +2225,7 @@ class PushStream:
                 quantizers=catchup_quantizers,
             )
 
-            if encoded:
+            if encoded and self._catchup_state.get(cache_key) == "catching_up":
                 self._role_chunk_cache[cache_key].extend(encoded)
 
             last_encoded_end_us = (
@@ -2269,7 +2269,7 @@ class PushStream:
                     quantizers=catchup_quantizers,
                 )
 
-                if new_encoded:
+                if new_encoded and self._catchup_state.get(cache_key) == "catching_up":
                     self._role_chunk_cache[cache_key].extend(new_encoded)
                     last_encoded_end_us = new_encoded[-1].timestamp_us + new_encoded[-1].duration_us
 
@@ -2282,7 +2282,7 @@ class PushStream:
                 req,
                 channel_id,
             )
-            if drained:
+            if drained and self._catchup_state.get(cache_key) == "catching_up":
                 self._role_chunk_cache[cache_key].extend(drained)
 
             now_us = self._clock.now_us()
@@ -2293,8 +2293,15 @@ class PushStream:
             self._catchup_state[cache_key] = "live"
         finally:
             if self._catchup_state.get(cache_key) != "live":
+                # Catchup was cancelled (e.g. role left mid-catchup). Clear partial state
+                # so a future re-join doesn't hit a stale cache or stale encoder pending
+                # that would back-shift live chunks via candidate_base.
                 self._catchup_state.pop(cache_key, None)
                 self._catchup_roles.pop(cache_key, None)
+                self._role_chunk_cache.pop(cache_key, None)
+                self._transform_last_input_end_us.pop(cache_key, None)
+                if encoder is not None:
+                    encoder.reset()
             self._catchup_tasks.pop(cache_key, None)
 
     def _cancel_catchup_tasks(self) -> None:
