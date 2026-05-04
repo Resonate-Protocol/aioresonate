@@ -946,6 +946,7 @@ class PushStream:
                         now_us + DEFAULT_INITIAL_DELAY_US + self._max_active_static_delay_us()
                     )
                     self._channel_timing_residue[MAIN_CHANNEL] = 0
+                commit_completed = True
                 return min(self._channel_timing.values())
 
             # Process historical buffers first: assign timestamps and inject into caches.
