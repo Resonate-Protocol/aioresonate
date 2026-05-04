@@ -2957,3 +2957,23 @@ async def test_commit_audio_advances_channel_timing_drift_free(mock_loop: Any) -
     )
     lossy = (n_commits - 1) * total_after_1
     assert expected - lossy >= 1
+
+
+def test_advance_channel_timing_resets_residue_on_rate_change() -> None:
+    """Residue is modulo the previous rate; switching rates must reset it."""
+    group = _DummyGroup(clients=[])
+    stream = PushStream(loop=MagicMock(), clock=ManualClock(), group=group)
+    channel_id = MAIN_CHANNEL
+    stream._channel_timing[channel_id] = 0  # noqa: SLF001
+
+    # 1024 samples @ 44100 leaves a non-zero residue (42100, modulo 44100).
+    delta1 = stream._advance_channel_timing(channel_id, 1024, 44_100)  # noqa: SLF001
+    assert delta1 == 1024 * 1_000_000 // 44_100  # 23219
+
+    # Switching to 48000 must not carry the 44100-modulus residue into the new
+    # divmod, otherwise delta would be 21334 instead of 21333.
+    delta2 = stream._advance_channel_timing(channel_id, 1024, 48_000)  # noqa: SLF001
+    assert delta2 == 1024 * 1_000_000 // 48_000, (
+        f"residue from prior rate bled into new-rate computation: "
+        f"got {delta2}µs, expected {1024 * 1_000_000 // 48_000}µs"
+    )
