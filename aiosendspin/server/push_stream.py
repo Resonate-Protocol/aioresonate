@@ -677,6 +677,9 @@ class PushStream:
         self._transform_last_input_end_us: dict[TransformKey, int] = {}
         # Roles awaiting delayed join; excluded from live delivery until join executes.
         self._pending_join_roles: weakref.WeakSet[Role] = weakref.WeakSet()
+        # >0 while commit_audio() is between the _channel_timing advance and _role_chunk_cache
+        # update, joiners should be delayed during that
+        self._commit_in_flight: int = 0
         # Historical audio buffers: channel_id -> list of (pcm_bytes, audio_format)
         self._historical_buffers: dict[UUID, list[tuple[bytes, AudioFormat]]] = {}
         # Optional start timestamps for historical channels (set on first historical chunk).
@@ -894,7 +897,7 @@ class PushStream:
                 return max(channel_tail_us, target_us)
         return target_us
 
-    async def commit_audio(self, *, play_start_us: int | None = None) -> int:
+    async def commit_audio(self, *, play_start_us: int | None = None) -> int:  # noqa: PLR0915
         """
         Encode and send all prepared audio to players.
 
@@ -923,114 +926,127 @@ class PushStream:
             raise StreamStoppedError("Cannot commit audio on a stopped stream")
         commit_generation = self._stream_generation
 
-        # Drain historical buffers
-        historical = dict(self._historical_buffers)
-        self._historical_buffers.clear()
-        historical_start_us = dict(self._historical_start_us)
-        self._historical_start_us.clear()
+        self._commit_in_flight += 1
+        commit_completed = False
+        try:
+            # Drain historical buffers
+            historical = dict(self._historical_buffers)
+            self._historical_buffers.clear()
+            historical_start_us = dict(self._historical_start_us)
+            self._historical_start_us.clear()
 
-        # If no pending audio (live or historical), return earliest channel timing
-        if not self._channel_buffers and not historical:
-            now_us = self._clock.now_us()
-            if not self._channel_timing:
-                self._channel_timing[MAIN_CHANNEL] = (
-                    now_us + DEFAULT_INITIAL_DELAY_US + self._max_active_static_delay_us()
+            # If no pending audio (live or historical), return earliest channel timing
+            if not self._channel_buffers and not historical:
+                now_us = self._clock.now_us()
+                if not self._channel_timing:
+                    self._channel_timing[MAIN_CHANNEL] = (
+                        now_us + DEFAULT_INITIAL_DELAY_US + self._max_active_static_delay_us()
+                    )
+                    self._channel_timing_residue[MAIN_CHANNEL] = 0
+                return min(self._channel_timing.values())
+
+            # Process historical buffers first: assign timestamps and inject into caches.
+            # This initializes _channel_timing for historical channels so the live chunk
+            # (if any) continues seamlessly after.
+            if historical:
+                await self._process_historical_buffers(
+                    historical,
+                    historical_start_us,
+                    commit_generation=commit_generation,
                 )
-                self._channel_timing_residue[MAIN_CHANNEL] = 0
-            return min(self._channel_timing.values())
+                if not self._is_generation_active(commit_generation):
+                    return self._stopped_commit_return_value()
 
-        # Process historical buffers first: assign timestamps and inject into caches.
-        # This initializes _channel_timing for historical channels so the live chunk
-        # (if any) continues seamlessly after.
-        if historical:
-            await self._process_historical_buffers(
-                historical,
-                historical_start_us,
+            # Drain live channel buffers
+            prepared = dict(self._channel_buffers)
+            self._channel_buffers.clear()
+
+            if not prepared:
+                # Historical-only commit: cache updated by _process_historical_buffers().
+                self._prune_role_chunk_cache()
+                commit_completed = True
+                return min(self._channel_timing.values())
+
+            # Calculate duration for each channel and warn on misalignment
+            durations_us = self._calculate_channel_durations(prepared)
+            self._warn_duration_misalignment(durations_us)
+
+            # Capture play_start_us for each channel
+            channel_play_start = self._resolve_channel_play_start(
+                prepared,
+                play_start_us=play_start_us,
+            )
+
+            # Advance channel timing by overwriting durations_us with drift-free values.
+            for channel_id, (pcm, fmt) in prepared.items():
+                bytes_per_sample = fmt.bit_depth // 8
+                frame_stride = bytes_per_sample * fmt.channels
+                sample_count = len(pcm) // frame_stride
+                durations_us[channel_id] = self._advance_channel_timing(
+                    channel_id, sample_count, fmt.sample_rate
+                )
+                self._channels_with_committed_audio.add(channel_id)
+
+            # Keep non-prepared active channels on the shared timeline.
+            #
+            # This avoids channel drift when an upstream channel (e.g., per-device DSP)
+            # times out and we commit only a subset of channels for one or more cycles.
+            # Those channels skip audio for this commit but should remain clock-aligned
+            # when they resume.
+            reference_duration_us = max(durations_us.values(), default=0)
+            if reference_duration_us > 0:
+                base_start_us = min(channel_play_start.values())
+                for channel_id in self._get_active_audio_channels():
+                    if channel_id in prepared:
+                        continue
+                    if channel_id not in self._channel_timing:
+                        self._channel_timing[channel_id] = base_start_us
+                        self._channel_timing_residue[channel_id] = 0
+                    self._channel_timing[channel_id] += reference_duration_us
+
+            # Cache PCM chunks before encoding (if enabled)
+            for channel_id, (pcm_bytes, fmt) in prepared.items():
+                channel_int = channel_id.int
+                if channel_int not in self._pcm_cache_enabled_channels:
+                    continue
+                pcm_chunk = CachedPCMChunk(
+                    timestamp_us=channel_play_start[channel_id],
+                    duration_us=durations_us[channel_id],
+                    pcm_data=pcm_bytes,
+                    sample_rate=fmt.sample_rate,
+                    bit_depth=fmt.bit_depth,
+                    channels=fmt.channels,
+                    sample_type=fmt.sample_type,
+                )
+                self._pcm_chunk_cache.setdefault(channel_int, deque()).append(pcm_chunk)
+
+            # Role-based audio delivery via hooks
+            role_cache_results = await self._deliver_audio_to_roles(
+                prepared,
+                channel_play_start,
                 commit_generation=commit_generation,
             )
             if not self._is_generation_active(commit_generation):
                 return self._stopped_commit_return_value()
+            # Merge role-based cache results into the cache
+            for cache_key, chunks in role_cache_results.items():
+                self._role_chunk_cache[cache_key].extend(chunks)
 
-        # Drain live channel buffers
-        prepared = dict(self._channel_buffers)
-        self._channel_buffers.clear()
-
-        if not prepared:
-            # Historical-only commit: cache is updated by _process_historical_buffers().
+            # Prune old chunks from cache
             self._prune_role_chunk_cache()
-            return min(self._channel_timing.values())
+            self._prune_stale_channel_timing()
 
-        # Calculate duration for each channel and warn on misalignment
-        durations_us = self._calculate_channel_durations(prepared)
-        self._warn_duration_misalignment(durations_us)
-
-        # Capture play_start_us for each channel
-        channel_play_start = self._resolve_channel_play_start(
-            prepared,
-            play_start_us=play_start_us,
-        )
-
-        # Advance channel timing by overwriting durations_us with drift-free values.
-        for channel_id, (pcm, fmt) in prepared.items():
-            bytes_per_sample = fmt.bit_depth // 8
-            frame_stride = bytes_per_sample * fmt.channels
-            sample_count = len(pcm) // frame_stride
-            durations_us[channel_id] = self._advance_channel_timing(
-                channel_id, sample_count, fmt.sample_rate
-            )
-            self._channels_with_committed_audio.add(channel_id)
-
-        # Keep non-prepared active channels on the shared timeline.
-        #
-        # This avoids channel drift when an upstream channel (e.g., per-device DSP)
-        # times out and we commit only a subset of channels for one or more cycles.
-        # Those channels skip audio for this commit but should remain clock-aligned
-        # when they resume.
-        reference_duration_us = max(durations_us.values(), default=0)
-        if reference_duration_us > 0:
-            base_start_us = min(channel_play_start.values())
-            for channel_id in self._get_active_audio_channels():
-                if channel_id in prepared:
-                    continue
-                if channel_id not in self._channel_timing:
-                    self._channel_timing[channel_id] = base_start_us
-                    self._channel_timing_residue[channel_id] = 0
-                self._channel_timing[channel_id] += reference_duration_us
-
-        # Cache PCM chunks before encoding (if enabled)
-        for channel_id, (pcm_bytes, fmt) in prepared.items():
-            channel_int = channel_id.int
-            if channel_int not in self._pcm_cache_enabled_channels:
-                continue
-            pcm_chunk = CachedPCMChunk(
-                timestamp_us=channel_play_start[channel_id],
-                duration_us=durations_us[channel_id],
-                pcm_data=pcm_bytes,
-                sample_rate=fmt.sample_rate,
-                bit_depth=fmt.bit_depth,
-                channels=fmt.channels,
-                sample_type=fmt.sample_type,
-            )
-            self._pcm_chunk_cache.setdefault(channel_int, deque()).append(pcm_chunk)
-
-        # Role-based audio delivery via hooks
-        role_cache_results = await self._deliver_audio_to_roles(
-            prepared,
-            channel_play_start,
-            commit_generation=commit_generation,
-        )
-        if not self._is_generation_active(commit_generation):
-            return self._stopped_commit_return_value()
-        # Merge role-based cache results into the cache
-        for cache_key, chunks in role_cache_results.items():
-            self._role_chunk_cache[cache_key].extend(chunks)
-
-        # Prune old chunks from cache
-        self._prune_role_chunk_cache()
-        self._prune_stale_channel_timing()
-
-        # Return earliest play_start_us
-        return min(channel_play_start.values())
+            # Return earliest play_start_us
+            commit_completed = True
+            return min(channel_play_start.values())
+        finally:
+            self._commit_in_flight -= 1
+            # Resend cached audio only on success to avoid replaying from cache missing chunks
+            if commit_completed and self._pending_join_roles:
+                pending = list(self._pending_join_roles)
+                self._pending_join_roles.clear()
+                for role in pending:
+                    self._do_role_join(role)
 
     def _resolve_channel_play_start(
         self,
@@ -1744,6 +1760,10 @@ class PushStream:
         """
         # Join immediately so replay anchors to the current shared timeline.
         # Deferring by wall-clock time can desynchronize grouped players.
+        if self._commit_in_flight > 0:
+            # _role_chunk_cache not yet updated for the in-flight chunk, run once commit is done.
+            self._pending_join_roles.add(role)
+            return
         self._do_role_join(role)
 
     def _do_role_join(self, role: Role) -> None:
