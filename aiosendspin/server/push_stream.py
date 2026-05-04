@@ -652,6 +652,9 @@ class PushStream:
         self._channel_buffers: dict[UUID, tuple[bytes, AudioFormat]] = {}
         # Per-channel timing: channel_id -> next_chunk_start_us
         self._channel_timing: dict[UUID, int] = {}
+        # Unconsumed numerator per channel for drift-free _channel_timing advancement.
+        # Reset to 0 whenever _channel_timing[channel_id] is rebased to a new absolute value.
+        self._channel_timing_residue: dict[UUID, int] = {}
         # Channels that have committed real audio (live or historical), not just synthetic timing.
         self._channels_with_committed_audio: set[UUID] = set()
         # Role-based streaming tracking (for hook-based flow)
@@ -933,6 +936,7 @@ class PushStream:
                 self._channel_timing[MAIN_CHANNEL] = (
                     now_us + DEFAULT_INITIAL_DELAY_US + self._max_active_static_delay_us()
                 )
+                self._channel_timing_residue[MAIN_CHANNEL] = 0
             return min(self._channel_timing.values())
 
         # Process historical buffers first: assign timestamps and inject into caches.
@@ -966,9 +970,14 @@ class PushStream:
             play_start_us=play_start_us,
         )
 
-        # Advance each channel's timing by its duration
-        for channel_id, duration_us in durations_us.items():
-            self._channel_timing[channel_id] += duration_us
+        # Advance channel timing by overwriting durations_us with drift-free values.
+        for channel_id, (pcm, fmt) in prepared.items():
+            bytes_per_sample = fmt.bit_depth // 8
+            frame_stride = bytes_per_sample * fmt.channels
+            sample_count = len(pcm) // frame_stride
+            durations_us[channel_id] = self._advance_channel_timing(
+                channel_id, sample_count, fmt.sample_rate
+            )
             self._channels_with_committed_audio.add(channel_id)
 
         # Keep non-prepared active channels on the shared timeline.
@@ -985,6 +994,7 @@ class PushStream:
                     continue
                 if channel_id not in self._channel_timing:
                     self._channel_timing[channel_id] = base_start_us
+                    self._channel_timing_residue[channel_id] = 0
                 self._channel_timing[channel_id] += reference_duration_us
 
         # Cache PCM chunks before encoding (if enabled)
@@ -1037,6 +1047,7 @@ class PushStream:
                 channel_play_start[channel_id] = play_start_us
                 if channel_id not in self._channel_timing:
                     self._channel_timing[channel_id] = play_start_us
+                    self._channel_timing_residue[channel_id] = 0
             return channel_play_start
 
         # Auto-calculate mode (existing behavior).
@@ -1058,8 +1069,10 @@ class PushStream:
                     # instead of restarting from now+delay behind active channels.
                     shared_timing_us = min(shared_candidates)
                     self._channel_timing[channel_id] = max(shared_timing_us, target_min_us)
+                    self._channel_timing_residue[channel_id] = 0
                 else:
                     self._channel_timing[channel_id] = target_min_us
+                    self._channel_timing_residue[channel_id] = 0
 
         # If audio production stalls (e.g., the upstream source blocks), the scheduled
         # play timeline can drift into the past. Rebase the timeline so new audio is
@@ -1108,15 +1121,24 @@ class PushStream:
         for channel_id, chunks in historical.items():
             if not self._is_generation_active(commit_generation):
                 return
+            # Avoid drifting by keeping track of the fraction, must match _advance_channel_timing
             total_duration_us = 0
+            duration_residue_by_rate: dict[int, int] = {}
             for pcm_bytes, fmt in chunks:
                 bytes_per_sample = fmt.bit_depth // 8
                 frame_stride = bytes_per_sample * fmt.channels
                 sample_count = len(pcm_bytes) // frame_stride
-                total_duration_us += int(sample_count * 1_000_000 / fmt.sample_rate)
+                numerator = (
+                    duration_residue_by_rate.get(fmt.sample_rate, 0) + sample_count * 1_000_000
+                )
+                chunk_duration_us, duration_residue_by_rate[fmt.sample_rate] = divmod(
+                    numerator, fmt.sample_rate
+                )
+                total_duration_us += chunk_duration_us
 
             if historical_start_us is not None and channel_id in historical_start_us:
                 self._channel_timing[channel_id] = historical_start_us[channel_id]
+                self._channel_timing_residue[channel_id] = 0
             elif channel_id in self._channel_timing:
                 if channel_id not in self._channels_with_committed_audio:
                     # Synthetic timing (from alignment of missing channels) should not block
@@ -1125,6 +1147,7 @@ class PushStream:
                     self._channel_timing[channel_id] = max(
                         0, self._channel_timing[channel_id] - total_duration_us
                     )
+                    self._channel_timing_residue[channel_id] = 0
             elif self._channel_timing:
                 # Align injected history so it ends at the current shared timeline.
                 # This avoids leaving newly injected channels permanently behind live.
@@ -1141,19 +1164,22 @@ class PushStream:
                     anchor_candidates = list(self._channel_timing.values())
                 anchor_timing_us = min(anchor_candidates)
                 self._channel_timing[channel_id] = max(0, anchor_timing_us - total_duration_us)
+                self._channel_timing_residue[channel_id] = 0
             else:
                 self._channel_timing[channel_id] = (
                     now_us + DEFAULT_INITIAL_DELAY_US + self._max_active_static_delay_us()
                 )
+                self._channel_timing_residue[channel_id] = 0
 
             for pcm_bytes, fmt in chunks:
                 chunk_start_us = self._channel_timing[channel_id]
 
-                # Calculate duration
                 bytes_per_sample = fmt.bit_depth // 8
                 frame_stride = bytes_per_sample * fmt.channels
                 sample_count = len(pcm_bytes) // frame_stride
-                duration_us = int(sample_count * 1_000_000 / fmt.sample_rate)
+                duration_us = self._advance_channel_timing(
+                    channel_id, sample_count, fmt.sample_rate
+                )
 
                 # Cache PCM (if enabled)
                 channel_int = channel_id.int
@@ -1168,9 +1194,6 @@ class PushStream:
                         sample_type=fmt.sample_type,
                     )
                     self._pcm_chunk_cache.setdefault(channel_int, deque()).append(pcm_chunk)
-
-                # Advance timing even if we skip delivery for stale chunks.
-                self._channel_timing[channel_id] += duration_us
 
                 # For late-join injection, historical chunks may already be too old by the
                 # time they're processed. Keep timeline/cache continuity, but don't deliver
@@ -1193,6 +1216,14 @@ class PushStream:
                 # Yield so historical injection doesn't starve the event loop.
                 await asyncio.sleep(0)
             self._channels_with_committed_audio.add(channel_id)
+
+    def _advance_channel_timing(self, channel_id: UUID, sample_count: int, sample_rate: int) -> int:
+        """Advance _channel_timing drift-free via residue accumulator. Return µs added."""
+        assert channel_id in self._channel_timing, f"channel {channel_id} not initialised"
+        numerator = self._channel_timing_residue.get(channel_id, 0) + sample_count * 1_000_000
+        delta_us, self._channel_timing_residue[channel_id] = divmod(numerator, sample_rate)
+        self._channel_timing[channel_id] += delta_us
+        return delta_us
 
     def _calculate_channel_durations(
         self,
@@ -1597,6 +1628,7 @@ class PushStream:
                 # sleep_to_limit_buffer from throttling the commit loop.
                 continue
             del self._channel_timing[ch]
+            self._channel_timing_residue.pop(ch, None)
             self._channels_with_committed_audio.discard(ch)
 
     def _ensure_role_started(self, role: Role) -> None:
@@ -1847,6 +1879,7 @@ class PushStream:
         self._channel_timing[channel_id] = max(
             self._channel_timing[channel_id], reference_timing_us
         )
+        self._channel_timing_residue[channel_id] = 0
 
     def _rebase_far_ahead_join_tail(self, channel_id: UUID, joining_role: Role) -> None:
         """Clamp far-ahead solo-channel timing so a rejoin can resume promptly."""
@@ -1863,6 +1896,7 @@ class PushStream:
         self._channel_timing[channel_id] = min(
             self._channel_timing[channel_id], max_resume_start_us
         )
+        self._channel_timing_residue[channel_id] = 0
 
     def _encode_pcm_sequence(
         self,
@@ -2162,6 +2196,7 @@ class PushStream:
 
         # Reset per-channel timing
         self._channel_timing.clear()
+        self._channel_timing_residue.clear()
         self._channels_with_committed_audio.clear()
 
         # Clear chunk cache
