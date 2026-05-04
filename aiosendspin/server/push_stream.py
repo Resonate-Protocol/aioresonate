@@ -655,6 +655,9 @@ class PushStream:
         # Unconsumed numerator per channel for drift-free _channel_timing advancement.
         # Reset to 0 whenever _channel_timing[channel_id] is rebased to a new absolute value.
         self._channel_timing_residue: dict[UUID, int] = {}
+        # Sample rate of the last _advance_channel_timing call per channel. Residue is
+        # modulo this rate, so changes invalidate it and force a residue reset.
+        self._channel_timing_rate: dict[UUID, int] = {}
         # Channels that have committed real audio (live or historical), not just synthetic timing.
         self._channels_with_committed_audio: set[UUID] = set()
         # Role-based streaming tracking (for hook-based flow)
@@ -1113,7 +1116,7 @@ class PushStream:
             channel_play_start[channel_id] = self._channel_timing[channel_id]
         return channel_play_start
 
-    async def _process_historical_buffers(
+    async def _process_historical_buffers(  # noqa: PLR0915
         self,
         historical: dict[UUID, list[tuple[bytes, AudioFormat]]],
         historical_start_us: dict[UUID, int] | None = None,
@@ -1141,10 +1144,14 @@ class PushStream:
             # Avoid drifting by keeping track of the fraction, must match _advance_channel_timing
             chunk_durations: list[int] = []
             residue = 0
+            last_rate: int | None = None
             for pcm_bytes, fmt in chunks:
                 bytes_per_sample = fmt.bit_depth // 8
                 frame_stride = bytes_per_sample * fmt.channels
                 sample_count = len(pcm_bytes) // frame_stride
+                if last_rate != fmt.sample_rate:
+                    residue = 0
+                    last_rate = fmt.sample_rate
                 numerator = residue + sample_count * 1_000_000
                 chunk_duration_us, residue = divmod(numerator, fmt.sample_rate)
                 chunk_durations.append(chunk_duration_us)
@@ -1234,6 +1241,10 @@ class PushStream:
     def _advance_channel_timing(self, channel_id: UUID, sample_count: int, sample_rate: int) -> int:
         """Advance _channel_timing drift-free via residue accumulator. Return µs added."""
         assert channel_id in self._channel_timing, f"channel {channel_id} not initialised"
+        if self._channel_timing_rate.get(channel_id) != sample_rate:
+            # Residue is modulo the previous rate; reset on rate change to keep units consistent.
+            self._channel_timing_residue[channel_id] = 0
+            self._channel_timing_rate[channel_id] = sample_rate
         numerator = self._channel_timing_residue.get(channel_id, 0) + sample_count * 1_000_000
         delta_us, self._channel_timing_residue[channel_id] = divmod(numerator, sample_rate)
         self._channel_timing[channel_id] += delta_us
@@ -1643,6 +1654,7 @@ class PushStream:
                 continue
             del self._channel_timing[ch]
             self._channel_timing_residue.pop(ch, None)
+            self._channel_timing_rate.pop(ch, None)
             self._channels_with_committed_audio.discard(ch)
 
     def _ensure_role_started(self, role: Role) -> None:
@@ -2215,6 +2227,7 @@ class PushStream:
         # Reset per-channel timing
         self._channel_timing.clear()
         self._channel_timing_residue.clear()
+        self._channel_timing_rate.clear()
         self._channels_with_committed_audio.clear()
 
         # Clear chunk cache
