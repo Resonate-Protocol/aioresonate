@@ -930,7 +930,6 @@ class PushStream:
         commit_generation = self._stream_generation
 
         self._commit_in_flight += 1
-        commit_completed = False
         try:
             # Drain historical buffers
             historical = dict(self._historical_buffers)
@@ -946,7 +945,6 @@ class PushStream:
                         now_us + DEFAULT_INITIAL_DELAY_US + self._max_active_static_delay_us()
                     )
                     self._channel_timing_residue[MAIN_CHANNEL] = 0
-                commit_completed = True
                 return min(self._channel_timing.values())
 
             # Process historical buffers first: assign timestamps and inject into caches.
@@ -968,7 +966,6 @@ class PushStream:
             if not prepared:
                 # Historical-only commit: cache updated by _process_historical_buffers().
                 self._prune_role_chunk_cache()
-                commit_completed = True
                 return min(self._channel_timing.values())
 
             # Calculate duration for each channel and warn on misalignment
@@ -1041,13 +1038,12 @@ class PushStream:
             self._prune_stale_channel_timing()
 
             # Return earliest play_start_us
-            commit_completed = True
             return min(channel_play_start.values())
         finally:
             self._commit_in_flight -= 1
-            # Resend cached audio only on success to avoid replaying from cache missing chunks.
-            # In case there are multiple parallel commits, only flush once the last one finishes.
-            if commit_completed and self._commit_in_flight == 0 and self._pending_join_roles:
+            # Flush deferred joins with last commit (in case there ever were multiple
+            # simultaneous commit calls).
+            if self._commit_in_flight == 0 and self._pending_join_roles:
                 pending = list(self._pending_join_roles)
                 self._pending_join_roles.clear()
                 for role in pending:
