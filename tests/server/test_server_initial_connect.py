@@ -11,7 +11,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from aiohttp import ClientConnectionError, ClientWebSocketResponse
 
-from aiosendspin.models.types import GoodbyeReason
+from aiosendspin.models.types import ConnectionReason, GoodbyeReason
 from aiosendspin.server.connection import SendspinConnection
 from aiosendspin.server.server import SendspinServer
 
@@ -69,6 +69,23 @@ class _PersistentSuccessfulSession:
 
     def ws_connect(self, *_args: object, **_kwargs: object) -> _SuccessfulConnectContext:
         self.calls += 1
+        return _SuccessfulConnectContext()
+
+    async def close(self) -> None:
+        self.closed = True
+
+
+class _FailOnceThenConnectSession:
+    """Client session whose first connection fails and second succeeds."""
+
+    def __init__(self) -> None:
+        self.closed = True
+        self.calls = 0
+
+    def ws_connect(self, *_args: object, **_kwargs: object) -> _SuccessfulConnectContext:
+        self.calls += 1
+        if self.calls == 1:
+            raise ClientConnectionError("offline")
         return _SuccessfulConnectContext()
 
     async def close(self) -> None:
@@ -145,6 +162,101 @@ async def test_connect_to_client_stops_after_initial_failure_without_retry() -> 
 
     assert session.calls == 1
     assert url not in server._connection_tasks  # noqa: SLF001
+
+
+@pytest.mark.asyncio
+async def test_connect_to_client_address_starts_persistent_address_connection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Configured addresses should be passed through unchanged with persistent retries."""
+    server = _make_server(_PersistentSuccessfulSession())
+    calls: list[tuple[str, ConnectionReason, bool, bool]] = []
+
+    def _connect_to_client(
+        url: str,
+        *,
+        connection_reason: ConnectionReason,
+        retry_initial_connection: bool,
+        retry_indefinitely: bool,
+    ) -> None:
+        calls.append(
+            (
+                url,
+                connection_reason,
+                retry_initial_connection,
+                retry_indefinitely,
+            )
+        )
+
+    monkeypatch.setattr(server, "connect_to_client", _connect_to_client)
+
+    configured_url = "ws://192.168.1.50:9999/custom-sendspin"
+    url = server.connect_to_client_address(configured_url)
+
+    assert url == configured_url
+    assert calls == [(url, ConnectionReason.DISCOVERY, True, True)]
+
+
+@pytest.mark.asyncio
+async def test_connect_to_client_and_wait_can_retry_initial_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Opt-in initial retry should wait until an offline client comes online."""
+    session = _FailOnceThenConnectSession()
+    server = _make_server(session)
+    url = "ws://127.0.0.1:9999/sendspin"
+
+    class _FakeConnection:
+        """Connection double used to bypass full websocket lifecycle."""
+
+        closing = False
+        goodbye_reason = None
+        should_retry_server_initiated_connection = False
+
+        def __init__(
+            self,
+            _server: SendspinServer,
+            *,
+            wsock_client: object,  # noqa: ARG002
+            url: str | None = None,  # noqa: ARG002
+        ) -> None:
+            return
+
+        async def _handle_client(self) -> None:
+            return
+
+    monkeypatch.setattr("aiosendspin.server.server.SendspinConnection", _FakeConnection)
+
+    wait_task = asyncio.create_task(
+        server.connect_to_client_and_wait(url, retry_initial_connection=True)
+    )
+    for _ in range(20):
+        if session.calls == 1 and url in server._retry_events:  # noqa: SLF001
+            break
+        await asyncio.sleep(0)
+
+    assert not wait_task.done()
+    server._retry_events[url].set()  # noqa: SLF001
+
+    await wait_task
+
+    assert session.calls == 2
+
+
+@pytest.mark.asyncio
+async def test_connect_to_client_and_wait_raises_when_initial_retry_exhausted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Bounded initial retry should not leave waiters unresolved."""
+    session = _FailingInitialConnectSession()
+    server = _make_server(session)
+    url = "ws://127.0.0.1:9999/sendspin"
+    monkeypatch.setattr("aiosendspin.server.server.MAX_RECONNECT_BACKOFF_S", 1.0)
+
+    with pytest.raises(TimeoutError, match="Initial connection did not succeed"):
+        await server.connect_to_client_and_wait(url, retry_initial_connection=True)
+
+    assert session.calls == 1
 
 
 @pytest.mark.asyncio
@@ -279,6 +391,61 @@ async def test_server_initiated_backoff_resets_only_after_stable_session(
     await server._handle_client_connection(url)  # noqa: SLF001
 
     assert sleep_calls == expected_sleeps
+
+
+@pytest.mark.asyncio
+async def test_retry_indefinitely_keeps_reconnecting_after_backoff_ceiling(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Persistent address connections should cap backoff without giving up."""
+    session = _PersistentSuccessfulSession()
+    server = _make_server(session)
+    url = "ws://127.0.0.1:9999/sendspin"
+    attempts = 0
+    sleep_calls: list[float] = []
+    monotonic_iter = iter([0.0, 0.1, 0.2, 0.3])
+
+    class _FakeConnection:
+        closing = False
+        goodbye_reason = None
+
+        def __init__(
+            self,
+            _server: SendspinServer,
+            *,
+            wsock_client: object,  # noqa: ARG002
+            url: str | None = None,  # noqa: ARG002
+        ) -> None:
+            nonlocal attempts
+            attempts += 1
+            self.should_retry_server_initiated_connection = attempts < 2
+
+        async def _handle_client(self) -> None:
+            return
+
+    async def _fake_sleep(delay: float) -> None:
+        sleep_calls.append(delay)
+
+    def _fake_monotonic() -> float:
+        return next(monotonic_iter)
+
+    monkeypatch.setattr("aiosendspin.server.server.SendspinConnection", _FakeConnection)
+    monkeypatch.setattr("aiosendspin.server.server.MAX_RECONNECT_BACKOFF_S", 1.0)
+    monkeypatch.setattr(
+        "aiosendspin.server.server.time",
+        SimpleNamespace(monotonic=_fake_monotonic),
+    )
+    monkeypatch.setattr("aiosendspin.server.server.asyncio.sleep", _fake_sleep)
+    server._set_connection_options(  # noqa: SLF001
+        url,
+        retry_initial_connection=False,
+        retry_indefinitely=True,
+    )
+
+    await server._handle_client_connection(url)  # noqa: SLF001
+
+    assert session.calls == 2
+    assert sleep_calls == [1.0]
 
 
 def test_should_retry_false_when_closing() -> None:

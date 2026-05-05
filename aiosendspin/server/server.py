@@ -47,6 +47,14 @@ MAX_RECONNECT_BACKOFF_S = 300.0
 STABLE_SERVER_INITIATED_SESSION_S = 10.0
 
 
+@dataclass(frozen=True, slots=True)
+class _ServerInitiatedConnectionOptions:
+    """Retry policy for a server-initiated client URL."""
+
+    retry_initial_connection: bool = False
+    retry_indefinitely: bool = False
+
+
 class SendspinEvent:
     """Base event type used by SendspinServer.add_event_listener()."""
 
@@ -96,6 +104,14 @@ def _get_first_valid_ip(addresses: list[str]) -> str | None:
     return None
 
 
+def _normalize_client_url(address: str) -> str:
+    """Normalize a configured client WebSocket URL."""
+    address = address.strip()
+    if not address:
+        raise ValueError("address must not be empty")
+    return address
+
+
 class SendspinServer:
     """Sendspin Server implementation to connect to and manage many Sendspin clients."""
 
@@ -132,6 +148,7 @@ class SendspinServer:
         self._retry_events: dict[str, asyncio.Event] = {}
         self._initial_connect_waiters: dict[str, list[asyncio.Future[None]]] = {}
         self._initial_connect_succeeded: set[str] = set()
+        self._connection_options: dict[str, _ServerInitiatedConnectionOptions] = {}
         self._connection_reasons: dict[str, ConnectionReason] = {}  # url → reason
         self._client_urls: dict[str, str] = {}  # client_id → url
         self._external_stream_start_cbs: dict[str, ExternalStreamStartCallback] = {}
@@ -317,13 +334,29 @@ class SendspinServer:
         return websocket
 
     def connect_to_client(
-        self, url: str, *, connection_reason: ConnectionReason = ConnectionReason.DISCOVERY
+        self,
+        url: str,
+        *,
+        connection_reason: ConnectionReason = ConnectionReason.DISCOVERY,
+        retry_initial_connection: bool = False,
+        retry_indefinitely: bool = False,
     ) -> None:
         """Start a background connection attempt to a client URL.
 
         Initial connection failures are logged and stop the background task.
         Automatic retries only happen after at least one successful connection.
+
+        Args:
+            url: Client WebSocket URL.
+            connection_reason: Reason reported in server/hello.
+            retry_initial_connection: Keep retrying if the first connection attempt fails.
+            retry_indefinitely: Keep retrying later disconnects with capped exponential backoff.
         """
+        self._set_connection_options(
+            url,
+            retry_initial_connection=retry_initial_connection,
+            retry_indefinitely=retry_indefinitely,
+        )
         self._connection_reasons[url] = connection_reason
         prev_task = self._connection_tasks.get(url)
         if prev_task is not None:
@@ -339,7 +372,12 @@ class SendspinServer:
         )
 
     async def connect_to_client_and_wait(
-        self, url: str, *, connection_reason: ConnectionReason = ConnectionReason.DISCOVERY
+        self,
+        url: str,
+        *,
+        connection_reason: ConnectionReason = ConnectionReason.DISCOVERY,
+        retry_initial_connection: bool = False,
+        retry_indefinitely: bool = False,
     ) -> None:
         """Connect to a client and wait for the initial connection attempt.
 
@@ -349,6 +387,11 @@ class SendspinServer:
             TimeoutError: If the initial connection attempt times out.
             Exception: Other unexpected errors during the initial connection attempt.
         """
+        self._set_connection_options(
+            url,
+            retry_initial_connection=retry_initial_connection,
+            retry_indefinitely=retry_indefinitely,
+        )
         self._connection_reasons[url] = connection_reason
         if url in self._initial_connect_succeeded:
             return
@@ -369,6 +412,78 @@ class SendspinServer:
             )
 
         await waiter
+
+    def connect_to_client_address(
+        self,
+        address: str,
+        *,
+        connection_reason: ConnectionReason = ConnectionReason.DISCOVERY,
+    ) -> str:
+        """Start a persistent connection to a configured client address.
+
+        This is intended for manually configured client WebSocket URLs, where mDNS
+        may not be available. The connection keeps retrying when the client is offline
+        at startup and after later disconnects. The caller must provide the URL,
+        including scheme, port, and path.
+
+        Args:
+            address: Complete client WebSocket URL.
+            connection_reason: Reason reported in server/hello.
+
+        Returns:
+            The WebSocket URL used for the connection.
+        """
+        url = _normalize_client_url(address)
+        self.connect_to_client(
+            url,
+            connection_reason=connection_reason,
+            retry_initial_connection=True,
+            retry_indefinitely=True,
+        )
+        return url
+
+    async def connect_to_client_address_and_wait(
+        self,
+        address: str,
+        *,
+        connection_reason: ConnectionReason = ConnectionReason.DISCOVERY,
+    ) -> str:
+        """Start a persistent address connection and wait until it first succeeds."""
+        url = _normalize_client_url(address)
+        await self.connect_to_client_and_wait(
+            url,
+            connection_reason=connection_reason,
+            retry_initial_connection=True,
+            retry_indefinitely=True,
+        )
+        return url
+
+    def _set_connection_options(
+        self,
+        url: str,
+        *,
+        retry_initial_connection: bool,
+        retry_indefinitely: bool,
+    ) -> None:
+        """Store retry options without downgrading an existing background task."""
+        previous = self._connection_options.get(url)
+        if previous is None:
+            self._connection_options[url] = _ServerInitiatedConnectionOptions(
+                retry_initial_connection=retry_initial_connection,
+                retry_indefinitely=retry_indefinitely,
+            )
+            return
+
+        self._connection_options[url] = _ServerInitiatedConnectionOptions(
+            retry_initial_connection=(
+                previous.retry_initial_connection or retry_initial_connection
+            ),
+            retry_indefinitely=previous.retry_indefinitely or retry_indefinitely,
+        )
+
+    def _get_connection_options(self, url: str) -> _ServerInitiatedConnectionOptions:
+        """Return retry options for a server-initiated client URL."""
+        return self._connection_options.get(url, _ServerInitiatedConnectionOptions())
 
     def get_connection_reason(self, url: str) -> ConnectionReason:
         """Get the connection reason for a URL (for use by SendspinConnection)."""
@@ -433,6 +548,9 @@ class SendspinServer:
 
     def disconnect_from_client(self, url: str) -> None:
         """Disconnect a server-initiated connection previously established via connect_to_client."""
+        self._connection_options.pop(url, None)
+        self._connection_reasons.pop(url, None)
+        self._initial_connect_succeeded.discard(url)
         connection_task = self._connection_tasks.pop(url, None)
         if connection_task is not None:
             connection_task.cancel()
@@ -494,7 +612,7 @@ class SendspinServer:
             else:
                 waiter.set_exception(err)
 
-    async def _handle_client_connection(self, url: str) -> None:  # noqa: PLR0915
+    async def _handle_client_connection(self, url: str) -> None:  # noqa: PLR0912, PLR0915
         """Handle a server-initiated WebSocket connection task."""
         backoff = 1.0
         first_connection_succeeded = False
@@ -537,30 +655,48 @@ class SendspinServer:
                     break
                 except TimeoutError:
                     if not first_connection_succeeded:
-                        logger.debug("Initial connection to %s timed out", url)
-                        self._resolve_initial_connect_waiters(url, TimeoutError())
-                        return
-                    logger.debug("Connection task for %s timed out", url)
+                        if self._get_connection_options(url).retry_initial_connection:
+                            logger.debug("Initial connection to %s timed out, retrying", url)
+                        else:
+                            logger.debug("Initial connection to %s timed out", url)
+                            self._resolve_initial_connect_waiters(url, TimeoutError())
+                            return
+                    else:
+                        logger.debug("Connection task for %s timed out", url)
                 except (ClientConnectionError, ClientResponseError) as err:
                     if not first_connection_succeeded:
-                        logger.debug("Initial connection to %s failed: %s", url, err)
-                        self._resolve_initial_connect_waiters(url, err)
-                        return
-                    logger.debug("Connection task for %s failed: %s", url, err)
+                        if self._get_connection_options(url).retry_initial_connection:
+                            logger.debug("Initial connection to %s failed, retrying: %s", url, err)
+                        else:
+                            logger.debug("Initial connection to %s failed: %s", url, err)
+                            self._resolve_initial_connect_waiters(url, err)
+                            return
+                    else:
+                        logger.debug("Connection task for %s failed: %s", url, err)
 
-                if backoff >= MAX_RECONNECT_BACKOFF_S:
+                options = self._get_connection_options(url)
+                if not options.retry_indefinitely and backoff >= MAX_RECONNECT_BACKOFF_S:
+                    if not first_connection_succeeded:
+                        self._resolve_initial_connect_waiters(
+                            url,
+                            TimeoutError(
+                                "Initial connection did not succeed before "
+                                "the reconnect backoff ceiling was reached"
+                            ),
+                        )
                     break
 
-                logger.debug("Trying to reconnect to client at %s in %.1fs", url, backoff)
+                sleep_s = min(backoff, MAX_RECONNECT_BACKOFF_S)
+                logger.debug("Trying to reconnect to client at %s in %.1fs", url, sleep_s)
                 if retry_event is not None:
                     try:
-                        await asyncio.wait_for(retry_event.wait(), timeout=backoff)
+                        await asyncio.wait_for(retry_event.wait(), timeout=sleep_s)
                         retry_event.clear()
                     except TimeoutError:
                         pass
                 else:
-                    await asyncio.sleep(backoff)
-                backoff *= 2
+                    await asyncio.sleep(sleep_s)
+                backoff = min(backoff * 2, MAX_RECONNECT_BACKOFF_S)
         except asyncio.CancelledError:
             if not first_connection_succeeded:
                 self._resolve_initial_connect_waiters(url, asyncio.CancelledError())
@@ -572,6 +708,7 @@ class SendspinServer:
             self._connection_tasks.pop(url, None)
             self._retry_events.pop(url, None)
             self._initial_connect_succeeded.discard(url)
+            self._connection_options.pop(url, None)
             self._connection_reasons.pop(url, None)
 
     async def start_server(
