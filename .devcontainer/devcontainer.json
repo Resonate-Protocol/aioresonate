@@ -3,12 +3,18 @@
   "build": {
     "dockerfile": "Dockerfile"
   },
+  "remoteUser": "vscode",
+  "updateRemoteUserUID": true,
   "mounts": [
     "source=${localEnv:HOME}/.claude,target=/home/vscode/.claude,type=bind"
   ],
+  "containerEnv": {
+    "UV_LINK_MODE": "copy"
+  },
   "remoteEnv": {
     "CLAUDE_CONFIG_DIR": "/home/vscode/.claude"
   },
+  "onCreateCommand": "sudo mkdir -p /home/vscode/.claude/downloads && sudo chown -R $(id -u):$(id -g) \"${containerWorkspaceFolder}\" /home/vscode/.claude",
   "postCreateCommand": "git config --global --add safe.directory ${containerWorkspaceFolder} && ./scripts/setup.sh && curl -fsSL https://claude.ai/install.sh | bash",
   "customizations": {
     "vscode": {
