@@ -1792,6 +1792,16 @@ class PushStream:
                 self._transform_last_input_end_us.pop(tkey, None)
                 if req.transformer is not None:
                     req.transformer.reset()
+            if not self._other_roles_share_resampler_shape(req, channel_id, role):
+                # Drop orphan resampler so a rejoin sees no stale FIR state.
+                for rkey in list(self._resamplers.keys()):
+                    if (
+                        rkey.channel_id == channel_id
+                        and rkey.target_sample_rate == req.sample_rate
+                        and rkey.target_bit_depth == req.bit_depth
+                        and rkey.target_channels == req.channels
+                    ):
+                        self._resamplers.pop(rkey, None)
         for tkey in list(self._catchup_roles.keys()):
             roles = self._catchup_roles[tkey]
             roles.discard(role)
@@ -1904,6 +1914,14 @@ class PushStream:
                             self._ensure_role_started(role)
                         return
 
+                if self._has_established_resampler_for(req, channel_id):
+                    # Sharing a resampler key with a live role would shift this
+                    # role's audio across the hand-off; skip historical replay.
+                    self._rebase_far_ahead_join_tail(channel_id, role)
+                    if self._channel_timing:
+                        self._ensure_role_started(role)
+                    return
+
                 self._catchup_state[cache_key] = "catching_up"
                 self._catchup_roles[cache_key] = {role}
                 self._catchup_tasks[cache_key] = create_task(
@@ -1961,6 +1979,44 @@ class PushStream:
                 tkey = self._build_transform_key(req, channel_id, role)
                 if tkey == cache_key:
                     return True
+        return False
+
+    def _other_roles_share_resampler_shape(
+        self, req: AudioRequirements, channel_id: UUID, exclude_role: Role
+    ) -> bool:
+        """Check whether another role drives a resampler at the same target PCM shape."""
+        for client in self._group.clients:
+            for role in client.active_roles:
+                if role is exclude_role:
+                    continue
+                if not self._role_in_audio_pipeline(client, role):
+                    continue
+                other_req = role.get_audio_requirements()
+                if other_req is None:
+                    continue
+                other_channel = other_req.channel_id or MAIN_CHANNEL
+                if other_channel != channel_id:
+                    continue
+                if (
+                    other_req.sample_rate == req.sample_rate
+                    and other_req.bit_depth == req.bit_depth
+                    and other_req.channels == req.channels
+                ):
+                    return True
+        return False
+
+    def _has_established_resampler_for(self, req: AudioRequirements, channel_id: UUID) -> bool:
+        """Check whether a live FIR resampler already exists at the same target PCM shape."""
+        for rkey, rstate in self._resamplers.items():
+            if rstate.is_passthrough:
+                continue
+            if (
+                rkey.channel_id == channel_id
+                and rkey.target_sample_rate == req.sample_rate
+                and rkey.target_bit_depth == req.bit_depth
+                and rkey.target_channels == req.channels
+            ):
+                return True
         return False
 
     def _channel_has_other_audio_roles(self, channel_id: UUID, exclude_role: Role) -> bool:
@@ -2252,6 +2308,9 @@ class PushStream:
         # back-shifts the first live chunk via candidate_base.
         catchup_resamplers: dict[_ResamplerKey, _ResamplerState] = {}
         catchup_quantizers: dict[_ResamplerKey, _ResamplerState] = {}
+        # Pre-existing keys belong to other live roles; concurrent stubs for
+        # this role's tkey will appear later and are safe to overwrite.
+        established_resampler_keys = set(self._resamplers.keys())
 
         try:
             if encoder is not None:
@@ -2345,12 +2404,13 @@ class PushStream:
                     self._role_chunk_cache[cache_key].extend(new_encoded)
                     last_encoded_end_us = new_encoded[-1].timestamp_us + new_encoded[-1].duration_us
 
-            # Promote catch-up resampler/quantizer state into the live caches so
-            # the first live commit continues from the FIR-warmed state.
+            # Promote FIR-warmed catch-up state, skipping shared live keys.
             for rkey, rstate in catchup_resamplers.items():
-                self._resamplers[rkey] = rstate
+                if rkey not in established_resampler_keys:
+                    self._resamplers[rkey] = rstate
             for qkey, qstate in catchup_quantizers.items():
-                self._resamplers[qkey] = qstate
+                if qkey not in established_resampler_keys:
+                    self._resamplers[qkey] = qstate
 
             now_us = self._clock.now_us()
             encoded_cache = self._role_chunk_cache.get(cache_key, [])
