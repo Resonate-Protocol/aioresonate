@@ -335,8 +335,8 @@ class SendspinServer:
     ) -> None:
         """Start a background connection attempt to a client URL.
 
-        Initial connection failures are logged and stop the background task.
-        Automatic retries only happen after at least one successful connection.
+        By default, initial connection failures are logged and stop the background task,
+        and automatic retries only happen after at least one successful connection.
         If mDNS discovery is unavailable, callers can build a full client WebSocket URL
         from a configured hostname/IP, port, and path, then pass
         retry_initial_connection=True and retry_indefinitely=True.
@@ -379,7 +379,8 @@ class SendspinServer:
         Raises:
             ClientConnectionError: If the initial connection to the client fails.
             ClientResponseError: If the client responds with an error HTTP status.
-            TimeoutError: If the initial connection attempt times out.
+            TimeoutError: If the initial connection attempt times out, or the backoff
+                ceiling is reached with retry_initial_connection=True.
             Exception: Other unexpected errors during the initial connection attempt.
         """
         self._set_connection_options(
