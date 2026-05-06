@@ -347,7 +347,7 @@ class SendspinServer:
         Automatic retries only happen after at least one successful connection.
 
         Args:
-            url: Client WebSocket URL.
+            url: Client WebSocket URL (e.g. "ws://192.168.1.2:8928/sendspin").
             connection_reason: Reason reported in server/hello.
             retry_initial_connection: Keep retrying if the first connection attempt fails.
             retry_indefinitely: Keep retrying later disconnects with capped exponential backoff.
