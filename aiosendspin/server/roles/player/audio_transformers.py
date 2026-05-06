@@ -65,7 +65,12 @@ class PcmPassthrough:
 
     @property
     def frame_duration_us(self) -> int:
-        """Duration of each output frame in microseconds."""
+        """Static frame duration used for `TransformKey` identity.
+
+        Per-frame wire duration is emitted by `process` / `flush` and may
+        vary by ±1µs at rates where `chunk_samples * 1_000_000` does not
+        divide cleanly into `sample_rate` (e.g. 44.1kHz/25ms).
+        """
         return self._chunk_duration_us
 
     @property
@@ -198,7 +203,12 @@ class FlacEncoder:
 
     @property
     def frame_duration_us(self) -> int:
-        """Duration of each output frame in microseconds."""
+        """Static frame duration used for `TransformKey` identity.
+
+        Per-frame wire duration is emitted by `process` / `flush` and may
+        vary by ±1µs at rates where `chunk_samples * 1_000_000` does not
+        divide cleanly into `sample_rate` (e.g. 44.1kHz/25ms).
+        """
         return self._chunk_duration_us
 
     @property
@@ -429,7 +439,12 @@ class OpusEncoder:
 
     @property
     def frame_duration_us(self) -> int:
-        """Duration of each output frame in microseconds."""
+        """Static frame duration used for `TransformKey` identity.
+
+        Per-frame wire duration is emitted by `process` / `flush` and may
+        vary by ±1µs at rates where `chunk_samples * 1_000_000` does not
+        divide cleanly into `sample_rate` (e.g. 44.1kHz/25ms).
+        """
         return self._chunk_duration_us
 
     @property

@@ -23,7 +23,11 @@ class AudioTransformer(Protocol):
 
     @property
     def frame_duration_us(self) -> int:
-        """Duration of each output frame in microseconds."""
+        """Static frame duration used for `TransformKey` identity.
+
+        Per-frame wire duration is emitted by `process` / `flush` and may
+        vary by ±1µs at non-divisible rates.
+        """
         ...
 
     def process(self, pcm: bytes, timestamp_us: int, duration_us: int) -> list[tuple[bytes, int]]:
