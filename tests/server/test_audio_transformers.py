@@ -527,10 +527,10 @@ class TestTransformerPool:
             def frame_duration_us(self) -> int:
                 return 25_000
 
-            def process(self, pcm: bytes, _ts: int, _dur: int) -> list[bytes]:
-                return [pcm]
+            def process(self, pcm: bytes, _ts: int, _dur: int) -> list[tuple[bytes, int]]:
+                return [(pcm, 25_000)]
 
-            def flush(self) -> list[bytes]:
+            def flush(self) -> list[tuple[bytes, int]]:
                 return []
 
             def get_header(self) -> bytes | None:
@@ -569,7 +569,7 @@ class TestFlacEncoder:
         # 25ms of silence at 48kHz stereo 16-bit = 1200 samples * 4 bytes = 4800 bytes
         # Send multiple chunks to ensure encoder produces output (FLAC buffers initial frames)
         pcm = bytes(4800)
-        total_output: list[bytes] = []
+        total_output: list[tuple[bytes, int]] = []
         for i in range(4):
             result = encoder.process(pcm, timestamp_us=i * 25_000, duration_us=25_000)
             total_output.extend(result)
@@ -580,7 +580,7 @@ class TestFlacEncoder:
         encoder = FlacEncoder(sample_rate=48000, bit_depth=32, channels=2)
         # 25ms at 48kHz stereo 32-bit: 1200 samples * 8 bytes = 9600 bytes.
         pcm = bytes(9600)
-        total_output: list[bytes] = []
+        total_output: list[tuple[bytes, int]] = []
         for i in range(4):
             result = encoder.process(pcm, timestamp_us=i * 25_000, duration_us=25_000)
             total_output.extend(result)
@@ -620,7 +620,7 @@ class TestFlacEncoder:
         # FLAC codec buffers ~4 frames before emitting output
         # Feed enough frames to guarantee output
         pcm = bytes(4800)  # 25ms per chunk
-        all_results: list[bytes] = []
+        all_results: list[tuple[bytes, int]] = []
         for i in range(8):  # 200ms total
             result = encoder.process(pcm, timestamp_us=i * 25_000, duration_us=25_000)
             assert isinstance(result, list)
