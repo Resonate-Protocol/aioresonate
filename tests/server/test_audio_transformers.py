@@ -254,6 +254,37 @@ class TestPcmPassthroughTimestampDrift:
         assert len(result) == 1
         # Pending advances by `1102 * 1_000_000 // 44100` = 24988 µs (NOT 25000)
         assert transformer.pending_timestamp_us == 24988
+        # Wire duration on returned tuple matches advance — no scalar 25_000.
+        assert result[0][1] == 24988
+
+    def test_passthrough_44100_returned_dur_alternates(self) -> None:
+        """Per-frame returned `frame_duration_us` alternates 24988/24989 at 44.1k.
+
+        Guards against regression where pending advances correctly via residue
+        but the emitted tuple reports a stale scalar `chunk_duration_us`.
+        """
+        transformer = PcmPassthrough(sample_rate=44100, bit_depth=16, channels=2)
+        chunk_samples = 1102
+        frame_size = chunk_samples * 4  # stereo s16
+        n = 1000
+        durs: list[int] = []
+        ts_residue = 0
+        ts = 0
+        while len(durs) < n:
+            for _, dur in transformer.process(
+                bytes(frame_size), timestamp_us=ts, duration_us=25_000
+            ):
+                durs.append(dur)
+            ts_residue += chunk_samples * 1_000_000
+            delta, ts_residue = divmod(ts_residue, 44100)
+            ts += delta
+        # Every per-frame duration is exactly one of the two valid divmod outputs.
+        assert set(durs) <= {24988, 24989}, (
+            f"unexpected per-frame durs: {set(durs) - {24988, 24989}}"
+        )
+        # Cumulative duration matches sample-derived elapsed time exactly.
+        expected = n * chunk_samples * 1_000_000 // 44100
+        assert sum(durs) == expected, f"sum(durs)={sum(durs)} expected={expected}"
 
     def test_passthrough_44100_no_drift_after_one_thousand_frames(self) -> None:
         """After 1000 frames at 44.1k, pending matches sample-derived elapsed time exactly."""
