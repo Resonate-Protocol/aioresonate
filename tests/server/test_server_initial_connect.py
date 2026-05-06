@@ -11,7 +11,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from aiohttp import ClientConnectionError, ClientWebSocketResponse
 
-from aiosendspin.models.types import ConnectionReason, GoodbyeReason
+from aiosendspin.models.types import GoodbyeReason
 from aiosendspin.server.connection import SendspinConnection
 from aiosendspin.server.server import SendspinServer
 
@@ -162,39 +162,6 @@ async def test_connect_to_client_stops_after_initial_failure_without_retry() -> 
 
     assert session.calls == 1
     assert url not in server._connection_tasks  # noqa: SLF001
-
-
-@pytest.mark.asyncio
-async def test_connect_to_client_address_starts_persistent_address_connection(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Configured addresses should be passed through unchanged with persistent retries."""
-    server = _make_server(_PersistentSuccessfulSession())
-    calls: list[tuple[str, ConnectionReason, bool, bool]] = []
-
-    def _connect_to_client(
-        url: str,
-        *,
-        connection_reason: ConnectionReason,
-        retry_initial_connection: bool,
-        retry_indefinitely: bool,
-    ) -> None:
-        calls.append(
-            (
-                url,
-                connection_reason,
-                retry_initial_connection,
-                retry_indefinitely,
-            )
-        )
-
-    monkeypatch.setattr(server, "connect_to_client", _connect_to_client)
-
-    configured_url = "ws://192.168.1.50:9999/custom-sendspin"
-    url = server.connect_to_client_address(configured_url)
-
-    assert url == configured_url
-    assert calls == [(url, ConnectionReason.DISCOVERY, True, True)]
 
 
 @pytest.mark.asyncio

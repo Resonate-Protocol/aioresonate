@@ -104,14 +104,6 @@ def _get_first_valid_ip(addresses: list[str]) -> str | None:
     return None
 
 
-def _normalize_client_url(address: str) -> str:
-    """Normalize a configured client WebSocket URL."""
-    address = address.strip()
-    if not address:
-        raise ValueError("address must not be empty")
-    return address
-
-
 class SendspinServer:
     """Sendspin Server implementation to connect to and manage many Sendspin clients."""
 
@@ -345,6 +337,9 @@ class SendspinServer:
 
         Initial connection failures are logged and stop the background task.
         Automatic retries only happen after at least one successful connection.
+        If mDNS discovery is unavailable, callers can build a full client WebSocket URL
+        from a configured hostname/IP, port, and path, then pass
+        retry_initial_connection=True and retry_indefinitely=True.
 
         Args:
             url: Client WebSocket URL (e.g. "ws://192.168.1.2:8928/sendspin").
@@ -412,51 +407,6 @@ class SendspinServer:
             )
 
         await waiter
-
-    def connect_to_client_address(
-        self,
-        address: str,
-        *,
-        connection_reason: ConnectionReason = ConnectionReason.DISCOVERY,
-    ) -> str:
-        """Start a persistent connection to a configured client address.
-
-        This is intended for manually configured client WebSocket URLs, where mDNS
-        may not be available. The connection keeps retrying when the client is offline
-        at startup and after later disconnects. The caller must provide the URL,
-        including scheme, port, and path.
-
-        Args:
-            address: Complete client WebSocket URL.
-            connection_reason: Reason reported in server/hello.
-
-        Returns:
-            The WebSocket URL used for the connection.
-        """
-        url = _normalize_client_url(address)
-        self.connect_to_client(
-            url,
-            connection_reason=connection_reason,
-            retry_initial_connection=True,
-            retry_indefinitely=True,
-        )
-        return url
-
-    async def connect_to_client_address_and_wait(
-        self,
-        address: str,
-        *,
-        connection_reason: ConnectionReason = ConnectionReason.DISCOVERY,
-    ) -> str:
-        """Start a persistent address connection and wait until it first succeeds."""
-        url = _normalize_client_url(address)
-        await self.connect_to_client_and_wait(
-            url,
-            connection_reason=connection_reason,
-            retry_initial_connection=True,
-            retry_indefinitely=True,
-        )
-        return url
 
     def _set_connection_options(
         self,
