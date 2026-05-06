@@ -675,10 +675,10 @@ async def test_pcm_cache_catchup_for_uncached_codec() -> None:
         def frame_duration_us(self) -> int:
             return 25_000
 
-        def process(self, pcm: bytes, _ts: int, _dur: int) -> list[bytes]:
-            return [pcm]
+        def process(self, pcm: bytes, _ts: int, _dur: int) -> list[tuple[bytes, int]]:
+            return [(pcm, 25_000)]
 
-        def flush(self) -> list[bytes]:
+        def flush(self) -> list[tuple[bytes, int]]:
             return []
 
         def get_header(self) -> bytes | None:
@@ -752,10 +752,10 @@ async def test_non_main_pcm_catchup_does_not_anchor_to_far_channel_tail() -> Non
         def frame_duration_us(self) -> int:
             return 25_000
 
-        def process(self, pcm: bytes, _ts: int, _dur: int) -> list[bytes]:
-            return [pcm]
+        def process(self, pcm: bytes, _ts: int, _dur: int) -> list[tuple[bytes, int]]:
+            return [(pcm, 25_000)]
 
-        def flush(self) -> list[bytes]:
+        def flush(self) -> list[tuple[bytes, int]]:
             return []
 
         def get_header(self) -> bytes | None:
@@ -841,10 +841,10 @@ async def test_non_main_join_without_cache_rebases_far_ahead_tail() -> None:
         def frame_duration_us(self) -> int:
             return 25_000
 
-        def process(self, pcm: bytes, _ts: int, _dur: int) -> list[bytes]:
-            return [pcm]
+        def process(self, pcm: bytes, _ts: int, _dur: int) -> list[tuple[bytes, int]]:
+            return [(pcm, 25_000)]
 
-        def flush(self) -> list[bytes]:
+        def flush(self) -> list[tuple[bytes, int]]:
             return []
 
         def get_header(self) -> bytes | None:
@@ -954,11 +954,11 @@ async def test_transform_dedup_uses_transform_key_not_instance(mock_loop: Any) -
         def frame_duration_us(self) -> int:
             return self._frame_duration_us
 
-        def process(self, pcm: bytes, _ts: int, _dur: int) -> list[bytes]:
+        def process(self, pcm: bytes, _ts: int, _dur: int) -> list[tuple[bytes, int]]:
             CountingTransformer.calls += 1
-            return [pcm]
+            return [(pcm, self._frame_duration_us)]
 
-        def flush(self) -> list[bytes]:
+        def flush(self) -> list[tuple[bytes, int]]:
             return []
 
         def get_header(self) -> bytes | None:
@@ -1016,11 +1016,11 @@ async def test_transform_key_separates_frame_duration(mock_loop: Any) -> None:
         def frame_duration_us(self) -> int:
             return self._frame_duration_us
 
-        def process(self, pcm: bytes, _ts: int, _dur: int) -> list[bytes]:
+        def process(self, pcm: bytes, _ts: int, _dur: int) -> list[tuple[bytes, int]]:
             CountingTransformer.calls += 1
-            return [pcm]
+            return [(pcm, self._frame_duration_us)]
 
-        def flush(self) -> list[bytes]:
+        def flush(self) -> list[tuple[bytes, int]]:
             return []
 
         def get_header(self) -> bytes | None:
@@ -1077,10 +1077,10 @@ async def test_long_gap_reset_is_handled_in_push_stream() -> None:
         def frame_duration_us(self) -> int:
             return 25_000
 
-        def process(self, pcm: bytes, _ts: int, _dur: int) -> list[bytes]:
-            return [pcm]
+        def process(self, pcm: bytes, _ts: int, _dur: int) -> list[tuple[bytes, int]]:
+            return [(pcm, 25_000)]
 
-        def flush(self) -> list[bytes]:
+        def flush(self) -> list[tuple[bytes, int]]:
             return []
 
         def get_header(self) -> bytes | None:
@@ -1132,10 +1132,10 @@ async def test_medium_gap_does_not_reset_transformer() -> None:
         def frame_duration_us(self) -> int:
             return 25_000
 
-        def process(self, pcm: bytes, _ts: int, _dur: int) -> list[bytes]:
-            return [pcm]
+        def process(self, pcm: bytes, _ts: int, _dur: int) -> list[tuple[bytes, int]]:
+            return [(pcm, 25_000)]
 
-        def flush(self) -> list[bytes]:
+        def flush(self) -> list[tuple[bytes, int]]:
             return []
 
         def get_header(self) -> bytes | None:
@@ -1184,10 +1184,10 @@ async def test_late_join_uses_cached_chunks_across_role_recreation(mock_loop: An
         def frame_duration_us(self) -> int:
             return 25_000
 
-        def process(self, pcm: bytes, _ts: int, _dur: int) -> list[bytes]:
-            return [pcm]
+        def process(self, pcm: bytes, _ts: int, _dur: int) -> list[tuple[bytes, int]]:
+            return [(pcm, 25_000)]
 
-        def flush(self) -> list[bytes]:
+        def flush(self) -> list[tuple[bytes, int]]:
             return []
 
         def get_header(self) -> bytes | None:
@@ -1283,11 +1283,11 @@ async def test_stop_flush_fans_out_to_all_roles(mock_loop: Any) -> None:
         def frame_duration_us(self) -> int:
             return 25_000
 
-        def process(self, pcm: bytes, _ts: int, _dur: int) -> list[bytes]:
-            return [pcm]
+        def process(self, pcm: bytes, _ts: int, _dur: int) -> list[tuple[bytes, int]]:
+            return [(pcm, 25_000)]
 
-        def flush(self) -> list[bytes]:
-            return [b"final"]
+        def flush(self) -> list[tuple[bytes, int]]:
+            return [(b"final", 25_000)]
 
         def get_header(self) -> bytes | None:
             return None
@@ -1340,11 +1340,11 @@ async def test_transform_key_separates_channels(mock_loop: Any) -> None:
         def frame_duration_us(self) -> int:
             return self._frame_duration_us
 
-        def process(self, pcm: bytes, _ts: int, _dur: int) -> list[bytes]:
+        def process(self, pcm: bytes, _ts: int, _dur: int) -> list[tuple[bytes, int]]:
             CountingTransformer.calls += 1
-            return [pcm]
+            return [(pcm, self._frame_duration_us)]
 
-        def flush(self) -> list[bytes]:
+        def flush(self) -> list[tuple[bytes, int]]:
             return []
 
         def get_header(self) -> bytes | None:
@@ -2258,10 +2258,10 @@ async def test_catchup_quantizer_does_not_share_live_cache(
         def frame_duration_us(self) -> int:
             return 25_000
 
-        def process(self, pcm: bytes, _ts: int, _dur: int) -> list[bytes]:
-            return [pcm]
+        def process(self, pcm: bytes, _ts: int, _dur: int) -> list[tuple[bytes, int]]:
+            return [(pcm, 25_000)]
 
-        def flush(self) -> list[bytes]:
+        def flush(self) -> list[tuple[bytes, int]]:
             return []
 
         def get_header(self) -> bytes | None:
@@ -2999,19 +2999,19 @@ async def test_catchup_drain_advances_encoder_pending_to_live_tip() -> None:
         def frame_duration_us(self) -> int:
             return 25_000
 
-        def process(self, pcm: bytes, ts: int, _dur: int) -> list[bytes]:
+        def process(self, pcm: bytes, ts: int, _dur: int) -> list[tuple[bytes, int]]:
             if self.pending_timestamp_us is None:
                 self.pending_timestamp_us = ts
             self._buffer.extend(pcm)
-            frames: list[bytes] = []
+            frames: list[tuple[bytes, int]] = []
             while len(self._buffer) >= self._frame_size:
-                frames.append(bytes(self._buffer[: self._frame_size]))
+                frames.append((bytes(self._buffer[: self._frame_size]), 25_000))
                 del self._buffer[: self._frame_size]
                 if self.pending_timestamp_us is not None:
                     self.pending_timestamp_us += 25_000
             return frames
 
-        def flush(self) -> list[bytes]:
+        def flush(self) -> list[tuple[bytes, int]]:
             return []
 
         def get_header(self) -> bytes | None:
@@ -3097,10 +3097,10 @@ async def test_catchup_mid_pass_format_change_keeps_chunks_ordered() -> None:
         def frame_duration_us(self) -> int:
             return 25_000
 
-        def process(self, pcm: bytes, _ts: int, _dur: int) -> list[bytes]:
-            return [pcm]
+        def process(self, pcm: bytes, _ts: int, _dur: int) -> list[tuple[bytes, int]]:
+            return [(pcm, 25_000)]
 
-        def flush(self) -> list[bytes]:
+        def flush(self) -> list[tuple[bytes, int]]:
             return []
 
         def get_header(self) -> bytes | None:

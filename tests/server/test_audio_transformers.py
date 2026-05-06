@@ -27,10 +27,12 @@ class TestAudioTransformerProtocol:
             def frame_duration_us(self) -> int:
                 return 25_000
 
-            def process(self, pcm: bytes, _timestamp_us: int, _duration_us: int) -> list[bytes]:
-                return [pcm]
+            def process(
+                self, pcm: bytes, _timestamp_us: int, _duration_us: int
+            ) -> list[tuple[bytes, int]]:
+                return [(pcm, 25_000)]
 
-            def flush(self) -> list[bytes]:
+            def flush(self) -> list[tuple[bytes, int]]:
                 return []
 
             def reset(self) -> None:
@@ -38,7 +40,7 @@ class TestAudioTransformerProtocol:
 
         # Should be recognized as implementing the protocol
         transformer: AudioTransformer = ValidTransformer()
-        assert transformer.process(b"test", 0, 1000) == [b"test"]
+        assert transformer.process(b"test", 0, 1000) == [(b"test", 25_000)]
 
     def test_protocol_defines_reset_method(self) -> None:
         """AudioTransformer requires reset() method."""
@@ -51,10 +53,12 @@ class TestAudioTransformerProtocol:
             def frame_duration_us(self) -> int:
                 return 25_000
 
-            def process(self, pcm: bytes, _timestamp_us: int, _duration_us: int) -> list[bytes]:
-                return [pcm]
+            def process(
+                self, pcm: bytes, _timestamp_us: int, _duration_us: int
+            ) -> list[tuple[bytes, int]]:
+                return [(pcm, 25_000)]
 
-            def flush(self) -> list[bytes]:
+            def flush(self) -> list[tuple[bytes, int]]:
                 return []
 
             def reset(self) -> None:
@@ -72,10 +76,12 @@ class TestAudioTransformerProtocol:
             def frame_duration_us(self) -> int:
                 return 25_000
 
-            def process(self, pcm: bytes, _timestamp_us: int, _duration_us: int) -> list[bytes]:
-                return [pcm]
+            def process(
+                self, pcm: bytes, _timestamp_us: int, _duration_us: int
+            ) -> list[tuple[bytes, int]]:
+                return [(pcm, 25_000)]
 
-            def flush(self) -> list[bytes]:
+            def flush(self) -> list[tuple[bytes, int]]:
                 return []
 
             def reset(self) -> None:
@@ -92,17 +98,19 @@ class TestAudioTransformerProtocol:
             def frame_duration_us(self) -> int:
                 return 25_000
 
-            def process(self, pcm: bytes, _timestamp_us: int, _duration_us: int) -> list[bytes]:
-                return [pcm]
+            def process(
+                self, pcm: bytes, _timestamp_us: int, _duration_us: int
+            ) -> list[tuple[bytes, int]]:
+                return [(pcm, 25_000)]
 
-            def flush(self) -> list[bytes]:
-                return [b"final"]
+            def flush(self) -> list[tuple[bytes, int]]:
+                return [(b"final", 25_000)]
 
             def reset(self) -> None:
                 pass
 
         transformer: AudioTransformer = TransformerWithFlush()
-        assert transformer.flush() == [b"final"]
+        assert transformer.flush() == [(b"final", 25_000)]
 
 
 class TestPcmPassthrough:
@@ -137,7 +145,7 @@ class TestPcmPassthrough:
         result = transformer.process(pcm, timestamp_us=0, duration_us=25_000)
         assert isinstance(result, list)
         assert len(result) == 1
-        assert result[0] == pcm
+        assert result[0] == (pcm, 25_000)
 
     def test_passthrough_splits_large_input(self) -> None:
         """PcmPassthrough splits large input into multiple frames."""
@@ -145,8 +153,8 @@ class TestPcmPassthrough:
         pcm = bytes(9600)  # 50ms = 2 frames
         result = transformer.process(pcm, timestamp_us=0, duration_us=50_000)
         assert len(result) == 2
-        assert len(result[0]) == 4800
-        assert len(result[1]) == 4800
+        assert len(result[0][0]) == 4800
+        assert len(result[1][0]) == 4800
 
     def test_passthrough_buffers_incomplete_frame(self) -> None:
         """PcmPassthrough buffers incomplete frames."""
@@ -164,7 +172,7 @@ class TestPcmPassthrough:
             bytes(2880), timestamp_us=15_000, duration_us=15_000
         )  # +15ms = 30ms total
         assert len(result2) == 1
-        assert len(result2[0]) == 4800
+        assert len(result2[0][0]) == 4800
 
     def test_passthrough_flush_emits_remainder_padded(self) -> None:
         """PcmPassthrough flush emits remaining buffer padded with silence."""
@@ -172,7 +180,7 @@ class TestPcmPassthrough:
         transformer.process(bytes(1920), timestamp_us=0, duration_us=10_000)
         result = transformer.flush()
         assert len(result) == 1
-        assert len(result[0]) == 4800  # Padded to 25ms
+        assert len(result[0][0]) == 4800  # Padded to 25ms
 
     def test_passthrough_flush_empty_buffer(self) -> None:
         """PcmPassthrough flush returns empty list when buffer is empty."""

@@ -209,15 +209,20 @@ def _encode_for_transform_key(
     if not frames:
         return []
 
-    frame_dur = transformer.frame_duration_us
+    total_dur = sum(dur for _, dur in frames)
     base_ts = output_ts
     pending = transformer.pending_timestamp_us
     if pending is not None:
-        candidate_base = pending - (len(frames) * frame_dur)
+        candidate_base = pending - total_dur
         if abs(candidate_base - output_ts) <= _TRANSFORMER_DRIFT_THRESHOLD_US:
             base_ts = candidate_base
 
-    return [(data, base_ts + i * frame_dur, frame_dur) for i, data in enumerate(frames)]
+    result: list[tuple[bytes, int, int]] = []
+    ts = base_ts
+    for data, dur in frames:
+        result.append((data, ts, dur))
+        ts += dur
+    return result
 
 
 class _ResamplerKey(NamedTuple):
@@ -2470,8 +2475,7 @@ class PushStream:
         for tkey, transformer in transformers_by_key.items():
             final_frames = transformer.flush()
             if final_frames:
-                frame_duration_us = transformer.frame_duration_us
-                for frame_data in final_frames:
+                for frame_data, frame_duration_us in final_frames:
                     chunk = AudioChunk(
                         data=frame_data,
                         timestamp_us=0,  # Timestamp doesn't matter at stream end

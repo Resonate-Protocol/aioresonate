@@ -26,7 +26,7 @@ class AudioTransformer(Protocol):
         """Duration of each output frame in microseconds."""
         ...
 
-    def process(self, pcm: bytes, timestamp_us: int, duration_us: int) -> list[bytes]:
+    def process(self, pcm: bytes, timestamp_us: int, duration_us: int) -> list[tuple[bytes, int]]:
         """Transform PCM chunk into output frames.
 
         Args:
@@ -35,16 +35,17 @@ class AudioTransformer(Protocol):
             duration_us: Duration of this chunk in microseconds.
 
         Returns:
-            List of encoded frames. May be empty if buffering incomplete frame.
-            May contain multiple frames if input spans multiple frame boundaries.
+            List of `(frame_bytes, frame_duration_us)` pairs. May be empty if
+            buffering incomplete frame. May contain multiple frames if input
+            spans multiple frame boundaries.
         """
         ...
 
-    def flush(self) -> list[bytes]:
+    def flush(self) -> list[tuple[bytes, int]]:
         """Flush remaining buffered audio at stream end.
 
         Returns:
-            Final frame(s), possibly padded with silence.
+            Final `(frame_bytes, frame_duration_us)` pairs, possibly padded with silence.
         """
         ...
 

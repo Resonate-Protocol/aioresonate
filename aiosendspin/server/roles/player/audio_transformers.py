@@ -39,13 +39,15 @@ class PcmPassthrough:
             chunk_duration_us: Duration of each output frame in microseconds.
         """
         self._sample_rate = sample_rate
-        self._chunk_duration_us = chunk_duration_us
         self._frame_stride = (bit_depth // 8) * channels
         self._options = options
         # Calculate frame size: samples = sample_rate * duration_s
         # For 48kHz, 25ms: 48000 * 0.025 = 1200 samples
         # Frame size = samples * frame_stride = 1200 * 4 = 4800 bytes
         self._chunk_samples = int(sample_rate * chunk_duration_us / 1_000_000)
+        # Derive duration from the integer sample count so the wire label matches
+        # the real audio per frame at non-divisible rates (e.g. 44.1k/25ms).
+        self._chunk_duration_us = self._chunk_samples * 1_000_000 // sample_rate
         self._frame_size = self._chunk_samples * self._frame_stride
         self._buffer = bytearray()
         # Track timestamp of the first sample in the buffer
@@ -71,7 +73,7 @@ class PcmPassthrough:
         """Timestamp of the first buffered sample, or None if buffer is empty."""
         return self._pending_timestamp_us
 
-    def process(self, pcm: bytes, timestamp_us: int, duration_us: int) -> list[bytes]:  # noqa: ARG002
+    def process(self, pcm: bytes, timestamp_us: int, duration_us: int) -> list[tuple[bytes, int]]:  # noqa: ARG002
         """Chunk PCM into fixed-size frames.
 
         Args:
@@ -80,7 +82,7 @@ class PcmPassthrough:
             duration_us: Duration of this chunk in microseconds (unused).
 
         Returns:
-            List of fixed-size PCM frames. May be empty if buffering.
+            List of `(frame_bytes, frame_duration_us)` pairs. May be empty if buffering.
         """
         # Detect production gaps: if input timestamp jumped by >1.5s, reset timeline
         # This handles cases where audio production stopped and resumed
@@ -99,24 +101,25 @@ class PcmPassthrough:
             self._pending_timestamp_us = timestamp_us
 
         self._buffer.extend(pcm)
-        frames: list[bytes] = []
+        frames: list[tuple[bytes, int]] = []
 
         while len(self._buffer) >= self._frame_size:
             frame = bytes(self._buffer[: self._frame_size])
             del self._buffer[: self._frame_size]
-            frames.append(frame)
             # Advance pending timestamp using rational arithmetic. Each frame
             # represents exactly `chunk_samples / sample_rate` seconds. Tracking
             # the residue avoids the systematic per-frame drift that occurs when
-            # `chunk_samples * 1_000_000` is not divisible by `sample_rate`.
+            # `chunk_samples * 1_000_000` is not divisible by `sample_rate`. The
+            # same delta is reported as the frame's wire duration.
+            self._ts_residue += self._chunk_samples * 1_000_000
+            delta_us, self._ts_residue = divmod(self._ts_residue, self._sample_rate)
             if self._pending_timestamp_us is not None:
-                self._ts_residue += self._chunk_samples * 1_000_000
-                delta_us, self._ts_residue = divmod(self._ts_residue, self._sample_rate)
                 self._pending_timestamp_us += delta_us
+            frames.append((frame, delta_us))
 
         return frames
 
-    def flush(self) -> list[bytes]:
+    def flush(self) -> list[tuple[bytes, int]]:
         """Flush remaining buffered audio, padded with silence.
 
         Returns:
@@ -130,9 +133,12 @@ class PcmPassthrough:
         self._buffer.extend(bytes(padding_needed))
         frame = bytes(self._buffer)
         self._buffer.clear()
+        # Same residue-aware advance as `process` so cumulative dur stays exact.
+        self._ts_residue += self._chunk_samples * 1_000_000
+        delta_us, self._ts_residue = divmod(self._ts_residue, self._sample_rate)
         self._pending_timestamp_us = None
         self._ts_residue = 0
-        return [frame]
+        return [(frame, delta_us)]
 
     def get_header(self) -> bytes | None:
         """No codec header for raw PCM."""
@@ -187,6 +193,8 @@ class FlacEncoder:
         self._chunks_encoded_total: int = 0
         # Track last input timestamp to detect production gaps
         self._last_input_timestamp_us: int | None = None
+        # Residue for drift-free per-frame duration (matches PcmPassthrough).
+        self._dur_residue: int = 0
 
     @property
     def frame_duration_us(self) -> int:
@@ -231,7 +239,7 @@ class FlacEncoder:
         # regardless of what input frame sizes we use.
         if self._encoder.frame_size:
             self._chunk_samples = self._encoder.frame_size
-            self._chunk_duration_us = int(self._chunk_samples / self._sample_rate * 1_000_000)
+            self._chunk_duration_us = self._chunk_samples * 1_000_000 // self._sample_rate
 
         header = bytes(self._encoder.extradata) if self._encoder.extradata else b""
         if header:
@@ -265,7 +273,7 @@ class FlacEncoder:
             output.extend(bytes(packet))
         return bytes(output)
 
-    def process(self, pcm: bytes, timestamp_us: int, duration_us: int) -> list[bytes]:  # noqa: ARG002
+    def process(self, pcm: bytes, timestamp_us: int, duration_us: int) -> list[tuple[bytes, int]]:  # noqa: ARG002
         """Encode PCM to FLAC frames.
 
         Args:
@@ -274,7 +282,7 @@ class FlacEncoder:
             duration_us: Duration of this chunk in microseconds (unused).
 
         Returns:
-            List of encoded FLAC frames. May be empty if buffering.
+            List of `(frame_bytes, frame_duration_us)` pairs. May be empty if buffering.
         """
         self._ensure_initialized()
 
@@ -288,6 +296,7 @@ class FlacEncoder:
                 self._output_frame_count = 0
                 self._first_input_timestamp_us = timestamp_us
                 self._chunks_encoded_total = 0
+                self._dur_residue = 0
         self._last_input_timestamp_us = timestamp_us
 
         # Track first input timestamp for encoder-delay compensation
@@ -295,7 +304,7 @@ class FlacEncoder:
             self._first_input_timestamp_us = timestamp_us
 
         self._buffer.extend(pcm)
-        frames: list[bytes] = []
+        frames: list[tuple[bytes, int]] = []
         chunk_size = self._chunk_samples * self._frame_stride
 
         while len(self._buffer) >= chunk_size:
@@ -316,13 +325,15 @@ class FlacEncoder:
                     self._stream_start_timestamp_us = self._first_input_timestamp_us + (
                         delay_samples * 1_000_000 // self._sample_rate
                     )
-                frames.append(encoded)
+                self._dur_residue += self._chunk_samples * 1_000_000
+                delta_us, self._dur_residue = divmod(self._dur_residue, self._sample_rate)
+                frames.append((encoded, delta_us))
                 # Count output frames for timestamp calculation
                 self._output_frame_count += 1
 
         return frames
 
-    def flush(self) -> list[bytes]:
+    def flush(self) -> list[tuple[bytes, int]]:
         """Flush remaining buffered audio, padded with silence.
 
         Returns:
@@ -343,7 +354,9 @@ class FlacEncoder:
         encoded = self._encode_chunk(chunk_pcm)
         if encoded:
             self._output_frame_count += 1
-            return [encoded]
+            self._dur_residue += self._chunk_samples * 1_000_000
+            delta_us, self._dur_residue = divmod(self._dur_residue, self._sample_rate)
+            return [(encoded, delta_us)]
         return []
 
     def get_header(self) -> bytes | None:
@@ -361,6 +374,7 @@ class FlacEncoder:
         self._first_input_timestamp_us = None
         self._chunks_encoded_total = 0
         self._last_input_timestamp_us = None
+        self._dur_residue = 0
 
 
 class OpusEncoder:
@@ -410,6 +424,8 @@ class OpusEncoder:
         self._last_input_timestamp_us: int | None = None
         # libopus codec lookahead, populated from the OpusHead pre_skip after open()
         self._lookahead_us: int = 0
+        # Residue for drift-free per-frame duration (matches PcmPassthrough).
+        self._dur_residue: int = 0
 
     @property
     def frame_duration_us(self) -> int:
@@ -445,7 +461,7 @@ class OpusEncoder:
         # Opus typically uses 960 samples = 20ms at 48kHz
         if self._encoder.frame_size:
             self._chunk_samples = self._encoder.frame_size
-            self._chunk_duration_us = int(self._chunk_samples / self._sample_rate * 1_000_000)
+            self._chunk_duration_us = self._chunk_samples * 1_000_000 // self._sample_rate
 
         # Extract libopus's encoder lookahead from the OpusHead pre_skip field
         # so the stream anchor can be shifted earlier to keep decoded audio aligned
@@ -490,7 +506,7 @@ class OpusEncoder:
             output.extend(bytes(packet))
         return bytes(output)
 
-    def process(self, pcm: bytes, timestamp_us: int, duration_us: int) -> list[bytes]:  # noqa: ARG002
+    def process(self, pcm: bytes, timestamp_us: int, duration_us: int) -> list[tuple[bytes, int]]:  # noqa: ARG002
         """Encode PCM to Opus frames.
 
         Args:
@@ -499,7 +515,7 @@ class OpusEncoder:
             duration_us: Duration of this chunk in microseconds (unused).
 
         Returns:
-            List of encoded Opus frames. May be empty if buffering.
+            List of `(frame_bytes, frame_duration_us)` pairs. May be empty if buffering.
         """
         self._ensure_initialized()
 
@@ -512,6 +528,7 @@ class OpusEncoder:
                 self._output_frame_count = 0
                 self._first_input_timestamp_us = timestamp_us
                 self._chunks_encoded_total = 0
+                self._dur_residue = 0
         self._last_input_timestamp_us = timestamp_us
 
         # Track first input timestamp for encoder-delay compensation
@@ -519,7 +536,7 @@ class OpusEncoder:
             self._first_input_timestamp_us = timestamp_us
 
         self._buffer.extend(pcm)
-        frames: list[bytes] = []
+        frames: list[tuple[bytes, int]] = []
         chunk_size = self._chunk_samples * self._frame_stride
 
         while len(self._buffer) >= chunk_size:
@@ -539,12 +556,14 @@ class OpusEncoder:
                         + (delay_samples * 1_000_000 // self._sample_rate)
                         - self._lookahead_us
                     )
-                frames.append(encoded)
+                self._dur_residue += self._chunk_samples * 1_000_000
+                delta_us, self._dur_residue = divmod(self._dur_residue, self._sample_rate)
+                frames.append((encoded, delta_us))
                 self._output_frame_count += 1
 
         return frames
 
-    def flush(self) -> list[bytes]:
+    def flush(self) -> list[tuple[bytes, int]]:
         """Flush remaining buffered audio, padded with silence.
 
         Returns:
@@ -565,7 +584,9 @@ class OpusEncoder:
         encoded = self._encode_chunk(chunk_pcm)
         if encoded:
             self._output_frame_count += 1
-            return [encoded]
+            self._dur_residue += self._chunk_samples * 1_000_000
+            delta_us, self._dur_residue = divmod(self._dur_residue, self._sample_rate)
+            return [(encoded, delta_us)]
         return []
 
     def get_header(self) -> bytes | None:
@@ -583,3 +604,4 @@ class OpusEncoder:
         self._chunks_encoded_total = 0
         self._last_input_timestamp_us = None
         self._lookahead_us = 0
+        self._dur_residue = 0
