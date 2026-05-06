@@ -14,7 +14,7 @@
   "remoteEnv": {
     "CLAUDE_CONFIG_DIR": "/home/vscode/.claude"
   },
-  "onCreateCommand": "sudo mkdir -p /home/vscode/.claude/downloads && sudo chown -R $(id -u):$(id -g) \"${containerWorkspaceFolder}\" /home/vscode/.claude",
+  "onCreateCommand": "sudo mkdir -p /home/vscode/.claude/downloads && (sudo chown -R $(id -u):$(id -g) /home/vscode/.claude 2>/dev/null || true) && (sudo chown -R $(id -u):$(id -g) \"${containerWorkspaceFolder}\" 2>/dev/null || true)",
   "postCreateCommand": "git config --global --add safe.directory ${containerWorkspaceFolder} && ./scripts/setup.sh && curl -fsSL https://claude.ai/install.sh | bash",
   "customizations": {
     "vscode": {
