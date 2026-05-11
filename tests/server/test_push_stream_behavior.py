@@ -681,6 +681,65 @@ async def test_clear_does_not_send_stream_end(mock_loop: Any) -> None:
 
 
 @pytest.mark.asyncio
+async def test_clear_bumps_stream_generation(mock_loop: Any) -> None:
+    """clear() bumps stream_generation so in-flight commits bail out.
+
+    Without the bump, role state machines that preserve _stream_started
+    across stream/clear would deliver stale chunks from concurrent
+    commit_audio() coroutines after the clear takes effect.
+    """
+    group = _DummyGroup(clients=[])
+    _make_connected_player(mock_loop, group, "p1")
+
+    stream = PushStream(loop=mock_loop, clock=LoopClock(mock_loop), group=group)
+    before = stream._stream_generation  # noqa: SLF001
+    stream.clear()
+    assert stream._stream_generation == before + 1  # noqa: SLF001
+
+
+@pytest.mark.asyncio
+async def test_clear_during_inflight_commit_suppresses_audio_delivery(mock_loop: Any) -> None:
+    """A clear() running during an in-flight commit must abort the delivery."""
+    group = _DummyGroup(clients=[])
+    _, conn = _make_connected_player(mock_loop, group, "p1")
+    stream = PushStream(loop=mock_loop, clock=LoopClock(mock_loop), group=group)
+
+    entered_delivery = asyncio.Event()
+    release_delivery = asyncio.Event()
+    original_deliver = stream._deliver_audio_to_roles  # noqa: SLF001
+
+    async def _gated_deliver(
+        prepared: dict[UUID, tuple[bytes, AudioFormat]],
+        channel_play_start: dict[UUID, int],
+        *,
+        commit_generation: int | None = None,
+    ) -> dict[object, list[CachedChunk]]:
+        entered_delivery.set()
+        await release_delivery.wait()
+        return await original_deliver(
+            prepared,
+            channel_play_start,
+            commit_generation=commit_generation,
+        )
+
+    stream._deliver_audio_to_roles = _gated_deliver  # type: ignore[method-assign]  # noqa: SLF001
+
+    stream.prepare_audio(
+        bytes(4800),
+        AudioFormat(sample_rate=48000, bit_depth=16, channels=2),
+    )
+    commit_task = asyncio.create_task(stream.commit_audio())
+    await asyncio.wait_for(entered_delivery.wait(), timeout=1.0)
+
+    stream.clear()
+    release_delivery.set()
+    await commit_task
+
+    assert any(isinstance(m, StreamClearMessage) for m in conn.sent_json)
+    assert not conn.sent_binary
+
+
+@pytest.mark.asyncio
 async def test_stop_with_keep_stream_suppresses_stream_end(mock_loop: Any) -> None:
     """stop(keep_stream=True) tears down transport without emitting stream/end."""
     group = _DummyGroup(clients=[])

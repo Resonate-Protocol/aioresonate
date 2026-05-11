@@ -2496,6 +2496,10 @@ class PushStream:
         This is used for seek operations or track changes where buffered
         audio is discarded. Sends stream/clear to all roles via hooks.
         """
+        # Bump the stream generation so any in-flight commit_audio()
+        # coroutine bails out before delivering chunks under the new epoch.
+        self._stream_generation += 1
+
         # Clear pending audio
         self._channel_buffers.clear()
         self._historical_buffers.clear()
