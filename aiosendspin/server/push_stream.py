@@ -2451,7 +2451,9 @@ class PushStream:
         Resets transformers and sends stream/end via role hooks. Pass
         ``keep_stream=True`` to skip the stream/end emission when the
         caller will immediately create a new PushStream and wants clients
-        to treat the transition as continuous.
+        to treat the transition as continuous. In that case, call
+        ``clear()`` first if buffered client audio should be discarded
+        before the successor PushStream takes over.
 
         Does not change the owning group's logical playback state. Call
         group.stop() to stop transport and also set playback state to STOPPED.
