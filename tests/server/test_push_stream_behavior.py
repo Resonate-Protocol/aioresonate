@@ -664,6 +664,42 @@ async def test_stop_resets_transformers_without_delivering_tail_frames(mock_loop
 
 
 @pytest.mark.asyncio
+async def test_clear_does_not_send_stream_end(mock_loop: Any) -> None:
+    """Clear must not emit stream/end (spec forbids it during transitions)."""
+    group = _DummyGroup(clients=[])
+    _, conn = _make_connected_player(mock_loop, group, "p1")
+
+    stream = PushStream(loop=mock_loop, clock=LoopClock(mock_loop), group=group)
+    stream.prepare_audio(
+        bytes(4800),
+        AudioFormat(sample_rate=48000, bit_depth=16, channels=2),
+    )
+    await stream.commit_audio()
+
+    stream.clear()
+    assert not any(isinstance(m, StreamEndMessage) for m in conn.sent_json)
+
+
+@pytest.mark.asyncio
+async def test_stop_with_keep_stream_suppresses_stream_end(mock_loop: Any) -> None:
+    """stop(keep_stream=True) tears down transport without emitting stream/end."""
+    group = _DummyGroup(clients=[])
+    _, conn = _make_connected_player(mock_loop, group, "p1")
+
+    stream = PushStream(loop=mock_loop, clock=LoopClock(mock_loop), group=group)
+    stream.prepare_audio(
+        bytes(4800),
+        AudioFormat(sample_rate=48000, bit_depth=16, channels=2),
+    )
+    await stream.commit_audio()
+
+    stream.stop(keep_stream=True)
+
+    assert stream.is_stopped
+    assert not any(isinstance(m, StreamEndMessage) for m in conn.sent_json)
+
+
+@pytest.mark.asyncio
 async def test_transient_disconnect_keeps_role_in_audio_pipeline(mock_loop: Any) -> None:
     """Transient disconnect keeps role processing active, but transport send remains no-op."""
     group = _DummyGroup(clients=[])

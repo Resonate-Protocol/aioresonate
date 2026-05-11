@@ -2443,17 +2443,18 @@ class PushStream:
         self._catchup_state.clear()
         self._catchup_roles.clear()
 
-    def stop(self) -> None:
+    def stop(self, *, keep_stream: bool = False) -> None:
         """
         Stop only this PushStream transport.
 
         After calling stop(), commit_audio() will raise StreamStoppedError.
-        Resets transformers and sends stream/end to all roles via hooks.
+        Resets transformers and sends stream/end via role hooks. Pass
+        ``keep_stream=True`` to skip the stream/end emission when the
+        caller will immediately create a new PushStream and wants clients
+        to treat the transition as continuous.
 
-        This does not change the owning group's logical playback state.
-        Use this when you are about to immediately start another stream and
-        want clients to remain in PLAYING state during the transition.
-        Call group.stop() to stop transport and also set playback state to STOPPED.
+        Does not change the owning group's logical playback state. Call
+        group.stop() to stop transport and also set playback state to STOPPED.
         """
         if self._is_stopped:
             return
@@ -2471,9 +2472,10 @@ class PushStream:
         for transformer in transformers_by_key.values():
             transformer.reset()
 
-        # Send stream/end to all roles with audio requirements via hooks
-        for _client, role in self._get_audio_roles():
-            role.on_stream_end()
+        if not keep_stream:
+            # Send stream/end to all roles with audio requirements via hooks
+            for _client, role in self._get_audio_roles():
+                role.on_stream_end()
 
         # Clear role tracking state
         self._started_roles.clear()
@@ -2489,8 +2491,8 @@ class PushStream:
         """
         Clear all pending audio and reset timing.
 
-        This is used for seek operations where buffered audio is discarded.
-        Sends stream/clear to all roles via hooks.
+        This is used for seek operations or track changes where buffered
+        audio is discarded. Sends stream/clear to all roles via hooks.
         """
         # Clear pending audio
         self._channel_buffers.clear()
