@@ -614,6 +614,56 @@ async def test_clear_sends_stream_clear(mock_loop: Any) -> None:
 
 
 @pytest.mark.asyncio
+async def test_stop_resets_transformers_without_delivering_tail_frames(mock_loop: Any) -> None:
+    """stop() resets transformers but never delivers flushed tail frames.
+
+    Flushed frames carry timestamp_us=0, which has no scheduling
+    semantics, so emitting them would only pollute the client's
+    buffer tracker without serving any playback purpose.
+    """
+    reset_calls = 0
+
+    class FlushingTransformer:
+        pending_timestamp_us: int | None = None
+
+        @property
+        def frame_duration_us(self) -> int:
+            return 25_000
+
+        def process(self, pcm: bytes, _ts: int, _dur: int) -> list[tuple[bytes, int]]:
+            return [(pcm, 25_000)]
+
+        def flush(self) -> list[tuple[bytes, int]]:
+            return [(b"tail", 25_000)]
+
+        def get_header(self) -> bytes | None:
+            return None
+
+        def reset(self) -> None:
+            nonlocal reset_calls
+            reset_calls += 1
+
+    group = _DummyGroup(clients=[])
+    role = _DummyRole(
+        AudioRequirements(
+            sample_rate=48000,
+            bit_depth=16,
+            channels=2,
+            transformer=FlushingTransformer(),
+            channel_id=MAIN_CHANNEL,
+            frame_duration_us=25_000,
+        )
+    )
+    group.clients.append(_DummyClient([role]))
+
+    stream = PushStream(loop=mock_loop, clock=LoopClock(mock_loop), group=group)
+    stream.stop()
+
+    assert role.received == []
+    assert reset_calls == 1
+
+
+@pytest.mark.asyncio
 async def test_transient_disconnect_keeps_role_in_audio_pipeline(mock_loop: Any) -> None:
     """Transient disconnect keeps role processing active, but transport send remains no-op."""
     group = _DummyGroup(clients=[])
@@ -1270,59 +1320,6 @@ async def test_send_cached_chunks_keeps_chunk_overlapping_now(mock_loop: Any) ->
     )
     assert len(role.received) == 2
     assert role.received[0].timestamp_us == overlapping.timestamp_us
-
-
-@pytest.mark.asyncio
-async def test_stop_flush_fans_out_to_all_roles(mock_loop: Any) -> None:
-    """stop() flush frames to all roles sharing a TransformKey."""
-
-    class FlushingTransformer:
-        pending_timestamp_us: int | None = None
-
-        @property
-        def frame_duration_us(self) -> int:
-            return 25_000
-
-        def process(self, pcm: bytes, _ts: int, _dur: int) -> list[tuple[bytes, int]]:
-            return [(pcm, 25_000)]
-
-        def flush(self) -> list[tuple[bytes, int]]:
-            return [(b"final", 25_000)]
-
-        def get_header(self) -> bytes | None:
-            return None
-
-        def reset(self) -> None:
-            return
-
-    group = _DummyGroup(clients=[])
-    role1 = _DummyRole(
-        AudioRequirements(
-            sample_rate=48000,
-            bit_depth=16,
-            channels=2,
-            transformer=FlushingTransformer(),
-            channel_id=MAIN_CHANNEL,
-            frame_duration_us=25_000,
-        )
-    )
-    role2 = _DummyRole(
-        AudioRequirements(
-            sample_rate=48000,
-            bit_depth=16,
-            channels=2,
-            transformer=FlushingTransformer(),
-            channel_id=MAIN_CHANNEL,
-            frame_duration_us=25_000,
-        )
-    )
-    group.clients.extend([_DummyClient([role1]), _DummyClient([role2])])
-
-    stream = PushStream(loop=mock_loop, clock=LoopClock(mock_loop), group=group)
-    stream.stop()
-
-    assert len(role1.received) == 1
-    assert len(role2.received) == 1
 
 
 @pytest.mark.asyncio

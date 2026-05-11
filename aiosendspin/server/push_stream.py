@@ -2448,8 +2448,7 @@ class PushStream:
         Stop only this PushStream transport.
 
         After calling stop(), commit_audio() will raise StreamStoppedError.
-        Flushes remaining audio from transformers, then sends stream/end message
-        to all roles via hooks.
+        Resets transformers and sends stream/end to all roles via hooks.
 
         This does not change the owning group's logical playback state.
         Use this when you are about to immediately start another stream and
@@ -2461,29 +2460,15 @@ class PushStream:
         self._is_stopped = True
         self._stream_generation += 1
 
-        # Flush remaining audio from transformers and reset them
-        roles_by_transform: defaultdict[TransformKey, list[Role]] = defaultdict(list)
+        # Reset transformers so any internal encoder state is discarded.
         transformers_by_key: dict[TransformKey, AudioTransformer] = {}
         for _client, role in self._get_audio_roles():
             req = role.get_audio_requirements()
             if req and req.transformer:
                 channel_id = req.channel_id or MAIN_CHANNEL
                 tkey = self._build_transform_key(req, channel_id, role)
-                roles_by_transform[tkey].append(role)
                 transformers_by_key.setdefault(tkey, req.transformer)
-
-        for tkey, transformer in transformers_by_key.items():
-            final_frames = transformer.flush()
-            if final_frames:
-                for frame_data, frame_duration_us in final_frames:
-                    chunk = AudioChunk(
-                        data=frame_data,
-                        timestamp_us=0,  # Timestamp doesn't matter at stream end
-                        duration_us=frame_duration_us,
-                        byte_count=len(frame_data),
-                    )
-                    for role in roles_by_transform.get(tkey, []):
-                        role.on_audio_chunk(chunk)
+        for transformer in transformers_by_key.values():
             transformer.reset()
 
         # Send stream/end to all roles with audio requirements via hooks
