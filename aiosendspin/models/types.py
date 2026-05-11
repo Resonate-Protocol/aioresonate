@@ -73,6 +73,8 @@ class Roles(Enum):
 
     Has preferred format for audio features.
     """
+    COLOR = "color@v1"
+    """Receives colors derived from the current audio."""
 
 
 class BinaryMessageType(Enum):

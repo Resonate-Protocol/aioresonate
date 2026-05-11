@@ -21,6 +21,7 @@ from .artwork import (
     StreamRequestFormatArtwork,
     StreamStartArtwork,
 )
+from .color import SessionUpdateColor
 from .controller import ControllerCommandPayload, ControllerStatePayload
 from .metadata import SessionUpdateMetadata
 from .player import (
@@ -340,6 +341,8 @@ class ServerStatePayload(DataClassORJSONMixin):
     """Metadata state - only sent to clients with metadata role."""
     controller: ControllerStatePayload | None = None
     """Controller state - only sent to clients with controller role."""
+    color: SessionUpdateColor | None = None
+    """Color state - only sent to clients with color role."""
 
     class Config(BaseConfig):
         """Config for parsing json messages."""

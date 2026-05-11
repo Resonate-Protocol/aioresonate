@@ -115,6 +115,9 @@ GroupUpdateCallback = Callable[[GroupUpdateServerPayload], None]
 # Callback invoked when controller state updates are received.
 ControllerStateCallback = Callable[[ServerStatePayload], None]
 
+# Callback invoked when server state color updates are received.
+ColorCallback = Callable[[ServerStatePayload], None]
+
 # Callback invoked when audio streaming begins.
 StreamStartCallback = Callable[[StreamStartMessage], None]
 
@@ -230,6 +233,8 @@ class SendspinClient:
     """Callbacks invoked on group/update messages."""
     _controller_callbacks: list[ControllerStateCallback]
     """Callbacks invoked on server/state messages."""
+    _color_callbacks: list[ColorCallback]
+    """Callbacks invoked on server/state messages with color."""
     _stream_start_callbacks: list[StreamStartCallback]
     """Callbacks invoked when a stream starts."""
     _server_hello_callbacks: list[ServerHelloCallback]
@@ -352,6 +357,7 @@ class SendspinClient:
         self._metadata_callbacks = []
         self._group_callbacks = []
         self._controller_callbacks = []
+        self._color_callbacks = []
         self._stream_start_callbacks = []
         self._server_hello_callbacks = []
         self._stream_end_callbacks = []
@@ -566,6 +572,17 @@ class SendspinClient:
             self._controller_callbacks.remove(callback)
             if callback in self._controller_callbacks
             else None
+        )
+
+    def add_color_listener(self, callback: ColorCallback) -> Callable[[], None]:
+        """Add a listener for server/state messages with color.
+
+        Returns:
+            A function that removes this listener when called.
+        """
+        self._color_callbacks.append(callback)
+        return lambda: (
+            self._color_callbacks.remove(callback) if callback in self._color_callbacks else None
         )
 
     def add_stream_start_listener(self, callback: StreamStartCallback) -> Callable[[], None]:
@@ -946,6 +963,9 @@ class SendspinClient:
         # Notify metadata callback when metadata is present
         if payload.metadata is not None:
             self._notify_metadata_callback(payload)
+        # Notify color callback when color is present
+        if payload.color is not None:
+            self._notify_color_callback(payload)
 
     def _handle_server_command(self, payload: ServerCommandPayload) -> None:
         """Handle server/command message."""
@@ -1142,6 +1162,13 @@ class SendspinClient:
                 callback(payload)
             except Exception:
                 logger.exception("Error in controller callback %s", callback)
+
+    def _notify_color_callback(self, payload: ServerStatePayload) -> None:
+        for callback in list(self._color_callbacks):
+            try:
+                callback(payload)
+            except Exception:
+                logger.exception("Error in color callback %s", callback)
 
     def _notify_stream_start(self, message: StreamStartMessage) -> None:
         for callback in list(self._stream_start_callbacks):

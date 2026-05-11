@@ -10,6 +10,7 @@ Roles encapsulate per-connection behavior for different client capabilities.
 # Import submodules to trigger auto-registration of roles
 from aiosendspin.server.roles import (
     artwork,  # noqa: F401
+    color,  # noqa: F401
     controller,  # noqa: F401
     metadata,  # noqa: F401
     player,  # noqa: F401
@@ -30,6 +31,13 @@ from aiosendspin.server.roles.base import (
     GroupRole,
     Role,
     StreamRequirements,
+)
+from aiosendspin.server.roles.color import (
+    ColorClearedEvent,
+    ColorEvent,
+    ColorGroupRole,
+    ColorUpdatedEvent,
+    ColorV1Role,
 )
 from aiosendspin.server.roles.controller import (
     ControllerEvent,
@@ -74,6 +82,11 @@ __all__ = [
     "ArtworkV1Role",
     "AudioChunk",
     "AudioRequirements",
+    "ColorClearedEvent",
+    "ColorEvent",
+    "ColorGroupRole",
+    "ColorUpdatedEvent",
+    "ColorV1Role",
     "ControllerEvent",
     "ControllerGroupRole",
     "ControllerMuteEvent",
