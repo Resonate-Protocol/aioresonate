@@ -109,6 +109,8 @@ class PlayerV1Role(Role):
         self._cached_state: PlayerPersistentState | None = None
         # Deferred stream start: set True by on_stream_start(), sent on first audio chunk
         self._pending_stream_start = False
+        # Last format announced to the client via stream/start.
+        self._last_sent_format: tuple[AudioCodec, int, int, int, str | None] | None = None
 
     @property
     def role_id(self) -> str:
@@ -188,6 +190,7 @@ class PlayerV1Role(Role):
         """Reset stream state and subscribe to PlayerGroupRole."""
         self._subscribe_to_group_role()
         self._stream_started = False
+        self._last_sent_format = None
         state = self._state()
         if state.buffer_reset_handle is not None:
             state.buffer_reset_handle.cancel()
@@ -204,6 +207,7 @@ class PlayerV1Role(Role):
         """Clean up, apply delayed buffer reset policy, and unsubscribe from PlayerGroupRole."""
         self._unsubscribe_from_group_role()
         self._stream_started = False
+        self._last_sent_format = None
 
         state = self._state()
         state.disconnect_time_us = self._client._server.clock.now_us()  # noqa: SLF001
@@ -244,6 +248,7 @@ class PlayerV1Role(Role):
             state.buffer_tracker.reset()
         self._stream_started = False
         self._pending_stream_start = False
+        self._last_sent_format = None
         self.reset_binary_timing()
         self._ensure_audio_requirements(force=True)
 
@@ -271,7 +276,11 @@ class PlayerV1Role(Role):
         self._pending_stream_start = True
 
     def _send_stream_start_message(self) -> None:
-        """Send stream/start message with codec header from transformer."""
+        """Send stream/start message with codec header from transformer.
+
+        Skips the send when the client already has an active stream with
+        an identical format.
+        """
         req = self.get_audio_requirements()
         if req is None or not self.has_connection():
             return
@@ -288,6 +297,11 @@ class PlayerV1Role(Role):
         else:
             codec = AudioCodec.PCM
 
+        current_format = (codec, req.sample_rate, req.channels, req.bit_depth, header_b64)
+        if self._stream_started and self._last_sent_format == current_format:
+            # Client already configured for this exact format
+            return
+
         stream_start = StreamStartMessage(
             payload=StreamStartPayload(
                 player=StreamStartPlayer(
@@ -302,6 +316,7 @@ class PlayerV1Role(Role):
         self.send_message(stream_start)
         is_initial = not self._stream_started
         self._stream_started = True
+        self._last_sent_format = current_format
 
         # Allow client to process stream/start before first binary audio (initial only).
         if is_initial and self._buffer_tracker is not None:
@@ -314,7 +329,7 @@ class PlayerV1Role(Role):
             self._send_stream_start_message()
             self._pending_stream_start = False
 
-        # Guard against stale delivery after stream/end or stream/clear.
+        # Guard against stale delivery after stream/end.
         if not self._stream_started:
             if self.has_connection():
                 self._client._logger.debug(  # noqa: SLF001
@@ -343,13 +358,12 @@ class PlayerV1Role(Role):
         )
 
     def on_stream_clear(self) -> None:
-        """Send stream/clear and reset state."""
+        """Send stream/clear and reset buffer-tracking state."""
         if not self.has_connection():
             return
 
         stream_clear = StreamClearMessage(payload=StreamClearPayload(roles=["player"]))
         self.send_message(stream_clear)
-        self._stream_started = False
         self._pending_stream_start = False
         self.reset_binary_timing()
 
@@ -365,6 +379,7 @@ class PlayerV1Role(Role):
         self.send_message(stream_end)
         self._stream_started = False
         self._pending_stream_start = False
+        self._last_sent_format = None
         self.reset_binary_timing()
 
         if self._buffer_tracker is not None:

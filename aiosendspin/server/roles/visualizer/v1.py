@@ -120,7 +120,8 @@ class VisualizerV1Role(Role):
         self.reset_binary_timing()
         # stream/end clears client-side visualizer config, so resend stream/start
         # at each new stream boundary.
-        self._send_stream_start()
+        if not self._stream_started:
+            self._send_stream_start()
         req = self.get_audio_requirements()
         self._extractor = VisualizerFeatureExtractor(
             sample_rate=req.sample_rate,

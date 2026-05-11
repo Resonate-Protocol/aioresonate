@@ -497,8 +497,13 @@ def test_player_role_on_stream_clear_sends_message() -> None:
     assert msg.payload.roles == ["player"]
 
 
-def test_player_role_on_stream_clear_resets_stream_started() -> None:
-    """on_stream_clear() resets _stream_started flag."""
+def test_player_role_on_stream_clear_keeps_stream_started() -> None:
+    """on_stream_clear() preserves _stream_started per spec.
+
+    stream/clear discards buffered audio but does not end the stream, so
+    the previously announced format stays valid and the role remains
+    "started" from the client's perspective.
+    """
     client = MagicMock()
     client.send_message = MagicMock()
 
@@ -509,7 +514,7 @@ def test_player_role_on_stream_clear_resets_stream_started() -> None:
 
     role.on_stream_clear()
 
-    assert role._stream_started is False  # noqa: SLF001
+    assert role._stream_started is True  # noqa: SLF001
 
 
 def test_player_role_on_stream_clear_resets_buffer_tracker() -> None:

@@ -326,6 +326,24 @@ def test_visualizer_role_stream_start_is_resent_after_stream_end() -> None:
     assert len(stream_start_calls) == 2
 
 
+def test_visualizer_role_stream_start_skipped_after_stream_clear() -> None:
+    """stream/clear preserves stream/start config, so no resend is needed."""
+    client = _make_client_stub()
+    role = VisualizerV1Role(client=client)
+    role.on_connect()
+
+    role.on_stream_start()
+    role.on_stream_clear()
+    role.on_stream_start()
+
+    stream_start_calls = [
+        call
+        for call in client.send_role_message.call_args_list
+        if isinstance(call.args[1], StreamStartMessage)
+    ]
+    assert len(stream_start_calls) == 1
+
+
 def test_visualizer_role_resets_binary_timing_on_stream_start() -> None:
     """on_stream_start() resets binary timing for fresh grace window."""
     client = _make_client_stub()

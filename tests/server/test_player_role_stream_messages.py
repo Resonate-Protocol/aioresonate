@@ -200,3 +200,109 @@ def test_player_role_on_audio_chunk_sends_binary() -> None:
 
     assert result is None
     client.send_binary.assert_called_once()
+
+
+def _stream_start_messages(client: MagicMock) -> list[StreamStartMessage]:
+    return [
+        call.args[1]
+        for call in client.send_role_message.call_args_list
+        if isinstance(call.args[1], StreamStartMessage)
+    ]
+
+
+def test_player_role_skips_redundant_stream_start_when_format_unchanged() -> None:
+    """Second on_stream_start with unchanged format must not re-emit stream/start.
+
+    Spec: stream/start during an active stream only updates configuration,
+    so re-sending an identical config is wasted traffic. Successor
+    PushStreams that preserve format should reach the client with no
+    intervening stream/start.
+    """
+    client = MagicMock()
+    client.send_role_message = MagicMock()
+    client.send_binary = MagicMock(return_value=True)
+
+    audio_req = AudioRequirements(
+        sample_rate=48000,
+        bit_depth=16,
+        channels=2,
+        transformer=PcmPassthrough(sample_rate=48000, bit_depth=16, channels=2),
+    )
+    role = PlayerV1Role(client=client, audio_requirements=audio_req)
+    role._client.connection = MagicMock()  # noqa: SLF001
+
+    # First cycle: initial stream/start.
+    role.on_stream_start()
+    chunk = AudioChunk(data=b"\x00" * 100, timestamp_us=0, duration_us=25000, byte_count=100)
+    role.on_audio_chunk(chunk)
+    assert len(_stream_start_messages(client)) == 1
+
+    # Simulate clear (per spec, leaves stream active) followed by a
+    # successor PushStream that re-triggers on_stream_start.
+    role.on_stream_clear()
+    role.on_stream_start()
+    role.on_audio_chunk(chunk)
+
+    # No second stream/start should have been emitted.
+    assert len(_stream_start_messages(client)) == 1
+
+
+def test_player_role_resends_stream_start_when_format_changes() -> None:
+    """Format change must emit a fresh stream/start carrying the new config."""
+    client = MagicMock()
+    client.send_role_message = MagicMock()
+    client.send_binary = MagicMock(return_value=True)
+
+    audio_req = AudioRequirements(
+        sample_rate=48000,
+        bit_depth=16,
+        channels=2,
+        transformer=PcmPassthrough(sample_rate=48000, bit_depth=16, channels=2),
+    )
+    role = PlayerV1Role(client=client, audio_requirements=audio_req)
+    role._client.connection = MagicMock()  # noqa: SLF001
+
+    role.on_stream_start()
+    chunk = AudioChunk(data=b"\x00" * 100, timestamp_us=0, duration_us=25000, byte_count=100)
+    role.on_audio_chunk(chunk)
+    assert len(_stream_start_messages(client)) == 1
+
+    # Swap to a different format (sample rate change).
+    role._audio_requirements = AudioRequirements(  # noqa: SLF001
+        sample_rate=44100,
+        bit_depth=16,
+        channels=2,
+        transformer=PcmPassthrough(sample_rate=44100, bit_depth=16, channels=2),
+    )
+    role.on_stream_start()
+    role.on_audio_chunk(chunk)
+
+    starts = _stream_start_messages(client)
+    assert len(starts) == 2
+    assert starts[1].payload.player.sample_rate == 44100
+
+
+def test_player_role_resends_stream_start_after_stream_end() -> None:
+    """stream/end clears last-sent format so the next stream/start fires again."""
+    client = MagicMock()
+    client.send_role_message = MagicMock()
+    client.send_binary = MagicMock(return_value=True)
+
+    audio_req = AudioRequirements(
+        sample_rate=48000,
+        bit_depth=16,
+        channels=2,
+        transformer=PcmPassthrough(sample_rate=48000, bit_depth=16, channels=2),
+    )
+    role = PlayerV1Role(client=client, audio_requirements=audio_req)
+    role._client.connection = MagicMock()  # noqa: SLF001
+
+    role.on_stream_start()
+    chunk = AudioChunk(data=b"\x00" * 100, timestamp_us=0, duration_us=25000, byte_count=100)
+    role.on_audio_chunk(chunk)
+    role.on_stream_end()
+
+    role.on_stream_start()
+    role.on_audio_chunk(chunk)
+
+    assert len(_stream_start_messages(client)) == 2
