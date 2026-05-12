@@ -130,7 +130,10 @@ class SendspinGroup:
         # Replace any existing active stream so stale handles cannot continue
         # committing audio after a new stream is started.
         if self._push_stream is not None and not self._push_stream.is_stopped:
-            self._push_stream.stop()
+            # Drop the previously buffered audio since that belonged to the old PushStream,
+            # but keep the Sendspin stream to avoid stopping and immediately restarting the stream
+            self._push_stream.clear()
+            self._push_stream.stop(keep_stream=True)
 
         self._push_stream = PushStream(
             loop=self._server.loop,
