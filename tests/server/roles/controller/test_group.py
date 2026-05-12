@@ -6,7 +6,7 @@ from unittest.mock import MagicMock
 
 from aiosendspin.models.controller import ControllerCommandPayload
 from aiosendspin.models.core import ServerStateMessage
-from aiosendspin.models.types import MediaCommand
+from aiosendspin.models.types import MediaCommand, RepeatMode
 from aiosendspin.server.roles.controller.events import (
     ControllerMuteEvent,
     ControllerNextEvent,
@@ -274,8 +274,6 @@ def test_controller_group_role_handle_switch_command() -> None:
 
 def test_controller_group_role_handle_repeat_commands() -> None:
     """handle_command() emits RepeatEvent for repeat commands."""
-    from aiosendspin.models.types import RepeatMode  # noqa: PLC0415
-
     group = _make_group_stub()
     cgr = ControllerGroupRole(group)
     cgr.set_supported_commands(
@@ -317,6 +315,81 @@ def test_controller_group_role_handle_shuffle_commands() -> None:
         event = group._signal_event.call_args.args[0]  # noqa: SLF001
         assert isinstance(event, ControllerShuffleEvent)
         assert event.shuffle == expected_shuffle
+
+
+def test_controller_group_role_on_member_join_includes_repeat_and_shuffle_defaults() -> None:
+    """on_member_join() includes default repeat=OFF and shuffle=False in state."""
+    group = _make_group_stub()
+    cgr = ControllerGroupRole(group)
+
+    member = MagicMock()
+    cgr.on_member_join(member)
+
+    msg = member.send_message.call_args.args[0]
+    assert msg.payload.controller.repeat == RepeatMode.OFF
+    assert msg.payload.controller.shuffle is False
+
+
+def test_controller_group_role_set_repeat_pushes_state() -> None:
+    """set_repeat() pushes updated controller state to members."""
+    group = _make_group_stub()
+    cgr = ControllerGroupRole(group)
+
+    member = MagicMock()
+    cgr._members.append(member)  # noqa: SLF001
+    member.send_message.reset_mock()
+
+    cgr.set_repeat(RepeatMode.ALL)
+
+    member.send_message.assert_called_once()
+    msg = member.send_message.call_args.args[0]
+    assert msg.payload.controller.repeat == RepeatMode.ALL
+
+
+def test_controller_group_role_set_shuffle_pushes_state() -> None:
+    """set_shuffle() pushes updated controller state to members."""
+    group = _make_group_stub()
+    cgr = ControllerGroupRole(group)
+
+    member = MagicMock()
+    cgr._members.append(member)  # noqa: SLF001
+    member.send_message.reset_mock()
+
+    cgr.set_shuffle(shuffle=True)
+
+    member.send_message.assert_called_once()
+    msg = member.send_message.call_args.args[0]
+    assert msg.payload.controller.shuffle is True
+
+
+def test_controller_group_role_set_repeat_dedupes_unchanged_value() -> None:
+    """set_repeat() with same value does not re-push state."""
+    group = _make_group_stub()
+    cgr = ControllerGroupRole(group)
+
+    member = MagicMock()
+    cgr._members.append(member)  # noqa: SLF001
+
+    cgr.set_repeat(RepeatMode.ONE)
+    member.send_message.reset_mock()
+
+    cgr.set_repeat(RepeatMode.ONE)
+    member.send_message.assert_not_called()
+
+
+def test_controller_group_role_set_shuffle_dedupes_unchanged_value() -> None:
+    """set_shuffle() with same value does not re-push state."""
+    group = _make_group_stub()
+    cgr = ControllerGroupRole(group)
+
+    member = MagicMock()
+    cgr._members.append(member)  # noqa: SLF001
+
+    cgr.set_shuffle(shuffle=True)
+    member.send_message.reset_mock()
+
+    cgr.set_shuffle(shuffle=True)
+    member.send_message.assert_not_called()
 
 
 def test_controller_group_role_handle_unsupported_command() -> None:
