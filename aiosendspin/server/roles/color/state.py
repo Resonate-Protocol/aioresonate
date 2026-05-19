@@ -6,52 +6,74 @@ from dataclasses import dataclass
 
 from aiosendspin.models.color import SessionUpdateColor
 
+_RGB = tuple[int, int, int]
+_WHITE: _RGB = (255, 255, 255)
+_BLACK: _RGB = (0, 0, 0)
+_MIN_CONTRAST = 4.5
 
-@dataclass
+
+def _relative_luminance(rgb: _RGB) -> float:
+    """Compute WCAG relative luminance for an sRGB color."""
+
+    def channel(c: int) -> float:
+        s = c / 255.0
+        return s / 12.92 if s <= 0.03928 else ((s + 0.055) / 1.055) ** 2.4
+
+    r, g, b = rgb
+    return 0.2126 * channel(r) + 0.7152 * channel(g) + 0.0722 * channel(b)
+
+
+def _contrast_ratio(a: _RGB, b: _RGB) -> float:
+    """Compute WCAG contrast ratio between two RGB colors."""
+    la = _relative_luminance(a)
+    lb = _relative_luminance(b)
+    lighter, darker = (la, lb) if la >= lb else (lb, la)
+    return (lighter + 0.05) / (darker + 0.05)
+
+
+def _assert_contrast(label: str, a: _RGB, b: _RGB) -> None:
+    ratio = _contrast_ratio(a, b)
+    if ratio < _MIN_CONTRAST:
+        raise ValueError(f"{label}: contrast {ratio:.2f} < {_MIN_CONTRAST}:1")
+
+
+@dataclass(frozen=True)
 class Color:
-    """Color palette for the current audio."""
+    """Color palette for the current audio.
 
-    background_dark: list[int] | None = None
-    """Background color for dark mode as [R, G, B].
-
-    Caller must ensure a WCAG contrast ratio of at least 4.5:1 with white text
-    and with `on_dark` (if also set).
-    """
-    background_light: list[int] | None = None
-    """Background color for light mode as [R, G, B].
-
-    Caller must ensure a WCAG contrast ratio of at least 4.5:1 with black text
-    and with `on_light` (if also set).
-    """
-    primary: list[int] | None = None
-    """Dominant color as [R, G, B]. Not adjusted for contrast."""
-    accent: list[int] | None = None
-    """Secondary or complementary color as [R, G, B]. Not adjusted for contrast."""
-    on_dark: list[int] | None = None
-    """Light color for use on dark backgrounds as [R, G, B].
-
-    Caller must ensure a WCAG contrast ratio of at least 4.5:1 with `background_dark`
-    (if also set).
-    """
-    on_light: list[int] | None = None
-    """Dark color for use on light backgrounds as [R, G, B].
-
-    Caller must ensure a WCAG contrast ratio of at least 4.5:1 with `background_light`
-    (if also set).
+    Enforces the WCAG ≥4.5:1 contrast invariants from the Sendspin color@v1
+    spec at construction time.
     """
 
-    def equals(self, other: Color | None) -> bool:
-        """Check if color palette is equal to another."""
-        if other is None:
-            return False
-        return (
-            self.background_dark == other.background_dark
-            and self.background_light == other.background_light
-            and self.primary == other.primary
-            and self.accent == other.accent
-            and self.on_dark == other.on_dark
-            and self.on_light == other.on_light
-        )
+    background_dark: _RGB | None = None
+    """Background color for dark mode as (R, G, B)."""
+    background_light: _RGB | None = None
+    """Background color for light mode as (R, G, B)."""
+    primary: _RGB | None = None
+    """Dominant color as (R, G, B). Not adjusted for contrast."""
+    accent: _RGB | None = None
+    """Secondary or complementary color as (R, G, B). Not adjusted for contrast."""
+    on_dark: _RGB | None = None
+    """Light color for use on dark backgrounds as (R, G, B)."""
+    on_light: _RGB | None = None
+    """Dark color for use on light backgrounds as (R, G, B)."""
+
+    def __post_init__(self) -> None:
+        """Validate spec-mandated contrast pairs."""
+        if self.background_dark is not None:
+            _assert_contrast("background_dark vs white text", self.background_dark, _WHITE)
+            if self.on_dark is not None:
+                _assert_contrast("background_dark vs on_dark", self.background_dark, self.on_dark)
+        if self.background_light is not None:
+            _assert_contrast("background_light vs black text", self.background_light, _BLACK)
+            if self.on_light is not None:
+                _assert_contrast(
+                    "background_light vs on_light", self.background_light, self.on_light
+                )
+        if self.on_dark is not None:
+            _assert_contrast("on_dark vs black text", self.on_dark, _BLACK)
+        if self.on_light is not None:
+            _assert_contrast("on_light vs white text", self.on_light, _WHITE)
 
     def diff_update(self, last: Color | None, timestamp: int) -> SessionUpdateColor:
         """Build a SessionUpdateColor containing only changed fields compared to last."""
@@ -72,23 +94,4 @@ class Color:
 
     def snapshot_update(self, timestamp: int) -> SessionUpdateColor:
         """Build a SessionUpdateColor snapshot with all current values."""
-        update = SessionUpdateColor(timestamp=timestamp)
-        update.background_dark = self.background_dark
-        update.background_light = self.background_light
-        update.primary = self.primary
-        update.accent = self.accent
-        update.on_dark = self.on_dark
-        update.on_light = self.on_light
-        return update
-
-    @staticmethod
-    def cleared_update(timestamp: int) -> SessionUpdateColor:
-        """Build a SessionUpdateColor that clears all color fields."""
-        update = SessionUpdateColor(timestamp=timestamp)
-        update.background_dark = None
-        update.background_light = None
-        update.primary = None
-        update.accent = None
-        update.on_dark = None
-        update.on_light = None
-        return update
+        return self.diff_update(None, timestamp)

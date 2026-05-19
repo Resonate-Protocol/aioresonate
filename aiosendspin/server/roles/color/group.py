@@ -4,10 +4,12 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from aiosendspin.models.color import SessionUpdateColor
 from aiosendspin.models.core import ServerStateMessage, ServerStatePayload
 from aiosendspin.server.roles.base import GroupRole, Role
 from aiosendspin.server.roles.color.events import ColorClearedEvent, ColorUpdatedEvent
 from aiosendspin.server.roles.color.state import Color
+from aiosendspin.server.roles.color.types import ColorRoleProtocol
 
 if TYPE_CHECKING:
     from aiosendspin.server.group import SendspinGroup
@@ -35,26 +37,24 @@ class ColorGroupRole(GroupRole):
         """Send current color to newly joined member."""
         self._send_state_to_role(role)
 
-    def _send_state_to_role(self, role: Role) -> None:
+    def _send_state_to_role(self, role: ColorRoleProtocol) -> None:
         """Send current color state to a single role."""
         timestamp = self._group._server.clock.now_us()  # noqa: SLF001
         if self._current_color is not None:
             color_update = self._current_color.snapshot_update(timestamp)
         else:
-            color_update = Color.cleared_update(timestamp)
-        state_message = ServerStateMessage(ServerStatePayload(color=color_update))
-        role.send_message(state_message)
+            color_update = SessionUpdateColor.cleared(timestamp)
+        role.send_message(ServerStateMessage(ServerStatePayload(color=color_update)))
 
     def set_color(self, color: Color | None) -> None:
         """Set color palette and push updates to all subscribed roles."""
-        timestamp = self._group._server.clock.now_us()  # noqa: SLF001
-
-        if color is not None and color.equals(self._current_color):
+        if color == self._current_color:
             return
 
+        timestamp = self._group._server.clock.now_us()  # noqa: SLF001
         last_color = self._current_color
         if color is None:
-            color_update = Color.cleared_update(timestamp)
+            color_update = SessionUpdateColor.cleared(timestamp)
         else:
             color_update = color.diff_update(last_color, timestamp)
 

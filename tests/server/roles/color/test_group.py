@@ -39,22 +39,22 @@ def test_set_color_stores_and_broadcasts() -> None:
     member = MagicMock()
     cgr._members = [member]  # noqa: SLF001
 
-    color = Color(primary=[255, 0, 0], accent=[0, 255, 0])
+    color = Color(primary=(255, 0, 0), accent=(0, 255, 0))
     cgr.set_color(color)
 
     assert cgr.color is not None
-    assert cgr.color.primary == [255, 0, 0]
+    assert cgr.color.primary == (255, 0, 0)
 
     member.send_message.assert_called_once()
     msg = member.send_message.call_args.args[0]
     assert isinstance(msg, ServerStateMessage)
     assert msg.payload.color is not None
-    assert msg.payload.color.primary == [255, 0, 0]
+    assert msg.payload.color.primary == (255, 0, 0)
 
     group._signal_event.assert_called_once()  # noqa: SLF001
     event = group._signal_event.call_args.args[0]  # noqa: SLF001
     assert isinstance(event, ColorUpdatedEvent)
-    assert event.color.primary == [255, 0, 0]
+    assert event.color.primary == (255, 0, 0)
     assert event.previous_color is None
 
 
@@ -63,11 +63,11 @@ def test_set_color_no_op_when_equal() -> None:
     group = _make_group_stub()
     cgr = ColorGroupRole(group)
 
-    color = Color(primary=[255, 0, 0])
+    color = Color(primary=(255, 0, 0))
     cgr.set_color(color)
     group._signal_event.reset_mock()  # noqa: SLF001
 
-    cgr.set_color(Color(primary=[255, 0, 0]))
+    cgr.set_color(Color(primary=(255, 0, 0)))
 
     group._signal_event.assert_not_called()  # noqa: SLF001
 
@@ -80,7 +80,7 @@ def test_clear_color() -> None:
     member = MagicMock()
     cgr._members = [member]  # noqa: SLF001
 
-    cgr.set_color(Color(primary=[255, 0, 0]))
+    cgr.set_color(Color(primary=(255, 0, 0)))
     member.send_message.reset_mock()
     group._signal_event.reset_mock()  # noqa: SLF001
 
@@ -101,7 +101,7 @@ def test_on_member_join_sends_current_color() -> None:
     """on_member_join sends a snapshot to the new member."""
     group = _make_group_stub()
     cgr = ColorGroupRole(group)
-    cgr._current_color = Color(primary=[100, 150, 200])  # noqa: SLF001
+    cgr._current_color = Color(primary=(100, 150, 200))  # noqa: SLF001
 
     member = MagicMock()
     cgr.on_member_join(member)
@@ -110,7 +110,7 @@ def test_on_member_join_sends_current_color() -> None:
     msg = member.send_message.call_args.args[0]
     assert isinstance(msg, ServerStateMessage)
     assert msg.payload.color is not None
-    assert msg.payload.color.primary == [100, 150, 200]
+    assert msg.payload.color.primary == (100, 150, 200)
 
 
 def test_on_member_join_sends_cleared_when_no_color() -> None:
