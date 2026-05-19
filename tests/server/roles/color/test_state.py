@@ -57,3 +57,15 @@ def test_valid_full_palette_passes() -> None:
         on_dark=(255, 255, 255),
         on_light=(0, 0, 0),
     )
+
+
+def test_rgb_wrong_length_raises() -> None:
+    """Color rejects tuples that are not exactly 3 components."""
+    with pytest.raises(ValueError, match=r"primary must be \(R, G, B\)"):
+        Color(primary=(1, 2, 3, 4))  # type: ignore[arg-type]
+
+
+def test_rgb_component_out_of_range_raises() -> None:
+    """Color rejects component values outside 0-255."""
+    with pytest.raises(ValueError, match="primary values must be 0-255"):
+        Color(primary=(300, 0, 0))

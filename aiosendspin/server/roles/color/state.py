@@ -4,12 +4,20 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from aiosendspin.models.color import SessionUpdateColor
+from aiosendspin.models.color import SessionUpdateColor, _validate_rgb
 
 _RGB = tuple[int, int, int]
 _WHITE: _RGB = (255, 255, 255)
 _BLACK: _RGB = (0, 0, 0)
 _MIN_CONTRAST = 4.5
+_RGB_FIELDS: tuple[str, ...] = (
+    "background_dark",
+    "background_light",
+    "primary",
+    "accent",
+    "on_dark",
+    "on_light",
+)
 
 
 def _relative_luminance(rgb: _RGB) -> float:
@@ -59,7 +67,11 @@ class Color:
     """Dark color for use on light backgrounds as (R, G, B)."""
 
     def __post_init__(self) -> None:
-        """Validate spec-mandated contrast pairs."""
+        """Validate RGB shape, range, and spec-mandated contrast pairs."""
+        for name in _RGB_FIELDS:
+            value = getattr(self, name)
+            if value is not None:
+                _validate_rgb(name, value)
         if self.background_dark is not None:
             _assert_contrast("background_dark vs white text", self.background_dark, _WHITE)
             if self.on_dark is not None:

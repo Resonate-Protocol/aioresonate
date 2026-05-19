@@ -44,17 +44,17 @@ class SessionUpdateColor(DataClassORJSONMixin):
     timestamp: int
     """Server clock time in microseconds for when these colors are valid."""
     background_dark: _RGB | None | UndefinedField = field(default_factory=undefined_field)
-    """Background color for dark mode as [R, G, B]. Null clears the field."""
+    """Background color for dark mode as `(R, G, B)`. Null clears the field."""
     background_light: _RGB | None | UndefinedField = field(default_factory=undefined_field)
-    """Background color for light mode as [R, G, B]. Null clears the field."""
+    """Background color for light mode as `(R, G, B)`. Null clears the field."""
     primary: _RGB | None | UndefinedField = field(default_factory=undefined_field)
-    """Dominant color as [R, G, B]. Null clears the field."""
+    """Dominant color as `(R, G, B)`. Null clears the field."""
     accent: _RGB | None | UndefinedField = field(default_factory=undefined_field)
-    """Secondary or complementary color as [R, G, B]. Null clears the field."""
+    """Secondary or complementary color as `(R, G, B)`. Null clears the field."""
     on_dark: _RGB | None | UndefinedField = field(default_factory=undefined_field)
-    """Light color for use on dark backgrounds as [R, G, B]. Null clears the field."""
+    """Light color for use on dark backgrounds as `(R, G, B)`. Null clears the field."""
     on_light: _RGB | None | UndefinedField = field(default_factory=undefined_field)
-    """Dark color for use on light backgrounds as [R, G, B]. Null clears the field."""
+    """Dark color for use on light backgrounds as `(R, G, B)`. Null clears the field."""
 
     def __post_init__(self) -> None:
         """Validate RGB fields."""
