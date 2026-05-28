@@ -1214,7 +1214,7 @@ class PushStream:
 
         # If audio production stalls (e.g., the upstream source blocks), the scheduled
         # play timeline can drift into the past. Rebase the timeline so new audio is
-        # always scheduled with at least the default initial delay from "now".
+        # always scheduled at least `_min_send_ahead_us()` from "now".
         rebase_candidates = [
             self._channel_timing[cid]
             for cid in active_or_prepared_channels
