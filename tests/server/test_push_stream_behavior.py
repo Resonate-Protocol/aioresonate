@@ -113,14 +113,24 @@ class _FakeConnection:
 
 
 class _DummyRole:
-    def __init__(self, requirements: AudioRequirements, *, static_delay_us: int = 0) -> None:
+    def __init__(
+        self,
+        requirements: AudioRequirements,
+        *,
+        static_delay_us: int = 0,
+        replay_from_pcm_cache: bool = False,
+    ) -> None:
         self._requirements = requirements
         self._static_delay_us = static_delay_us
+        self._replay_from_pcm_cache = replay_from_pcm_cache
         self.received: list[AudioChunk] = []
         self.started = 0
 
     def get_audio_requirements(self) -> AudioRequirements | None:
         return self._requirements
+
+    def replay_from_pcm_cache(self) -> bool:
+        return self._replay_from_pcm_cache
 
     def get_static_delay_us(self) -> int:
         return self._static_delay_us
@@ -2428,6 +2438,117 @@ async def test_catchup_quantizer_does_not_share_live_cache(
         f"Expected 0 drift-triggered rebuilds during catch-up, got {catchup_drifts} "
         f"(likely shared quantizer cache causing timestamp jump)"
     )
+
+
+async def test_replay_from_pcm_cache_overrides_established_resampler_skip() -> None:
+    """Late join with an established resampler at the role's shape.
+
+    A live role builds a resampler at 48k/16/2. When a second role joins with
+    that same target shape, the established-resampler guard normally skips PCM
+    replay (re-running the shared resampler would shift the live role's audio).
+    Analysis-only roles opt in via `replay_from_pcm_cache()` so they get the
+    buffered PCM immediately instead of waiting for the next live commit, which
+    may sit far ahead behind a producer buffer.
+
+    Asserts the flag is the only thing that flips the decision: same scenario,
+    replay=True is fed cached audio; replay=False is not.
+    """
+
+    class TransformerA:
+        pending_timestamp_us: int | None = None
+
+        @property
+        def frame_duration_us(self) -> int:
+            return 25_000
+
+        def process(self, pcm: bytes, _ts: int, _dur: int) -> list[tuple[bytes, int]]:
+            return [(pcm, 25_000)]
+
+        def flush(self) -> list[tuple[bytes, int]]:
+            return []
+
+        def get_header(self) -> bytes | None:
+            return None
+
+        def reset(self) -> None:
+            return
+
+    group = _DummyGroup(clients=[])
+    live_role = _DummyRole(
+        AudioRequirements(
+            sample_rate=48_000,
+            bit_depth=16,
+            channels=2,
+            transformer=TransformerA(),
+            channel_id=MAIN_CHANNEL,
+            frame_duration_us=25_000,
+        )
+    )
+    group.clients.append(_DummyClient([live_role]))
+
+    loop = asyncio.get_running_loop()
+    clock = ManualClock(now_us_value=0)
+    stream = PushStream(loop=loop, clock=clock, group=group)
+    stream.enable_pcm_cache_for_channel(MAIN_CHANNEL)
+
+    for _ in range(4):
+        stream.prepare_audio(
+            bytes(9600),  # 25ms @ 48kHz stereo f32
+            AudioFormat(sample_rate=48_000, bit_depth=32, channels=2, sample_type="float"),
+        )
+        await stream.commit_audio()
+        clock.advance_us(25_000)
+
+    # Force the guarded branch: pretend a non-passthrough resampler already
+    # exists at the joining role's target shape. Without the opt-out this
+    # short-circuits PCM replay.
+    stream._has_established_resampler_for = lambda *_a, **_k: True  # type: ignore[method-assign]  # noqa: SLF001
+
+    # Analysis-only joiner (no transformer => distinct TransformKey from the
+    # live role) that opts into PCM-cache replay.
+    viz_role = _DummyRole(
+        AudioRequirements(
+            sample_rate=48_000,
+            bit_depth=16,
+            channels=2,
+            channel_id=MAIN_CHANNEL,
+            frame_duration_us=25_000,
+        ),
+        replay_from_pcm_cache=True,
+    )
+    group.clients.append(_DummyClient([viz_role]))
+    stream.on_role_join(viz_role)
+
+    for _ in range(50):
+        if viz_role.received:
+            break
+        await asyncio.sleep(0.01)
+
+    assert viz_role.received, "replay_from_pcm_cache role should receive buffered PCM on late join"
+
+    # Control: same scenario, replay disabled => guard skips replay, no audio.
+    class TransformerB(TransformerA):
+        pass
+
+    plain_role = _DummyRole(
+        AudioRequirements(
+            sample_rate=48_000,
+            bit_depth=16,
+            channels=2,
+            transformer=TransformerB(),
+            channel_id=MAIN_CHANNEL,
+            frame_duration_us=25_000,
+        ),
+        replay_from_pcm_cache=False,
+    )
+    group.clients.append(_DummyClient([plain_role]))
+    stream.on_role_join(plain_role)
+
+    for _ in range(20):
+        await asyncio.sleep(0.01)
+
+    assert not plain_role.received, "replay-disabled role must not get historical replay"
+    assert plain_role.started >= 1, "replay-disabled role should still be started for live audio"
 
 
 def test_noop_resample_bypasses_graph_construction(

@@ -250,6 +250,20 @@ class Role(ABC):
         """
         return False
 
+    def replay_from_pcm_cache(self) -> bool:
+        """Whether late-join should replay cached PCM even when a live resampler exists.
+
+        Audio-playback roles skip historical replay when another live role
+        already drives a resampler at their target PCM shape, because
+        re-running that resampler would shift the live role's samples across
+        the hand-off. Analysis-only roles (e.g. visualizer) do not feed a
+        synchronized output, so the seam is inaudible; they override this to
+        True so a mid-stream join is fed the buffered PCM immediately instead
+        of waiting for the next live commit (which may sit far ahead of the
+        playhead behind a producer buffer).
+        """
+        return False
+
     def get_binary_handling(self, message_type: int) -> BinaryHandling | None:  # noqa: ARG002
         """Return handling policy for a binary message type, or None if not handled.
 

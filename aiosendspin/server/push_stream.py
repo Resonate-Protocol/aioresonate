@@ -1919,9 +1919,15 @@ class PushStream:
                             self._ensure_role_started(role)
                         return
 
-                if self._has_established_resampler_for(req, channel_id):
+                if not role.replay_from_pcm_cache() and self._has_established_resampler_for(
+                    req, channel_id
+                ):
                     # Sharing a resampler key with a live role would shift this
                     # role's audio across the hand-off; skip historical replay.
+                    # Analysis-only roles opt out: their catch-up uses isolated
+                    # resampler state and an inaudible seam, so replaying the
+                    # buffered PCM now beats waiting for a live commit that may
+                    # sit far ahead behind the producer buffer.
                     self._rebase_far_ahead_join_tail(channel_id, role)
                     if self._channel_timing:
                         self._ensure_role_started(role)

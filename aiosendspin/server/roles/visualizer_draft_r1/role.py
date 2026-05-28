@@ -75,6 +75,10 @@ class VisualizerDraftR1Role(Role):
             frame_duration_us=25_000,
         )
 
+    def replay_from_pcm_cache(self) -> bool:
+        """Replay buffered PCM on late join (visualizer is analysis-only)."""
+        return True
+
     def get_binary_handling(self, message_type: int) -> BinaryHandling | None:
         """Return handling policy for visualizer binary frames."""
         if message_type == BinaryMessageType.VISUALIZATION_DATA.value:
