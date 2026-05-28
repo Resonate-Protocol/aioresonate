@@ -32,6 +32,11 @@ if TYPE_CHECKING:
     from aiosendspin.server.group import SendspinGroup
 
 
+# Default startup lead time used when a role does not report its own. Matches the
+# push stream's no-roles fallback so default behavior is unchanged.
+DEFAULT_REQUIRED_LEAD_TIME_US = 250_000
+
+
 @dataclass(frozen=True)
 class BinaryHandling:
     """Policy for how binary messages should be handled by connection.
@@ -266,6 +271,14 @@ class Role(ABC):
 
     def get_static_delay_us(self) -> int:
         """Return transport delay in microseconds applied by this role (default: 0)."""
+        return 0
+
+    def get_required_lead_time_us(self) -> int:
+        """Return the startup lead time this role needs before the first audio chunk."""
+        return DEFAULT_REQUIRED_LEAD_TIME_US
+
+    def get_min_buffer_us(self) -> int:
+        """Return the minimum ongoing buffer duration this role wants during playback."""
         return 0
 
     def get_join_delay_s(self) -> float:

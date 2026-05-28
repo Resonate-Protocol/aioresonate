@@ -22,6 +22,20 @@ class StaticDelayChangedEvent(ClientRoleEvent):
     static_delay_ms: int
 
 
+@dataclass
+class RequiredLeadTimeChangedEvent(ClientRoleEvent):
+    """The player's reported startup lead time was changed."""
+
+    required_lead_time_ms: int
+
+
+@dataclass
+class MinBufferChangedEvent(ClientRoleEvent):
+    """The player's reported minimum ongoing buffer duration was changed."""
+
+    min_buffer_ms: int
+
+
 class PlayerGroupEvent(GroupRoleEvent):
     """Base event type for player group role changes."""
 

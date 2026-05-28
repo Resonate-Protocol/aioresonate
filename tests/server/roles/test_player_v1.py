@@ -22,6 +22,10 @@ from aiosendspin.server.audio import AudioFormat
 from aiosendspin.server.roles import PlayerV1Role
 from aiosendspin.server.roles.base import AudioChunk, AudioRequirements, StreamRequirements
 from aiosendspin.server.roles.player.audio_transformers import FlacEncoder, PcmPassthrough
+from aiosendspin.server.roles.player.events import (
+    MinBufferChangedEvent,
+    RequiredLeadTimeChangedEvent,
+)
 
 # --- Basic properties ---
 
@@ -851,6 +855,42 @@ def test_on_client_state_no_event_if_unchanged() -> None:
     payload = ClientStatePayload(player=PlayerStatePayload(static_delay_ms=0))
     role.on_client_state(payload)
     client._signal_event.assert_not_called()  # noqa: SLF001
+
+
+def test_timing_defaults() -> None:
+    """Lead time and min buffer default to 250 ms."""
+    client = _make_client_stub()
+    role = PlayerV1Role(client=client)
+    assert role.required_lead_time_ms == 250
+    assert role.min_buffer_ms == 250
+    assert role.get_required_lead_time_us() == 250_000
+    assert role.get_min_buffer_us() == 250_000
+
+
+def test_on_client_state_updates_required_lead_time() -> None:
+    """on_client_state() updates required_lead_time_ms and fires its event."""
+    client = _make_client_stub()
+    role = PlayerV1Role(client=client)
+    payload = ClientStatePayload(player=PlayerStatePayload(required_lead_time_ms=80))
+    role.on_client_state(payload)
+    assert role.required_lead_time_ms == 80
+    assert role.get_required_lead_time_us() == 80_000
+    event = client._signal_event.call_args[0][0]  # noqa: SLF001
+    assert isinstance(event, RequiredLeadTimeChangedEvent)
+    assert event.required_lead_time_ms == 80
+
+
+def test_on_client_state_updates_min_buffer() -> None:
+    """on_client_state() updates min_buffer_ms and fires its event."""
+    client = _make_client_stub()
+    role = PlayerV1Role(client=client)
+    payload = ClientStatePayload(player=PlayerStatePayload(min_buffer_ms=1500))
+    role.on_client_state(payload)
+    assert role.min_buffer_ms == 1500
+    assert role.get_min_buffer_us() == 1_500_000
+    event = client._signal_event.call_args[0][0]  # noqa: SLF001
+    assert isinstance(event, MinBufferChangedEvent)
+    assert event.min_buffer_ms == 1500
 
 
 def test_on_client_state_updates_supported_commands() -> None:

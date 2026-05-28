@@ -773,7 +773,7 @@ class PushStream:
         """Return a stable timestamp for commits interrupted by stop()."""
         if self._channel_timing:
             return min(self._channel_timing.values())
-        return self._clock.now_us() + DEFAULT_INITIAL_DELAY_US + self._max_active_static_delay_us()
+        return self._clock.now_us() + self._min_send_ahead_us()
 
     @staticmethod
     def _client_in_audio_pipeline(client: SendspinClient) -> bool:
@@ -814,6 +814,26 @@ class PushStream:
         if not roles:
             return 0
         return max(role.get_static_delay_us() for _, role in roles)
+
+    @staticmethod
+    def _role_send_ahead_us(role: Role) -> int:
+        """Per-role send-ahead floor: max(required_lead, min_buffer) + static_delay.
+
+        Satisfies both spec constraints at once: the first chunk lands at least
+        required_lead_time_ms ahead (startup) and the ongoing timeline never sits
+        below min_buffer_ms ahead, with the player's static delay added on top.
+        """
+        return (
+            max(role.get_required_lead_time_us(), role.get_min_buffer_us())
+            + role.get_static_delay_us()
+        )
+
+    def _min_send_ahead_us(self) -> int:
+        """Return the common send-ahead floor across active audio roles."""
+        roles = self._get_audio_roles()
+        if not roles:
+            return DEFAULT_INITIAL_DELAY_US
+        return max(self._role_send_ahead_us(role) for _, role in roles)
 
     def _get_cached_resampler(self, key: _ResamplerKey) -> _ResamplerState | None:
         """Get existing resampler from cache, or None if not cached."""
@@ -961,7 +981,9 @@ class PushStream:
             # drifted far ahead (e.g., reconnect with large server-side buffering),
             # use the standard near-now target to avoid long audible startup delays.
             channel_tail_us = max(now_us, self._channel_timing[channel_id])
-            align_ceiling_us = now_us + DEFAULT_INITIAL_DELAY_US + delay_us
+            align_ceiling_us = now_us + (
+                self._role_send_ahead_us(role) if role is not None else DEFAULT_INITIAL_DELAY_US
+            )
             if channel_tail_us <= align_ceiling_us:
                 return max(channel_tail_us, target_us)
         return target_us
@@ -1007,9 +1029,7 @@ class PushStream:
             if not self._channel_buffers and not historical:
                 now_us = self._clock.now_us()
                 if not self._channel_timing:
-                    self._channel_timing[MAIN_CHANNEL] = (
-                        now_us + DEFAULT_INITIAL_DELAY_US + self._max_active_static_delay_us()
-                    )
+                    self._channel_timing[MAIN_CHANNEL] = now_us + self._min_send_ahead_us()
                     self._channel_timing_residue[MAIN_CHANNEL] = 0
                 return min(self._channel_timing.values())
 
@@ -1143,7 +1163,7 @@ class PushStream:
 
         # Auto-calculate mode (existing behavior).
         now_us = self._clock.now_us()
-        target_min_us = now_us + DEFAULT_INITIAL_DELAY_US + self._max_active_static_delay_us()
+        target_min_us = now_us + self._min_send_ahead_us()
         # Limit timeline sharing/rebase inputs to channels participating in this commit
         # (active subscribers + prepared payloads). This excludes stale timing entries
         # from inactive channels.
@@ -1205,9 +1225,7 @@ class PushStream:
         :param historical: Channel ID -> list of (pcm, format) chunks (oldest first).
         """
         now_us = self._clock.now_us()
-        min_delivery_timestamp_us = (
-            now_us + DEFAULT_INITIAL_DELAY_US + self._max_active_static_delay_us()
-        )
+        min_delivery_timestamp_us = now_us + self._min_send_ahead_us()
 
         for channel_id, chunks in historical.items():
             if not self._is_generation_active(commit_generation):
@@ -1258,9 +1276,7 @@ class PushStream:
                 self._channel_timing[channel_id] = max(0, anchor_timing_us - total_duration_us)
                 self._channel_timing_residue[channel_id] = 0
             else:
-                self._channel_timing[channel_id] = (
-                    now_us + DEFAULT_INITIAL_DELAY_US + self._max_active_static_delay_us()
-                )
+                self._channel_timing[channel_id] = now_us + self._min_send_ahead_us()
                 self._channel_timing_residue[channel_id] = 0
 
             for pcm_bytes, fmt in chunks:
@@ -2068,7 +2084,7 @@ class PushStream:
             # will de-sync it from other clients.
             return
         now_us = self._clock.now_us()
-        max_resume_start_us = now_us + DEFAULT_INITIAL_DELAY_US + joining_role.get_static_delay_us()
+        max_resume_start_us = now_us + self._role_send_ahead_us(joining_role)
         self._channel_timing[channel_id] = min(
             self._channel_timing[channel_id], max_resume_start_us
         )

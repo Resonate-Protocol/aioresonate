@@ -88,6 +88,21 @@ class PlayerStatePayload(DataClassORJSONMixin):
     """Mute state, only included if 'mute' in supported_commands."""
     static_delay_ms: int = 0
     """Static delay in milliseconds (0-5000), always present for players."""
+    # TODO: drop default once all clients report this field per spec.
+    required_lead_time_ms: int = 250
+    """Minimum startup lead time in milliseconds (0-30000), always present for players.
+
+    Measured from the server transmit time of the start/restart trigger (stream/start
+    or stream/clear) to the timestamp of the first subsequent audio chunk. Covers codec
+    init, decode warmup, audio backend buffering, and DAC latency. Excludes static_delay_ms.
+    """
+    # TODO: drop default once all clients report this field per spec.
+    min_buffer_ms: int = 250
+    """Requested minimum ongoing buffer duration in milliseconds (0-30000).
+
+    Maintained during playback (primarily for live streams) to absorb network jitter and
+    decode/playback timing variance. Excludes static_delay_ms.
+    """
     supported_commands: list[PlayerCommand] | None = None
     """Subset of: 'set_static_delay'. Commands this player supports via client/state."""
 
@@ -97,6 +112,12 @@ class PlayerStatePayload(DataClassORJSONMixin):
             raise ValueError(f"Volume must be in range 0-100, got {self.volume}")
         if not 0 <= self.static_delay_ms <= 5000:
             raise ValueError(f"static_delay_ms must be in range 0-5000, got {self.static_delay_ms}")
+        if not 0 <= self.required_lead_time_ms <= 30000:
+            raise ValueError(
+                f"required_lead_time_ms must be in range 0-30000, got {self.required_lead_time_ms}"
+            )
+        if not 0 <= self.min_buffer_ms <= 30000:
+            raise ValueError(f"min_buffer_ms must be in range 0-30000, got {self.min_buffer_ms}")
         VALID_STATE_COMMANDS = {PlayerCommand.SET_STATIC_DELAY}  # noqa: N806
         if self.supported_commands:
             invalid = [c for c in self.supported_commands if c not in VALID_STATE_COMMANDS]

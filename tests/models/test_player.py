@@ -48,6 +48,32 @@ def test_player_state_backward_compat_no_delay() -> None:
     assert payload.static_delay_ms == 0
 
 
+def test_player_state_timing_defaults() -> None:
+    """Clients that omit timing fields get the 250 ms defaults."""
+    payload = PlayerStatePayload.from_json('{"volume": 50}')
+    assert payload.required_lead_time_ms == 250
+    assert payload.min_buffer_ms == 250
+
+
+def test_player_state_timing_serializes() -> None:
+    """Timing fields are always serialized (not omitted)."""
+    data = PlayerStatePayload(required_lead_time_ms=80, min_buffer_ms=1200).to_dict()
+    assert data["required_lead_time_ms"] == 80
+    assert data["min_buffer_ms"] == 1200
+
+
+def test_player_state_required_lead_time_out_of_range() -> None:
+    """required_lead_time_ms above 30000 is rejected."""
+    with pytest.raises(ValueError, match="required_lead_time_ms"):
+        PlayerStatePayload(required_lead_time_ms=30001)
+
+
+def test_player_state_min_buffer_negative_invalid() -> None:
+    """Negative min_buffer_ms is rejected."""
+    with pytest.raises(ValueError, match="min_buffer_ms"):
+        PlayerStatePayload(min_buffer_ms=-1)
+
+
 def test_player_command_set_static_delay_valid() -> None:
     """SET_STATIC_DELAY command accepts valid delay value."""
     cmd = PlayerCommandPayload(command=PlayerCommand.SET_STATIC_DELAY, static_delay_ms=300)

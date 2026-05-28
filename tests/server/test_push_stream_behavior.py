@@ -113,9 +113,18 @@ class _FakeConnection:
 
 
 class _DummyRole:
-    def __init__(self, requirements: AudioRequirements, *, static_delay_us: int = 0) -> None:
+    def __init__(
+        self,
+        requirements: AudioRequirements,
+        *,
+        static_delay_us: int = 0,
+        required_lead_time_us: int = DEFAULT_INITIAL_DELAY_US,
+        min_buffer_us: int = 0,
+    ) -> None:
         self._requirements = requirements
         self._static_delay_us = static_delay_us
+        self._required_lead_time_us = required_lead_time_us
+        self._min_buffer_us = min_buffer_us
         self.received: list[AudioChunk] = []
         self.started = 0
 
@@ -124,6 +133,12 @@ class _DummyRole:
 
     def get_static_delay_us(self) -> int:
         return self._static_delay_us
+
+    def get_required_lead_time_us(self) -> int:
+        return self._required_lead_time_us
+
+    def get_min_buffer_us(self) -> int:
+        return self._min_buffer_us
 
     def get_join_delay_s(self) -> float:
         return 0.0
@@ -2679,6 +2694,8 @@ _STATIC_DELAY_US = 5_000_000  # 5 s
 def _make_role(
     *,
     static_delay_us: int = 0,
+    required_lead_time_us: int = DEFAULT_INITIAL_DELAY_US,
+    min_buffer_us: int = 0,
     channel_id: UUID = MAIN_CHANNEL,
 ) -> _DummyRole:
     return _DummyRole(
@@ -2691,6 +2708,8 @@ def _make_role(
             frame_duration_us=25_000,
         ),
         static_delay_us=static_delay_us,
+        required_lead_time_us=required_lead_time_us,
+        min_buffer_us=min_buffer_us,
     )
 
 
@@ -2727,6 +2746,61 @@ async def test_mixed_delay_timeline_uses_largest_static_delay() -> None:
     play_start = await stream.commit_audio()
 
     assert play_start >= clock.now_us() + DEFAULT_INITIAL_DELAY_US + _STATIC_DELAY_US
+
+
+@pytest.mark.asyncio
+async def test_commit_audio_uses_reported_lead_time() -> None:
+    """A player reporting a low lead time starts ahead by exactly that lead."""
+    loop = asyncio.get_running_loop()
+    clock = ManualClock(now_us_value=1_000_000)
+    group = _DummyGroup(clients=[])
+    role = _make_role(required_lead_time_us=50_000, min_buffer_us=0, static_delay_us=0)
+    group.clients.append(_DummyClient([role]))
+
+    stream = PushStream(loop=loop, clock=clock, group=group)
+    fmt = AudioFormat(sample_rate=48000, bit_depth=16, channels=2)
+    stream.prepare_audio(bytes(4800), fmt)
+    play_start = await stream.commit_audio()
+
+    assert play_start == clock.now_us() + 50_000
+
+
+@pytest.mark.asyncio
+async def test_commit_audio_min_buffer_floors_send_ahead() -> None:
+    """When min_buffer exceeds lead time, the send-ahead floor follows min_buffer."""
+    loop = asyncio.get_running_loop()
+    clock = ManualClock(now_us_value=1_000_000)
+    group = _DummyGroup(clients=[])
+    role = _make_role(required_lead_time_us=50_000, min_buffer_us=2_000_000, static_delay_us=0)
+    group.clients.append(_DummyClient([role]))
+
+    stream = PushStream(loop=loop, clock=clock, group=group)
+    fmt = AudioFormat(sample_rate=48000, bit_depth=16, channels=2)
+    stream.prepare_audio(bytes(4800), fmt)
+    play_start = await stream.commit_audio()
+
+    assert play_start == clock.now_us() + 2_000_000
+
+
+@pytest.mark.asyncio
+async def test_send_ahead_uses_largest_member_budget() -> None:
+    """Grouped players use a common floor: max(lead, min_buffer) + static across members."""
+    loop = asyncio.get_running_loop()
+    clock = ManualClock(now_us_value=1_000_000)
+    group = _DummyGroup(clients=[])
+    role_low = _make_role(required_lead_time_us=100_000, min_buffer_us=0, static_delay_us=0)
+    role_high = _make_role(
+        required_lead_time_us=0, min_buffer_us=1_500_000, static_delay_us=200_000
+    )
+    group.clients.extend([_DummyClient([role_low]), _DummyClient([role_high])])
+
+    stream = PushStream(loop=loop, clock=clock, group=group)
+    fmt = AudioFormat(sample_rate=48000, bit_depth=16, channels=2)
+    stream.prepare_audio(bytes(4800), fmt)
+    play_start = await stream.commit_audio()
+
+    # role_high dominates: max(0, 1_500_000) + 200_000 = 1_700_000.
+    assert play_start == clock.now_us() + 1_700_000
 
 
 @pytest.mark.asyncio

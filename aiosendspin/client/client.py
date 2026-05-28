@@ -204,6 +204,10 @@ class SendspinClient:
 
     _static_delay_us: int = 0
     """Static playback delay in microseconds."""
+    _required_lead_time_us: int = 250_000
+    """Reported startup lead time in microseconds."""
+    _min_buffer_us: int = 250_000
+    """Reported minimum ongoing buffer duration in microseconds."""
     _send_lock: asyncio.Lock
     """Lock for serializing WebSocket message sends."""
     _time_filter: SendspinTimeFilter
@@ -273,6 +277,8 @@ class SendspinClient:
         visualizer_support: ClientHelloVisualizerSupport | None = None,
         session: ClientSession | None = None,
         static_delay_ms: float = 0.0,
+        required_lead_time_ms: float = 250.0,
+        min_buffer_ms: float = 250.0,
         initial_volume: int = 100,
         initial_muted: bool = False,
         state_supported_commands: list[PlayerCommand] | None = None,
@@ -299,6 +305,12 @@ class SendspinClient:
                 and managed by this client.
             static_delay_ms: Static playback delay in milliseconds applied after
                 clock synchronization. Defaults to 0.0.
+            required_lead_time_ms: Startup lead time reported via client/state
+                (codec init, decode warmup, backend buffering, DAC latency).
+                Defaults to 250.0. Excludes static_delay_ms.
+            min_buffer_ms: Minimum ongoing buffer duration reported via client/state
+                to absorb network jitter and decode/playback variance. Defaults to
+                250.0. Excludes static_delay_ms.
             initial_volume: Initial volume level (0-100) for player role.
                 Defaults to 100. Sent automatically after handshake if PLAYER
                 role is supported.
@@ -351,6 +363,8 @@ class SendspinClient:
         self._initial_volume = initial_volume
         self._initial_muted = initial_muted
         self.set_static_delay_ms(static_delay_ms)
+        self.set_required_lead_time_ms(required_lead_time_ms)
+        self.set_min_buffer_ms(min_buffer_ms)
         self._state_supported_commands: list[PlayerCommand] = list(state_supported_commands or [])
 
         # Initialize callback lists
@@ -391,6 +405,40 @@ class SendspinClient:
             return
         self._static_delay_us = delay_us
         logger.info("Set static playback delay to %.1f ms", self.static_delay_ms)
+
+    @property
+    def required_lead_time_ms(self) -> float:
+        """Return the currently reported startup lead time in milliseconds."""
+        return self._required_lead_time_us / 1_000.0
+
+    def set_required_lead_time_ms(self, lead_ms: float) -> None:
+        """Update the startup lead time reported via client/state.
+
+        If changing frequently, the caller must debounce to only report sustained shifts.
+        """
+        lead_ms = max(0.0, min(30000.0, lead_ms))
+        lead_us = round(lead_ms * 1_000.0)
+        if lead_us == self._required_lead_time_us:
+            return
+        self._required_lead_time_us = lead_us
+        logger.info("Set required lead time to %.1f ms", self.required_lead_time_ms)
+
+    @property
+    def min_buffer_ms(self) -> float:
+        """Return the currently reported minimum ongoing buffer duration in milliseconds."""
+        return self._min_buffer_us / 1_000.0
+
+    def set_min_buffer_ms(self, buffer_ms: float) -> None:
+        """Update the minimum ongoing buffer duration reported via client/state.
+
+        If changing frequently, the caller must debounce to only report sustained shifts.
+        """
+        buffer_ms = max(0.0, min(30000.0, buffer_ms))
+        buffer_us = round(buffer_ms * 1_000.0)
+        if buffer_us == self._min_buffer_us:
+            return
+        self._min_buffer_us = buffer_us
+        logger.info("Set minimum ongoing buffer to %.1f ms", self.min_buffer_ms)
 
     async def connect(self, url: str) -> None:
         """Connect to a Sendspin server via WebSocket."""
@@ -514,6 +562,8 @@ class SendspinClient:
                     volume=volume,
                     muted=muted,
                     static_delay_ms=round(self._static_delay_us / 1_000),
+                    required_lead_time_ms=round(self._required_lead_time_us / 1_000),
+                    min_buffer_ms=round(self._min_buffer_us / 1_000),
                     supported_commands=self._state_supported_commands or None,
                 )
             )

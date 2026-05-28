@@ -24,6 +24,8 @@ __all__ = [
     "GroupMemberRemovedEvent",
     "GroupRoleEvent",
     "GroupStateChangedEvent",
+    "MinBufferChangedEvent",
+    "RequiredLeadTimeChangedEvent",
     "SendspinClient",
     "SendspinEvent",
     "SendspinGroup",
@@ -50,7 +52,12 @@ from .events import (
 from .group import (
     SendspinGroup,
 )
-from .roles.player.events import StaticDelayChangedEvent, VolumeChangedEvent
+from .roles.player.events import (
+    MinBufferChangedEvent,
+    RequiredLeadTimeChangedEvent,
+    StaticDelayChangedEvent,
+    VolumeChangedEvent,
+)
 from .server import (
     ClientAddedEvent,
     ClientRemovedEvent,
