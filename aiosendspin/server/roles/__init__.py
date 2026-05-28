@@ -73,6 +73,7 @@ from aiosendspin.server.roles.visualizer import (
     VisualizerGroupRole,
     VisualizerV1Role,
 )
+from aiosendspin.server.roles.visualizer_draft_r1 import VisualizerDraftR1Role
 
 __all__ = [
     "ArtworkClearedEvent",
@@ -113,6 +114,7 @@ __all__ = [
     "PlayerV1Role",
     "Role",
     "StreamRequirements",
+    "VisualizerDraftR1Role",
     "VisualizerGroupRole",
     "VisualizerV1Role",
     "register_role",

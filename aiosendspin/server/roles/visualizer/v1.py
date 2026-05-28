@@ -1,9 +1,34 @@
-"""Visualizer role implementation for draft visualizer streaming."""
+"""Visualizer role implementation for the `visualizer@v1` wire.
+
+Each binary message carries exactly one frame of one type. The role emits:
+- `loudness` (msg 16) — per audio chunk
+- `beat` (msg 17) — fed in via `append_beats` from offline analysis
+- `f_peak` (msg 18) — per audio chunk
+- `spectrum` (msg 19) — per audio chunk
+- `peak` (msg 20) — per audio chunk when the onset detector fires
+- `pitch` (msg 21) — per audio chunk when a confident pitch is detected
+
+`beat` is *deferred* from `stream/start.types` until the first non-empty
+schedule actually lands. While beats are still being computed upstream
+the role advertises only the FFT-driven types so clients can render a
+`peak`-based fallback without flicker; once `append_beats` first
+delivers, the role re-emits `stream/start` with `beat` added and beats
+begin riding the wire interleaved with periodic frames.
+
+All beats drain through `on_audio_chunk` (audio chunks are delivered to
+this role's `on_audio_chunk` regardless of negotiated types), so no
+separate clock-based scheduler is needed.
+"""
 
 from __future__ import annotations
 
 import logging
+import struct
+from collections import deque
+from dataclasses import replace
 from typing import TYPE_CHECKING
+
+import numpy as np
 
 from aiosendspin.models.core import (
     StreamClearMessage,
@@ -16,8 +41,11 @@ from aiosendspin.models.core import (
 )
 from aiosendspin.models.types import BinaryMessageType
 from aiosendspin.models.visualizer import (
+    BeatAvailability,
+    BeatTiming,
     ClientHelloVisualizerSupport,
     StreamStartVisualizer,
+    SupportedVisualizerType,
 )
 from aiosendspin.server.audio import BufferTracker
 from aiosendspin.server.roles.base import (
@@ -27,40 +55,86 @@ from aiosendspin.server.roles.base import (
     Role,
     StreamRequirements,
 )
-from aiosendspin.server.roles.visualizer.features import VisualizerFeatureExtractor
-from aiosendspin.server.roles.visualizer.packing import pack_visualization_message
+from aiosendspin.server.roles.visualizer.features import (
+    ExtractedFrame,
+    VisualizerFeatureExtractor,
+)
+from aiosendspin.server.roles.visualizer.packing import (
+    FLAG_DOWNBEAT,
+    pack_visualizer_frame,
+)
 
 if TYPE_CHECKING:
     from aiosendspin.server.client import SendspinClient
 
 _LOGGER = logging.getLogger(__name__)
 
+# Types the reference implementation knows how to compute. Unsupported
+# types requested by the client are silently dropped per spec.
+_IMPLEMENTED_TYPES: frozenset[SupportedVisualizerType] = frozenset(
+    {"loudness", "f_peak", "spectrum", "beat", "peak", "pitch"}
+)
+# Types whose computation requires the FFT extractor. `beat` is the only
+# supplied-externally type and does not require the extractor.
+_FFT_DRIVEN_TYPES: frozenset[SupportedVisualizerType] = frozenset(
+    {"loudness", "f_peak", "spectrum", "peak", "pitch"}
+)
+
 
 class VisualizerV1Role(Role):
-    """Role implementation for draft visualizer streaming."""
+    """Role implementation for `visualizer@v1` streaming."""
 
     def __init__(self, client: SendspinClient | None = None) -> None:
         """Initialize VisualizerV1Role."""
         if client is None:
-            msg = "VisualizerV1Role requires a client"
-            raise ValueError(msg)
+            raise ValueError("VisualizerV1Role requires a client")
         self._client = client
         self._stream_started = False
-        self._buffer_tracker = None
-        self._group_role = None
+        self._buffer_tracker: BufferTracker | None = None
         self._support: ClientHelloVisualizerSupport | None = None
         self._stream_config: StreamStartVisualizer | None = None
         self._extractor: VisualizerFeatureExtractor | None = None
+        # Beats queued for delivery on the next audio chunk's drain.
+        self._pending_beats: deque[BeatTiming] = deque()
+        # True once `append_beats` has delivered a non-empty schedule for
+        # the current stream. Gates `beat` in the negotiated types.
+        self._has_beats_landed: bool = False
+        # Server-side capability metadata for downbeat tracking, set via
+        # `set_tracks_downbeats()` before `stream/start` is sent.
+        self._tracks_downbeats: bool = False
+        # Last-emitted timestamp across all visualizer binaries. The spec
+        # requires non-decreasing timestamp order within the role; beats
+        # interleave with audio-chunk-driven periodic frames to satisfy
+        # it. None means the cursor has not been primed yet.
+        self._last_wire_emit_ts_us: int | None = None
+        # Beat availability for the current source. UNAVAILABLE drops
+        # `beat` from the negotiated set and discards pending beats.
+        self._beat_availability: BeatAvailability = BeatAvailability.PENDING
 
     @property
     def role_id(self) -> str:
         """Versioned role identifier."""
-        return "visualizer@_draft_r1"
+        return "visualizer@v1"
 
     @property
     def role_family(self) -> str:
         """Role family name for protocol messages."""
         return "visualizer"
+
+    @property
+    def wants_beats(self) -> bool:
+        """True if the client negotiated `beat` and beats are not unavailable.
+
+        Reads the client's requested types (`_support`), not the exposed
+        `stream/start` types, so it is True from the moment the client
+        asks for beats — before the first schedule activates the type on
+        the wire.
+        """
+        return (
+            self._support is not None
+            and "beat" in self._support.types
+            and self._beat_availability is not BeatAvailability.UNAVAILABLE
+        )
 
     def get_stream_requirements(self) -> StreamRequirements:
         """Visualizer role sends binary streams."""
@@ -77,16 +151,58 @@ class VisualizerV1Role(Role):
 
     def get_binary_handling(self, message_type: int) -> BinaryHandling | None:
         """Return handling policy for visualizer binary frames."""
-        if message_type == BinaryMessageType.VISUALIZATION_DATA.value:
-            return BinaryHandling(drop_late=True, grace_period_us=2_000_000, buffer_track=True)
+        for member in (
+            BinaryMessageType.VISUALIZATION_LOUDNESS,
+            BinaryMessageType.VISUALIZATION_BEAT,
+            BinaryMessageType.VISUALIZATION_F_PEAK,
+            BinaryMessageType.VISUALIZATION_SPECTRUM,
+            BinaryMessageType.VISUALIZATION_PEAK,
+            BinaryMessageType.VISUALIZATION_PITCH,
+        ):
+            if message_type == member.value:
+                return BinaryHandling(drop_late=True, grace_period_us=2_000_000, buffer_track=True)
         return None
 
     def get_buffer_tracker(self) -> BufferTracker | None:
         """Return the visualizer buffer tracker."""
         return self._buffer_tracker
 
+    def set_tracks_downbeats(self, *, tracks: bool) -> None:
+        """Mark whether the upstream beat detector identifies bar starts."""
+        self._tracks_downbeats = bool(tracks)
+
+    def set_beat_availability(self, availability: BeatAvailability) -> None:
+        """Declare whether beats will arrive for the current source.
+
+        `beat` rides in `stream/start.types` whenever the client wants
+        beats AND a schedule has already landed. Switching to
+        UNAVAILABLE drops any pending schedule and re-issues
+        `stream/start` so the client falls back to the FFT-driven types.
+        """
+        if self._beat_availability is availability:
+            return
+        previous_beat_in_types = self._beat_in_negotiated_types()
+        self._beat_availability = availability
+        if availability is BeatAvailability.UNAVAILABLE:
+            self._pending_beats.clear()
+            self._has_beats_landed = False
+        if (
+            self._support is None
+            or "beat" not in self._support.types
+            or self._stream_config is None
+        ):
+            return
+        if previous_beat_in_types != self._beat_in_negotiated_types():
+            self._reissue_stream_start()
+
     def _ensure_buffer_tracker(self) -> None:
-        """Create or update buffer tracker from negotiated config."""
+        """Create or update the buffer tracker from negotiated config.
+
+        Capacity changes update the limit but never reset the buffered
+        byte count — the client still holds previously sent bytes and a
+        reset would under-count, disabling backpressure until the real
+        client buffer overflowed.
+        """
         if self._support is None:
             self._buffer_tracker = None
             return
@@ -99,7 +215,6 @@ class VisualizerV1Role(Role):
             )
         else:
             self._buffer_tracker.capacity_bytes = capacity
-            self._buffer_tracker.reset()
 
     def on_connect(self) -> None:
         """Initialize stream config and subscribe to group role."""
@@ -107,97 +222,399 @@ class VisualizerV1Role(Role):
         self._subscribe_to_group_role()
 
     def on_disconnect(self) -> None:
-        """Unsubscribe from VisualizerGroupRole."""
+        """Unsubscribe from VisualizerGroupRole and reset state."""
         self._unsubscribe_from_group_role()
         self._stream_started = False
         self._extractor = None
+        self._pending_beats.clear()
+        self._has_beats_landed = False
+        self._last_wire_emit_ts_us = None
+        self._beat_availability = BeatAvailability.PENDING
         self.reset_binary_timing()
 
     def on_stream_start(self) -> None:
-        """Start extractor state for a new audio stream."""
-        if self._stream_config is None:
+        """Start extractor state and emit `stream/start` on a fresh stream."""
+        if self._support is None:
             return
+        # Rebuild the config so any beats that landed before this
+        # `on_stream_start` (mid-stream join replay) are reflected.
+        self._stream_config = self._build_stream_config()
         self.reset_binary_timing()
-        # stream/end clears client-side visualizer config, so resend stream/start
-        # at each new stream boundary.
+        # Prime the wire-ts cursor to the current playhead so a stale
+        # replayed beat can't poison the cursor backward into the past.
+        self._last_wire_emit_ts_us = self._client._server.clock.now_us()  # noqa: SLF001
+        # `stream/start` is just a config update during an active stream
+        # (`stream/clear` keeps the stream alive). Skip the resend when
+        # we have already announced a config; mid-stream config changes
+        # go through `_reissue_stream_start` which bypasses this guard.
         if not self._stream_started:
             self._send_stream_start()
+        self._rebuild_extractor()
+        self._stream_started = True
+        self._ensure_buffer_tracker()
+
+    def _rebuild_extractor(self) -> None:
+        """Create the FFT extractor when at least one FFT-driven type is negotiated.
+
+        Beat-only configurations have no use for the extractor; leaving
+        it None lets `on_audio_chunk` early-return after the beat drain.
+        """
+        if self._stream_config is None:
+            self._extractor = None
+            return
+        if not any(t in self._stream_config.types for t in _FFT_DRIVEN_TYPES):
+            self._extractor = None
+            return
         req = self.get_audio_requirements()
         self._extractor = VisualizerFeatureExtractor(
             sample_rate=req.sample_rate,
             channels=req.channels,
             config=self._stream_config,
         )
-        self._stream_started = True
-        self._ensure_buffer_tracker()
 
     def on_audio_chunk(self, chunk: AudioChunk) -> None:
-        """Process audio chunk and emit visualizer binary frame."""
-        if not self.has_connection() or self._stream_config is None or self._extractor is None:
-            return
+        """Extract per-chunk features and emit one binary per enabled type.
 
-        frame = self._extractor.process_chunk(chunk.data, chunk.timestamp_us)
-        message = pack_visualization_message(frames=[frame], config=self._stream_config)
+        Beats are drained up to each emit ts so the visualizer wire stays
+        in non-decreasing ts order. Audio chunks are delivered regardless
+        of which types are negotiated, so this method is also the drain
+        driver for beat-only configurations.
+        """
+        if not self.has_connection() or self._stream_config is None:
+            return
+        # Drain pending beats that fall at or before this chunk's start
+        # so they precede the chunk's periodic frames. Frames inside the
+        # chunk drain further as they emit.
+        self._drain_beats_up_to(chunk.timestamp_us)
+        if self._extractor is None:
+            return
+        end_time_us = chunk.timestamp_us + chunk.duration_us
+        for frame in self._extractor.process_chunk(chunk.data, chunk.timestamp_us):
+            self._drain_beats_up_to(frame.timestamp_us)
+            self._emit_frame(frame, end_time_us=end_time_us, duration_us=chunk.duration_us)
+
+    def _emit_frame(
+        self,
+        frame: ExtractedFrame,
+        *,
+        end_time_us: int,
+        duration_us: int,
+    ) -> None:
+        """Pack and send all configured binaries for a single extractor frame."""
+        if self._stream_config is None:
+            return
+        types = self._stream_config.types
+        ts = frame.timestamp_us
+        if "loudness" in types and frame.loudness is not None:
+            payload = struct.pack(">H", int(np.clip(frame.loudness, 0, 65535)))
+            self._dispatch_frame(
+                pack_visualizer_frame(BinaryMessageType.VISUALIZATION_LOUDNESS, ts, payload),
+                ts_us=ts,
+                msg_type=BinaryMessageType.VISUALIZATION_LOUDNESS,
+                end_time_us=end_time_us,
+                duration_us=duration_us,
+            )
+        if "f_peak" in types and frame.f_peak_freq is not None and frame.f_peak_amp is not None:
+            # Wire invariant: `freq == 0 implies amp == 0` so a misbehaving
+            # extractor cannot emit "no peak with non-zero amp".
+            freq = int(np.clip(frame.f_peak_freq, 0, 65535))
+            amp = int(np.clip(frame.f_peak_amp, 0, 65535)) if freq != 0 else 0
+            payload = struct.pack(">HH", freq, amp)
+            self._dispatch_frame(
+                pack_visualizer_frame(BinaryMessageType.VISUALIZATION_F_PEAK, ts, payload),
+                ts_us=ts,
+                msg_type=BinaryMessageType.VISUALIZATION_F_PEAK,
+                end_time_us=end_time_us,
+                duration_us=duration_us,
+            )
+        if "spectrum" in types and frame.spectrum is not None:
+            payload = frame.spectrum.astype(">u2", copy=False).tobytes()
+            self._dispatch_frame(
+                pack_visualizer_frame(BinaryMessageType.VISUALIZATION_SPECTRUM, ts, payload),
+                ts_us=ts,
+                msg_type=BinaryMessageType.VISUALIZATION_SPECTRUM,
+                end_time_us=end_time_us,
+                duration_us=duration_us,
+            )
+        if "peak" in types and frame.peak is not None:
+            payload = bytes((int(np.clip(frame.peak, 0, 255)),))
+            self._dispatch_frame(
+                pack_visualizer_frame(BinaryMessageType.VISUALIZATION_PEAK, ts, payload),
+                ts_us=ts,
+                msg_type=BinaryMessageType.VISUALIZATION_PEAK,
+                end_time_us=end_time_us,
+                duration_us=duration_us,
+            )
+        if (
+            "pitch" in types
+            and frame.pitch_midi_q88 is not None
+            and frame.pitch_confidence is not None
+        ):
+            midi = int(np.clip(frame.pitch_midi_q88, 0, 65535))
+            confidence = int(np.clip(frame.pitch_confidence, 0, 255))
+            payload = struct.pack(">H", midi) + bytes((confidence,))
+            self._dispatch_frame(
+                pack_visualizer_frame(BinaryMessageType.VISUALIZATION_PITCH, ts, payload),
+                ts_us=ts,
+                msg_type=BinaryMessageType.VISUALIZATION_PITCH,
+                end_time_us=end_time_us,
+                duration_us=duration_us,
+            )
+
+    def _dispatch_frame(
+        self,
+        message: bytes,
+        *,
+        ts_us: int,
+        msg_type: BinaryMessageType,
+        end_time_us: int,
+        duration_us: int,
+    ) -> None:
+        """Reserve the wire ts and enqueue a periodic binary frame."""
+        self._reserve_wire_ts(ts_us)
         self._client.send_binary(
             message,
             role_family=self.role_family,
-            timestamp_us=frame.timestamp_us,
-            message_type=BinaryMessageType.VISUALIZATION_DATA.value,
-            buffer_end_time_us=chunk.timestamp_us + chunk.duration_us,
+            timestamp_us=ts_us,
+            message_type=msg_type.value,
+            buffer_end_time_us=end_time_us,
             buffer_byte_count=len(message),
-            duration_us=chunk.duration_us,
+            duration_us=duration_us,
         )
 
+    def _reserve_wire_ts(self, ts_us: int) -> None:
+        """Advance the wire-ts cursor; callers must not regress below it."""
+        last = self._last_wire_emit_ts_us
+        self._last_wire_emit_ts_us = max(ts_us, last) if last is not None else ts_us
+
+    def append_beats(self, beats: list[BeatTiming]) -> None:
+        """Append beat timings for delivery interleaved with audio chunks.
+
+        Beats land here from `VisualizerGroupRole.append_beat_schedule`
+        (server-fed offline analysis). They drain on the next
+        `on_audio_chunk` whose timestamp matches or exceeds each beat's
+        ts.
+
+        No-op while `BeatAvailability.UNAVAILABLE` or when the client
+        did not request `beat`. The first non-empty delivery re-emits
+        `stream/start` so the client sees `beat` added to the negotiated
+        types.
+        """
+        if self._support is None or "beat" not in self._support.types:
+            return
+        if self._beat_availability is BeatAvailability.UNAVAILABLE:
+            return
+        if not beats:
+            return
+        first_landing = not self._has_beats_landed
+        self._pending_beats.extend(beats)
+        self._has_beats_landed = True
+        if first_landing and self._stream_started and self._stream_config is not None:
+            # Beat is now legitimately part of the negotiated types — tell
+            # the client. Subsequent audio chunks will drain the queue.
+            self._reissue_stream_start()
+
+    def _reissue_stream_start(self) -> None:
+        """Rebuild stream config from current state and re-send `stream/start`."""
+        if self._support is None:
+            return
+        self._stream_config = self._build_stream_config()
+        self._send_stream_start()
+
+    def clear_beats(self) -> None:
+        """Drop any pending beat schedule (`stream/clear` carries this on the wire)."""
+        self._pending_beats.clear()
+        if self._has_beats_landed:
+            self._has_beats_landed = False
+            if self._stream_started and self._stream_config is not None:
+                self._reissue_stream_start()
+
+    def _drain_beats_up_to(self, max_ts_us: int) -> None:
+        """Emit any pending beats whose ts is <= `max_ts_us`."""
+        if self._stream_config is None or "beat" not in self._stream_config.types:
+            return
+        due: list[BeatTiming] = []
+        while self._pending_beats and self._pending_beats[0].timestamp_us <= max_ts_us:
+            due.append(self._pending_beats.popleft())
+        if due:
+            self._emit_beats(due)
+
+    def _emit_beats(self, beats: list[BeatTiming]) -> None:
+        """Emit each beat as its own msg 17 binary.
+
+        Drops any beat whose ts would regress (or duplicate) the wire
+        cursor — the wire must stay strictly non-decreasing.
+        """
+        if self._stream_config is None or not beats:
+            return
+        for beat in beats:
+            last = self._last_wire_emit_ts_us
+            # `<=` drops duplicates as well as strict regressions — the
+            # group enforces strict monotonicity within a single schedule
+            # but a resubscribe replay can deliver a beat whose ts equals
+            # the most-recently-emitted one.
+            if last is not None and beat.timestamp_us <= last:
+                continue
+            self._reserve_wire_ts(beat.timestamp_us)
+            flags = FLAG_DOWNBEAT if beat.is_downbeat else 0
+            message = pack_visualizer_frame(
+                BinaryMessageType.VISUALIZATION_BEAT, beat.timestamp_us, bytes((flags,))
+            )
+            self._client.send_binary(
+                message,
+                role_family=self.role_family,
+                timestamp_us=beat.timestamp_us,
+                message_type=BinaryMessageType.VISUALIZATION_BEAT.value,
+                buffer_end_time_us=beat.timestamp_us,
+                buffer_byte_count=len(message),
+                duration_us=0,
+            )
+
     def on_stream_clear(self) -> None:
-        """Reset visualizer state and notify client to clear buffered data."""
+        """Reset extractor state, drop pending beats, notify client."""
         if self._extractor is not None:
             self._extractor.reset()
+        self._pending_beats.clear()
+        # Seek re-pushes the schedule, so beats arrive again shortly.
+        # Drop the wire-ts guard so post-seek frames with earlier
+        # timestamps are not silently blocked.
+        self._last_wire_emit_ts_us = None
+        had_beats = self._has_beats_landed
+        self._has_beats_landed = False
         self.send_message(StreamClearMessage(payload=StreamClearPayload(roles=["visualizer"])))
         self.reset_binary_timing()
         if self._buffer_tracker is not None:
             self._buffer_tracker.reset()
+        if had_beats and self._stream_started and self._stream_config is not None:
+            # `beat` is no longer in the negotiated types until a fresh
+            # schedule arrives; tell the client.
+            self._reissue_stream_start()
 
     def on_stream_end(self) -> None:
-        """Reset visualizer state and notify client that stream has ended."""
+        """End the visualizer stream and reset state."""
         self._extractor = None
         self._stream_started = False
+        self._pending_beats.clear()
+        self._has_beats_landed = False
         self.send_message(StreamEndMessage(payload=StreamEndPayload(roles=["visualizer"])))
         self.reset_binary_timing()
         if self._buffer_tracker is not None:
             self._buffer_tracker.reset()
 
-    def on_stream_request_format(self, payload: StreamRequestFormatPayload) -> None:  # noqa: ARG002
-        """Ignore runtime visualizer renegotiation for now."""
-        _LOGGER.debug(
-            "Ignoring visualizer stream/request-format from client %s",
-            self._client.client_id,
-        )
+    def on_stream_request_format(self, payload: StreamRequestFormatPayload) -> None:
+        """Apply mid-stream renegotiation. All v1 fields are optional and merged."""
+        request = payload.visualizer
+        if request is None or self._stream_config is None or self._support is None:
+            return
+
+        # Build the merged payload as a plain dict so the support
+        # dataclass's `__post_init__` validation only runs once after
+        # normalization — avoiding a "spectrum in types without spectrum
+        # config" ValueError during intermediate `replace()` calls.
+        merged: dict[str, object] = self._support.to_dict()
+        if request.types is not None:
+            merged["types"] = list(request.types)
+        if request.rate_max is not None:
+            merged["rate_max"] = request.rate_max
+        if request.buffer_capacity is not None:
+            merged["buffer_capacity"] = request.buffer_capacity
+        if request.spectrum is not None:
+            merged["spectrum"] = request.spectrum.to_dict()
+
+        normalized = self._normalize_support_payload(merged)
+        new_support = ClientHelloVisualizerSupport.from_dict(normalized)
+        kept: list[str] = [t for t in new_support.types if t in _IMPLEMENTED_TYPES]
+        if not kept:
+            kept = ["loudness"]
+        new_support = replace(new_support, types=kept)
+
+        # Pending beats are pinned to the old config (e.g. stale rate);
+        # drop them and re-arm `_has_beats_landed` so the new config
+        # waits for fresh beats before re-advertising `beat`.
+        self._pending_beats.clear()
+        self._has_beats_landed = False
+
+        self._support = new_support
+        self._stream_config = self._build_stream_config()
+        # rate_max / types change rebuilds the extractor (new hop). Drop
+        # the wire-ts guard so the new config takes effect immediately.
+        self._last_wire_emit_ts_us = None
+        self._rebuild_extractor()
+        self._ensure_buffer_tracker()
+        self._send_stream_start()
 
     def _init_stream_config(self) -> None:
         """Parse visualizer support config from client/hello."""
         support_raw = self._client.info.visualizer_support
         if support_raw is None:
-            raise ValueError("visualizer support object missing for draft visualizer role")
+            raise ValueError("visualizer support object missing for visualizer@v1 role")
         self._support = ClientHelloVisualizerSupport.from_dict(
             self._normalize_support_payload(support_raw)
         )
-        self._stream_config = StreamStartVisualizer.from_support(self._support)
+        kept: list[str] = [t for t in self._support.types if t in _IMPLEMENTED_TYPES]
+        dropped = [t for t in self._support.types if t not in _IMPLEMENTED_TYPES]
+        if dropped:
+            _LOGGER.warning(
+                "client %s requested unimplemented visualizer types %s; ignoring",
+                self._client.client_id,
+                dropped,
+            )
+        if not kept:
+            _LOGGER.warning(
+                "client %s requested no implemented visualizer types; falling back to ['loudness']",
+                self._client.client_id,
+            )
+            kept = ["loudness"]
+        self._support = replace(self._support, types=kept)
+        self._stream_config = self._build_stream_config()
+
+    def _beat_in_negotiated_types(self) -> bool:
+        """Whether `beat` is currently exposed in `stream/start.types`."""
+        return (
+            self._support is not None
+            and "beat" in self._support.types
+            and self._has_beats_landed
+            and self._beat_availability is not BeatAvailability.UNAVAILABLE
+        )
+
+    def _build_stream_config(self) -> StreamStartVisualizer:
+        """Derive the current `stream/start` config from support + beat state.
+
+        `beat` is deferred: it is exposed only once a non-empty beat
+        schedule has actually landed for the current stream (and the
+        client requested it, and availability is not UNAVAILABLE).
+        Until then the client sees only the FFT-driven types and can
+        render a `peak`-based fallback without flicker.
+
+        Exception: beat-only clients (`types == ["beat"]`) get `beat`
+        from the start — there is no FFT-driven type to fall back to.
+        """
+        if self._support is None:
+            raise ValueError("support must be initialised before building stream config")
+        client_types = list(self._support.types)
+        beat_only = client_types == ["beat"]
+        if beat_only or self._beat_in_negotiated_types():
+            exposed_types = client_types
+        else:
+            exposed_types = [t for t in client_types if t != "beat"]
+        derived_support = replace(self._support, types=exposed_types)
+        return StreamStartVisualizer.from_support(
+            derived_support, tracks_downbeats=self._tracks_downbeats
+        )
 
     def _normalize_support_payload(self, support_raw: object) -> dict[str, object]:
-        """Normalize legacy/minimal support payloads to draft visualizer schema."""
+        """Normalize a client/hello support payload to the v1 schema."""
         if isinstance(support_raw, dict):
             payload: dict[str, object] = dict(support_raw)
         elif isinstance(support_raw, ClientHelloVisualizerSupport):
-            # Legacy and draft payloads represented by model object.
             payload = support_raw.to_dict()
         else:
             raise TypeError("visualizer support object must be a JSON object")
 
-        # Backward-compatible defaults when client sends only buffer capacity.
         if "types" not in payload:
             payload["types"] = ["loudness", "f_peak"]
-        if "batch_max" not in payload:
-            payload["batch_max"] = 8
+        if "rate_max" not in payload or payload.get("rate_max") is None:
+            payload["rate_max"] = 30
 
         raw_types = payload.get("types")
         if isinstance(raw_types, list):
@@ -211,7 +628,7 @@ class VisualizerV1Role(Role):
         return payload
 
     def _send_stream_start(self) -> None:
-        """Send stream/start with negotiated visualizer configuration."""
+        """Send `stream/start` with the negotiated visualizer configuration."""
         if self._stream_config is None:
             return
         message = StreamStartMessage(payload=StreamStartPayload(visualizer=self._stream_config))

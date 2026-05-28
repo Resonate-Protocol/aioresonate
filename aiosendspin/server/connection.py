@@ -467,22 +467,30 @@ class SendspinConnection:
                 continue
 
             custom_support_key = f"{selected_role}_support"
+            # If the role's support key has a mashumaro-aliased field on
+            # ClientHelloPayload (e.g. legacy `visualizer@_draft_r1` running
+            # alongside the primary `visualizer@v1`), let mashumaro parse it
+            # via the alias and skip the custom-role path so the schema is
+            # picked correctly for the role version.
+            if custom_support_key in ClientHelloPayload._SUPPORT_KEY_ALIASES.values():  # noqa: SLF001
+                continue
             custom_support = payload.get(custom_support_key)
             primary_support_key = (
                 f"{primary_role_id}_support" if primary_role_id is not None else None
             )
             legacy_support_key = f"{family}_support"
-            if custom_support is None and (
-                (primary_support_key is not None and payload.get(primary_support_key) is not None)
-                or payload.get(legacy_support_key) is not None
+            # Fall back to the legacy (unversioned) <family>_support key when
+            # the client didn't include a per-version key. Versioned keys for
+            # OTHER versions (e.g. primary_support_key) stay rejected because
+            # their schema may differ from the selected role's.
+            if custom_support is None and payload.get(legacy_support_key) is not None:
+                custom_support = payload.get(legacy_support_key)
+            elif custom_support is None and (
+                primary_support_key is not None and payload.get(primary_support_key) is not None
             ):
-                # If built-in/legacy support keys are present for custom role IDs, keep
-                # legacy behavior but make it explicit that custom roles must use their
-                # versioned support key.
                 logger.warning(
-                    "Ignoring %s/%s for custom role %s; expected %s",
+                    "Ignoring %s for custom role %s; expected %s",
                     primary_support_key,
-                    legacy_support_key,
                     selected_role,
                     custom_support_key,
                 )
@@ -714,7 +722,11 @@ class SendspinConnection:
             return
 
     def _check_late_binary(
-        self, handling: BinaryHandling | None, role: Role | None, timestamp_us: int
+        self,
+        handling: BinaryHandling | None,
+        role: Role | None,
+        timestamp_us: int,
+        message_type: int = 0,
     ) -> bool:
         """Check if a binary message's playback time has passed and should be dropped.
 
@@ -736,7 +748,9 @@ class SendspinConnection:
         if late_by_us > 0 and not in_grace_period:
             role._late_skips_since_log += 1  # noqa: SLF001
             self._logger.debug(
-                "Discarding late chunk: late_by=%.1fms, plays_in=%.1fms",
+                "Discarding late chunk type=%s role=%s: late_by=%.1fms, plays_in=%.1fms",
+                message_type,
+                role.role_family,
                 late_by_us / 1000,
                 -late_by_us / 1000,
             )
@@ -744,8 +758,10 @@ class SendspinConnection:
             if now_s - role._last_late_log_s >= 1.0:  # noqa: SLF001
                 qsize, qmax = self.queue_status()
                 self._logger.warning(
-                    "Late binary: skipping %s chunk(s); "
+                    "Late binary type=%s role=%s: skipping %s chunk(s); "
                     "late_by_us=%s ts_us=%s now_us=%s queue=%s/%s",
+                    message_type,
+                    role.role_family,
                     role._late_skips_since_log,  # noqa: SLF001
                     late_by_us,
                     timestamp_us,
@@ -1001,7 +1017,9 @@ class SendspinConnection:
         if (
             handling is not None
             and handling_role is not None
-            and self._check_late_binary(handling, handling_role, entry.timestamp_us)
+            and self._check_late_binary(
+                handling, handling_role, entry.timestamp_us, entry.binary.message_type
+            )
         ):
             self._discard_role_head(role)
             self._schedule_role_head(role)

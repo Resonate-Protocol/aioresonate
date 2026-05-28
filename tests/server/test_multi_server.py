@@ -333,7 +333,7 @@ class TestCustomRoleSupportParsing:
                 "visualizer@_custom_version",
                 "visualizer@_custom_version_support",
                 "visualizer_support",
-                {"buffer_capacity": 100_000},
+                {"buffer_capacity": 100_000, "rate_max": 30, "types": ["loudness"]},
             ),
         ],
     )
@@ -431,11 +431,11 @@ class TestCustomRoleSupportParsing:
                     "client_id": "c1",
                     "name": "Client",
                     "version": 1,
-                    "supported_roles": ["visualizer@_draft_r1"],
+                    "supported_roles": ["visualizer@_custom_r1"],
                     "visualizer_support": {
                         "types": ["loudness", "f_peak"],
                         "buffer_capacity": 65536,
-                        "batch_max": 8,
+                        "rate_max": 30,
                     },
                 },
             }
@@ -539,6 +539,29 @@ class TestCustomRoleSupportParsing:
 
         with pytest.raises(ValueError, match="player@v2_support"):
             SendspinConnection._deserialize_client_message(raw)  # noqa: SLF001
+
+    def test_legacy_family_support_key_used_for_custom_role(self) -> None:
+        """A client that sends the legacy <family>_support key still binds for custom roles."""
+        raw = orjson.dumps(
+            {
+                "type": "client/hello",
+                "payload": {
+                    "client_id": "c1",
+                    "name": "Client",
+                    "version": 1,
+                    "supported_roles": ["visualizer@v1", "visualizer@_custom_legacy"],
+                    "visualizer_support": {
+                        "types": ["loudness"],
+                        "buffer_capacity": 65_536,
+                        "rate_max": 30,
+                    },
+                },
+            }
+        ).decode()
+
+        msg = SendspinConnection._deserialize_client_message(raw)  # noqa: SLF001
+        assert isinstance(msg, ClientHelloMessage)
+        assert msg.payload.visualizer_support is not None
 
 
 class TestClientUrlRegistration:

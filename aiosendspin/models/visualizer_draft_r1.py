@@ -3,41 +3,17 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from enum import Enum
 from typing import Any, Literal, cast
 
 from mashumaro.config import BaseConfig
 from mashumaro.mixins.orjson import DataClassORJSONMixin
 
-VisualizerType = Literal["loudness", "f_peak", "spectrum", "beat", "peak", "pitch"]
-SupportedVisualizerType = Literal["loudness", "f_peak", "spectrum", "beat", "peak", "pitch"]
+VisualizerType = Literal["loudness", "f_peak", "spectrum", "beat"]
+SupportedVisualizerType = Literal["loudness", "f_peak", "spectrum"]
 SpectrumScale = Literal["lin", "log", "mel"]
 
-_SUPPORTED_TYPES: tuple[SupportedVisualizerType, ...] = (
-    "loudness",
-    "f_peak",
-    "spectrum",
-    "beat",
-    "peak",
-    "pitch",
-)
-
-
-class BeatAvailability(Enum):
-    """Server-side declaration of whether beats will arrive for the source.
-
-    `PENDING` (default): beats may arrive via `append_beat_schedule()`. `beat`
-    is included in `stream/start.types` up front (when the client requested
-    it), so no mid-stream `stream/start` re-emit is needed once a schedule
-    lands.
-
-    `UNAVAILABLE`: no beats will arrive for this source. `beat` is excluded
-    from the negotiated types, and any `append_beat_schedule()` call is a
-    no-op until availability changes back.
-    """
-
-    PENDING = "pending"
-    UNAVAILABLE = "unavailable"
+# TODO: Add "beat" once wire format + extraction support is implemented.
+_SUPPORTED_TYPES: tuple[SupportedVisualizerType, ...] = ("loudness", "f_peak", "spectrum")
 
 
 # Client -> Server: client/hello visualizer support object
@@ -49,6 +25,7 @@ class ClientHelloVisualizerSpectrum(DataClassORJSONMixin):
     scale: SpectrumScale
     f_min: int
     f_max: int
+    rate_max: int
 
     def __post_init__(self) -> None:
         """Validate spectrum config bounds."""
@@ -58,6 +35,8 @@ class ClientHelloVisualizerSpectrum(DataClassORJSONMixin):
             raise ValueError(f"f_min must be >= 0, got {self.f_min}")
         if self.f_max <= self.f_min:
             raise ValueError(f"f_max must be > f_min, got f_min={self.f_min}, f_max={self.f_max}")
+        if self.rate_max <= 0:
+            raise ValueError(f"rate_max must be > 0, got {self.rate_max}")
 
     def to_wire_dict(self) -> dict[str, Any]:
         """Serialize to stream/start visualizer.spectrum payload."""
@@ -71,11 +50,11 @@ class ClientHelloVisualizerSpectrum(DataClassORJSONMixin):
 
 @dataclass
 class ClientHelloVisualizerSupport(DataClassORJSONMixin):
-    """Visualizer support payload for client/hello visualizer negotiation."""
+    """Visualizer support payload for client/hello draft-r1 negotiation."""
 
     buffer_capacity: int
-    rate_max: int
-    types: list[str]
+    types: list[str] | None = None
+    batch_max: int | None = None
     spectrum: ClientHelloVisualizerSpectrum | None = None
 
     @classmethod
@@ -93,16 +72,16 @@ class ClientHelloVisualizerSupport(DataClassORJSONMixin):
 
     def __post_init__(self) -> None:
         """Validate support object constraints."""
-        if not self.types:
+        if self.types == []:
             raise ValueError(
-                "visualizer support 'types' must contain at least one supported type "
+                "visualizer support 'types' did not contain any supported type "
                 f"(supported: {list(_SUPPORTED_TYPES)})"
             )
         if self.buffer_capacity <= 0:
             raise ValueError(f"buffer_capacity must be > 0, got {self.buffer_capacity}")
-        if self.rate_max <= 0:
-            raise ValueError(f"rate_max must be > 0, got {self.rate_max}")
-        if "spectrum" in self.types and self.spectrum is None:
+        if self.batch_max is not None and self.batch_max <= 0:
+            raise ValueError(f"batch_max must be > 0, got {self.batch_max}")
+        if self.types is not None and "spectrum" in self.types and self.spectrum is None:
             raise ValueError("visualizer support must include 'spectrum' object")
 
     class Config(BaseConfig):
@@ -114,36 +93,29 @@ class ClientHelloVisualizerSupport(DataClassORJSONMixin):
 # Server -> Client: stream/start visualizer object
 @dataclass(frozen=True)
 class StreamStartVisualizer(DataClassORJSONMixin):
-    """Negotiated visualizer stream config returned in stream/start."""
+    """Negotiated draft visualizer stream config returned in stream/start."""
 
     types: tuple[SupportedVisualizerType, ...]
-    rate_max: int
-    tracks_downbeats: bool | None = None
+    batch_max: int
     spectrum: ClientHelloVisualizerSpectrum | None = None
 
     @classmethod
-    def from_support(
-        cls,
-        support: ClientHelloVisualizerSupport,
-        *,
-        tracks_downbeats: bool | None = None,
-    ) -> StreamStartVisualizer:
+    def from_support(cls, support: ClientHelloVisualizerSupport) -> StreamStartVisualizer:
         """Create server stream config from validated client support data."""
+        if support.types is None:
+            raise ValueError("visualizer support must include 'types'")
+        if support.batch_max is None:
+            raise ValueError("visualizer support must include 'batch_max'")
         stream_types = cast(
             "tuple[SupportedVisualizerType, ...]",
             tuple(typed for typed in support.types if typed in _SUPPORTED_TYPES),
         )
         if not stream_types:
             raise ValueError("visualizer stream must contain at least one supported type")
-        # tracks_downbeats only meaningful when beat is in types.
-        effective_tracks_downbeats: bool | None = None
-        if "beat" in stream_types:
-            effective_tracks_downbeats = bool(tracks_downbeats)
         return cls(
             types=stream_types,
-            rate_max=support.rate_max,
+            batch_max=support.batch_max,
             spectrum=support.spectrum,
-            tracks_downbeats=effective_tracks_downbeats,
         )
 
     def to_wire_dict(self) -> dict[str, Any]:
@@ -159,14 +131,10 @@ class StreamStartVisualizer(DataClassORJSONMixin):
 # Client -> Server: stream/request-format visualizer object
 @dataclass
 class StreamRequestFormatVisualizer(DataClassORJSONMixin):
-    """Visualizer stream format renegotiation payload.
-
-    All fields optional; omitted fields keep the prior value.
-    """
+    """Draft visualizer format request payload."""
 
     types: list[VisualizerType] | None = None
-    rate_max: int | None = None
-    buffer_capacity: int | None = None
+    batch_max: int | None = None
     spectrum: ClientHelloVisualizerSpectrum | None = None
 
     class Config(BaseConfig):
@@ -177,27 +145,9 @@ class StreamRequestFormatVisualizer(DataClassORJSONMixin):
 
 @dataclass(slots=True)
 class VisualizerFrame:
-    """Single visualizer frame parsed by clients from binary payloads.
-
-    On the v1 wire each binary message carries one type's data, so any given
-    `VisualizerFrame` has exactly one of the optional fields populated.
-    """
+    """Single visualizer frame parsed by clients from binary payloads."""
 
     timestamp_us: int
     loudness: int | None = None
-    f_peak_freq: int | None = None
-    f_peak_amp: int | None = None
+    f_peak: int | None = None
     spectrum: list[int] | None = None
-    peak_strength: int | None = None
-    pitch_midi_q88: int | None = None
-    pitch_confidence: int | None = None
-    # Set for beat frames (msg 17). True at bar boundaries on the v1 wire.
-    is_downbeat: bool | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class BeatTiming:
-    """A single beat in a visualizer beat schedule."""
-
-    timestamp_us: int
-    is_downbeat: bool = False

@@ -67,11 +67,10 @@ class Roles(Enum):
     """Displays text metadata describing the currently playing audio."""
     ARTWORK = "artwork@v1"
     """Displays artwork images. Has preferred format for images."""
-    VISUALIZER = "visualizer@_draft_r1"
+    VISUALIZER = "visualizer@v1"
     """
-    Visualizes music.
-
-    Has preferred format for audio features.
+    Visualizes music. Has preferred format for audio features (FFT spectrum,
+    loudness, beats, peaks, pitch).
     """
     COLOR = "color@v1"
     """Receives colors derived from the current audio."""
@@ -95,10 +94,22 @@ class BinaryMessageType(Enum):
     """Artwork channel 3 (Artwork role, slot 3)."""
 
     # Visualizer role (bits 00010xxx, IDs 16-23):
-    VISUALIZATION_DATA = 16
-    """Visualization data (Visualizer role, slot 0)."""
+    VISUALIZATION_LOUDNESS = 16
+    """Loudness frame (Visualizer role, slot 0). Also reused for the legacy
+    `visualizer@_draft_r1` `VISUALIZATION_DATA` blob — same wire byte, the
+    negotiated role's `get_binary_handling` selects the framing."""
+    VISUALIZATION_DATA = 16  # noqa: PIE796
+    """Alias of `VISUALIZATION_LOUDNESS` for the legacy draft_r1 wire."""
     VISUALIZATION_BEAT = 17
-    """Visualization beat data (Visualizer role, slot 1)."""
+    """Musical beat event (Visualizer role, slot 1)."""
+    VISUALIZATION_F_PEAK = 18
+    """Dominant frequency + amplitude (Visualizer role, slot 2)."""
+    VISUALIZATION_SPECTRUM = 19
+    """Display-binned spectrum (Visualizer role, slot 3)."""
+    VISUALIZATION_PEAK = 20
+    """Energy onset event with strength (Visualizer role, slot 4)."""
+    VISUALIZATION_PITCH = 21
+    """Perceived pitch (MIDI 8.8 + confidence) (Visualizer role, slot 5)."""
 
 
 class RepeatMode(Enum):

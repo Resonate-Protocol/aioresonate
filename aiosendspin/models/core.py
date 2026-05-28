@@ -46,6 +46,12 @@ from .visualizer import (
     StreamRequestFormatVisualizer,
     StreamStartVisualizer,
 )
+from .visualizer_draft_r1 import (
+    ClientHelloVisualizerSupport as ClientHelloVisualizerSupportDraftR1,
+)
+from .visualizer_draft_r1 import (
+    StreamStartVisualizer as StreamStartVisualizerDraftR1,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -118,15 +124,20 @@ class ClientHelloPayload(DataClassORJSONMixin):
     artwork_support: Annotated[ClientHelloArtworkSupport | None, Alias("artwork@v1_support")] = None
     """Artwork support configuration - only if artwork role is in supported_roles."""
     visualizer_support: Annotated[
-        ClientHelloVisualizerSupport | None, Alias("visualizer@_draft_r1_support")
+        ClientHelloVisualizerSupport | None, Alias("visualizer@v1_support")
     ] = None
-    """Visualizer support configuration - only if visualizer role is in supported_roles."""
+    """Visualizer support configuration - only if visualizer@v1 role is in supported_roles."""
+    visualizer_draft_r1_support: Annotated[
+        ClientHelloVisualizerSupportDraftR1 | None, Alias("visualizer@_draft_r1_support")
+    ] = None
+    """Visualizer support for clients on the legacy `visualizer@_draft_r1` wire."""
 
     # Static mapping: unversioned support key -> actual alias key.
     _SUPPORT_KEY_ALIASES: ClassVar[dict[str, str]] = {
         "player_support": "player@v1_support",
         "artwork_support": "artwork@v1_support",
-        "visualizer_support": "visualizer@_draft_r1_support",
+        "visualizer_support": "visualizer@v1_support",
+        "visualizer_draft_r1_support": "visualizer@_draft_r1_support",
     }
 
     @classmethod
@@ -174,15 +185,25 @@ class ClientHelloPayload(DataClassORJSONMixin):
         if not artwork_role_supported:
             self.artwork_support = None
 
-        # Validate visualizer role and support configuration
+        # Validate visualizer role and support configuration.
         visualizer_role_supported = Roles.VISUALIZER.value in self.supported_roles
         if visualizer_role_supported and self.visualizer_support is None:
             raise ValueError(
-                "visualizer@_draft_r1_support (visualizer_support alias) must be "
-                "provided when 'visualizer@_draft_r1' is in supported_roles"
+                "visualizer@v1_support (visualizer_support alias) must be "
+                "provided when 'visualizer@v1' is in supported_roles"
             )
         if not visualizer_role_supported:
             self.visualizer_support = None
+
+        # Validate legacy `visualizer@_draft_r1` support configuration.
+        visualizer_draft_supported = "visualizer@_draft_r1" in self.supported_roles
+        if visualizer_draft_supported and self.visualizer_draft_r1_support is None:
+            raise ValueError(
+                "visualizer@_draft_r1_support must be provided when "
+                "'visualizer@_draft_r1' is in supported_roles"
+            )
+        if not visualizer_draft_supported:
+            self.visualizer_draft_r1_support = None
 
     class Config(BaseConfig):
         """Config for parsing json messages."""
@@ -430,8 +451,12 @@ class StreamStartPayload(DataClassORJSONMixin):
     """Information about the player."""
     artwork: StreamStartArtwork | None = None
     """Artwork information (sent to clients with artwork role)."""
-    visualizer: StreamStartVisualizer | None = None
-    """Visualizer information (sent to clients with visualizer role)."""
+    visualizer: StreamStartVisualizer | StreamStartVisualizerDraftR1 | None = None
+    """Visualizer information (sent to clients with visualizer role).
+
+    Carries the v1 schema by default; legacy clients on `visualizer@_draft_r1`
+    get the draft schema. Roles emit whichever matches their negotiated wire.
+    """
 
     class Config(BaseConfig):
         """Config for parsing json messages."""

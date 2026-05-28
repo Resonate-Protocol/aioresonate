@@ -8,10 +8,11 @@ from aiosendspin.server.roles.registry import (
     register_role_support_spec,
 )
 from aiosendspin.server.roles.visualizer.group import VisualizerGroupRole
+from aiosendspin.server.roles.visualizer.types import VisualizerRoleProtocol
 from aiosendspin.server.roles.visualizer.v1 import VisualizerV1Role
 
 register_group_role("visualizer", VisualizerGroupRole)
-register_role("visualizer@_draft_r1", lambda client: VisualizerV1Role(client=client))
+register_role("visualizer@v1", lambda client: VisualizerV1Role(client=client))
 register_role_support_spec(
     "visualizer",
     RoleSupportSpec(
@@ -19,4 +20,8 @@ register_role_support_spec(
     ),
 )
 
-__all__ = ["VisualizerGroupRole", "VisualizerV1Role"]
+__all__ = [
+    "VisualizerGroupRole",
+    "VisualizerRoleProtocol",
+    "VisualizerV1Role",
+]

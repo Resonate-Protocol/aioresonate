@@ -141,7 +141,9 @@ DisconnectCallback = Callable[[], None]
 # Callback invoked when server sends player commands (volume, mute).
 ServerCommandCallback = Callable[[ServerCommandPayload], None]
 
-# Callback invoked when visualizer frames are received.
+# Callback invoked when visualizer frames are received. Beat events are
+# delivered through the same callback as a `VisualizerFrame` carrying
+# only `timestamp_us` + `is_downbeat`.
 VisualizerCallback = Callable[[list[VisualizerFrame]], None]
 
 # Callback invoked when artwork binary frames are received.
@@ -250,7 +252,7 @@ class SendspinClient:
     _server_command_callbacks: list[ServerCommandCallback]
     """Callbacks invoked when server sends player commands."""
     _visualizer_callbacks: list[VisualizerCallback]
-    """Callbacks invoked when visualizer frames are received."""
+    """Callbacks invoked when visualizer frames are received (beats included)."""
     _artwork_callbacks: list[ArtworkCallback]
     """Callbacks invoked when artwork frames are received."""
 
@@ -834,10 +836,16 @@ class SendspinClient:
                 logger.exception("Failed to unpack binary header")
                 return
             self._handle_artwork_chunk(message_type, payload[BINARY_HEADER_SIZE:])
-        elif message_type is BinaryMessageType.VISUALIZATION_DATA:
-            # Spec format: [type:1][frame_count:1][frames...]
-            # Pass payload[1:] so _parse_visualization_frames sees frame_count at data[0]
-            self._handle_visualization_data(payload[1:])
+        elif message_type in {
+            BinaryMessageType.VISUALIZATION_LOUDNESS,
+            BinaryMessageType.VISUALIZATION_F_PEAK,
+            BinaryMessageType.VISUALIZATION_SPECTRUM,
+            BinaryMessageType.VISUALIZATION_PEAK,
+            BinaryMessageType.VISUALIZATION_PITCH,
+        }:
+            self._handle_visualization_frame(message_type, payload[1:])
+        elif message_type is BinaryMessageType.VISUALIZATION_BEAT:
+            self._handle_visualization_beat(payload[1:])
         else:
             logger.debug("Ignoring unsupported binary message type: %s", message_type)
 
@@ -871,8 +879,9 @@ class SendspinClient:
         self._time_filter.update(round(offset), round(delay), now_us)
 
     async def _handle_stream_start(self, message: StreamStartMessage) -> None:
-        # Handle visualizer stream start
-        if message.payload.visualizer is not None:
+        # Handle visualizer stream start (client SDK is v1-only; older
+        # draft_r1 schema is ignored — those servers expect the legacy SDK).
+        if isinstance(message.payload.visualizer, StreamStartVisualizer):
             self._current_visualizer_config = message.payload.visualizer
             self._visualizer_stream_active = True
         if message.payload.artwork is not None:
@@ -1007,95 +1016,64 @@ class SendspinClient:
             except Exception:
                 logger.exception("Error in artwork callback %s", callback)
 
-    def _handle_visualization_data(self, payload: bytes) -> None:
-        """Handle incoming visualization data binary message."""
+    def _handle_visualization_frame(self, message_type: BinaryMessageType, payload: bytes) -> None:
+        """Parse a single-type visualization binary and notify callbacks."""
         if not self._visualizer_callbacks:
             return
         if self._current_visualizer_config is None:
             return
-
-        config = self._current_visualizer_config
-        types_order = list(config.types)
-        n_disp_bins = 0
-        if config.spectrum is not None:
-            n_disp_bins = config.spectrum.n_disp_bins
-
         try:
-            frames = self._parse_visualization_frames(payload, types_order, n_disp_bins)
+            frame = self._parse_visualization_frame(
+                message_type, payload, self._current_visualizer_config
+            )
         except Exception:
-            logger.exception("Failed to parse visualization data")
+            logger.exception("Failed to parse visualization frame")
             return
-
-        if frames:
-            self._notify_visualizer_callbacks(frames)
+        if frame is not None:
+            self._notify_visualizer_callbacks([frame])
 
     @staticmethod
-    def _parse_visualization_frames(
-        data: bytes, types_order: Sequence[str], n_disp_bins: int
-    ) -> list[VisualizerFrame]:
-        """Parse visualization frames from binary data."""
-        if len(data) < 1:
-            return []
+    def _parse_visualization_frame(
+        message_type: BinaryMessageType,
+        data: bytes,
+        config: StreamStartVisualizer,
+    ) -> VisualizerFrame | None:
+        """Parse `[ts:8][data]` payload for one of the v1 visualizer types."""
+        if len(data) < 8:
+            return None
+        (timestamp_us,) = struct.unpack_from(">q", data, 0)
+        rest = data[8:]
 
-        # Determine bytes consumed per frame for the negotiated type order.
-        bytes_per_frame = 8  # timestamp_us
-        for data_type in types_order:
-            if data_type in {"loudness", "f_peak"}:
-                bytes_per_frame += 2
-            elif data_type == "spectrum":
-                bytes_per_frame += n_disp_bins * 2
-
-        frame_count = data[0]
-        expected_len = 1 + (frame_count * bytes_per_frame)
-        if len(data) != expected_len:
-            return []
-        offset = 1
-        frames: list[VisualizerFrame] = []
-
-        for _ in range(frame_count):
-            if offset + 8 > len(data):
-                break
-            timestamp_us = struct.unpack_from(">q", data, offset)[0]
-            offset += 8
-
-            loudness: int | None = None
-            f_peak: int | None = None
-            spectrum: list[int] | None = None
-            complete_frame = True
-
-            for data_type in types_order:
-                if data_type == "loudness":
-                    if offset + 2 > len(data):
-                        complete_frame = False
-                        break
-                    loudness = struct.unpack_from(">H", data, offset)[0]
-                    offset += 2
-                elif data_type == "f_peak":
-                    if offset + 2 > len(data):
-                        complete_frame = False
-                        break
-                    f_peak = struct.unpack_from(">H", data, offset)[0]
-                    offset += 2
-                elif data_type == "spectrum":
-                    nbytes = n_disp_bins * 2
-                    if offset + nbytes > len(data):
-                        complete_frame = False
-                        break
-                    spectrum = list(struct.unpack_from(f">{n_disp_bins}H", data, offset))
-                    offset += nbytes
-
-            if not complete_frame:
-                break
-            frames.append(
-                VisualizerFrame(
-                    timestamp_us=timestamp_us,
-                    loudness=loudness,
-                    f_peak=f_peak,
-                    spectrum=spectrum,
-                )
+        if message_type is BinaryMessageType.VISUALIZATION_LOUDNESS:
+            if len(rest) != 2:
+                return None
+            (value,) = struct.unpack(">H", rest)
+            return VisualizerFrame(timestamp_us=timestamp_us, loudness=value)
+        if message_type is BinaryMessageType.VISUALIZATION_F_PEAK:
+            if len(rest) != 4:
+                return None
+            freq, amp = struct.unpack(">HH", rest)
+            return VisualizerFrame(timestamp_us=timestamp_us, f_peak_freq=freq, f_peak_amp=amp)
+        if message_type is BinaryMessageType.VISUALIZATION_SPECTRUM:
+            n_disp_bins = config.spectrum.n_disp_bins if config.spectrum is not None else 0
+            if n_disp_bins <= 0 or len(rest) != n_disp_bins * 2:
+                return None
+            bins = list(struct.unpack(f">{n_disp_bins}H", rest))
+            return VisualizerFrame(timestamp_us=timestamp_us, spectrum=bins)
+        if message_type is BinaryMessageType.VISUALIZATION_PEAK:
+            if len(rest) != 1:
+                return None
+            return VisualizerFrame(timestamp_us=timestamp_us, peak_strength=rest[0])
+        if message_type is BinaryMessageType.VISUALIZATION_PITCH:
+            if len(rest) != 3:
+                return None
+            (midi_q88,) = struct.unpack(">H", rest[:2])
+            return VisualizerFrame(
+                timestamp_us=timestamp_us,
+                pitch_midi_q88=midi_q88,
+                pitch_confidence=rest[2],
             )
-
-        return frames
+        return None
 
     def _notify_visualizer_callbacks(self, frames: list[VisualizerFrame]) -> None:
         for callback in list(self._visualizer_callbacks):
@@ -1103,6 +1081,27 @@ class SendspinClient:
                 callback(frames)
             except Exception:
                 logger.exception("Error in visualizer callback %s", callback)
+
+    def _handle_visualization_beat(self, payload: bytes) -> None:
+        """Handle a `beat` binary message (type 17). 9 bytes of payload.
+
+        Routed through the same `VisualizerCallback` as the periodic
+        frames; the dispatched `VisualizerFrame` carries only
+        `timestamp_us` + `is_downbeat`.
+        """
+        if not self._visualizer_callbacks:
+            return
+        if len(payload) != 9:
+            return
+        try:
+            (ts,) = struct.unpack_from(">q", payload, 0)
+        except Exception:
+            logger.exception("Failed to parse beat data")
+            return
+        is_downbeat = bool(payload[8] & 0b0000_0001)
+        self._notify_visualizer_callbacks(
+            [VisualizerFrame(timestamp_us=ts, is_downbeat=is_downbeat)]
+        )
 
     def compute_play_time(self, server_timestamp_us: int) -> int:
         """

@@ -1,17 +1,23 @@
-"""Tests for VisualizerV1Role draft visualizer implementation."""
+"""Tests for VisualizerV1Role (the visualizer@v1 wire)."""
 
 from __future__ import annotations
 
 import struct
 from unittest.mock import MagicMock
 
-import pytest
-
-from aiosendspin.models.core import StreamClearMessage, StreamEndMessage, StreamStartMessage
+from aiosendspin.models.core import (
+    StreamClearMessage,
+    StreamEndMessage,
+    StreamRequestFormatPayload,
+    StreamStartMessage,
+)
 from aiosendspin.models.types import BinaryMessageType
 from aiosendspin.models.visualizer import (
+    BeatAvailability,
+    BeatTiming,
     ClientHelloVisualizerSpectrum,
     ClientHelloVisualizerSupport,
+    StreamRequestFormatVisualizer,
 )
 from aiosendspin.server.roles.base import AudioChunk
 from aiosendspin.server.roles.visualizer.v1 import VisualizerV1Role
@@ -19,7 +25,7 @@ from tests.server.roles.visualizer.conftest import sine_pcm_16bit
 
 
 def _make_client_stub() -> MagicMock:
-    """Create a mock client for testing."""
+    """Create a mock client preconfigured for visualizer@v1 tests."""
     client = MagicMock()
     client.client_id = "client-1"
     client.group = MagicMock()
@@ -28,13 +34,12 @@ def _make_client_stub() -> MagicMock:
     client.info.visualizer_support = {
         "types": ["loudness", "f_peak", "spectrum"],
         "buffer_capacity": 65536,
-        "batch_max": 8,
+        "rate_max": 60,
         "spectrum": {
             "n_disp_bins": 8,
             "scale": "lin",
             "f_min": 20,
             "f_max": 16_000,
-            "rate_max": 60,
         },
     }
     client.send_role_message = MagicMock()
@@ -45,28 +50,66 @@ def _make_client_stub() -> MagicMock:
     return client
 
 
-def test_visualizer_role_has_role_id() -> None:
-    """VisualizerV1Role has role_id of 'visualizer@_draft_r1'."""
+def _make_beat_client_stub() -> MagicMock:
+    """Client stub negotiating both loudness and beat."""
     client = _make_client_stub()
-    role = VisualizerV1Role(client=client)
-    assert role.role_id == "visualizer@_draft_r1"
+    client.info.visualizer_support = {
+        "types": ["loudness", "beat"],
+        "buffer_capacity": 65536,
+        "rate_max": 60,
+    }
+    return client
 
 
-def test_visualizer_role_has_role_family() -> None:
-    """VisualizerV1Role has role_family of 'visualizer'."""
+def _audio_chunk(timestamp_us: int = 1_000_000) -> AudioChunk:
+    pcm = sine_pcm_16bit(sample_rate=48_000, channels=2, hz=1000.0, duration_s=0.025)
+    return AudioChunk(
+        data=pcm,
+        timestamp_us=timestamp_us,
+        duration_us=25_000,
+        byte_count=len(pcm),
+    )
+
+
+def _last_stream_start(client: MagicMock) -> StreamStartMessage:
+    for call in reversed(client.send_role_message.call_args_list):
+        msg = call.args[1]
+        if isinstance(msg, StreamStartMessage):
+            return msg
+    raise AssertionError("no StreamStartMessage was sent")
+
+
+def _stream_start_count(client: MagicMock) -> int:
+    return sum(
+        1
+        for call in client.send_role_message.call_args_list
+        if isinstance(call.args[1], StreamStartMessage)
+    )
+
+
+def _beat_calls(client: MagicMock) -> list:
+    return [
+        call
+        for call in client.send_binary.call_args_list
+        if call.kwargs["message_type"] == BinaryMessageType.VISUALIZATION_BEAT.value
+    ]
+
+
+# ---------------------------------------------------------------------------
+# Role identity + lifecycle
+# ---------------------------------------------------------------------------
+
+
+def test_role_id_is_v1() -> None:
+    """Role id is v1."""
     client = _make_client_stub()
     role = VisualizerV1Role(client=client)
+    assert role.role_id == "visualizer@v1"
     assert role.role_family == "visualizer"
 
 
-def test_visualizer_role_requires_client() -> None:
-    """VisualizerV1Role raises ValueError if no client provided."""
-    with pytest.raises(ValueError, match="requires a client"):
-        VisualizerV1Role(client=None)
-
-
-def test_visualizer_role_on_connect_subscribes_to_group_role() -> None:
-    """on_connect() subscribes to VisualizerGroupRole."""
+def test_on_connect_subscribes_to_group_role() -> None:
+    """On connect subscribes to group role."""
     client = _make_client_stub()
     group_role = MagicMock()
     client.group.group_role.return_value = group_role
@@ -78,83 +121,8 @@ def test_visualizer_role_on_connect_subscribes_to_group_role() -> None:
     group_role.subscribe.assert_called_once_with(role)
 
 
-def test_visualizer_role_on_stream_start_sends_stream_start() -> None:
-    """on_stream_start() sends stream/start with negotiated config."""
-    client = _make_client_stub()
-    role = VisualizerV1Role(client=client)
-    role.on_connect()
-
-    role.on_stream_start()
-
-    client.send_role_message.assert_called()
-    _family, message = client.send_role_message.call_args.args
-    assert isinstance(message, StreamStartMessage)
-    assert message.payload.visualizer is not None
-    assert list(message.payload.visualizer.types) == ["loudness", "f_peak", "spectrum"]
-    assert message.payload.visualizer.batch_max == 8
-
-
-def test_visualizer_role_on_connect_does_not_send_stream_start() -> None:
-    """on_connect() initializes config but does not send stream/start."""
-    client = _make_client_stub()
-    role = VisualizerV1Role(client=client)
-
-    role.on_connect()
-
-    # No stream/start should be sent until on_stream_start is called.
-    for call in client.send_role_message.call_args_list:
-        assert not isinstance(call.args[1], StreamStartMessage)
-
-
-def test_visualizer_role_accepts_legacy_support_object() -> None:
-    """Legacy visualizer support shape still initializes draft role."""
-    client = _make_client_stub()
-    client.info.visualizer_support = ClientHelloVisualizerSupport(buffer_capacity=65536)
-    role = VisualizerV1Role(client=client)
-    role.on_connect()
-
-    role.on_stream_start()
-
-    client.send_role_message.assert_called()
-    _family, message = client.send_role_message.call_args.args
-    assert isinstance(message, StreamStartMessage)
-    assert message.payload.visualizer is not None
-    assert list(message.payload.visualizer.types) == ["loudness", "f_peak"]
-    assert message.payload.visualizer.batch_max == 8
-
-
-def test_visualizer_role_preserves_draft_support_fields() -> None:
-    """Draft support fields survive model parsing and are used in stream/start."""
-    client = _make_client_stub()
-    client.info.visualizer_support = ClientHelloVisualizerSupport(
-        types=["loudness", "f_peak", "spectrum"],
-        buffer_capacity=65536,
-        batch_max=6,
-        spectrum=ClientHelloVisualizerSpectrum(
-            n_disp_bins=16,
-            scale="lin",
-            f_min=40,
-            f_max=14000,
-            rate_max=30,
-        ),
-    )
-    role = VisualizerV1Role(client=client)
-    role.on_connect()
-
-    role.on_stream_start()
-
-    client.send_role_message.assert_called()
-    _family, message = client.send_role_message.call_args.args
-    assert isinstance(message, StreamStartMessage)
-    assert message.payload.visualizer is not None
-    assert list(message.payload.visualizer.types) == ["loudness", "f_peak", "spectrum"]
-    assert message.payload.visualizer.batch_max == 6
-    assert message.payload.visualizer.spectrum is not None
-    assert message.payload.visualizer.spectrum.n_disp_bins == 16
-
-
-def test_visualizer_role_on_disconnect_unsubscribes_from_group_role() -> None:
-    """on_disconnect() unsubscribes from VisualizerGroupRole."""
+def test_on_disconnect_unsubscribes() -> None:
+    """On disconnect unsubscribes."""
     client = _make_client_stub()
     group_role = MagicMock()
     client.group.group_role.return_value = group_role
@@ -166,229 +134,718 @@ def test_visualizer_role_on_disconnect_unsubscribes_from_group_role() -> None:
     group_role.unsubscribe.assert_called_once_with(role)
 
 
-def test_visualizer_role_has_stream_requirements() -> None:
-    """Visualizer role declares stream requirements."""
-    client = _make_client_stub()
-    role = VisualizerV1Role(client=client)
-    assert role.get_stream_requirements() is not None
+def test_wants_beats_true_when_beat_negotiated() -> None:
+    """wants_beats is True once the client negotiated `beat` (PENDING default)."""
+    role = VisualizerV1Role(client=_make_beat_client_stub())
+    role.on_connect()
+    assert role.wants_beats is True
 
 
-def test_visualizer_role_has_audio_requirements() -> None:
-    """Visualizer role consumes audio for feature extraction."""
-    client = _make_client_stub()
-    role = VisualizerV1Role(client=client)
-    req = role.get_audio_requirements()
-    assert req is not None
-    assert req.sample_rate == 48_000
-    assert req.bit_depth == 16
-    assert req.channels == 2
+def test_wants_beats_false_when_beat_not_negotiated() -> None:
+    """wants_beats is False when the client never requested `beat`."""
+    role = VisualizerV1Role(client=_make_client_stub())
+    role.on_connect()
+    assert role.wants_beats is False
 
 
-def test_visualizer_role_emits_binary_visualization_frame() -> None:
-    """on_audio_chunk() sends binary type 16 frame."""
+def test_wants_beats_false_when_unavailable() -> None:
+    """UNAVAILABLE locks beats out even when the client requested `beat`."""
+    role = VisualizerV1Role(client=_make_beat_client_stub())
+    role.on_connect()
+    role.set_beat_availability(BeatAvailability.UNAVAILABLE)
+    assert role.wants_beats is False
+
+
+def test_on_stream_start_sends_stream_start_with_negotiated_config() -> None:
+    """on_stream_start emits stream/start with the negotiated config."""
     client = _make_client_stub()
     role = VisualizerV1Role(client=client)
     role.on_connect()
     role.on_stream_start()
 
-    pcm = sine_pcm_16bit(sample_rate=48_000, channels=2, hz=1000.0, duration_s=0.025)
-    role.on_audio_chunk(
-        AudioChunk(
-            data=pcm,
-            timestamp_us=1_000_000,
-            duration_us=25_000,
-            byte_count=len(pcm),
-        )
-    )
-
-    client.send_binary.assert_called()
-    kwargs = client.send_binary.call_args.kwargs
-    payload = client.send_binary.call_args.args[0]
-
-    assert kwargs["role_family"] == "visualizer"
-    assert kwargs["message_type"] == BinaryMessageType.VISUALIZATION_DATA.value
-    assert kwargs["timestamp_us"] == 1_000_000
-
-    assert payload[0] == BinaryMessageType.VISUALIZATION_DATA.value
-    assert payload[1] == 1  # frame count
-    assert struct.unpack(">q", payload[2:10])[0] == 1_000_000
+    message = _last_stream_start(client)
+    assert message.payload.visualizer is not None
+    assert list(message.payload.visualizer.types) == ["loudness", "f_peak", "spectrum"]
+    assert message.payload.visualizer.rate_max == 60
+    assert message.payload.visualizer.spectrum is not None
+    assert message.payload.visualizer.spectrum.n_disp_bins == 8
 
 
-def test_visualizer_role_on_stream_clear_sends_clear_message() -> None:
-    """on_stream_clear() sends stream/clear for visualizer role."""
+def test_on_stream_start_resent_after_stream_end() -> None:
+    """stream/start is re-sent after stream/end → on_stream_start cycle."""
+    client = _make_client_stub()
+    role = VisualizerV1Role(client=client)
+    role.on_connect()
+    role.on_stream_start()
+    role.on_stream_end()
+    role.on_stream_start()
+
+    assert _stream_start_count(client) == 2
+
+
+def test_on_stream_start_not_resent_during_active_stream() -> None:
+    """A second on_stream_start with no stream/end in between is a no-op (per #239)."""
+    client = _make_client_stub()
+    role = VisualizerV1Role(client=client)
+    role.on_connect()
+    role.on_stream_start()
+    role.on_stream_start()
+
+    assert _stream_start_count(client) == 1
+
+
+def test_on_stream_clear_sends_clear_message() -> None:
+    """on_stream_clear emits stream/clear."""
     client = _make_client_stub()
     role = VisualizerV1Role(client=client)
     role.on_connect()
     role.on_stream_clear()
 
-    _family, message = client.send_role_message.call_args.args
-    assert isinstance(message, StreamClearMessage)
-    assert message.payload.roles == ["visualizer"]
+    last = client.send_role_message.call_args.args[1]
+    assert isinstance(last, StreamClearMessage)
+    assert last.payload.roles == ["visualizer"]
 
 
-def test_visualizer_role_on_stream_end_sends_end_message() -> None:
-    """on_stream_end() sends stream/end for visualizer role."""
+def test_on_stream_end_sends_end_message() -> None:
+    """on_stream_end emits stream/end."""
     client = _make_client_stub()
     role = VisualizerV1Role(client=client)
     role.on_connect()
     role.on_stream_end()
 
-    _family, message = client.send_role_message.call_args.args
-    assert isinstance(message, StreamEndMessage)
-    assert message.payload.roles == ["visualizer"]
+    last = client.send_role_message.call_args.args[1]
+    assert isinstance(last, StreamEndMessage)
+    assert last.payload.roles == ["visualizer"]
 
 
-def test_visualizer_role_sends_buffer_tracking_metadata() -> None:
-    """send_binary must include buffer tracking parameters."""
+# ---------------------------------------------------------------------------
+# Periodic per-type emission from on_audio_chunk
+# ---------------------------------------------------------------------------
+
+
+def test_on_audio_chunk_emits_one_binary_per_periodic_type() -> None:
+    """on_audio_chunk emits one binary per negotiated periodic type."""
     client = _make_client_stub()
     role = VisualizerV1Role(client=client)
     role.on_connect()
     role.on_stream_start()
+    client.send_binary.reset_mock()
 
-    pcm = sine_pcm_16bit(sample_rate=48_000, channels=2, hz=1000.0, duration_s=0.025)
-    role.on_audio_chunk(
-        AudioChunk(
-            data=pcm,
-            timestamp_us=1_000_000,
-            duration_us=25_000,
-            byte_count=len(pcm),
-        )
+    role.on_audio_chunk(_audio_chunk(1_000_000))
+
+    msg_types = [call.kwargs["message_type"] for call in client.send_binary.call_args_list]
+    assert sorted(msg_types) == sorted(
+        [
+            BinaryMessageType.VISUALIZATION_LOUDNESS.value,
+            BinaryMessageType.VISUALIZATION_F_PEAK.value,
+            BinaryMessageType.VISUALIZATION_SPECTRUM.value,
+        ]
     )
 
-    client.send_binary.assert_called()
+
+def test_loudness_binary_layout_is_type_ts_value() -> None:
+    """`loudness`: [16][ts:8][uint16] = 11 bytes."""
+    client = _make_client_stub()
+    client.info.visualizer_support = {
+        "types": ["loudness"],
+        "buffer_capacity": 65536,
+        "rate_max": 60,
+    }
+    role = VisualizerV1Role(client=client)
+    role.on_connect()
+    role.on_stream_start()
+    client.send_binary.reset_mock()
+
+    role.on_audio_chunk(_audio_chunk(1_234_000))
+
+    client.send_binary.assert_called_once()
+    payload = client.send_binary.call_args.args[0]
     kwargs = client.send_binary.call_args.kwargs
-    assert kwargs["buffer_end_time_us"] == 1_025_000  # timestamp + 25ms frame duration
-    assert kwargs["buffer_byte_count"] > 0
-    assert kwargs["duration_us"] == 25_000
+    assert payload[0] == BinaryMessageType.VISUALIZATION_LOUDNESS.value
+    expected_ts = 1_234_000 + 25_000
+    assert struct.unpack(">q", payload[1:9])[0] == expected_ts
+    assert len(payload) == 11
+    assert kwargs["timestamp_us"] == expected_ts
 
 
-def test_visualizer_role_creates_buffer_tracker_on_stream_start() -> None:
-    """on_stream_start() creates a BufferTracker with negotiated capacity."""
+def test_f_peak_binary_carries_freq_and_amp() -> None:
+    """`f_peak`: [18][ts:8][uint16 freq][uint16 amp] = 13 bytes."""
+    client = _make_client_stub()
+    client.info.visualizer_support = {
+        "types": ["f_peak"],
+        "buffer_capacity": 65536,
+        "rate_max": 60,
+    }
+    role = VisualizerV1Role(client=client)
+    role.on_connect()
+    role.on_stream_start()
+    client.send_binary.reset_mock()
+
+    role.on_audio_chunk(_audio_chunk(2_000_000))
+
+    client.send_binary.assert_called_once()
+    payload = client.send_binary.call_args.args[0]
+    assert payload[0] == BinaryMessageType.VISUALIZATION_F_PEAK.value
+    assert struct.unpack(">q", payload[1:9])[0] == 2_000_000 + 25_000
+    freq, amp = struct.unpack(">HH", payload[9:13])
+    assert freq > 0
+    assert amp > 0
+
+
+def test_on_audio_chunk_emits_no_periodic_when_only_beat_negotiated() -> None:
+    """Beat-only client: no periodic binaries on audio chunks (no FFT extractor)."""
+    client = _make_client_stub()
+    client.info.visualizer_support = {
+        "types": ["beat"],
+        "buffer_capacity": 65536,
+        "rate_max": 30,
+    }
+    role = VisualizerV1Role(client=client)
+    role.on_connect()
+    role.on_stream_start()
+    client.send_binary.reset_mock()
+
+    role.on_audio_chunk(_audio_chunk())
+
+    client.send_binary.assert_not_called()
+    assert role._extractor is None  # noqa: SLF001
+
+
+def test_audio_chunk_without_stream_start_is_noop() -> None:
+    """on_audio_chunk before on_stream_start is a no-op."""
     client = _make_client_stub()
     role = VisualizerV1Role(client=client)
     role.on_connect()
+    role.on_audio_chunk(_audio_chunk())
+    client.send_binary.assert_not_called()
+    assert role._extractor is None  # noqa: SLF001
 
-    assert role.get_buffer_tracker() is None
 
+# ---------------------------------------------------------------------------
+# Beats — deferred type, drained via on_audio_chunk
+# ---------------------------------------------------------------------------
+
+
+def test_initial_stream_start_omits_beat_until_schedule_lands() -> None:
+    """`beat` is deferred from the negotiated types until the first schedule arrives."""
+    client = _make_beat_client_stub()
+    role = VisualizerV1Role(client=client)
+    role.on_connect()
     role.on_stream_start()
 
+    initial = _last_stream_start(client).payload.visualizer
+    assert initial is not None
+    assert "beat" not in initial.types
+    # tracks_downbeats only meaningful when `beat` is negotiated.
+    assert initial.tracks_downbeats is None
+
+
+def test_first_beats_landing_reissues_stream_start_with_beat() -> None:
+    """The first non-empty append_beats activates `beat` in the negotiated types."""
+    client = _make_beat_client_stub()
+    role = VisualizerV1Role(client=client)
+    role.set_tracks_downbeats(tracks=True)
+    role.on_connect()
+    role.on_stream_start()
+    assert "beat" not in _last_stream_start(client).payload.visualizer.types
+    starts_before = _stream_start_count(client)
+
+    role.append_beats([BeatTiming(1_000_000)])
+
+    assert _stream_start_count(client) == starts_before + 1
+    after = _last_stream_start(client).payload.visualizer
+    assert after is not None
+    assert "beat" in after.types
+    assert after.tracks_downbeats is True
+
+
+def test_subsequent_beats_landings_do_not_reissue_stream_start() -> None:
+    """Only the first batch flips `_has_beats_landed`; later batches are no-ops on the config."""
+    client = _make_beat_client_stub()
+    role = VisualizerV1Role(client=client)
+    role.on_connect()
+    role.on_stream_start()
+    role.append_beats([BeatTiming(1_000_000)])  # first landing — re-emits
+    starts_after_first = _stream_start_count(client)
+
+    role.append_beats([BeatTiming(2_000_000)])
+    role.append_beats([BeatTiming(3_000_000)])
+
+    assert _stream_start_count(client) == starts_after_first
+
+
+def test_beats_drain_on_next_audio_chunk() -> None:
+    """Beats sit in the pending queue and emit on the next on_audio_chunk drain."""
+    client = _make_beat_client_stub()
+    role = VisualizerV1Role(client=client)
+    role.on_connect()
+    role.on_stream_start()
+
+    role.append_beats([BeatTiming(500_000), BeatTiming(1_500_000)])
+    # No beats on the wire yet — drain is audio-driven.
+    assert _beat_calls(client) == []
+
+    role.on_audio_chunk(_audio_chunk(1_000_000))
+
+    beat_ts = [c.kwargs["timestamp_us"] for c in _beat_calls(client)]
+    assert beat_ts == [500_000]
+
+    role.on_audio_chunk(_audio_chunk(2_000_000))
+    beat_ts = [c.kwargs["timestamp_us"] for c in _beat_calls(client)]
+    assert beat_ts == [500_000, 1_500_000]
+
+
+def test_beats_interleave_with_periodic_frames_in_ts_order() -> None:
+    """All wire timestamps stay non-decreasing across periodic + beat frames."""
+    client = _make_beat_client_stub()
+    role = VisualizerV1Role(client=client)
+    role.on_connect()
+    role.on_stream_start()
+    role.append_beats([BeatTiming(500_000), BeatTiming(1_500_000)])
+    client.send_binary.reset_mock()
+
+    role.on_audio_chunk(_audio_chunk(1_000_000))
+    role.on_audio_chunk(_audio_chunk(2_000_000))
+
+    ts_values = [c.kwargs["timestamp_us"] for c in client.send_binary.call_args_list]
+    assert ts_values == sorted(ts_values)
+
+
+def test_beat_binary_layout() -> None:
+    """`beat` binary: [17][ts:8][flags:1] = 10 bytes."""
+    client = _make_beat_client_stub()
+    role = VisualizerV1Role(client=client)
+    role.on_connect()
+    role.on_stream_start()
+    role.append_beats(
+        [
+            BeatTiming(100, is_downbeat=True),
+            BeatTiming(200),
+        ]
+    )
+    role.on_audio_chunk(_audio_chunk(1_000_000))
+
+    payloads = [call.args[0] for call in _beat_calls(client)]
+    assert len(payloads) == 2
+    for payload in payloads:
+        assert len(payload) == 10
+        assert payload[0] == BinaryMessageType.VISUALIZATION_BEAT.value
+    assert struct.unpack(">q", payloads[0][1:9])[0] == 100
+    assert payloads[0][9] == 0b0000_0001
+    assert struct.unpack(">q", payloads[1][1:9])[0] == 200
+    assert payloads[1][9] == 0
+
+
+def test_append_beats_empty_is_noop() -> None:
+    """Empty append_beats neither queues nor reissues stream/start."""
+    client = _make_beat_client_stub()
+    role = VisualizerV1Role(client=client)
+    role.on_connect()
+    role.on_stream_start()
+    starts_before = _stream_start_count(client)
+
+    role.append_beats([])
+
+    assert _stream_start_count(client) == starts_before
+    assert list(role._pending_beats) == []  # noqa: SLF001
+
+
+def test_append_beats_noop_without_beat_type() -> None:
+    """Client without `beat` in supported types: append_beats has no effect."""
+    client = _make_client_stub()
+    role = VisualizerV1Role(client=client)
+    role.on_connect()
+    role.on_stream_start()
+    client.send_binary.reset_mock()
+    starts_before = _stream_start_count(client)
+
+    role.append_beats([BeatTiming(1), BeatTiming(2)])
+    role.on_audio_chunk(_audio_chunk())
+
+    assert _beat_calls(client) == []
+    assert _stream_start_count(client) == starts_before
+
+
+def test_clear_beats_drops_pending() -> None:
+    """clear_beats empties the pending schedule."""
+    client = _make_beat_client_stub()
+    role = VisualizerV1Role(client=client)
+    role.on_connect()
+    role.on_stream_start()
+    role.append_beats([BeatTiming(1_000_000), BeatTiming(60_000_000)])
+    assert list(role._pending_beats) != []  # noqa: SLF001
+
+    role.clear_beats()
+
+    assert list(role._pending_beats) == []  # noqa: SLF001
+
+
+def test_clear_beats_reissues_stream_start_to_drop_beat() -> None:
+    """After clear_beats the negotiated types no longer expose `beat` until next landing."""
+    client = _make_beat_client_stub()
+    role = VisualizerV1Role(client=client)
+    role.on_connect()
+    role.on_stream_start()
+    role.append_beats([BeatTiming(1_000_000)])
+    assert "beat" in _last_stream_start(client).payload.visualizer.types
+
+    role.clear_beats()
+
+    assert "beat" not in _last_stream_start(client).payload.visualizer.types
+
+
+def test_emit_beats_drops_duplicate_ts() -> None:
+    """Beats whose ts equals the most-recently-emitted one are dropped (`<=` guard)."""
+    client = _make_beat_client_stub()
+    role = VisualizerV1Role(client=client)
+    role.on_connect()
+    role.on_stream_start()
+    role.append_beats([BeatTiming(500_000)])
+    role.on_audio_chunk(_audio_chunk(1_000_000))  # emits 500_000
+    client.send_binary.reset_mock()
+
+    # Same ts again — should be dropped by the `<=` wire-ts guard.
+    role._pending_beats.append(BeatTiming(500_000))  # noqa: SLF001
+    role.on_audio_chunk(_audio_chunk(1_025_000))
+
+    assert _beat_calls(client) == []
+
+
+def test_join_ordering_beats_before_stream_start_drains_after_start() -> None:
+    """Beats appended before on_stream_start (mid-stream join) drain after start."""
+    client = _make_beat_client_stub()
+    role = VisualizerV1Role(client=client)
+    role.on_connect()
+    role.append_beats([BeatTiming(500_000)])
+    # Before on_stream_start: nothing on the wire (no stream/start emitted yet
+    # either, so the client wouldn't know the config).
+    assert _beat_calls(client) == []
+
+    role.on_stream_start()
+    # The first batch arrived during warmup → `beat` is already in the
+    # initial stream/start (it landed before the start), so no second
+    # stream/start is needed.
+    assert "beat" in _last_stream_start(client).payload.visualizer.types
+    assert _beat_calls(client) == []  # still waiting for a chunk to drain
+
+    role.on_audio_chunk(_audio_chunk(1_000_000))
+    beat_ts = [c.kwargs["timestamp_us"] for c in _beat_calls(client)]
+    assert beat_ts == [500_000]
+
+
+# ---------------------------------------------------------------------------
+# Availability transitions
+# ---------------------------------------------------------------------------
+
+
+def test_unavailable_blocks_beat_activation() -> None:
+    """UNAVAILABLE makes append_beats a no-op and keeps `beat` out of types."""
+    client = _make_beat_client_stub()
+    role = VisualizerV1Role(client=client)
+    role.on_connect()
+    role.set_beat_availability(BeatAvailability.UNAVAILABLE)
+    role.on_stream_start()
+
+    role.append_beats([BeatTiming(1_000_000)])
+    role.on_audio_chunk(_audio_chunk(2_000_000))
+
+    assert "beat" not in _last_stream_start(client).payload.visualizer.types
+    assert _beat_calls(client) == []
+
+
+def test_unavailable_after_landing_clears_beats_and_reissues() -> None:
+    """Flipping to UNAVAILABLE drops the pending schedule and re-emits stream/start."""
+    client = _make_beat_client_stub()
+    role = VisualizerV1Role(client=client)
+    role.on_connect()
+    role.on_stream_start()
+    role.append_beats([BeatTiming(1_000_000)])
+    assert "beat" in _last_stream_start(client).payload.visualizer.types
+
+    role.set_beat_availability(BeatAvailability.UNAVAILABLE)
+
+    assert "beat" not in _last_stream_start(client).payload.visualizer.types
+    assert list(role._pending_beats) == []  # noqa: SLF001
+
+
+def test_unavailable_then_pending_requires_fresh_beats_for_reactivation() -> None:
+    """PENDING after UNAVAILABLE does not re-add `beat`; a fresh schedule must land."""
+    client = _make_beat_client_stub()
+    role = VisualizerV1Role(client=client)
+    role.on_connect()
+    role.on_stream_start()
+    role.append_beats([BeatTiming(1_000_000)])
+    role.set_beat_availability(BeatAvailability.UNAVAILABLE)
+    assert "beat" not in _last_stream_start(client).payload.visualizer.types
+
+    role.set_beat_availability(BeatAvailability.PENDING)
+    # Flipping back to PENDING alone is not enough — the schedule was wiped.
+    assert "beat" not in _last_stream_start(client).payload.visualizer.types
+
+    role.append_beats([BeatTiming(2_000_000)])
+    assert "beat" in _last_stream_start(client).payload.visualizer.types
+
+
+def test_beat_only_stream_initial_includes_beat() -> None:
+    """Beat-only clients see `beat` from the start (no FFT type to fall back to)."""
+    client = _make_client_stub()
+    client.info.visualizer_support = {
+        "types": ["beat"],
+        "buffer_capacity": 65536,
+        "rate_max": 30,
+    }
+    role = VisualizerV1Role(client=client)
+    role.on_connect()
+    role.on_stream_start()
+
+    initial = _last_stream_start(client).payload.visualizer
+    assert list(initial.types) == ["beat"]
+
+
+# ---------------------------------------------------------------------------
+# stream/request-format renegotiation
+# ---------------------------------------------------------------------------
+
+
+def test_request_format_replaces_spectrum() -> None:
+    """request-format replaces the spectrum config and rebuilds the extractor."""
+    client = _make_client_stub()
+    role = VisualizerV1Role(client=client)
+    role.on_connect()
+    role.on_stream_start()
+    original_extractor = role._extractor  # noqa: SLF001
+
+    new_spectrum = ClientHelloVisualizerSpectrum(
+        n_disp_bins=24, scale="mel", f_min=40, f_max=14_000
+    )
+    payload = StreamRequestFormatPayload(
+        visualizer=StreamRequestFormatVisualizer(spectrum=new_spectrum)
+    )
+    role.on_stream_request_format(payload)
+
+    assert role._stream_config is not None  # noqa: SLF001
+    assert role._stream_config.spectrum is not None  # noqa: SLF001
+    assert role._stream_config.spectrum.n_disp_bins == 24  # noqa: SLF001
+    assert role._extractor is not original_extractor  # noqa: SLF001
+
+
+def test_request_format_replaces_rate_max() -> None:
+    """request-format replaces rate_max."""
+    client = _make_client_stub()
+    role = VisualizerV1Role(client=client)
+    role.on_connect()
+    role.on_stream_start()
+
+    payload = StreamRequestFormatPayload(visualizer=StreamRequestFormatVisualizer(rate_max=15))
+    role.on_stream_request_format(payload)
+
+    assert role._stream_config is not None  # noqa: SLF001
+    assert role._stream_config.rate_max == 15  # noqa: SLF001
+
+
+def test_request_format_replaces_types() -> None:
+    """request-format replaces the negotiated types."""
+    client = _make_client_stub()
+    role = VisualizerV1Role(client=client)
+    role.on_connect()
+    role.on_stream_start()
+
+    payload = StreamRequestFormatPayload(
+        visualizer=StreamRequestFormatVisualizer(types=["loudness"])
+    )
+    role.on_stream_request_format(payload)
+
+    assert role._stream_config is not None  # noqa: SLF001
+    assert list(role._stream_config.types) == ["loudness"]  # noqa: SLF001
+
+
+def test_request_format_emits_new_stream_start() -> None:
+    """request-format always emits a fresh stream/start."""
+    client = _make_client_stub()
+    role = VisualizerV1Role(client=client)
+    role.on_connect()
+    role.on_stream_start()
+    starts_before = _stream_start_count(client)
+
+    payload = StreamRequestFormatPayload(visualizer=StreamRequestFormatVisualizer(rate_max=20))
+    role.on_stream_request_format(payload)
+
+    assert _stream_start_count(client) == starts_before + 1
+
+
+def test_request_format_adding_spectrum_without_spectrum_object_falls_back() -> None:
+    """A `types` change adding `spectrum` without a `spectrum` object is normalized away."""
+    client = _make_client_stub()
+    client.info.visualizer_support = {
+        "types": ["loudness"],
+        "buffer_capacity": 65536,
+        "rate_max": 60,
+    }
+    role = VisualizerV1Role(client=client)
+    role.on_connect()
+    role.on_stream_start()
+
+    payload = StreamRequestFormatPayload(
+        visualizer=StreamRequestFormatVisualizer(types=["loudness", "spectrum"])
+    )
+    role.on_stream_request_format(payload)
+
+    # No spectrum object available → `spectrum` is filtered out by normalization.
+    assert "spectrum" not in role._stream_config.types  # noqa: SLF001
+    # And no crash in pack_spectrum on the next chunk.
+    role.on_audio_chunk(_audio_chunk(1_000_000))
+
+
+def test_request_format_clears_pending_beats_and_re_defers() -> None:
+    """request-format drops pending beats and re-defers `beat` until next landing."""
+    client = _make_beat_client_stub()
+    role = VisualizerV1Role(client=client)
+    role.on_connect()
+    role.on_stream_start()
+    role.append_beats([BeatTiming(1_000_000)])
+    assert "beat" in _last_stream_start(client).payload.visualizer.types
+    assert list(role._pending_beats) != []  # noqa: SLF001
+
+    role.on_stream_request_format(
+        StreamRequestFormatPayload(visualizer=StreamRequestFormatVisualizer(rate_max=15))
+    )
+
+    assert "beat" not in _last_stream_start(client).payload.visualizer.types
+    assert list(role._pending_beats) == []  # noqa: SLF001
+
+
+# ---------------------------------------------------------------------------
+# Buffer tracker + binary handling
+# ---------------------------------------------------------------------------
+
+
+def test_buffer_tracker_uses_negotiated_capacity() -> None:
+    """Buffer tracker uses negotiated capacity."""
+    client = _make_client_stub()
+    role = VisualizerV1Role(client=client)
+    role.on_connect()
+    role.on_stream_start()
     tracker = role.get_buffer_tracker()
     assert tracker is not None
     assert tracker.capacity_bytes == 65536
 
 
-def test_visualizer_role_resets_buffer_tracker_on_stream_clear() -> None:
-    """on_stream_clear() resets the buffer tracker."""
+def test_buffer_tracker_resets_on_stream_clear() -> None:
+    """Buffer tracker resets on stream clear."""
     client = _make_client_stub()
     role = VisualizerV1Role(client=client)
     role.on_connect()
     role.on_stream_start()
+    role.on_stream_clear()
 
     tracker = role.get_buffer_tracker()
     assert tracker is not None
-
-    role.on_stream_clear()
-    # Tracker still exists but was reset (buffered_bytes = 0)
-    assert role.get_buffer_tracker() is not None
-    assert role.get_buffer_tracker().buffered_bytes == 0  # type: ignore[union-attr]
+    assert tracker.buffered_bytes == 0
 
 
-def test_visualizer_role_resets_buffer_tracker_on_stream_end() -> None:
-    """on_stream_end() resets the buffer tracker."""
+def test_buffer_tracker_capacity_shrink_does_not_reset_buffered_bytes() -> None:
+    """Mid-stream capacity changes update the limit but keep buffered_bytes intact."""
     client = _make_client_stub()
     role = VisualizerV1Role(client=client)
     role.on_connect()
     role.on_stream_start()
-
     tracker = role.get_buffer_tracker()
     assert tracker is not None
+    # Simulate already-sent bytes the client still holds.
+    tracker.register(end_time_us=1_000_000, byte_count=4096, duration_us=25_000)
+    assert tracker.buffered_bytes == 4096
 
-    role.on_stream_end()
-    assert role.get_buffer_tracker() is not None
-    assert role.get_buffer_tracker().buffered_bytes == 0  # type: ignore[union-attr]
+    payload = StreamRequestFormatPayload(
+        visualizer=StreamRequestFormatVisualizer(buffer_capacity=32_768)
+    )
+    role.on_stream_request_format(payload)
+
+    assert tracker.capacity_bytes == 32_768
+    assert tracker.buffered_bytes == 4096
 
 
-def test_visualizer_role_stream_start_is_resent_after_stream_end() -> None:
-    """A new stream/start must be sent again after stream/end."""
+def test_binary_handling_for_all_visualizer_types() -> None:
+    """get_binary_handling covers all per-type wire bytes."""
     client = _make_client_stub()
     role = VisualizerV1Role(client=client)
-    role.on_connect()
+    for member in (
+        BinaryMessageType.VISUALIZATION_LOUDNESS,
+        BinaryMessageType.VISUALIZATION_BEAT,
+        BinaryMessageType.VISUALIZATION_F_PEAK,
+        BinaryMessageType.VISUALIZATION_SPECTRUM,
+        BinaryMessageType.VISUALIZATION_PEAK,
+        BinaryMessageType.VISUALIZATION_PITCH,
+    ):
+        handling = role.get_binary_handling(member.value)
+        assert handling is not None
+        assert handling.drop_late is True
+        assert handling.buffer_track is True
 
-    role.on_stream_start()
-    role.on_stream_end()
-    role.on_stream_start()
 
-    stream_start_calls = [
-        call
-        for call in client.send_role_message.call_args_list
-        if isinstance(call.args[1], StreamStartMessage)
-    ]
-    assert len(stream_start_calls) == 2
+# ---------------------------------------------------------------------------
+# Support payload normalization
+# ---------------------------------------------------------------------------
 
 
-def test_visualizer_role_stream_start_skipped_after_stream_clear() -> None:
-    """stream/clear preserves stream/start config, so no resend is needed."""
+def test_role_accepts_support_object_instance() -> None:
+    """Client info may carry a model instance rather than a dict."""
     client = _make_client_stub()
-    role = VisualizerV1Role(client=client)
-    role.on_connect()
-
-    role.on_stream_start()
-    role.on_stream_clear()
-    role.on_stream_start()
-
-    stream_start_calls = [
-        call
-        for call in client.send_role_message.call_args_list
-        if isinstance(call.args[1], StreamStartMessage)
-    ]
-    assert len(stream_start_calls) == 1
-
-
-def test_visualizer_role_resets_binary_timing_on_stream_start() -> None:
-    """on_stream_start() resets binary timing for fresh grace window."""
-    client = _make_client_stub()
-    role = VisualizerV1Role(client=client)
-    role.on_connect()
-
-    # Simulate stale timing from a previous stream
-    role._stream_start_time_us = 1_000_000  # noqa: SLF001
-
-    role.on_stream_start()
-
-    assert role._stream_start_time_us is None  # noqa: SLF001
-
-
-def test_visualizer_role_resets_binary_timing_on_disconnect() -> None:
-    """on_disconnect() resets binary timing to avoid stale grace period."""
-    client = _make_client_stub()
+    client.info.visualizer_support = ClientHelloVisualizerSupport(
+        types=["loudness", "f_peak"],
+        buffer_capacity=65536,
+        rate_max=30,
+    )
     role = VisualizerV1Role(client=client)
     role.on_connect()
     role.on_stream_start()
 
-    role._stream_start_time_us = 5_000_000  # noqa: SLF001
+    message = _last_stream_start(client)
+    assert message.payload.visualizer is not None
+    assert list(message.payload.visualizer.types) == ["loudness", "f_peak"]
+    assert message.payload.visualizer.rate_max == 30
 
-    role.on_disconnect()
 
-    assert role._stream_start_time_us is None  # noqa: SLF001
-
-
-def test_visualizer_role_audio_chunk_without_stream_start_is_noop() -> None:
-    """on_audio_chunk() before on_stream_start() does not send data or self-initialize."""
+def test_unsupported_types_are_filtered() -> None:
+    """Types the reference impl can't produce are dropped from stream/start."""
     client = _make_client_stub()
+    client.info.visualizer_support = {
+        "types": ["loudness", "_not_a_real_type"],
+        "buffer_capacity": 65536,
+        "rate_max": 30,
+    }
     role = VisualizerV1Role(client=client)
     role.on_connect()
+    role.on_stream_start()
 
-    pcm = sine_pcm_16bit(sample_rate=48_000, channels=2, hz=1000.0, duration_s=0.025)
+    message = _last_stream_start(client)
+    assert message.payload.visualizer is not None
+    assert list(message.payload.visualizer.types) == ["loudness"]
+
+
+def test_pitch_emits_msg_21_with_midi_and_confidence() -> None:
+    """Pure-tone audio yields a confident pitch frame in MIDI 8.8 fixed-point."""
+    client = _make_client_stub()
+    client.info.visualizer_support = {
+        "types": ["pitch"],
+        "buffer_capacity": 65536,
+        "rate_max": 30,
+    }
+    role = VisualizerV1Role(client=client)
+    role.on_connect()
+    role.on_stream_start()
+    client.send_binary.reset_mock()
+
+    pcm = sine_pcm_16bit(sample_rate=48_000, channels=2, hz=440.0, duration_s=0.05)
     role.on_audio_chunk(
-        AudioChunk(
-            data=pcm,
-            timestamp_us=1_000_000,
-            duration_us=25_000,
-            byte_count=len(pcm),
-        )
+        AudioChunk(data=pcm, timestamp_us=1_000_000, duration_us=50_000, byte_count=len(pcm))
     )
 
-    # Should not have sent binary data or stream/start
-    client.send_binary.assert_not_called()
-    # Should not have self-initialized the extractor
-    assert role._extractor is None  # noqa: SLF001
+    assert client.send_binary.call_count == 1
+    payload = client.send_binary.call_args.args[0]
+    assert payload[0] == BinaryMessageType.VISUALIZATION_PITCH.value
+    assert struct.unpack(">q", payload[1:9])[0] == 1_050_000
+    (midi_q88,) = struct.unpack(">H", payload[9:11])
+    confidence = payload[11]
+    midi_float = midi_q88 / 256.0
+    assert abs(midi_float - 69.0) < 1.0
+    assert confidence > 128
