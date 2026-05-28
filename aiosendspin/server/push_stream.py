@@ -703,6 +703,11 @@ class PushStream:
         self._clock = clock
         self._group = group
         self._is_stopped = False
+        # Whether the audio source is realtime (live) vs buffered. Live sources
+        # honor min_buffer_ms at startup since the queue cannot grow after
+        # playback begins. Buffered sources skip the min_buffer startup wait.
+        # Default to buffered; callers opt into live via set_live_source(True).
+        self._is_live: bool = False
         # Monotonic lifecycle token used to invalidate in-flight commit work on stop().
         self._stream_generation = 0
         # Pending audio per channel: channel_id -> (pcm_bytes, audio_format)
@@ -815,18 +820,22 @@ class PushStream:
             return 0
         return max(role.get_static_delay_us() for _, role in roles)
 
-    @staticmethod
-    def _role_send_ahead_us(role: Role) -> int:
-        """Per-role send-ahead floor: max(required_lead, min_buffer) + static_delay.
+    def _role_send_ahead_us(self, role: Role) -> int:
+        """Per-role send-ahead floor.
 
-        Satisfies both spec constraints at once: the first chunk lands at least
-        required_lead_time_ms ahead (startup) and the ongoing timeline never sits
-        below min_buffer_ms ahead, with the player's static delay added on top.
+        Live: max(required_lead, min_buffer) + static. The first chunk lands at
+        least required_lead ahead and the timeline never sits below min_buffer
+        ahead, since a realtime queue cannot grow after playback begins.
+
+        Buffered: required_lead + static. The queue grows naturally past
+        min_buffer once playback starts, so paying min_buffer upfront would only
+        add startup latency without buying jitter resilience.
         """
-        return (
-            max(role.get_required_lead_time_us(), role.get_min_buffer_us())
-            + role.get_static_delay_us()
-        )
+        lead_us = role.get_required_lead_time_us()
+        static_us = role.get_static_delay_us()
+        if self._is_live:
+            return max(lead_us, role.get_min_buffer_us()) + static_us
+        return lead_us + static_us
 
     def _min_send_ahead_us(self) -> int:
         """Return the common send-ahead floor across active audio roles."""
@@ -834,6 +843,24 @@ class PushStream:
         if not roles:
             return DEFAULT_INITIAL_DELAY_US
         return max(self._role_send_ahead_us(role) for _, role in roles)
+
+    @property
+    def is_live(self) -> bool:
+        """Whether the audio source is treated as realtime/live."""
+        return self._is_live
+
+    def set_live_source(self, is_live: bool) -> None:  # noqa: FBT001
+        """Configure whether subsequent stream startups treat audio as live or buffered.
+
+        Buffered (default): startup uses only required_lead_time_ms since the
+        queue can grow naturally after playback begins. Live: startup waits for
+        min_buffer_ms so the jitter buffer is filled before playback, since a
+        realtime source cannot grow the queue after start.
+
+        Call before the first commit_audio of a new stream session so the startup
+        anchor uses the right floor.
+        """
+        self._is_live = is_live
 
     def _get_cached_resampler(self, key: _ResamplerKey) -> _ResamplerState | None:
         """Get existing resampler from cache, or None if not cached."""

@@ -2767,7 +2767,7 @@ async def test_commit_audio_uses_reported_lead_time() -> None:
 
 @pytest.mark.asyncio
 async def test_commit_audio_min_buffer_floors_send_ahead() -> None:
-    """When min_buffer exceeds lead time, the send-ahead floor follows min_buffer."""
+    """Live streams: when min_buffer exceeds lead time, the floor follows min_buffer."""
     loop = asyncio.get_running_loop()
     clock = ManualClock(now_us_value=1_000_000)
     group = _DummyGroup(clients=[])
@@ -2775,6 +2775,7 @@ async def test_commit_audio_min_buffer_floors_send_ahead() -> None:
     group.clients.append(_DummyClient([role]))
 
     stream = PushStream(loop=loop, clock=clock, group=group)
+    stream.set_live_source(is_live=True)
     fmt = AudioFormat(sample_rate=48000, bit_depth=16, channels=2)
     stream.prepare_audio(bytes(4800), fmt)
     play_start = await stream.commit_audio()
@@ -2783,8 +2784,27 @@ async def test_commit_audio_min_buffer_floors_send_ahead() -> None:
 
 
 @pytest.mark.asyncio
+async def test_buffered_source_skips_min_buffer_at_startup() -> None:
+    """Buffered streams anchor startup at required_lead + static, ignoring min_buffer."""
+    loop = asyncio.get_running_loop()
+    clock = ManualClock(now_us_value=1_000_000)
+    group = _DummyGroup(clients=[])
+    role = _make_role(required_lead_time_us=0, min_buffer_us=15_000_000, static_delay_us=0)
+    group.clients.append(_DummyClient([role]))
+
+    stream = PushStream(loop=loop, clock=clock, group=group)
+    stream.set_live_source(is_live=False)
+    fmt = AudioFormat(sample_rate=48000, bit_depth=16, channels=2)
+    stream.prepare_audio(bytes(4800), fmt)
+    play_start = await stream.commit_audio()
+
+    # Buffered: startup = lead(0) + static(0) = 0; min_buffer ignored upfront.
+    assert play_start == clock.now_us()
+
+
+@pytest.mark.asyncio
 async def test_send_ahead_uses_largest_member_budget() -> None:
-    """Grouped players use a common floor: max(lead, min_buffer) + static across members."""
+    """Live grouped players use a common floor: max(lead, min_buffer) + static across members."""
     loop = asyncio.get_running_loop()
     clock = ManualClock(now_us_value=1_000_000)
     group = _DummyGroup(clients=[])
@@ -2795,6 +2815,7 @@ async def test_send_ahead_uses_largest_member_budget() -> None:
     group.clients.extend([_DummyClient([role_low]), _DummyClient([role_high])])
 
     stream = PushStream(loop=loop, clock=clock, group=group)
+    stream.set_live_source(is_live=True)
     fmt = AudioFormat(sample_rate=48000, bit_depth=16, channels=2)
     stream.prepare_audio(bytes(4800), fmt)
     play_start = await stream.commit_audio()
