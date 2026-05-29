@@ -1052,3 +1052,36 @@ async def test_server_set_pitch_enabled_fans_out_to_roles() -> None:
     role.refresh_pitch_setting.reset_mock()
     server.set_visualizer_pitch_enabled(enabled=False)  # idempotent
     role.refresh_pitch_setting.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Warmup re-arm on beat-schedule clear / availability flip
+# ---------------------------------------------------------------------------
+
+
+async def test_clear_beats_reholds_far_future_frames_after_schedule_landed() -> None:
+    """Dropping a landed schedule re-arms warmup so the next schedule is protected."""
+    client = _make_beat_client_stub()
+    role = VisualizerV1Role(client)
+    role.on_connect()
+    role.on_stream_start()
+    role.append_beats([BeatTiming(1_000_000)])  # first landing → holdback lifted
+    role.clear_beats()  # schedule dropped while stream continues → re-arm
+    client.send_binary.reset_mock()
+    role.on_audio_chunk(_audio_chunk(timestamp_us=5_000_000))  # > lead → must be held
+    assert _periodic_calls(client) == []
+    role._cancel_release_timer()  # noqa: SLF001
+
+
+async def test_pending_after_unavailable_reholds_far_future_frames() -> None:
+    """UNAVAILABLE → PENDING re-arms warmup (beats wanted again on a new source)."""
+    client = _make_beat_client_stub()
+    role = VisualizerV1Role(client)
+    role.on_connect()
+    role.on_stream_start()
+    role.set_beat_availability(BeatAvailability.UNAVAILABLE)  # holdback lifted
+    role.set_beat_availability(BeatAvailability.PENDING)  # beats wanted again → re-arm
+    client.send_binary.reset_mock()
+    role.on_audio_chunk(_audio_chunk(timestamp_us=5_000_000))
+    assert _periodic_calls(client) == []
+    role._cancel_release_timer()  # noqa: SLF001

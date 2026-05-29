@@ -207,6 +207,11 @@ class VisualizerV1Role(Role):
             self._has_beats_landed = False
             # No beats will arrive — lift the cap and release held frames.
             self._end_holdback()
+        elif self._holdback_should_be_active() and not self._holdback_active:
+            # Beats are wanted again (e.g. UNAVAILABLE → PENDING on a new track)
+            # but the cap was lifted earlier. Re-arm it so a schedule landing
+            # after a few seconds of audio is not dropped behind the cursor.
+            self._rearm_warmup_holdback()
         if (
             self._support is None
             or "beat" not in self._support.types
@@ -429,6 +434,19 @@ class VisualizerV1Role(Role):
         """Whether the warmup cap applies: client wants beats, none landed yet."""
         return self.wants_beats and not self._has_beats_landed
 
+    def _rearm_warmup_holdback(self) -> None:
+        """Re-arm the warmup cap and drop the wire-ts cursor for a fresh schedule.
+
+        Used whenever a schedule is dropped (seek, beat-schedule clear) or beats
+        become wanted again (availability back to PENDING): the next schedule
+        arrives shortly, so hold periodic frames near the playhead and clear the
+        cursor so a landing beat is not dropped behind a far-ahead frontier.
+        """
+        self._cancel_release_timer()
+        self._pending_frames.clear()
+        self._last_wire_emit_ts_us = None
+        self._holdback_active = self._holdback_should_be_active()
+
     def _warmup_cutoff_us(self) -> int:
         """Wire ts above which periodic frames are held during warmup."""
         return self._client._server.clock.now_us() + _WARMUP_LEAD_US  # noqa: SLF001
@@ -524,6 +542,10 @@ class VisualizerV1Role(Role):
         self._pending_beats.clear()
         if self._has_beats_landed:
             self._has_beats_landed = False
+            # A landed schedule was dropped while the stream continues (track
+            # change, analysis re-clear). Re-arm warmup so the next schedule is
+            # not lost behind a wire cursor already pushed far ahead.
+            self._rearm_warmup_holdback()
             if self._stream_started and self._stream_config is not None:
                 self._reissue_stream_start()
 
@@ -573,18 +595,12 @@ class VisualizerV1Role(Role):
         if self._extractor is not None:
             self._extractor.reset()
         self._pending_beats.clear()
-        # Seek re-pushes the schedule, so beats arrive again shortly.
-        # Drop the wire-ts guard so post-seek frames with earlier
-        # timestamps are not silently blocked.
-        self._last_wire_emit_ts_us = None
         had_beats = self._has_beats_landed
         self._has_beats_landed = False
-        # Re-arm warmup: a seek re-pushes the (already-computed) schedule, so
-        # beats arrive again shortly; hold periodic frames near the playhead
-        # until they do.
-        self._cancel_release_timer()
-        self._pending_frames.clear()
-        self._holdback_active = self._holdback_should_be_active()
+        # Seek re-pushes the schedule, so beats arrive again shortly: re-arm
+        # warmup and drop the wire-ts guard so post-seek frames with earlier
+        # timestamps are not silently blocked.
+        self._rearm_warmup_holdback()
         self.send_message(StreamClearMessage(payload=StreamClearPayload(roles=["visualizer"])))
         self.reset_binary_timing()
         if self._buffer_tracker is not None:
