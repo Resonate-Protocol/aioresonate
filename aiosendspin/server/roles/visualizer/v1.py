@@ -435,16 +435,20 @@ class VisualizerV1Role(Role):
         return self.wants_beats and not self._has_beats_landed
 
     def _rearm_warmup_holdback(self) -> None:
-        """Re-arm the warmup cap and drop the wire-ts cursor for a fresh schedule.
+        """Re-arm the warmup cap for a fresh schedule.
 
         Used whenever a schedule is dropped (seek, beat-schedule clear) or beats
         become wanted again (availability back to PENDING): the next schedule
-        arrives shortly, so hold periodic frames near the playhead and clear the
-        cursor so a landing beat is not dropped behind a far-ahead frontier.
+        arrives shortly, so cap periodic frames near the playhead again.
+
+        Does NOT reset the wire-ts cursor: callers that did not also send a
+        `stream/clear` must keep it, so a late beat landing below an
+        already-sent frame is dropped by the `<=` guard rather than emitted out
+        of order. Only `on_stream_clear` resets the cursor (it pairs the reset
+        with a `stream/clear` so the client discards the ahead binaries).
         """
         self._cancel_release_timer()
         self._pending_frames.clear()
-        self._last_wire_emit_ts_us = None
         self._holdback_active = self._holdback_should_be_active()
 
     def _warmup_cutoff_us(self) -> int:
@@ -598,9 +602,11 @@ class VisualizerV1Role(Role):
         had_beats = self._has_beats_landed
         self._has_beats_landed = False
         # Seek re-pushes the schedule, so beats arrive again shortly: re-arm
-        # warmup and drop the wire-ts guard so post-seek frames with earlier
-        # timestamps are not silently blocked.
+        # warmup. The accompanying `stream/clear` makes the client discard
+        # ahead binaries, so the wire-ts guard can be dropped too — post-seek
+        # frames with earlier timestamps are then not silently blocked.
         self._rearm_warmup_holdback()
+        self._last_wire_emit_ts_us = None
         self.send_message(StreamClearMessage(payload=StreamClearPayload(roles=["visualizer"])))
         self.reset_binary_timing()
         if self._buffer_tracker is not None:

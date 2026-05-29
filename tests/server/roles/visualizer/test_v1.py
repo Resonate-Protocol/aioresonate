@@ -1085,3 +1085,22 @@ async def test_pending_after_unavailable_reholds_far_future_frames() -> None:
     role.on_audio_chunk(_audio_chunk(timestamp_us=5_000_000))
     assert _periodic_calls(client) == []
     role._cancel_release_timer()  # noqa: SLF001
+
+
+async def test_clear_beats_keeps_cursor_no_wire_regression() -> None:
+    """clear_beats must not reset the cursor: a below-frontier beat is dropped, not regressed."""
+    client = _make_beat_client_stub()
+    role = VisualizerV1Role(client)
+    role.on_connect()
+    role.on_stream_start()
+    role.append_beats([BeatTiming(1_000_000)])  # land → holdback lifted
+    role.on_audio_chunk(_audio_chunk(timestamp_us=5_000_000))  # frame ~5.025s → cursor advances
+    role.clear_beats()  # re-arm warmup, cursor kept (no stream/clear sent)
+    # New schedule: 2_000_000 is below the already-emitted frontier and must be
+    # dropped, not sent out of order; 6_000_000 is ahead and emits.
+    role.append_beats([BeatTiming(2_000_000), BeatTiming(6_000_000)])
+    role.on_audio_chunk(_audio_chunk(timestamp_us=6_000_000))
+    sent_ts = [call.kwargs["timestamp_us"] for call in client.send_binary.call_args_list]
+    assert sent_ts == sorted(sent_ts), f"wire timestamps regressed: {sent_ts}"
+    assert 2_000_000 not in sent_ts
+    role._cancel_release_timer()  # noqa: SLF001
