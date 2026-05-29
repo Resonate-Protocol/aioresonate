@@ -395,3 +395,26 @@ def test_window_samples_scales_with_sample_rate() -> None:
     )
     assert extractor_48k._window_samples == 2048  # noqa: SLF001
     assert extractor_96k._window_samples == 4096  # noqa: SLF001
+
+
+def test_fft_size_caches_reused_across_frames() -> None:
+    """Per-window-size caches (hann, rfftfreq, bin assignment) are reused, not rebuilt."""
+    config = _spectrum_config(rate_max=60)
+    extractor = VisualizerFeatureExtractor(sample_rate=48_000, channels=2, config=config)
+    # 100ms chunk fills the rolling buffer so the window settles to its full
+    # size (2048) on the very first frame.
+    pcm = sine_pcm_16bit(sample_rate=48_000, channels=2, hz=1000.0, duration_s=0.1)
+
+    assert extractor.process_chunk(pcm, 1_000_000)
+    hann = extractor._hann_window  # noqa: SLF001
+    freqs = extractor._rfftfreq  # noqa: SLF001
+    bin_cache = extractor._spectrum_bin_cache  # noqa: SLF001
+    assert hann is not None
+    assert freqs is not None
+    assert bin_cache is not None
+
+    # Contiguous second chunk → same window size → cached arrays reused verbatim.
+    assert extractor.process_chunk(pcm, 1_100_000)
+    assert extractor._hann_window is hann  # noqa: SLF001
+    assert extractor._rfftfreq is freqs  # noqa: SLF001
+    assert extractor._spectrum_bin_cache is bin_cache  # noqa: SLF001

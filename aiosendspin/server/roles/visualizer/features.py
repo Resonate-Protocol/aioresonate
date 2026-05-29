@@ -114,6 +114,15 @@ class VisualizerFeatureExtractor:
         # Cursor: ts of the NEXT frame to emit. Set on first chunk.
         self._next_emit_ts_us: int | None = None
 
+        # Per-FFT-size caches for values that are constant once the window
+        # size settles (recomputing them every frame is pure overhead on
+        # constrained hardware). Keyed by window length so the brief warmup
+        # ramp, where the window grows, refreshes them and then they stick.
+        self._hann_window: np.ndarray | None = None
+        self._rfftfreq: np.ndarray | None = None
+        # (freqs.size, valid mask, bin-index array) for the spectrum binning.
+        self._spectrum_bin_cache: tuple[int, np.ndarray, np.ndarray] | None = None
+
         # Smoothing / hysteresis state.
         self._spectrum_ema: np.ndarray | None = None
         self._loudness_ema: float | None = None
@@ -537,10 +546,15 @@ class VisualizerFeatureExtractor:
         if mono.size <= 1:
             return np.zeros(0, dtype=np.float32), np.zeros(0, dtype=np.float32)
 
-        windowed = mono * np.hanning(mono.size).astype(np.float32)
+        n = mono.size
+        if self._hann_window is None or self._hann_window.size != n:
+            self._hann_window = np.hanning(n).astype(np.float32)
+            self._rfftfreq = np.fft.rfftfreq(n, d=1.0 / float(self._sample_rate)).astype(np.float32)
+        assert self._rfftfreq is not None
+        windowed = mono * self._hann_window
         spectrum = np.fft.rfft(windowed)
         magnitude = np.abs(spectrum).astype(np.float32)
-        freqs = np.fft.rfftfreq(mono.size, d=1.0 / float(self._sample_rate)).astype(np.float32)
+        freqs = self._rfftfreq
 
         # Drop DC for peak/spectrum display.
         if magnitude.size > 0:
@@ -610,12 +624,19 @@ class VisualizerFeatureExtractor:
         if hi <= lo:
             return np.zeros(n_bins, dtype=np.uint16)
 
-        edges = self._frequency_bin_edges(n_bins=n_bins, f_min=lo, f_max=hi, scale=scale)
-
-        # Vectorized binning via np.digitize.
-        bin_indices = np.digitize(freqs, edges) - 1
-        valid = (bin_indices >= 0) & (bin_indices < n_bins)
-        idx = bin_indices[valid]
+        # Bin assignment is constant for a fixed freq grid + config; compute it
+        # once per window size and reuse (digitize over ~1k bins per frame is
+        # otherwise a steady cost). f_min/f_max/scale are fixed for the
+        # extractor's lifetime, so freqs.size alone keys the cache.
+        cache = self._spectrum_bin_cache
+        if cache is not None and cache[0] == freqs.size:
+            _, valid, idx = cache
+        else:
+            edges = self._frequency_bin_edges(n_bins=n_bins, f_min=lo, f_max=hi, scale=scale)
+            bin_indices = np.digitize(freqs, edges) - 1
+            valid = (bin_indices >= 0) & (bin_indices < n_bins)
+            idx = bin_indices[valid]
+            self._spectrum_bin_cache = (freqs.size, valid, idx)
         mag = magnitude[valid]
 
         sq = mag.astype(np.float64) ** 2
