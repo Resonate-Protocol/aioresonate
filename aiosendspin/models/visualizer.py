@@ -27,9 +27,9 @@ class BeatAvailability(Enum):
     """Server-side declaration of whether beats will arrive for the source.
 
     `PENDING` (default): beats may arrive via `append_beat_schedule()`. `beat`
-    is included in `stream/start.types` up front (when the client requested
-    it), so no mid-stream `stream/start` re-emit is needed once a schedule
-    lands.
+    is deferred from `stream/start.types` until the first schedule lands (when
+    the client requested it), at which point the role re-emits `stream/start`
+    with `beat` added.
 
     `UNAVAILABLE`: no beats will arrive for this source. `beat` is excluded
     from the negotiated types, and any `append_beat_schedule()` call is a
