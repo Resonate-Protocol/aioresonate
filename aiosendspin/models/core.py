@@ -442,10 +442,21 @@ class ServerCommandMessage(ServerMessage):
     type: Literal["server/command"] = "server/command"
 
 
-def _serialize_stream_start_visualizer(
-    value: StreamStartVisualizer | StreamStartVisualizerDraftR1 | None,
-) -> dict[str, Any] | None:
-    return value.to_dict() if value is not None else None
+# Shape carried by `StreamStartPayload.visualizer`. The field is typed `Any`
+# so mashumaro defers to the dispatch hooks below, but callers should annotate
+# against this alias for static checking.
+StreamStartVisualizerLike = StreamStartVisualizer | StreamStartVisualizerDraftR1 | None
+
+
+def _serialize_stream_start_visualizer(value: Any) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    if not isinstance(value, (StreamStartVisualizer, StreamStartVisualizerDraftR1)):
+        raise TypeError(
+            "StreamStartPayload.visualizer must be a StreamStartVisualizer, "
+            f"StreamStartVisualizerDraftR1, or None; got {type(value).__name__}"
+        )
+    return value.to_dict()
 
 
 def _deserialize_stream_start_visualizer(
@@ -476,10 +487,10 @@ class StreamStartPayload(DataClassORJSONMixin):
     """Information about the player."""
     artwork: StreamStartArtwork | None = None
     """Artwork information (sent to clients with artwork role)."""
-    # Typed `Any` (rather than the v1|draft union) so mashumaro defers to the
-    # explicit serialize/deserialize hooks; the bare union cannot disambiguate
-    # the two same-named schemas. Holds StreamStartVisualizer (v1),
-    # StreamStartVisualizerDraftR1, or None.
+    # Typed `Any` (rather than `StreamStartVisualizerLike`) so mashumaro defers
+    # to the explicit serialize/deserialize hooks; the bare union cannot
+    # disambiguate the two same-named schemas. The serialize hook rejects
+    # anything other than the alias's members at runtime.
     visualizer: Any = field(
         default=None,
         metadata={
