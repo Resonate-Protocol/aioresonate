@@ -135,10 +135,10 @@ class StreamStartVisualizer(DataClassORJSONMixin):
         )
         if not stream_types:
             raise ValueError("visualizer stream must contain at least one supported type")
-        # tracks_downbeats only meaningful when beat is in types.
-        effective_tracks_downbeats: bool | None = None
-        if "beat" in stream_types:
-            effective_tracks_downbeats = bool(tracks_downbeats)
+        # tracks_downbeats is only meaningful when beat is in types. Preserve
+        # the caller's tri-state (None = not declared) instead of coercing to
+        # False so an "unknown" stays omitted on the wire.
+        effective_tracks_downbeats = tracks_downbeats if "beat" in stream_types else None
         return cls(
             types=stream_types,
             rate_max=support.rate_max,
