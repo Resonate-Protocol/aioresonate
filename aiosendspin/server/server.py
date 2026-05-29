@@ -128,6 +128,11 @@ class SendspinServer:
 
         self._clients: dict[str, SendspinClient] = {}
         self._event_cbs: list[Callable[[SendspinServer, SendspinEvent], None]] = []
+        # Server-wide toggle for the visualizer `pitch` feature. Pitch (YINFFT)
+        # is the heaviest per-frame visualizer computation; disable it to shed
+        # load on constrained hardware. Read by VisualizerV1Role when building
+        # its stream config.
+        self._visualizer_pitch_enabled: bool = True
 
         if client_session is None:
             self._client_session = ClientSession(loop=self._loop, timeout=ClientTimeout(total=30))
@@ -196,6 +201,28 @@ class SendspinServer:
     def get_client(self, client_id: str) -> SendspinClient | None:
         """Get a persistent client device by id, if known."""
         return self._clients.get(client_id)
+
+    @property
+    def visualizer_pitch_enabled(self) -> bool:
+        """Whether visualizer roles compute the `pitch` feature (default True)."""
+        return self._visualizer_pitch_enabled
+
+    def set_visualizer_pitch_enabled(self, *, enabled: bool) -> None:
+        """Enable or disable the visualizer `pitch` feature server-wide.
+
+        Pitch (YINFFT) is the heaviest per-frame visualizer computation.
+        Disabling sheds that cost on constrained hardware: live visualizer
+        roles drop `pitch` from their negotiated types and re-emit
+        `stream/start`; new roles pick the setting up when they connect.
+        """
+        if enabled == self._visualizer_pitch_enabled:
+            return
+        self._visualizer_pitch_enabled = enabled
+        for client in self._clients.values():
+            for role in client.active_roles:
+                refresh = getattr(role, "refresh_pitch_setting", None)
+                if callable(refresh):
+                    refresh()
 
     def get_or_create_client(self, client_id: str) -> SendspinClient:
         """Get or create a persistent client device by id."""

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import struct
 from unittest.mock import MagicMock
 
@@ -21,6 +22,7 @@ from aiosendspin.models.visualizer import (
 )
 from aiosendspin.server.roles.base import AudioChunk
 from aiosendspin.server.roles.visualizer.v1 import VisualizerV1Role
+from aiosendspin.server.server import SendspinServer
 from tests.server.roles.visualizer.conftest import sine_pcm_16bit
 
 
@@ -46,7 +48,19 @@ def _make_client_stub() -> MagicMock:
     client.send_binary = MagicMock()
     client._server = MagicMock()  # noqa: SLF001
     client._server.clock.now_us.return_value = 0  # noqa: SLF001
+    client._server.visualizer_pitch_enabled = True  # noqa: SLF001
     client.connection = MagicMock()
+    return client
+
+
+def _make_pitch_client_stub() -> MagicMock:
+    """Client stub negotiating loudness + pitch."""
+    client = _make_client_stub()
+    client.info.visualizer_support = {
+        "types": ["loudness", "pitch"],
+        "buffer_capacity": 65536,
+        "rate_max": 60,
+    }
     return client
 
 
@@ -940,3 +954,101 @@ async def test_release_scheduler_sends_frames_as_playhead_advances() -> None:
     client._server.clock.now_us.return_value = 4_000_000  # cutoff 7s  # noqa: SLF001
     role._run_release_scheduler()  # noqa: SLF001
     assert _periodic_calls(client)
+
+
+# ---------------------------------------------------------------------------
+# Server-wide pitch shed toggle
+# ---------------------------------------------------------------------------
+
+
+def test_pitch_in_types_when_server_enabled() -> None:
+    """Pitch stays in the negotiated types while the server flag is on (default)."""
+    client = _make_pitch_client_stub()
+    role = VisualizerV1Role(client)
+    role.on_connect()
+    role.on_stream_start()
+    assert "pitch" in _last_stream_start(client).payload.visualizer.types
+
+
+def test_pitch_dropped_when_server_disabled() -> None:
+    """Pitch is excluded from negotiated types when the server flag is off."""
+    client = _make_pitch_client_stub()
+    client._server.visualizer_pitch_enabled = False  # noqa: SLF001
+    role = VisualizerV1Role(client)
+    role.on_connect()
+    role.on_stream_start()
+    types = _last_stream_start(client).payload.visualizer.types
+    assert "pitch" not in types
+    assert "loudness" in types
+
+
+def test_disabled_pitch_emits_no_pitch_binary() -> None:
+    """With pitch disabled, no PITCH binary is produced from an audio chunk."""
+    client = _make_pitch_client_stub()
+    client._server.visualizer_pitch_enabled = False  # noqa: SLF001
+    role = VisualizerV1Role(client)
+    role.on_connect()
+    role.on_stream_start()
+    client.send_binary.reset_mock()
+    role.on_audio_chunk(_audio_chunk(timestamp_us=1_000_000))
+    msg_types = [call.kwargs["message_type"] for call in client.send_binary.call_args_list]
+    assert BinaryMessageType.VISUALIZATION_PITCH.value not in msg_types
+
+
+def test_pitch_kept_when_sole_type_even_if_disabled() -> None:
+    """A pitch-only client keeps pitch — types must not be emptied."""
+    client = _make_client_stub()
+    client.info.visualizer_support = {
+        "types": ["pitch"],
+        "buffer_capacity": 65536,
+        "rate_max": 60,
+    }
+    client._server.visualizer_pitch_enabled = False  # noqa: SLF001
+    role = VisualizerV1Role(client)
+    role.on_connect()
+    role.on_stream_start()
+    assert _last_stream_start(client).payload.visualizer.types == ("pitch",)
+
+
+def test_refresh_pitch_setting_reissues_stream_start_on_change() -> None:
+    """Flipping the server flag live re-emits stream/start without pitch."""
+    client = _make_pitch_client_stub()
+    role = VisualizerV1Role(client)
+    role.on_connect()
+    role.on_stream_start()
+    before = _stream_start_count(client)
+    client._server.visualizer_pitch_enabled = False  # noqa: SLF001
+    role.refresh_pitch_setting()
+    assert _stream_start_count(client) == before + 1
+    assert "pitch" not in _last_stream_start(client).payload.visualizer.types
+
+
+def test_refresh_pitch_setting_noop_when_unchanged() -> None:
+    """refresh_pitch_setting does not re-emit when the resolved types are unchanged."""
+    client = _make_pitch_client_stub()  # flag stays enabled
+    role = VisualizerV1Role(client)
+    role.on_connect()
+    role.on_stream_start()
+    before = _stream_start_count(client)
+    role.refresh_pitch_setting()
+    assert _stream_start_count(client) == before
+
+
+async def test_server_set_pitch_enabled_fans_out_to_roles() -> None:
+    """SendspinServer.set_visualizer_pitch_enabled refreshes every active role once."""
+    server = SendspinServer(asyncio.get_running_loop(), "srv", "Srv", MagicMock())
+    role = MagicMock()
+    role.refresh_pitch_setting = MagicMock()
+    other = MagicMock(spec=[])  # no refresh_pitch_setting attr → skipped
+    client = MagicMock()
+    client.active_roles = [role, other]
+    server._clients["c1"] = client  # noqa: SLF001
+
+    assert server.visualizer_pitch_enabled is True
+    server.set_visualizer_pitch_enabled(enabled=False)
+    assert server.visualizer_pitch_enabled is False
+    role.refresh_pitch_setting.assert_called_once()
+
+    role.refresh_pitch_setting.reset_mock()
+    server.set_visualizer_pitch_enabled(enabled=False)  # idempotent
+    role.refresh_pitch_setting.assert_not_called()

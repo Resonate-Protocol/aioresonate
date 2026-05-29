@@ -709,10 +709,37 @@ class VisualizerV1Role(Role):
             exposed_types = client_types
         else:
             exposed_types = [t for t in client_types if t != "beat"]
+        # Server-wide pitch shed: drop the (heavy) pitch feature unless it is
+        # the only exposed type — `stream/start` must keep at least one, and we
+        # cannot add a type the client did not request.
+        if not self._client._server.visualizer_pitch_enabled:  # noqa: SLF001
+            without_pitch = [t for t in exposed_types if t != "pitch"]
+            if without_pitch:
+                exposed_types = without_pitch
         derived_support = replace(self._support, types=exposed_types)
         return StreamStartVisualizer.from_support(
             derived_support, tracks_downbeats=self._tracks_downbeats
         )
+
+    def refresh_pitch_setting(self) -> None:
+        """Re-apply the server-wide pitch toggle to the live stream config.
+
+        Called by the server when `set_visualizer_pitch_enabled` flips. Rebuilds
+        the config and, if the exposed types changed, rebuilds the extractor and
+        re-emits `stream/start` so the client sees the new set.
+        """
+        if self._support is None or self._stream_config is None:
+            return
+        new_config = self._build_stream_config()
+        if new_config.types == self._stream_config.types:
+            return
+        self._stream_config = new_config
+        # Types changed (pitch added/removed) — let the new config take effect
+        # immediately rather than being blocked by the prior wire-ts cursor.
+        self._last_wire_emit_ts_us = None
+        self._rebuild_extractor()
+        if self._stream_started:
+            self._send_stream_start()
 
     def _normalize_support_payload(self, support_raw: object) -> dict[str, object]:
         """Normalize a client/hello support payload to the v1 schema."""
