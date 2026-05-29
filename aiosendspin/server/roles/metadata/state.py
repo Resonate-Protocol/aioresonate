@@ -26,8 +26,10 @@ class Metadata:
     """Release year of the current media."""
     track: int | None = None
     """Track number of the current media."""
+    # Deprecated: use ControllerGroupRole.set_repeat. Still emitted for backwards compatibility.
     repeat: RepeatMode | None = None
     """Current repeat mode."""
+    # Deprecated: use ControllerGroupRole.set_shuffle. Still emitted for backwards compatibility.
     shuffle: bool | None = None
     """Whether shuffle is enabled."""
 

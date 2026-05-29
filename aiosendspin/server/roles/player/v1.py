@@ -43,7 +43,12 @@ from aiosendspin.server.roles.player.audio_transformers import (
     PcmPassthrough,
 )
 from aiosendspin.server.roles.player.capabilities import can_encode_format, filter_encodable_formats
-from aiosendspin.server.roles.player.events import StaticDelayChangedEvent, VolumeChangedEvent
+from aiosendspin.server.roles.player.events import (
+    MinBufferChangedEvent,
+    RequiredLeadTimeChangedEvent,
+    StaticDelayChangedEvent,
+    VolumeChangedEvent,
+)
 from aiosendspin.util import create_task
 
 if TYPE_CHECKING:
@@ -62,6 +67,8 @@ class PlayerPersistentState:
     disconnect_time_us: int | None = None
     buffer_reset_handle: asyncio.TimerHandle | None = None
     static_delay_ms: int = 0
+    required_lead_time_ms: int = 250
+    min_buffer_ms: int = 250
     state_supported_commands: list[PlayerCommand] = field(default_factory=list)
 
 
@@ -420,6 +427,24 @@ class PlayerV1Role(Role):
         self._state().static_delay_ms = value
 
     @property
+    def required_lead_time_ms(self) -> int:
+        """Startup lead time reported by this player in milliseconds."""
+        return self._state().required_lead_time_ms
+
+    @required_lead_time_ms.setter
+    def required_lead_time_ms(self, value: int) -> None:
+        self._state().required_lead_time_ms = value
+
+    @property
+    def min_buffer_ms(self) -> int:
+        """Minimum ongoing buffer duration reported by this player in milliseconds."""
+        return self._state().min_buffer_ms
+
+    @min_buffer_ms.setter
+    def min_buffer_ms(self, value: int) -> None:
+        self._state().min_buffer_ms = value
+
+    @property
     def state_supported_commands(self) -> list[PlayerCommand]:
         """Commands supported via client/state (e.g., set_static_delay)."""
         return self._state().state_supported_commands
@@ -447,6 +472,14 @@ class PlayerV1Role(Role):
     def get_static_delay_us(self) -> int:
         """Return transport delay in microseconds for timestamp offsetting."""
         return max(self.static_delay_ms, 0) * 1_000
+
+    def get_required_lead_time_us(self) -> int:
+        """Return reported startup lead time in microseconds."""
+        return max(self.required_lead_time_ms, 0) * 1_000
+
+    def get_min_buffer_us(self) -> int:
+        """Return reported minimum ongoing buffer duration in microseconds."""
+        return max(self.min_buffer_ms, 0) * 1_000
 
     def get_static_delay_ms(self) -> int:
         """Return static delay for protocol API."""
@@ -641,6 +674,18 @@ class PlayerV1Role(Role):
             self.static_delay_ms = state.static_delay_ms
             self._client._signal_event(  # noqa: SLF001
                 StaticDelayChangedEvent(static_delay_ms=state.static_delay_ms)
+            )
+
+        if self.required_lead_time_ms != state.required_lead_time_ms:
+            self.required_lead_time_ms = state.required_lead_time_ms
+            self._client._signal_event(  # noqa: SLF001
+                RequiredLeadTimeChangedEvent(required_lead_time_ms=state.required_lead_time_ms)
+            )
+
+        if self.min_buffer_ms != state.min_buffer_ms:
+            self.min_buffer_ms = state.min_buffer_ms
+            self._client._signal_event(  # noqa: SLF001
+                MinBufferChangedEvent(min_buffer_ms=state.min_buffer_ms)
             )
 
     def on_stream_request_format(self, payload: StreamRequestFormatPayload) -> None:

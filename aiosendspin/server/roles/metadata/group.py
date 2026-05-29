@@ -7,7 +7,6 @@ from typing import TYPE_CHECKING
 
 from aiosendspin.models.core import ServerStateMessage, ServerStatePayload
 from aiosendspin.models.metadata import Progress
-from aiosendspin.models.types import RepeatMode
 from aiosendspin.server.roles.base import GroupRole, Role
 from aiosendspin.server.roles.metadata.events import MetadataClearedEvent, MetadataUpdatedEvent
 from aiosendspin.server.roles.metadata.state import Metadata
@@ -152,7 +151,7 @@ class MetadataGroupRole(GroupRole):
             )
         )
 
-    def update(  # noqa: PLR0913
+    def update(
         self,
         *,
         title: str | None | object = _UNSET,
@@ -162,8 +161,6 @@ class MetadataGroupRole(GroupRole):
         artwork_url: str | None | object = _UNSET,
         year: int | None | object = _UNSET,
         track: int | None | object = _UNSET,
-        repeat: RepeatMode | None | object = _UNSET,
-        shuffle: bool | None | object = _UNSET,
         track_progress: int | None | object = _UNSET,
         track_duration: int | None | object = _UNSET,
         playback_speed: int | None | object = _UNSET,
@@ -188,10 +185,6 @@ class MetadataGroupRole(GroupRole):
             kwargs["year"] = year
         if track is not _UNSET:
             kwargs["track"] = track
-        if repeat is not _UNSET:
-            kwargs["repeat"] = repeat
-        if shuffle is not _UNSET:
-            kwargs["shuffle"] = shuffle
         if track_progress is not _UNSET:
             kwargs["track_progress"] = track_progress
         if track_duration is not _UNSET:

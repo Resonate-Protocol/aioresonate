@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from mashumaro.config import BaseConfig
 from mashumaro.mixins.orjson import DataClassORJSONMixin
 
-from .types import MediaCommand
+from .types import MediaCommand, RepeatMode
 
 
 # Client -> Server: client/command controller object
@@ -67,8 +67,21 @@ class ControllerStatePayload(DataClassORJSONMixin):
     """Volume of the whole group, range 0-100."""
     muted: bool
     """Mute state of the whole group."""
+    repeat: RepeatMode
+    """Repeat mode: 'off' = no repeat, 'one' = repeat current track, 'all' = repeat all."""
+    shuffle: bool
+    """Whether shuffle is enabled."""
 
     def __post_init__(self) -> None:
         """Validate field values."""
         if not 0 <= self.volume <= 100:
             raise ValueError(f"Volume must be in range 0-100, got {self.volume}")
+
+    @classmethod
+    def __pre_deserialize__(cls, d: dict[str, object]) -> dict[str, object]:
+        """Backfill repeat/shuffle for pre-spec servers."""
+        # Deprecated: drop with metadata dual-emit.
+        data = dict(d)
+        data.setdefault("repeat", RepeatMode.OFF.value)
+        data.setdefault("shuffle", False)
+        return data

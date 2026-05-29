@@ -5,7 +5,6 @@ from __future__ import annotations
 from unittest.mock import MagicMock
 
 from aiosendspin.models.core import ServerStateMessage
-from aiosendspin.models.types import RepeatMode
 from aiosendspin.server.roles.metadata import Metadata, MetadataClearedEvent, MetadataUpdatedEvent
 from aiosendspin.server.roles.metadata.group import MetadataGroupRole
 
@@ -122,28 +121,6 @@ def test_metadata_group_role_update_progress() -> None:
     assert mgr.metadata.track_progress == 30000
     assert mgr.metadata.track_duration == 180000
     assert mgr.metadata.playback_speed == 1000
-
-
-def test_metadata_group_role_update_repeat() -> None:
-    """update() updates repeat mode."""
-    group = _make_group_stub()
-    mgr = MetadataGroupRole(group)
-
-    mgr.update(repeat=RepeatMode.ALL)
-
-    assert mgr.metadata is not None
-    assert mgr.metadata.repeat == RepeatMode.ALL
-
-
-def test_metadata_group_role_update_shuffle() -> None:
-    """update() updates shuffle state."""
-    group = _make_group_stub()
-    mgr = MetadataGroupRole(group)
-
-    mgr.update(shuffle=True)
-
-    assert mgr.metadata is not None
-    assert mgr.metadata.shuffle is True
 
 
 def test_metadata_group_role_update_batch() -> None:
