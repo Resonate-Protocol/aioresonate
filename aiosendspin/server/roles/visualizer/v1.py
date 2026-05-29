@@ -22,6 +22,7 @@ separate clock-based scheduler is needed.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import struct
 from collections import deque
@@ -79,6 +80,13 @@ _IMPLEMENTED_TYPES: frozenset[SupportedVisualizerType] = frozenset(
 _FFT_DRIVEN_TYPES: frozenset[SupportedVisualizerType] = frozenset(
     {"loudness", "f_peak", "spectrum", "peak", "pitch"}
 )
+# While a beat-wanting client waits for the first schedule, periodic frames
+# are held to this lead ahead of the playhead. Keeping the wire-ts cursor
+# near the playhead means that when beats land only a small window of them
+# trails the cursor (and is dropped), instead of the whole schedule being
+# dropped behind a cursor already pushed seconds into the future by frames.
+# Lifted to full send-ahead once beats land (or are declared UNAVAILABLE).
+_WARMUP_LEAD_US = 3_000_000
 
 
 class VisualizerV1Role(Role):
@@ -110,6 +118,13 @@ class VisualizerV1Role(Role):
         # Beat availability for the current source. UNAVAILABLE drops
         # `beat` from the negotiated set and discards pending beats.
         self._beat_availability: BeatAvailability = BeatAvailability.PENDING
+        # Warmup holdback: while the client wants beats but none have landed,
+        # periodic frames beyond `_WARMUP_LEAD_US` are parked here instead of
+        # sent, and released by `_release_timer` as the playhead advances. The
+        # first schedule (or UNAVAILABLE) flushes them and lifts the cap.
+        self._holdback_active: bool = False
+        self._pending_frames: deque[tuple[int, bytes, BinaryMessageType, int, int]] = deque()
+        self._release_timer: asyncio.TimerHandle | None = None
 
     @property
     def role_id(self) -> str:
@@ -190,6 +205,8 @@ class VisualizerV1Role(Role):
         if availability is BeatAvailability.UNAVAILABLE:
             self._pending_beats.clear()
             self._has_beats_landed = False
+            # No beats will arrive — lift the cap and release held frames.
+            self._end_holdback()
         if (
             self._support is None
             or "beat" not in self._support.types
@@ -234,6 +251,9 @@ class VisualizerV1Role(Role):
         self._has_beats_landed = False
         self._last_wire_emit_ts_us = None
         self._beat_availability = BeatAvailability.PENDING
+        self._cancel_release_timer()
+        self._pending_frames.clear()
+        self._holdback_active = False
         self.reset_binary_timing()
 
     def on_stream_start(self) -> None:
@@ -247,6 +267,10 @@ class VisualizerV1Role(Role):
         # Prime the wire-ts cursor to the current playhead so a stale
         # replayed beat can't poison the cursor backward into the past.
         self._last_wire_emit_ts_us = self._client._server.clock.now_us()  # noqa: SLF001
+        # Arm the warmup holdback if beats are wanted but none have landed yet.
+        self._cancel_release_timer()
+        self._pending_frames.clear()
+        self._holdback_active = self._holdback_should_be_active()
         # `stream/start` is just a config update during an active stream
         # (`stream/clear` keeps the stream alive). Skip the resend when
         # we have already announced a config; mid-stream config changes
@@ -374,7 +398,22 @@ class VisualizerV1Role(Role):
         end_time_us: int,
         duration_us: int,
     ) -> None:
-        """Reserve the wire ts and enqueue a periodic binary frame."""
+        """Send a periodic frame now, or park it while the warmup cap is active."""
+        if self._holdback_active and ts_us > self._warmup_cutoff_us():
+            self._pending_frames.append((ts_us, message, msg_type, end_time_us, duration_us))
+            self._arm_release_timer()
+            return
+        self._send_frame_now(ts_us, message, msg_type, end_time_us, duration_us)
+
+    def _send_frame_now(
+        self,
+        ts_us: int,
+        message: bytes,
+        msg_type: BinaryMessageType,
+        end_time_us: int,
+        duration_us: int,
+    ) -> None:
+        """Reserve the wire ts and enqueue a periodic binary frame for sending."""
         self._reserve_wire_ts(ts_us)
         self._client.send_binary(
             message,
@@ -385,6 +424,57 @@ class VisualizerV1Role(Role):
             buffer_byte_count=len(message),
             duration_us=duration_us,
         )
+
+    def _holdback_should_be_active(self) -> bool:
+        """Whether the warmup cap applies: client wants beats, none landed yet."""
+        return self.wants_beats and not self._has_beats_landed
+
+    def _warmup_cutoff_us(self) -> int:
+        """Wire ts above which periodic frames are held during warmup."""
+        return self._client._server.clock.now_us() + _WARMUP_LEAD_US  # noqa: SLF001
+
+    def _cancel_release_timer(self) -> None:
+        """Cancel the pending held-frame release timer, if any."""
+        if self._release_timer is not None:
+            self._release_timer.cancel()
+            self._release_timer = None
+
+    def _arm_release_timer(self) -> None:
+        """Schedule the next held-frame release at the warmup lead."""
+        if self._release_timer is not None or not self._pending_frames or not self.has_connection():
+            return
+        now_us = self._client._server.clock.now_us()  # noqa: SLF001
+        head_ts = self._pending_frames[0][0]
+        delay_s = max(0, head_ts - _WARMUP_LEAD_US - now_us) / 1_000_000
+        loop = asyncio.get_running_loop()
+        self._release_timer = loop.call_later(delay_s, self._run_release_scheduler)
+
+    def _run_release_scheduler(self) -> None:
+        """Release held periodic frames whose ts is within the warmup lead."""
+        self._release_timer = None
+        if not self.has_connection():
+            return
+        cutoff_us = self._warmup_cutoff_us()
+        while self._pending_frames and self._pending_frames[0][0] <= cutoff_us:
+            ts_us, message, msg_type, end_time_us, duration_us = self._pending_frames.popleft()
+            self._send_frame_now(ts_us, message, msg_type, end_time_us, duration_us)
+        self._arm_release_timer()
+
+    def _end_holdback(self) -> None:
+        """Lift the warmup cap and flush held frames, interleaving due beats.
+
+        Held periodic frames are released in ts order; pending beats at or
+        below each frame's ts emit first so the wire stays non-decreasing.
+        Beats beyond the held frontier stay queued for `on_audio_chunk` to
+        drain. After this, periodic frames send immediately.
+        """
+        self._holdback_active = False
+        self._cancel_release_timer()
+        while self._pending_frames:
+            frame_ts = self._pending_frames[0][0]
+            self._drain_beats_up_to(frame_ts)
+            ts_us, message, msg_type, end_time_us, duration_us = self._pending_frames.popleft()
+            self._send_frame_now(ts_us, message, msg_type, end_time_us, duration_us)
 
     def _reserve_wire_ts(self, ts_us: int) -> None:
         """Advance the wire-ts cursor; callers must not regress below it."""
@@ -417,6 +507,10 @@ class VisualizerV1Role(Role):
             # Beat is now legitimately part of the negotiated types — tell
             # the client. Subsequent audio chunks will drain the queue.
             self._reissue_stream_start()
+        if first_landing:
+            # Lift the warmup cap: beats are here, flush held frames (with
+            # beats interleaved) and restore full send-ahead.
+            self._end_holdback()
 
     def _reissue_stream_start(self) -> None:
         """Rebuild stream config from current state and re-send `stream/start`."""
@@ -485,6 +579,12 @@ class VisualizerV1Role(Role):
         self._last_wire_emit_ts_us = None
         had_beats = self._has_beats_landed
         self._has_beats_landed = False
+        # Re-arm warmup: a seek re-pushes the (already-computed) schedule, so
+        # beats arrive again shortly; hold periodic frames near the playhead
+        # until they do.
+        self._cancel_release_timer()
+        self._pending_frames.clear()
+        self._holdback_active = self._holdback_should_be_active()
         self.send_message(StreamClearMessage(payload=StreamClearPayload(roles=["visualizer"])))
         self.reset_binary_timing()
         if self._buffer_tracker is not None:
@@ -500,6 +600,9 @@ class VisualizerV1Role(Role):
         self._stream_started = False
         self._pending_beats.clear()
         self._has_beats_landed = False
+        self._cancel_release_timer()
+        self._pending_frames.clear()
+        self._holdback_active = False
         self.send_message(StreamEndMessage(payload=StreamEndPayload(roles=["visualizer"])))
         self.reset_binary_timing()
         if self._buffer_tracker is not None:
@@ -540,6 +643,11 @@ class VisualizerV1Role(Role):
 
         self._support = new_support
         self._stream_config = self._build_stream_config()
+        # Held frames carry old-config payloads (e.g. stale spectrum bins);
+        # drop them and re-evaluate the warmup cap against the new support.
+        self._cancel_release_timer()
+        self._pending_frames.clear()
+        self._holdback_active = self._holdback_should_be_active()
         # rate_max / types change rebuilds the extractor (new hop). Drop
         # the wire-ts guard so the new config takes effect immediately.
         self._last_wire_emit_ts_us = None

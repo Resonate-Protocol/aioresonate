@@ -849,3 +849,94 @@ def test_pitch_emits_msg_21_with_midi_and_confidence() -> None:
     midi_float = midi_q88 / 256.0
     assert abs(midi_float - 69.0) < 1.0
     assert confidence > 128
+
+
+# ---------------------------------------------------------------------------
+# Warmup holdback: cap periodic send-ahead while beats are pending
+# ---------------------------------------------------------------------------
+
+
+def _periodic_calls(client: MagicMock) -> list:
+    """send_binary calls for periodic (non-beat) frames."""
+    return [
+        call
+        for call in client.send_binary.call_args_list
+        if call.kwargs["message_type"] != BinaryMessageType.VISUALIZATION_BEAT.value
+    ]
+
+
+async def test_warmup_holds_periodic_frames_beyond_lead() -> None:
+    """While beats are pending, periodic frames past the warmup lead are held."""
+    client = _make_beat_client_stub()  # loudness + beat, now_us=0 → cutoff 3s
+    role = VisualizerV1Role(client)
+    role.on_connect()
+    role.on_stream_start()
+    client.send_binary.reset_mock()
+    role.on_audio_chunk(_audio_chunk(timestamp_us=5_000_000))  # frame ~5.025s > lead
+    assert _periodic_calls(client) == []
+    role._cancel_release_timer()  # noqa: SLF001
+
+
+async def test_warmup_passes_frames_within_lead() -> None:
+    """Periodic frames within the warmup lead send immediately while pending."""
+    client = _make_beat_client_stub()
+    role = VisualizerV1Role(client)
+    role.on_connect()
+    role.on_stream_start()
+    client.send_binary.reset_mock()
+    role.on_audio_chunk(_audio_chunk(timestamp_us=1_000_000))  # frame ~1.025s < lead
+    assert _periodic_calls(client)
+
+
+async def test_no_holdback_when_beats_not_wanted() -> None:
+    """Without beat negotiated, far-ahead frames are never held."""
+    client = _make_client_stub()  # loudness/f_peak/spectrum, no beat
+    role = VisualizerV1Role(client)
+    role.on_connect()
+    role.on_stream_start()
+    client.send_binary.reset_mock()
+    role.on_audio_chunk(_audio_chunk(timestamp_us=5_000_000))
+    assert _periodic_calls(client)
+
+
+async def test_first_beats_flush_held_frames_in_ts_order() -> None:
+    """Beats landing lifts the cap, flushing held frames with beats interleaved."""
+    client = _make_beat_client_stub()
+    role = VisualizerV1Role(client)
+    role.on_connect()
+    role.on_stream_start()
+    client.send_binary.reset_mock()
+    role.on_audio_chunk(_audio_chunk(timestamp_us=5_000_000))  # loudness held ~5.025s
+    assert _periodic_calls(client) == []
+    role.append_beats([BeatTiming(5_010_000)])
+    sent_ts = [call.kwargs["timestamp_us"] for call in client.send_binary.call_args_list]
+    assert sent_ts == sorted(sent_ts), "wire timestamps must stay non-decreasing"
+    assert _beat_calls(client), "beat should emit on flush"
+    assert _periodic_calls(client), "held periodic frame should flush"
+
+
+async def test_unavailable_flushes_held_frames() -> None:
+    """Declaring beats UNAVAILABLE lifts the cap and releases held frames."""
+    client = _make_beat_client_stub()
+    role = VisualizerV1Role(client)
+    role.on_connect()
+    role.on_stream_start()
+    client.send_binary.reset_mock()
+    role.on_audio_chunk(_audio_chunk(timestamp_us=5_000_000))
+    assert _periodic_calls(client) == []
+    role.set_beat_availability(BeatAvailability.UNAVAILABLE)
+    assert _periodic_calls(client)
+
+
+async def test_release_scheduler_sends_frames_as_playhead_advances() -> None:
+    """Held frames release once the playhead advances within the warmup lead."""
+    client = _make_beat_client_stub()
+    role = VisualizerV1Role(client)
+    role.on_connect()
+    role.on_stream_start()
+    client.send_binary.reset_mock()
+    role.on_audio_chunk(_audio_chunk(timestamp_us=5_000_000))  # held ~5.025s
+    assert _periodic_calls(client) == []
+    client._server.clock.now_us.return_value = 4_000_000  # cutoff 7s  # noqa: SLF001
+    role._run_release_scheduler()  # noqa: SLF001
+    assert _periodic_calls(client)
