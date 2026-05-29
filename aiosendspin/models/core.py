@@ -9,7 +9,7 @@ synchronization, stream lifecycle management, and role-based state updates and c
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, fields, is_dataclass
+from dataclasses import dataclass, field, fields, is_dataclass
 from typing import Annotated, Any, ClassVar, Literal
 
 from mashumaro.config import BaseConfig
@@ -442,6 +442,31 @@ class ServerCommandMessage(ServerMessage):
     type: Literal["server/command"] = "server/command"
 
 
+def _serialize_stream_start_visualizer(
+    value: StreamStartVisualizer | StreamStartVisualizerDraftR1 | None,
+) -> dict[str, Any] | None:
+    return value.to_dict() if value is not None else None
+
+
+def _deserialize_stream_start_visualizer(
+    value: Any,
+) -> StreamStartVisualizer | StreamStartVisualizerDraftR1 | None:
+    """Pick the visualizer wire schema by its discriminating field.
+
+    The v1 and draft schemas overlap on `types`/`spectrum` and share the
+    class name `StreamStartVisualizer`, so mashumaro's bare-union resolution
+    cannot tell them apart (it yields None / raises for a draft payload).
+    They are distinguished by the required `rate_max` (v1) vs `batch_max`
+    (draft); dispatch explicitly. The field is annotated `Any` so mashumaro
+    defers to these hooks instead of generating union codec.
+    """
+    if not isinstance(value, dict):
+        return None
+    if "batch_max" in value and "rate_max" not in value:
+        return StreamStartVisualizerDraftR1.from_dict(value)
+    return StreamStartVisualizer.from_dict(value)
+
+
 # Server -> Client: stream/start
 @dataclass
 class StreamStartPayload(DataClassORJSONMixin):
@@ -451,7 +476,17 @@ class StreamStartPayload(DataClassORJSONMixin):
     """Information about the player."""
     artwork: StreamStartArtwork | None = None
     """Artwork information (sent to clients with artwork role)."""
-    visualizer: StreamStartVisualizer | StreamStartVisualizerDraftR1 | None = None
+    # Typed `Any` (rather than the v1|draft union) so mashumaro defers to the
+    # explicit serialize/deserialize hooks; the bare union cannot disambiguate
+    # the two same-named schemas. Holds StreamStartVisualizer (v1),
+    # StreamStartVisualizerDraftR1, or None.
+    visualizer: Any = field(
+        default=None,
+        metadata={
+            "serialize": _serialize_stream_start_visualizer,
+            "deserialize": _deserialize_stream_start_visualizer,
+        },
+    )
     """Visualizer information (sent to clients with visualizer role).
 
     Carries the v1 schema by default; legacy clients on `visualizer@_draft_r1`
