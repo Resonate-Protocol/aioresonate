@@ -80,12 +80,12 @@ _IMPLEMENTED_TYPES: frozenset[SupportedVisualizerType] = frozenset(
 _FFT_DRIVEN_TYPES: frozenset[SupportedVisualizerType] = frozenset(
     {"loudness", "f_peak", "spectrum", "peak", "pitch"}
 )
-# While a beat-wanting client waits for the first schedule, periodic frames
-# are held to this lead ahead of the playhead. Keeping the wire-ts cursor
-# near the playhead means that when beats land only a small window of them
-# trails the cursor (and is dropped), instead of the whole schedule being
-# dropped behind a cursor already pushed seconds into the future by frames.
-# Lifted to full send-ahead once beats land (or are declared UNAVAILABLE).
+# Periodic frames for a beat-wanting client are held to this lead ahead of the
+# playhead. Keeping the wire-ts cursor near the playhead means a beat schedule
+# landing mid-stream (a flow-mode track change re-pushes the whole schedule)
+# sits at the cursor — only a small window trails it and is dropped — instead
+# of the whole schedule landing behind a cursor already pushed seconds ahead by
+# frames. Held the whole time beats are wanted; only `UNAVAILABLE` lifts it.
 _WARMUP_LEAD_US = 3_000_000
 
 
@@ -118,10 +118,12 @@ class VisualizerV1Role(Role):
         # Beat availability for the current source. UNAVAILABLE drops
         # `beat` from the negotiated set and discards pending beats.
         self._beat_availability: BeatAvailability = BeatAvailability.PENDING
-        # Warmup holdback: while the client wants beats but none have landed,
-        # periodic frames beyond `_WARMUP_LEAD_US` are parked here instead of
-        # sent, and released by `_release_timer` as the playhead advances. The
-        # first schedule (or UNAVAILABLE) flushes them and lifts the cap.
+        # Near-playhead cap: while the client wants beats, periodic frames
+        # beyond `_WARMUP_LEAD_US` are parked here instead of sent, and released
+        # by `_release_timer` as the playhead advances. This keeps the wire
+        # cursor close to the playhead so a schedule pushed mid-stream (a
+        # flow-mode track change) is not dropped behind it. `UNAVAILABLE` lifts
+        # the cap (no beats coming, so full send-ahead is fine).
         self._holdback_active: bool = False
         self._pending_frames: deque[tuple[int, bytes, BinaryMessageType, int, int]] = deque()
         self._release_timer: asyncio.TimerHandle | None = None
@@ -431,25 +433,27 @@ class VisualizerV1Role(Role):
         )
 
     def _holdback_should_be_active(self) -> bool:
-        """Whether the warmup cap applies: client wants beats, none landed yet."""
-        return self.wants_beats and not self._has_beats_landed
+        """Whether the near-playhead cap applies: the client wants beats.
+
+        Active the whole time beats are wanted, not just before the first
+        schedule. Keeping the wire cursor within `_WARMUP_LEAD_US` of the
+        playhead lets a schedule pushed mid-stream — e.g. a flow-mode track
+        change — land at the cursor instead of behind an already-advanced one.
+        """
+        return self.wants_beats
 
     def _rearm_warmup_holdback(self) -> None:
-        """Re-arm the warmup cap for a fresh schedule.
+        """Re-arm the near-playhead cap (schedule cleared, or beats wanted again).
 
-        Used whenever a schedule is dropped (seek, beat-schedule clear) or beats
-        become wanted again (availability back to PENDING): the next schedule
-        arrives shortly, so cap periodic frames near the playhead again.
-
-        Does NOT reset the wire-ts cursor: callers that did not also send a
-        `stream/clear` must keep it, so a late beat landing below an
-        already-sent frame is dropped by the `<=` guard rather than emitted out
-        of order. Only `on_stream_clear` resets the cursor (it pairs the reset
-        with a `stream/clear` so the client discards the ahead binaries).
+        Keeps already-parked periodic frames and the wire-ts cursor: a flow-mode
+        track change keeps streaming the same continuous audio, so parked frames
+        are still valid and must keep flowing, and a late beat landing below the
+        cursor is dropped by the `<=` guard rather than emitted out of order.
+        Genuine resets (`on_stream_clear` for a seek, `on_stream_request_format`)
+        drop the parked frames and reset the cursor themselves.
         """
-        self._cancel_release_timer()
-        self._pending_frames.clear()
         self._holdback_active = self._holdback_should_be_active()
+        self._arm_release_timer()
 
     def _warmup_cutoff_us(self) -> int:
         """Wire ts above which periodic frames are held during warmup."""
@@ -472,14 +476,17 @@ class VisualizerV1Role(Role):
         self._release_timer = loop.call_later(delay_s, self._run_release_scheduler)
 
     def _run_release_scheduler(self) -> None:
-        """Release held periodic frames whose ts is within the warmup lead."""
+        """Release held periodic frames within the cap, interleaving due beats."""
         self._release_timer = None
         if not self.has_connection():
             return
         cutoff_us = self._warmup_cutoff_us()
         while self._pending_frames and self._pending_frames[0][0] <= cutoff_us:
             ts_us, message, msg_type, end_time_us, duration_us = self._pending_frames.popleft()
+            self._drain_beats_up_to(ts_us)
             self._send_frame_now(ts_us, message, msg_type, end_time_us, duration_us)
+        # Beats past the last released frame but still within the cap.
+        self._drain_beats_up_to(cutoff_us)
         self._arm_release_timer()
 
     def _end_holdback(self) -> None:
@@ -527,12 +534,10 @@ class VisualizerV1Role(Role):
         self._has_beats_landed = True
         if first_landing and self._stream_started and self._stream_config is not None:
             # Beat is now legitimately part of the negotiated types — tell
-            # the client. Subsequent audio chunks will drain the queue.
+            # the client. Subsequent audio chunks (and the release timer) drain
+            # the queue; the near-playhead cap stays active so beats are not
+            # lost behind a cursor pushed ahead by frames.
             self._reissue_stream_start()
-        if first_landing:
-            # Lift the warmup cap: beats are here, flush held frames (with
-            # beats interleaved) and restore full send-ahead.
-            self._end_holdback()
 
     def _reissue_stream_start(self) -> None:
         """Rebuild stream config from current state and re-send `stream/start`."""
@@ -554,9 +559,16 @@ class VisualizerV1Role(Role):
                 self._reissue_stream_start()
 
     def _drain_beats_up_to(self, max_ts_us: int) -> None:
-        """Emit any pending beats whose ts is <= `max_ts_us`."""
+        """Emit any pending beats whose ts is <= `max_ts_us`.
+
+        While the near-playhead cap is active, beats drain only up to the cap
+        cutoff, so a far-ahead audio chunk cannot push the cursor past beats a
+        later mid-stream schedule will need to sit at.
+        """
         if self._stream_config is None or "beat" not in self._stream_config.types:
             return
+        if self._holdback_active:
+            max_ts_us = min(max_ts_us, self._warmup_cutoff_us())
         due: list[BeatTiming] = []
         while self._pending_beats and self._pending_beats[0].timestamp_us <= max_ts_us:
             due.append(self._pending_beats.popleft())
@@ -604,7 +616,10 @@ class VisualizerV1Role(Role):
         # Seek re-pushes the schedule, so beats arrive again shortly: re-arm
         # warmup. The accompanying `stream/clear` makes the client discard
         # ahead binaries, so the wire-ts guard can be dropped too — post-seek
-        # frames with earlier timestamps are then not silently blocked.
+        # frames with earlier timestamps are then not silently blocked. Parked
+        # frames are for the pre-seek position, so drop them here.
+        self._cancel_release_timer()
+        self._pending_frames.clear()
         self._rearm_warmup_holdback()
         self._last_wire_emit_ts_us = None
         self.send_message(StreamClearMessage(payload=StreamClearPayload(roles=["visualizer"])))

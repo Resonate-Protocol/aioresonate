@@ -913,20 +913,26 @@ async def test_no_holdback_when_beats_not_wanted() -> None:
     assert _periodic_calls(client)
 
 
-async def test_first_beats_flush_held_frames_in_ts_order() -> None:
-    """Beats landing lifts the cap, flushing held frames with beats interleaved."""
+async def test_first_beats_keep_cap_release_in_ts_order() -> None:
+    """Landing beats keeps the cap; the held frame and beat release in ts order on advance."""
     client = _make_beat_client_stub()
     role = VisualizerV1Role(client)
     role.on_connect()
     role.on_stream_start()
     client.send_binary.reset_mock()
-    role.on_audio_chunk(_audio_chunk(timestamp_us=5_000_000))  # loudness held ~5.025s
+    role.on_audio_chunk(_audio_chunk(timestamp_us=5_000_000))  # frame ~5.025s held (cutoff 3s)
     assert _periodic_calls(client) == []
-    role.append_beats([BeatTiming(5_010_000)])
+    role.append_beats([BeatTiming(5_010_000)])  # beyond the cap → pending, cap not lifted
+    assert _beat_calls(client) == [], "beat beyond the cap must not emit on landing"
+    assert _periodic_calls(client) == [], "held frame must stay parked while beats are wanted"
+    # Playhead advances past the held frame/beat: both release, in ts order.
+    client._server.clock.now_us.return_value = 5_100_000  # cutoff 8.1s  # noqa: SLF001
+    role._run_release_scheduler()  # noqa: SLF001
     sent_ts = [call.kwargs["timestamp_us"] for call in client.send_binary.call_args_list]
     assert sent_ts == sorted(sent_ts), "wire timestamps must stay non-decreasing"
-    assert _beat_calls(client), "beat should emit on flush"
-    assert _periodic_calls(client), "held periodic frame should flush"
+    assert _beat_calls(client), "beat should emit once within the cap"
+    assert _periodic_calls(client), "held frame should release once within the cap"
+    role._cancel_release_timer()  # noqa: SLF001
 
 
 async def test_unavailable_flushes_held_frames() -> None:
@@ -1087,20 +1093,63 @@ async def test_pending_after_unavailable_reholds_far_future_frames() -> None:
     role._cancel_release_timer()  # noqa: SLF001
 
 
-async def test_clear_beats_keeps_cursor_no_wire_regression() -> None:
-    """clear_beats must not reset the cursor: a below-frontier beat is dropped, not regressed."""
+async def test_cap_keeps_cursor_near_playhead_so_track_change_beats_deliver() -> None:
+    """A far-ahead chunk is capped, so a track-change re-push lands at the cursor, not behind it."""
     client = _make_beat_client_stub()
     role = VisualizerV1Role(client)
     role.on_connect()
     role.on_stream_start()
-    role.append_beats([BeatTiming(1_000_000)])  # land → holdback lifted
-    role.on_audio_chunk(_audio_chunk(timestamp_us=5_000_000))  # frame ~5.025s → cursor advances
-    role.clear_beats()  # re-arm warmup, cursor kept (no stream/clear sent)
-    # New schedule: 2_000_000 is below the already-emitted frontier and must be
-    # dropped, not sent out of order; 6_000_000 is ahead and emits.
-    role.append_beats([BeatTiming(2_000_000), BeatTiming(6_000_000)])
-    role.on_audio_chunk(_audio_chunk(timestamp_us=6_000_000))
+    role.append_beats([BeatTiming(1_000_000)])  # track 1
+    role.on_audio_chunk(_audio_chunk(timestamp_us=1_000_000))  # beat 1s emits, cursor ~1s
+    # Far-ahead audio (send-ahead) must NOT push the cursor 30s ahead: frame is parked.
+    role.on_audio_chunk(_audio_chunk(timestamp_us=30_000_000))
+    role.clear_beats()  # track change
+    role.append_beats([BeatTiming(2_000_000)])  # track 2 beat near the playhead
+    role.on_audio_chunk(_audio_chunk(timestamp_us=2_000_000))
     sent_ts = [call.kwargs["timestamp_us"] for call in client.send_binary.call_args_list]
     assert sent_ts == sorted(sent_ts), f"wire timestamps regressed: {sent_ts}"
-    assert 2_000_000 not in sent_ts
+    beat_ts = [c.kwargs["timestamp_us"] for c in _beat_calls(client)]
+    assert 2_000_000 in beat_ts, "track-change beat must deliver, not drop behind the cursor"
+    role._cancel_release_timer()  # noqa: SLF001
+
+
+async def test_beat_below_cursor_is_dropped_no_regression() -> None:
+    """A beat at or below the wire cursor is dropped so the wire stays non-decreasing."""
+    client = _make_beat_client_stub()
+    role = VisualizerV1Role(client)
+    role.on_connect()
+    role.on_stream_start()
+    role.append_beats([BeatTiming(2_500_000)])  # within the cap (cutoff 3s)
+    role.on_audio_chunk(_audio_chunk(timestamp_us=2_500_000))  # beat 2.5s emits → cursor ~2.5s
+    assert 2_500_000 in [c.kwargs["timestamp_us"] for c in _beat_calls(client)]
+    # A stale/replayed beat below the cursor must be dropped, not sent out of order.
+    role.append_beats([BeatTiming(2_000_000), BeatTiming(2_800_000)])
+    role.on_audio_chunk(_audio_chunk(timestamp_us=2_800_000))
+    sent_ts = [call.kwargs["timestamp_us"] for call in client.send_binary.call_args_list]
+    assert sent_ts == sorted(sent_ts), f"wire regressed: {sent_ts}"
+    beat_ts = [c.kwargs["timestamp_us"] for c in _beat_calls(client)]
+    assert 2_000_000 not in beat_ts, "beat below the cursor must be dropped"
+    assert 2_800_000 in beat_ts, "beat ahead of the cursor must emit"
+    role._cancel_release_timer()  # noqa: SLF001
+
+
+async def test_track_change_keeps_parked_periodic_frames() -> None:
+    """A flow-mode track change keeps parked periodic frames (continuous audio)."""
+    client = _make_beat_client_stub()
+    role = VisualizerV1Role(client)
+    role.on_connect()
+    role.on_stream_start()
+    role.append_beats([BeatTiming(1_000_000)])  # track 1
+    role.on_audio_chunk(_audio_chunk(timestamp_us=5_000_000))  # frame ~5.025s parked (cutoff 3s)
+    assert role._pending_frames, "frame beyond the cap should be parked"  # noqa: SLF001
+    parked_before = len(role._pending_frames)  # noqa: SLF001
+    role.clear_beats()  # track change — parked frames must survive
+    assert len(role._pending_frames) == parked_before, (  # noqa: SLF001
+        "track change must keep parked periodic frames"
+    )
+    # Playhead advances past the parked frame → it releases.
+    client.send_binary.reset_mock()
+    client._server.clock.now_us.return_value = 5_000_000  # cutoff 8s  # noqa: SLF001
+    role._run_release_scheduler()  # noqa: SLF001
+    assert _periodic_calls(client), "parked frame should release after the track change"
     role._cancel_release_timer()  # noqa: SLF001
