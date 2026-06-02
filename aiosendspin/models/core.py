@@ -534,14 +534,19 @@ class StreamClearPayload(DataClassORJSONMixin):
     """Roles to clear: player, visualizer, or both. If omitted, clears both roles."""
 
     def __post_init__(self) -> None:
-        """Validate that only player and visualizer role families are specified."""
+        """Validate role names. Permits known families and `_`-prefixed app roles."""
         if self.roles is not None:
-            invalid_roles = set(self.roles) - STREAM_CLEAR_ROLE_FAMILIES
+            invalid_roles = {
+                role
+                for role in self.roles
+                if role not in STREAM_CLEAR_ROLE_FAMILIES and not role.startswith("_")
+            }
             if invalid_roles:
                 supported = sorted(STREAM_CLEAR_ROLE_FAMILIES)
                 invalid = sorted(invalid_roles)
                 raise ValueError(
-                    f"stream/clear only supports roles {supported}, got invalid roles: {invalid}"
+                    f"stream/clear only supports roles {supported} or `_`-prefixed "
+                    f"application roles, got invalid roles: {invalid}"
                 )
 
     class Config(BaseConfig):
@@ -593,14 +598,19 @@ class StreamEndPayload(DataClassORJSONMixin):
     """Roles to end streams for. If omitted, ends all active streams."""
 
     def __post_init__(self) -> None:
-        """Validate that only known role families are specified."""
+        """Validate role names. Permits known families and `_`-prefixed app roles."""
         if self.roles is not None:
-            invalid_roles = set(self.roles) - STREAM_END_ROLE_FAMILIES
+            invalid_roles = {
+                role
+                for role in self.roles
+                if role not in STREAM_END_ROLE_FAMILIES and not role.startswith("_")
+            }
             if invalid_roles:
                 supported = sorted(STREAM_END_ROLE_FAMILIES)
                 invalid = sorted(invalid_roles)
                 raise ValueError(
-                    f"stream/end only supports roles {supported}, got invalid roles: {invalid}"
+                    f"stream/end only supports roles {supported} or `_`-prefixed "
+                    f"application roles, got invalid roles: {invalid}"
                 )
 
     class Config(BaseConfig):
