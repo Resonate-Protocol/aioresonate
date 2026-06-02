@@ -296,6 +296,26 @@ def test_player_group_role_set_volume_redistributes() -> None:
     p2.set_player_volume.assert_called_once_with(50)
 
 
+def test_player_group_role_set_volume_redistributes_through_iterative_clamp() -> None:
+    """Asymmetric starting volumes still hit the target after iterative redistribution."""
+    group = MagicMock()
+    pgr = PlayerGroupRole(group)
+
+    p1 = MagicMock()
+    p1.get_player_volume.return_value = 90
+    p2 = MagicMock()
+    p2.get_player_volume.return_value = 70
+    p3 = MagicMock()
+    p3.get_player_volume.return_value = 30
+    pgr._members = [p1, p2, p3]  # noqa: SLF001
+
+    pgr.set_volume(100)
+
+    p1.set_player_volume.assert_called_once_with(100)
+    p2.set_player_volume.assert_called_once_with(100)
+    p3.set_player_volume.assert_called_once_with(100)
+
+
 def test_player_group_role_set_volume_clamps_to_zero() -> None:
     """Set volume clamps player volumes to 0 minimum."""
     group = MagicMock()
