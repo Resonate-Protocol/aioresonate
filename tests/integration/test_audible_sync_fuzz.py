@@ -250,7 +250,7 @@ async def _run_seeded_fuzz(seed: int) -> None:  # noqa: PLR0915
     assert_audible_sync(
         segments_by_player,
         max_skew_us=5_000,
-        min_corr=0.35,
+        min_corr=0.85,
         enforce_corr=True,
         window_duration_us=250_000,
         warmup_us=0,
