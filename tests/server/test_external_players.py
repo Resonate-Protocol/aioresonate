@@ -574,15 +574,16 @@ async def test_reclaim_timeout_refreshes_on_repeated_requests(
         lambda _url, *, connection_reason: None,  # noqa: ARG005
     )
 
-    assert server.reclaim_client_for_playback("speaker-refresh", timeout_s=0.12)
-    await asyncio.sleep(0.07)
-    assert server.reclaim_client_for_playback("speaker-refresh", timeout_s=0.12)
+    # Inflated to ~5x the timeout to absorb CI scheduler jitter (#28 in REVIEW.md)
+    assert server.reclaim_client_for_playback("speaker-refresh", timeout_s=0.5)
+    await asyncio.sleep(0.3)
+    assert server.reclaim_client_for_playback("speaker-refresh", timeout_s=0.5)
 
-    await asyncio.sleep(0.07)
+    await asyncio.sleep(0.3)
     await _flush_asyncio_callbacks()
     assert server.get_client("speaker-refresh") is not None
 
-    await asyncio.sleep(0.08)
+    await asyncio.sleep(0.7)
     await _flush_asyncio_callbacks()
     assert server.get_client("speaker-refresh") is None
 
