@@ -260,7 +260,26 @@ async def test_late_join_target_includes_player_static_delay() -> None:
 
     stream = PushStream(loop=loop, clock=clock, group=group)
 
-    assert stream.get_late_join_target_timestamp_us(role=role) == 6_100_000
+    # now + max(LATE_JOINER_MIN_LEAD_US=100ms, required_lead=250ms) + static_delay=5s
+    assert stream.get_late_join_target_timestamp_us(role=role) == 6_250_000
+
+
+@pytest.mark.asyncio
+async def test_late_join_target_uses_required_lead_time() -> None:
+    """Required lead time bumps the floor when it exceeds the static minimum."""
+    loop = asyncio.get_running_loop()
+    clock = ManualClock(now_us_value=1_000_000)
+    group = _DummyGroup(clients=[])
+    client, _ = _make_connected_player(loop, group, "p1", clock=clock)
+    role = client.role("player@v1")
+    assert role is not None
+    role.static_delay_ms = 5_000
+    role.required_lead_time_ms = 400  # > 100ms default floor
+
+    stream = PushStream(loop=loop, clock=clock, group=group)
+
+    # now + max(100ms, 400ms required_lead) + 5s static_delay
+    assert stream.get_late_join_target_timestamp_us(role=role) == 6_400_000
 
 
 @pytest.mark.asyncio
@@ -2525,6 +2544,7 @@ async def test_replay_from_pcm_cache_overrides_established_resampler_skip() -> N
             frame_duration_us=25_000,
         ),
         replay_from_pcm_cache=True,
+        required_lead_time_us=100_000,
     )
     group.clients.append(_DummyClient([viz_role]))
     stream.on_role_join(viz_role)
@@ -3359,7 +3379,8 @@ async def test_catchup_drain_advances_encoder_pending_to_live_tip() -> None:
             transformer=joining_transformer,
             channel_id=MAIN_CHANNEL,
             frame_duration_us=25_000,
-        )
+        ),
+        required_lead_time_us=100_000,
     )
     group.clients.append(_DummyClient([role2]))
     stream.on_role_join(role2)
@@ -3457,7 +3478,8 @@ async def test_catchup_mid_pass_format_change_keeps_chunks_ordered() -> None:
             transformer=Transformer(),
             channel_id=MAIN_CHANNEL,
             frame_duration_us=25_000,
-        )
+        ),
+        required_lead_time_us=100_000,
     )
     group.clients.append(_DummyClient([role2]))
     stream.on_role_join(role2)
