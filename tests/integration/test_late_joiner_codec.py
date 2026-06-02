@@ -50,7 +50,7 @@ class _DummyGroup:
 class _CaptureConnection:
     def __init__(self) -> None:
         self.sent_json: list[object] = []
-        self.sent_binary: list[bytes] = []
+        self.sent_binary: list[tuple[int, bytes]] = []
         self.buffer_tracker = None
 
     async def disconnect(self, *, retry_connection: bool = True) -> None:  # noqa: ARG002
@@ -67,13 +67,13 @@ class _CaptureConnection:
         data: bytes,
         *,
         role: str,  # noqa: ARG002
-        timestamp_us: int,  # noqa: ARG002
+        timestamp_us: int,
         message_type: int,  # noqa: ARG002
         buffer_end_time_us: int | None = None,
         buffer_byte_count: int | None = None,
         duration_us: int | None = None,
     ) -> bool:
-        self.sent_binary.append(data)
+        self.sent_binary.append((timestamp_us, data))
         if (
             self.buffer_tracker is not None
             and buffer_end_time_us is not None
@@ -183,3 +183,8 @@ async def test_late_joiner_receives_catchup_for_uncached_codec() -> None:
 
     assert any(isinstance(m, StreamStartMessage) for m in conn2.sent_json)
     assert conn2.sent_binary, "expected PCM catch-up audio for late joiner"
+    first_ts, _ = conn2.sent_binary[0]
+    assert first_ts >= clock.now_us(), (
+        f"late joiner first chunk ts {first_ts} < now {clock.now_us()} "
+        "(spec README:177 mandates future-only timestamps)"
+    )
