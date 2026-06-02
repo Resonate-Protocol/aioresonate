@@ -1183,12 +1183,12 @@ class PushStream:
         channel_play_start: dict[UUID, int] = {}
 
         if play_start_us is not None:
-            # Explicit timestamp mode: use provided timestamp directly.
+            # Explicit timestamp mode: caller-provided value is authoritative
+            # across mode switches, so overwrite any stale advanced timing.
             for channel_id in prepared:
                 channel_play_start[channel_id] = play_start_us
-                if channel_id not in self._channel_timing:
-                    self._channel_timing[channel_id] = play_start_us
-                    self._channel_timing_residue[channel_id] = 0
+                self._channel_timing[channel_id] = play_start_us
+                self._channel_timing_residue[channel_id] = 0
             return channel_play_start
 
         # Auto-calculate mode (existing behavior).

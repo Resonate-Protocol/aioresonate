@@ -2939,6 +2939,37 @@ async def test_buffered_source_skips_min_buffer_at_startup() -> None:
 
 
 @pytest.mark.asyncio
+async def test_explicit_play_start_us_overrides_stale_channel_timing() -> None:
+    """Explicit play_start_us is authoritative across mode switches."""
+    loop = asyncio.get_running_loop()
+    clock = ManualClock(now_us_value=1_000_000)
+    group = _DummyGroup(clients=[])
+    role = _make_role(required_lead_time_us=0, min_buffer_us=0, static_delay_us=0)
+    group.clients.append(_DummyClient([role]))
+
+    stream = PushStream(loop=loop, clock=clock, group=group)
+    fmt = AudioFormat(sample_rate=48000, bit_depth=16, channels=2)
+
+    # First commit anchors the channel at an explicit start far ahead of "now".
+    first_play_start_us = 10_000_000
+    stream.prepare_audio(bytes(4800), fmt)
+    returned_first = await stream.commit_audio(play_start_us=first_play_start_us)
+    assert returned_first == first_play_start_us
+
+    # Subsequent commit with a different play_start_us must overwrite the
+    # advanced channel timing, not be ignored because the channel already exists.
+    second_play_start_us = 20_000_000
+    stream.prepare_audio(bytes(4800), fmt)
+    returned_second = await stream.commit_audio(play_start_us=second_play_start_us)
+    assert returned_second == second_play_start_us
+
+    # The channel timing now reflects the second play_start_us plus its chunk
+    # duration (25ms @ 48kHz stereo s16 = 25_000us), not first + 2 * duration.
+    expected_after_advance = second_play_start_us + 25_000
+    assert stream._channel_timing[MAIN_CHANNEL] == expected_after_advance  # noqa: SLF001
+
+
+@pytest.mark.asyncio
 async def test_send_ahead_uses_largest_member_budget() -> None:
     """Live grouped players use a common floor: max(lead, min_buffer) + static across members."""
     loop = asyncio.get_running_loop()
