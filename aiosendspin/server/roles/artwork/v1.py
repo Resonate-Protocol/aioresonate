@@ -65,13 +65,11 @@ class ArtworkV1Role(Role):
     def on_connect(self) -> None:
         """Initialize channel configs from client hello and subscribe to group."""
         self._init_channel_configs()
-        self._subscribe_to_group_role()
         if self._channel_configs:
             # Reannounce stream config first so follow-up artwork snapshot is interpretable.
             self._send_stream_start()
-        if isinstance(self._group_role, ArtworkGroupRole):
-            # Push current artwork immediately on (re)connect; do not wait for next change.
-            self._group_role._send_artwork_to_role(self)  # noqa: SLF001
+        # Subscribe after stream/start so the on_member_join artwork snapshot lands second.
+        self._subscribe_to_group_role()
 
     def on_disconnect(self) -> None:
         """Unsubscribe from ArtworkGroupRole."""

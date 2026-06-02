@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 from aiosendspin.models.artwork import ArtworkChannel
 from aiosendspin.models.core import StreamStartMessage
 from aiosendspin.models.types import ArtworkSource, PictureFormat
+from aiosendspin.server.roles.artwork.group import ArtworkGroupRole
 from aiosendspin.server.roles.artwork.v1 import ArtworkV1Role
 
 
@@ -170,3 +171,44 @@ def test_artwork_role_has_no_audio_requirements() -> None:
     client = _make_client_stub()
     role = ArtworkV1Role(client=client)
     assert role.get_audio_requirements() is None
+
+
+def test_artwork_role_on_connect_schedules_artwork_once_per_channel() -> None:
+    """on_connect() schedules a single artwork snapshot per configured channel."""
+    from PIL import Image  # noqa: PLC0415
+
+    client = _make_client_stub()
+    support = MagicMock()
+    support.channels = [
+        ArtworkChannel(
+            source=ArtworkSource.ALBUM,
+            format=PictureFormat.JPEG,
+            media_width=300,
+            media_height=300,
+        ),
+        ArtworkChannel(
+            source=ArtworkSource.ARTIST,
+            format=PictureFormat.PNG,
+            media_width=400,
+            media_height=400,
+        ),
+    ]
+    client.info.artwork_support = support
+    client.connection = MagicMock()
+
+    group = MagicMock()
+    group._server = MagicMock()  # noqa: SLF001
+    group._server.clock.now_us.return_value = 1_000_000  # noqa: SLF001
+    group_role = ArtworkGroupRole(group)
+    group_role._current_artwork = {  # noqa: SLF001
+        ArtworkSource.ALBUM: Image.new("RGB", (10, 10)),
+        ArtworkSource.ARTIST: Image.new("RGB", (10, 10)),
+    }
+    client.group.group_role.return_value = group_role
+
+    role = ArtworkV1Role(client=client)
+    with patch.object(group_role, "_schedule_send_artwork") as schedule:
+        role.on_connect()
+
+    channels_sent = [call.args[2] for call in schedule.call_args_list]
+    assert sorted(channels_sent) == [0, 1]
