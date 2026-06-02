@@ -524,13 +524,13 @@ def assert_audible_sync(
         reference_samples = window_samples_by_player[chosen_reference]
         reference_rate = sample_rate_by_player[chosen_reference]
 
-    lag_us_by_player: dict[str, float] = {}
+    signed_lag_us_by_player: dict[str, float] = {}
     for player_id, segments in segments_by_player.items():
         seg = segments[-1]
         received = window_samples_by_player[player_id]
         if compare_to == "reference":
             if player_id == chosen_reference:
-                lag_us_by_player[player_id] = 0.0
+                signed_lag_us_by_player[player_id] = 0.0
                 continue
             expected = resample_mono_s16(
                 reference_samples,
@@ -551,12 +551,13 @@ def assert_audible_sync(
             expected,
             max_lag_samples=max_lag_samples,
         )
-        lag_us = abs(lag_samples) * 1_000_000 / seg.sample_rate
+        signed_lag_us = lag_samples * 1_000_000 / seg.sample_rate
+        lag_us = abs(signed_lag_us)
 
         assert lag_us <= max_skew_us, f"{player_id} lag {lag_us:.2f}us > {max_skew_us}us"
         if enforce_corr:
             assert score >= min_corr, f"{player_id} correlation {score:.3f} < {min_corr}"
-        lag_us_by_player[player_id] = lag_us
+        signed_lag_us_by_player[player_id] = signed_lag_us
 
-    spread = max(lag_us_by_player.values()) - min(lag_us_by_player.values())
-    assert spread <= max_skew_us, f"player lag spread {spread:.2f}us > {max_skew_us}us"
+    spread = max(signed_lag_us_by_player.values()) - min(signed_lag_us_by_player.values())
+    assert spread <= max_skew_us, f"player signed lag spread {spread:.2f}us > {max_skew_us}us"
