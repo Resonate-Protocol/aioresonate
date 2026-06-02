@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from dataclasses import dataclass
 from typing import Any, Never
 from unittest.mock import AsyncMock, MagicMock
@@ -438,6 +439,53 @@ async def test_role_stream_lifecycle_json_is_sent_before_older_binary() -> None:
         await asyncio.sleep(0)
 
     assert send_order[:3] == ["json", "json", "binary"]
+
+    await conn.disconnect(retry_connection=False)
+
+
+@pytest.mark.asyncio
+async def test_writer_rewrites_server_transmitted_at_send_time() -> None:
+    """`server/time` must carry the clock value at actual send, not at enqueue."""
+    loop = asyncio.get_running_loop()
+    clock = ManualClock(now_us_value=1_000_000)
+    server = _DummyServer(loop=loop, clock=clock)
+
+    sent_json: list[str] = []
+
+    async def _record_json(payload: str) -> None:
+        sent_json.append(payload)
+
+    wsock = MagicMock()
+    wsock.closed = False
+    wsock.send_str = AsyncMock(side_effect=_record_json)
+    wsock.send_bytes = AsyncMock()
+
+    conn = SendspinConnection(server, wsock_client=wsock)
+    await conn._setup_connection()  # noqa: SLF001
+
+    conn.send_message(
+        ServerTimeMessage(
+            payload=ServerTimePayload(
+                client_transmitted=11,
+                server_received=22,
+                server_transmitted=0,
+            )
+        )
+    )
+
+    # Simulate enqueue-to-send latency before the writer drains the queue.
+    clock.advance_us(750_000)
+
+    for _ in range(50):
+        if sent_json:
+            break
+        await asyncio.sleep(0)
+
+    assert len(sent_json) == 1
+    payload = json.loads(sent_json[0])["payload"]
+    assert payload["client_transmitted"] == 11
+    assert payload["server_received"] == 22
+    assert payload["server_transmitted"] == 1_750_000
 
     await conn.disconnect(retry_connection=False)
 
