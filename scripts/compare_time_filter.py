@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """Parity vector harness for SendspinTimeFilter vs the C++ reference.
 
-NOT RUN IN CI. Invoke manually after touching aiosendspin/client/time_sync.py
-or bumping the C++ reference SHA in scripts/cpp_reference_sha.txt.
+This script is not run in CI since it needs a checkout of the C++ reference
+and a working C++ toolchain. Invoke manually after touching
+aiosendspin/client/time_sync.py or bumping the C++ reference SHA in
+scripts/cpp_reference_sha.txt.
 
 Pipeline:
 
