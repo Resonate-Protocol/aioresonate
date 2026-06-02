@@ -6,6 +6,9 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from aiosendspin.models.core import ServerStateMessage
+from aiosendspin.server.roles.metadata.group import MetadataGroupRole
+from aiosendspin.server.roles.metadata.state import Metadata
 from aiosendspin.server.roles.metadata.v1 import MetadataV1Role
 
 
@@ -75,3 +78,28 @@ def test_metadata_role_has_no_audio_requirements() -> None:
     client = _make_client_stub()
     role = MetadataV1Role(client=client)
     assert role.get_audio_requirements() is None
+
+
+def test_metadata_role_on_connect_sends_state_exactly_once() -> None:
+    """on_connect() emits a single ServerStateMessage via on_member_join."""
+    group = MagicMock()
+    group._server = MagicMock()  # noqa: SLF001
+    group._server.clock.now_us.return_value = 1_000_000  # noqa: SLF001
+    group.has_active_stream = False
+    group_role = MetadataGroupRole(group)
+    group_role.set_metadata(Metadata(title="Test"))
+
+    client = MagicMock()
+    client.connection = MagicMock()
+    client.group.group_role.return_value = group_role
+    client.send_role_message = MagicMock()
+
+    role = MetadataV1Role(client=client)
+    role.on_connect()
+
+    state_calls = [
+        call
+        for call in client.send_role_message.call_args_list
+        if isinstance(call.args[1], ServerStateMessage)
+    ]
+    assert len(state_calls) == 1
