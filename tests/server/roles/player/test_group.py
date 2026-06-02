@@ -2,13 +2,82 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from typing import TYPE_CHECKING
 from unittest.mock import MagicMock
 
+from aiosendspin.server.events import ClientEvent
 from aiosendspin.server.roles.player.events import (
     PlayerGroupMuteChangedEvent,
     PlayerGroupVolumeChangedEvent,
+    VolumeChangedEvent,
 )
 from aiosendspin.server.roles.player.group import PlayerGroupRole
+
+if TYPE_CHECKING:
+    from aiosendspin.server.client import SendspinClient
+
+
+class _ClientStub:
+    """Minimal SendspinClient stub with event listener wiring."""
+
+    def __init__(self, *, negotiated_roles: list[str] | None = None) -> None:
+        self.negotiated_roles = negotiated_roles or ["player@v1"]
+        self._cbs: list[Callable[[SendspinClient, ClientEvent], None]] = []
+
+    def add_event_listener(
+        self, callback: Callable[[SendspinClient, ClientEvent], None]
+    ) -> Callable[[], None]:
+        self._cbs.append(callback)
+
+        def _remove() -> None:
+            if callback in self._cbs:
+                self._cbs.remove(callback)
+
+        return _remove
+
+    def signal(self, event: ClientEvent) -> None:
+        for cb in list(self._cbs):
+            cb(self, event)  # type: ignore[arg-type]
+
+
+class _PlayerStub:
+    """Minimal player role with mutable volume/mute used to drive aggregation."""
+
+    def __init__(self, client: _ClientStub, *, volume: int = 100, muted: bool = False) -> None:
+        self._client = client
+        self._volume = volume
+        self._muted = muted
+
+    def get_player_volume(self) -> int | None:
+        return self._volume
+
+    def get_player_muted(self) -> bool | None:
+        return self._muted
+
+    def set_player_volume(self, volume: int) -> None:  # noqa: ARG002
+        # Production set_volume is send-only; the echoed `client/state` is what
+        # mutates the role's volume. Tests drive that echo explicitly below.
+        return
+
+    def set_player_mute(self, muted: bool) -> None:  # noqa: ARG002, FBT001
+        return
+
+    def echo_state(self, *, volume: int | None = None, muted: bool | None = None) -> None:
+        if volume is not None:
+            self._volume = volume
+        if muted is not None:
+            self._muted = muted
+        self._client.signal(VolumeChangedEvent(volume=self._volume, muted=self._muted))
+
+
+def _build(*players: _PlayerStub) -> tuple[PlayerGroupRole, MagicMock]:
+    group = MagicMock()
+    pgr = PlayerGroupRole(group)
+    pgr._members = list(players)  # type: ignore[assignment]  # noqa: SLF001
+    for player in players:
+        pgr.on_client_added(player._client)  # type: ignore[arg-type]  # noqa: SLF001
+    return pgr, group
 
 
 def test_player_group_role_volume_empty() -> None:
@@ -109,31 +178,6 @@ def test_player_group_role_muted_none_returns_false() -> None:
     assert pgr.muted is False
 
 
-def test_player_group_role_set_mute_propagates() -> None:
-    """Propagate mute state to all players."""
-    group = MagicMock()
-    pgr = PlayerGroupRole(group)
-
-    p1 = MagicMock()
-    p2 = MagicMock()
-    muted_state = {"p1": False, "p2": False}
-    p1.get_player_muted.side_effect = lambda: muted_state["p1"]
-    p2.get_player_muted.side_effect = lambda: muted_state["p2"]
-    p1.set_player_mute.side_effect = lambda muted: muted_state.__setitem__("p1", muted)
-    p2.set_player_mute.side_effect = lambda muted: muted_state.__setitem__("p2", muted)
-    pgr._members = [p1, p2]  # noqa: SLF001
-
-    pgr.set_mute(muted=True)
-
-    p1.set_player_mute.assert_called_once_with(True)  # noqa: FBT003
-    p2.set_player_mute.assert_called_once_with(True)  # noqa: FBT003
-    group._signal_event.assert_called_once()  # noqa: SLF001
-    event = group._signal_event.call_args.args[0]  # noqa: SLF001
-    assert isinstance(event, PlayerGroupMuteChangedEvent)
-    assert event.previous_muted is False
-    assert event.muted is True
-
-
 def test_player_group_role_set_volume_empty() -> None:
     """Set volume on empty group is a no-op."""
     group = MagicMock()
@@ -142,25 +186,96 @@ def test_player_group_role_set_volume_empty() -> None:
     pgr.set_volume(50)  # Should not raise
 
 
-def test_player_group_role_set_volume_single_player() -> None:
-    """Set volume on single player sets that player's volume."""
-    group = MagicMock()
-    pgr = PlayerGroupRole(group)
-
-    player = MagicMock()
-    state = {"volume": 100}
-    player.get_player_volume.side_effect = lambda: state["volume"]
-    player.set_player_volume.side_effect = lambda volume: state.__setitem__("volume", volume)
-    pgr._members = [player]  # noqa: SLF001
+def test_player_group_role_set_volume_does_not_emit_synchronously() -> None:
+    """`set_volume` only dispatches commands; events wait for the client echo."""
+    p1 = _PlayerStub(_ClientStub(), volume=100)
+    p2 = _PlayerStub(_ClientStub(), volume=100)
+    pgr, group = _build(p1, p2)
 
     pgr.set_volume(50)
 
-    player.set_player_volume.assert_called_once_with(50)
-    group._signal_event.assert_called_once()  # noqa: SLF001
-    event = group._signal_event.call_args.args[0]  # noqa: SLF001
-    assert isinstance(event, PlayerGroupVolumeChangedEvent)
-    assert event.previous_volume == 100
-    assert event.volume == 50
+    group._signal_event.assert_not_called()  # noqa: SLF001
+
+
+def test_player_group_role_emits_volume_when_clients_echo_state() -> None:
+    """Group event fires when player client/state echoes complete the transition."""
+    p1 = _PlayerStub(_ClientStub(), volume=100)
+    p2 = _PlayerStub(_ClientStub(), volume=100)
+    pgr, group = _build(p1, p2)
+
+    pgr.set_volume(50)
+    p1.echo_state(volume=50)
+    p2.echo_state(volume=50)
+
+    volume_events = [
+        call.args[0]
+        for call in group._signal_event.call_args_list  # noqa: SLF001
+        if isinstance(call.args[0], PlayerGroupVolumeChangedEvent)
+    ]
+    assert len(volume_events) >= 1
+    final = volume_events[-1]
+    assert final.volume == 50
+
+
+def test_player_group_role_volume_event_carries_previous_value() -> None:
+    """`previous_volume` reflects the last emitted group volume."""
+    p1 = _PlayerStub(_ClientStub(), volume=100)
+    p2 = _PlayerStub(_ClientStub(), volume=100)
+    _pgr, group = _build(p1, p2)
+
+    # Seed the cached last-emitted volume with the starting group volume.
+    p1.echo_state(volume=100)
+
+    group._signal_event.reset_mock()  # noqa: SLF001
+    p1.echo_state(volume=60)
+    p2.echo_state(volume=40)
+
+    volume_events = [
+        call.args[0]
+        for call in group._signal_event.call_args_list  # noqa: SLF001
+        if isinstance(call.args[0], PlayerGroupVolumeChangedEvent)
+    ]
+    assert volume_events
+    final = volume_events[-1]
+    assert final.previous_volume != final.volume
+    assert final.volume == 50
+
+
+def test_player_group_role_set_mute_does_not_emit_synchronously() -> None:
+    """`set_mute` only dispatches commands; events wait for the client echo."""
+    p1 = _PlayerStub(_ClientStub(), muted=False)
+    p2 = _PlayerStub(_ClientStub(), muted=False)
+    pgr, group = _build(p1, p2)
+
+    pgr.set_mute(muted=True)
+
+    group._signal_event.assert_not_called()  # noqa: SLF001
+
+
+def test_player_group_role_emits_mute_when_all_clients_echo_state() -> None:
+    """`PlayerGroupMuteChangedEvent` fires only once all players echo muted."""
+    p1 = _PlayerStub(_ClientStub(), muted=False)
+    p2 = _PlayerStub(_ClientStub(), muted=False)
+    pgr, group = _build(p1, p2)
+
+    pgr.set_mute(muted=True)
+    p1.echo_state(muted=True)
+    mute_events = [
+        call.args[0]
+        for call in group._signal_event.call_args_list  # noqa: SLF001
+        if isinstance(call.args[0], PlayerGroupMuteChangedEvent)
+    ]
+    assert mute_events == []  # not yet — group muted only when ALL muted
+
+    p2.echo_state(muted=True)
+    mute_events = [
+        call.args[0]
+        for call in group._signal_event.call_args_list  # noqa: SLF001
+        if isinstance(call.args[0], PlayerGroupMuteChangedEvent)
+    ]
+    assert len(mute_events) == 1
+    assert mute_events[0].previous_muted is False
+    assert mute_events[0].muted is True
 
 
 def test_player_group_role_set_volume_redistributes() -> None:
@@ -227,14 +342,27 @@ def test_player_group_role_set_volume_skips_none() -> None:
 
 
 def test_player_group_role_set_volume_no_change_no_event() -> None:
-    """No event is emitted when effective group volume is unchanged."""
-    group = MagicMock()
-    pgr = PlayerGroupRole(group)
+    """No event is emitted when effective group volume is unchanged across echoes."""
+    p1 = _PlayerStub(_ClientStub(), volume=50)
+    _pgr, group = _build(p1)
 
-    player = MagicMock()
-    player.get_player_volume.return_value = 50
-    pgr._members = [player]  # noqa: SLF001
+    # Prime the last-emitted state to match current.
+    p1.echo_state(volume=50)
+    group._signal_event.reset_mock()  # noqa: SLF001
 
-    pgr.set_volume(50)
+    # Re-echo same volume — no transition.
+    p1.echo_state(volume=50)
+
+    group._signal_event.assert_not_called()  # noqa: SLF001
+
+
+def test_player_group_role_unsubscribes_on_client_removed() -> None:
+    """`on_client_removed` stops aggregating that client's volume echoes."""
+    client = _ClientStub()
+    player = _PlayerStub(client, volume=50)
+    pgr, group = _build(player)
+
+    pgr.on_client_removed(client)  # type: ignore[arg-type]
+    player.echo_state(volume=20)
 
     group._signal_event.assert_not_called()  # noqa: SLF001

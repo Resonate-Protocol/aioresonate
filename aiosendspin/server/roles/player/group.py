@@ -2,23 +2,35 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import TYPE_CHECKING, cast
 
+from aiosendspin.models.types import has_role_family
+from aiosendspin.server.events import ClientEvent
 from aiosendspin.server.roles.base import GroupRole
 from aiosendspin.server.roles.player.events import (
     PlayerGroupMuteChangedEvent,
     PlayerGroupVolumeChangedEvent,
+    VolumeChangedEvent,
 )
 from aiosendspin.server.roles.player.types import PlayerRoleProtocol
 
 if TYPE_CHECKING:
     from aiosendspin.server.client import SendspinClient
+    from aiosendspin.server.group import SendspinGroup
 
 
 class PlayerGroupRole(GroupRole):
     """Coordinate player roles across a group."""
 
     role_family = "player"
+
+    def __init__(self, group: SendspinGroup) -> None:
+        """Initialize PlayerGroupRole."""
+        super().__init__(group)
+        self._last_emitted_volume: int | None = None
+        self._last_emitted_muted: bool | None = None
+        self._player_client_unsubs: dict[SendspinClient, Callable[[], None]] = {}
 
     def _player_roles(self) -> list[PlayerRoleProtocol]:
         """Return player role members.
@@ -59,7 +71,6 @@ class PlayerGroupRole(GroupRole):
         players = self._player_roles()
         if not players:
             return True
-        previous_volume = self.get_group_volume()
 
         # Build mapping of player -> current volume (only players with volume support)
         player_volumes: dict[PlayerRoleProtocol, float] = {}
@@ -106,26 +117,12 @@ class PlayerGroupRole(GroupRole):
         # Apply to players
         for player, final_vol in player_volumes.items():
             player.set_player_volume(round(final_vol))
-        new_volume = self.get_group_volume()
-        if previous_volume is not None and new_volume is not None and previous_volume != new_volume:
-            self.emit_group_event(
-                PlayerGroupVolumeChangedEvent(
-                    previous_volume=previous_volume,
-                    volume=new_volume,
-                )
-            )
         return True
 
     def set_group_muted(self, muted: bool) -> bool | None:  # noqa: FBT001
         """Set mute state on all players."""
-        previous_muted = bool(self.get_group_muted())
         for player in self._player_roles():
             player.set_player_mute(muted)
-        new_muted = bool(self.get_group_muted())
-        if previous_muted != new_muted:
-            self.emit_group_event(
-                PlayerGroupMuteChangedEvent(previous_muted=previous_muted, muted=new_muted)
-            )
         return True
 
     @property
@@ -153,3 +150,53 @@ class PlayerGroupRole(GroupRole):
             Clients with player roles.
         """
         return [role._client for role in self._player_roles()]  # noqa: SLF001
+
+    # --- Client added/removed hooks ---
+
+    def on_client_added(self, client: SendspinClient) -> None:
+        """Subscribe to per-client volume events to aggregate group transitions."""
+        if client in self._player_client_unsubs:
+            return
+        if not has_role_family("player", client.negotiated_roles):
+            return
+
+        def on_client_event(_client: SendspinClient, event: ClientEvent) -> None:
+            if isinstance(event, VolumeChangedEvent):
+                self._recompute_and_emit()
+
+        unsub = client.add_event_listener(on_client_event)
+        self._player_client_unsubs[client] = unsub
+        # Prime cached state so the first real echo emits against a known baseline.
+        if self._last_emitted_volume is None:
+            self._last_emitted_volume = self.get_group_volume()
+        if self._last_emitted_muted is None:
+            self._last_emitted_muted = self.get_group_muted()
+
+    def on_client_removed(self, client: SendspinClient) -> None:
+        """Unsubscribe from per-client volume events and re-aggregate."""
+        if client in self._player_client_unsubs:
+            self._player_client_unsubs[client]()
+            del self._player_client_unsubs[client]
+
+    def _recompute_and_emit(self) -> None:
+        """Recompute group volume/mute and emit on integer-average / bool transitions."""
+        new_volume = self.get_group_volume()
+        if new_volume is not None:
+            previous_volume = self._last_emitted_volume
+            self._last_emitted_volume = new_volume
+            if previous_volume is not None and previous_volume != new_volume:
+                self.emit_group_event(
+                    PlayerGroupVolumeChangedEvent(
+                        previous_volume=previous_volume,
+                        volume=new_volume,
+                    )
+                )
+
+        new_muted = self.get_group_muted()
+        if new_muted is not None:
+            previous_muted = self._last_emitted_muted
+            self._last_emitted_muted = new_muted
+            if previous_muted is not None and previous_muted != new_muted:
+                self.emit_group_event(
+                    PlayerGroupMuteChangedEvent(previous_muted=previous_muted, muted=new_muted)
+                )
