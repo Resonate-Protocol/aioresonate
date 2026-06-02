@@ -366,8 +366,7 @@ class SendspinGroup:
                 if self._push_stream is not None and not self._push_stream.is_stopped:
                     self._push_stream.on_role_leave(role)
         if not self._clients:
-            # Emit event for group deletion, no clients left
-            self._signal_event(GroupDeletedEvent())
+            self._finalize_empty_group()
         else:
             # Emit event for client removal
             self._signal_event(GroupMemberRemovedEvent(client.client_id))
@@ -375,6 +374,10 @@ class SendspinGroup:
         new_group = SendspinGroup(self._server, client)
         # Send group update to notify client of their new solo group
         new_group.on_client_connected(client)
+
+    def _finalize_empty_group(self) -> None:
+        """Tear down a group with no remaining clients."""
+        self._signal_event(GroupDeletedEvent())
 
     async def add_client(self, client: SendspinClient) -> None:
         """

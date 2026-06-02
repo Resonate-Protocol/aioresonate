@@ -545,6 +545,18 @@ class SendspinClient:
             role.on_group_changed(group)
 
     async def ungroup(self) -> None:
-        """Remove the client from the group (no-op if already solo)."""
-        if len(self.group.clients) > 1:
-            await self.group.remove_client(self)
+        """Remove the client from its current group, placing it in a fresh solo group."""
+        if self._group is None:
+            return
+        old_group = self._group
+        if len(old_group.clients) > 1:
+            await old_group.remove_client(self)
+            return
+        # Solo source: evict directly and finalize the now-empty group. The new
+        # SendspinGroup() below triggers _set_group on us, which unregisters
+        # events from old_group.
+        from .group import SendspinGroup  # noqa: PLC0415  # avoid circular import
+
+        old_group._clients.remove(self)  # noqa: SLF001
+        old_group._finalize_empty_group()  # noqa: SLF001
+        SendspinGroup(self._server, self)

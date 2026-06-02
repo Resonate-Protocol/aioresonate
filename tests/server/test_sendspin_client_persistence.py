@@ -18,6 +18,7 @@ from aiosendspin.server.audio import AudioFormat
 from aiosendspin.server.client import SendspinClient
 from aiosendspin.server.clock import LoopClock
 from aiosendspin.server.connection import SendspinConnection
+from aiosendspin.server.events import GroupDeletedEvent
 from aiosendspin.server.group import SendspinGroup
 from aiosendspin.server.roles.player import v1 as player_v1_module
 from aiosendspin.server.roles.player.v1 import PlayerPersistentState
@@ -510,3 +511,28 @@ async def test_client_updated_event_fires_when_hello_changes() -> None:
     updated = [e for e in server.events if isinstance(e, ClientUpdatedEvent)]
     assert len(updated) == 1
     assert updated[0].client_id == "player-1"
+
+
+@pytest.mark.asyncio
+async def test_add_client_from_solo_group_finalizes_old_group() -> None:
+    """Moving a solo client into another group must drain and delete the old group."""
+    loop = asyncio.get_running_loop()
+    server = _DummyServer(loop=loop, clock=LoopClock(loop))
+    client_x = SendspinClient(server, client_id="player-x")
+    group_a = SendspinGroup(server, client_x)
+
+    client_y = SendspinClient(server, client_id="player-y")
+    group_b = SendspinGroup(server, client_y)
+
+    deleted_groups: list[SendspinGroup] = []
+    group_a.add_event_listener(
+        lambda g, evt: deleted_groups.append(g) if isinstance(evt, GroupDeletedEvent) else None
+    )
+
+    await group_b.add_client(client_x)
+
+    assert client_x not in group_a.clients
+    assert group_a.clients == []
+    assert client_x.group is group_b
+    assert client_x in group_b.clients
+    assert deleted_groups == [group_a]
