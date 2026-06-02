@@ -255,6 +255,7 @@ class SendspinTimeFilter:
     def reset(self) -> None:
         """Reset the filter state."""
         self._count = 0
+        self._last_update = 0
         self._offset = 0.0
         self._drift = 0.0
         self._offset_covariance = math.inf
