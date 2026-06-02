@@ -8,6 +8,14 @@ from aiosendspin.models.metadata import Progress, SessionUpdateMetadata
 from aiosendspin.models.types import RepeatMode
 
 
+def _progress_fields_changed(last: Metadata, current: Metadata) -> bool:
+    return (
+        last.track_progress != current.track_progress
+        or last.track_duration != current.track_duration
+        or last.playback_speed != current.playback_speed
+    )
+
+
 @dataclass
 class Metadata:
     """Metadata for media playback."""
@@ -128,25 +136,23 @@ class Metadata:
         if last is None or last.shuffle != self.shuffle:
             metadata_update.shuffle = self.shuffle
 
-        # Send progress object if any progress field changed or if track_progress is set
-        # (clients need fresh timestamp for progress calculation)
-        progress_changed = (
-            last is None
-            or last.track_duration != self.track_duration
-            or last.playback_speed != self.playback_speed
-            or self.track_progress is not None
-        )
+        # Emit progress=null to clear when the previous state had progress and the new state
+        # doesn't (spec: omitted = unchanged, null = clear). Emit a full Progress object on the
+        # first update or when any progress field changed.
+        last_had_progress = last is not None and last.track_progress is not None
         if (
-            progress_changed
-            and self.track_progress is not None
+            self.track_progress is not None
             and self.track_duration is not None
             and self.playback_speed is not None
         ):
-            metadata_update.progress = Progress(
-                track_progress=self.track_progress,
-                track_duration=self.track_duration,
-                playback_speed=self.playback_speed,
-            )
+            if last is None or _progress_fields_changed(last, self):
+                metadata_update.progress = Progress(
+                    track_progress=self.track_progress,
+                    track_duration=self.track_duration,
+                    playback_speed=self.playback_speed,
+                )
+        elif last_had_progress:
+            metadata_update.progress = None
 
         return metadata_update
 

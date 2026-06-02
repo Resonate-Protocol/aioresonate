@@ -5,6 +5,7 @@ from __future__ import annotations
 from unittest.mock import MagicMock
 
 from aiosendspin.models.core import ServerStateMessage
+from aiosendspin.models.types import UndefinedField
 from aiosendspin.server.roles.metadata import Metadata, MetadataClearedEvent, MetadataUpdatedEvent
 from aiosendspin.server.roles.metadata.group import MetadataGroupRole
 
@@ -252,3 +253,59 @@ def test_metadata_group_role_member_join_does_not_rewind_after_freeze() -> None:
     assert msg.payload.metadata.progress is not None
     assert msg.payload.metadata.progress.track_progress == 40_000
     assert msg.payload.metadata.progress.playback_speed == 0
+
+
+def test_progress_set_on_first_update() -> None:
+    """diff_update emits a full Progress object on the first update."""
+    current = Metadata(
+        title="Song",
+        track_progress=5_000,
+        track_duration=180_000,
+        playback_speed=1000,
+    )
+
+    update = current.diff_update(None, timestamp=1_000_000)
+
+    assert update.progress is not None
+    assert not isinstance(update.progress, UndefinedField)
+    assert update.progress.track_progress == 5_000
+    assert update.progress.track_duration == 180_000
+    assert update.progress.playback_speed == 1000
+
+
+def test_progress_cleared_when_track_progress_becomes_none() -> None:
+    """diff_update emits progress=null when previous state had progress and new doesn't."""
+    last = Metadata(
+        title="Song",
+        track_progress=12_345,
+        track_duration=180_000,
+        playback_speed=1000,
+    )
+    current = Metadata(title="Loading next track...")
+
+    update = current.diff_update(last, timestamp=2_000_000)
+
+    assert update.progress is None
+    assert update.to_dict()["progress"] is None
+    assert '"progress":null' in update.to_json()
+
+
+def test_progress_omitted_when_unchanged() -> None:
+    """diff_update omits progress when no progress field changed."""
+    last = Metadata(
+        title="Song",
+        track_progress=5_000,
+        track_duration=180_000,
+        playback_speed=1000,
+    )
+    current = Metadata(
+        title="New Title",
+        track_progress=5_000,
+        track_duration=180_000,
+        playback_speed=1000,
+    )
+
+    update = current.diff_update(last, timestamp=2_000_000)
+
+    assert isinstance(update.progress, UndefinedField)
+    assert "progress" not in update.to_json()
