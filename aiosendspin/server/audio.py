@@ -184,14 +184,15 @@ class BufferTracker:
         if bytes_needed <= 0:
             return True
         if bytes_needed >= self.capacity_bytes:
-            # Chunk exceeds capacity, but allow it through
             logger.warning(
-                "Chunk size %s exceeds reported buffer capacity %s for client %s",
+                "Chunk size %s exceeds reported buffer capacity %s for client %s "
+                "— blocking until buffer drains",
                 bytes_needed,
                 self.capacity_bytes,
                 self.client_id,
             )
-            return True
+            self.prune_consumed()
+            return self.buffered_bytes == 0
 
         self.prune_consumed()
         projected_usage = self.buffered_bytes + bytes_needed
@@ -276,20 +277,25 @@ class BufferTracker:
         """
         Calculate time in microseconds until the buffer can accept bytes_needed more bytes.
 
-        Returns 0 if bytes_needed <= 0 (immediate capacity) or bytes_needed >= capacity_bytes
-        (chunk exceeds capacity but is allowed through anyway).
+        Returns 0 if bytes_needed <= 0 (immediate capacity). When bytes_needed exceeds
+        capacity_bytes, returns the time needed for the buffer to fully drain so the
+        oversize chunk can be admitted alone; returns 0 only if the buffer is already empty.
         """
         if bytes_needed <= 0:
             return 0
         if bytes_needed >= self.capacity_bytes:
-            # TODO: raise exception instead?
             logger.warning(
-                "Chunk size %s exceeds reported buffer capacity %s for client %s",
+                "Chunk size %s exceeds reported buffer capacity %s for client %s "
+                "— blocking until buffer drains",
                 bytes_needed,
                 self.capacity_bytes,
                 self.client_id,
             )
-            return 0
+            cursor_time_us = self.prune_consumed()
+            if self.buffered_bytes == 0:
+                return 0
+            latest_end_us = self.buffered_chunks[-1].end_time_us
+            return max(latest_end_us - cursor_time_us, 0)
 
         # Prune consumed chunks once at the start
         cursor_time_us = self.prune_consumed()

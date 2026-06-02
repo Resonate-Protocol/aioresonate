@@ -238,3 +238,55 @@ def test_buffered_horizon_us_tracks_furthest_end_from_now() -> None:
     clock.set_now(250_000)
     # First chunk is pruned; horizon is from now to the second chunk's end.
     assert tracker.buffered_horizon_us() == 250_000
+
+
+def test_has_capacity_now_oversize_blocks_while_buffered() -> None:
+    """Oversize chunk must wait for the buffer to drain before being admitted."""
+    clock = _FakeClock(now_us=0)
+    tracker = BufferTracker(
+        clock=clock,
+        client_id="test",
+        capacity_bytes=1000,
+    )
+
+    tracker.register(end_time_us=100_000, byte_count=500, duration_us=100_000)
+
+    assert tracker.has_capacity_now(1500) is False
+
+
+def test_has_capacity_now_oversize_passes_when_empty() -> None:
+    """Oversize chunk is admitted alone when the buffer is empty."""
+    clock = _FakeClock(now_us=0)
+    tracker = BufferTracker(
+        clock=clock,
+        client_id="test",
+        capacity_bytes=1000,
+    )
+
+    assert tracker.has_capacity_now(1500) is True
+
+
+def test_time_until_capacity_oversize_returns_wait_while_buffered() -> None:
+    """Oversize chunk reports the wait until existing buffered audio fully drains."""
+    clock = _FakeClock(now_us=0)
+    tracker = BufferTracker(
+        clock=clock,
+        client_id="test",
+        capacity_bytes=1000,
+    )
+
+    tracker.register(end_time_us=100_000, byte_count=500, duration_us=100_000)
+
+    assert tracker.time_until_capacity(1500) == 100_000
+
+
+def test_time_until_capacity_oversize_zero_when_empty() -> None:
+    """Oversize chunk waits no time when the buffer is already empty."""
+    clock = _FakeClock(now_us=0)
+    tracker = BufferTracker(
+        clock=clock,
+        client_id="test",
+        capacity_bytes=1000,
+    )
+
+    assert tracker.time_until_capacity(1500) == 0
