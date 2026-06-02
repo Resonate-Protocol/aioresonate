@@ -2135,8 +2135,8 @@ class PushStream:
     ) -> list[CachedChunk]:
         """Resample PCM chunks to the target format and encode them sequentially.
 
-        Pass `resamplers`/`quantizers` to share state across calls (single resampler,
-        drainable via `_drain_catchup_resamplers`).
+        Pass `resamplers`/`quantizers` to share state across calls (single resampler
+        instance per key reused between batches).
         """
         tkey = self._build_transform_key(req, channel_id)
         cached: list[CachedChunk] = []
@@ -2322,29 +2322,6 @@ class PushStream:
             )
             for data, ts, dur in encoded_frames
         ]
-
-    def _drain_catchup_resamplers(
-        self,
-        resamplers: dict[_ResamplerKey, _ResamplerState],
-        quantizers: dict[_ResamplerKey, _ResamplerState],
-        encoder: AudioTransformer | None,
-        req: AudioRequirements,
-        channel_id: UUID,
-    ) -> list[CachedChunk]:
-        """Flush each catchup resampler's FIR tail and encode the drained PCM.
-
-        Without draining, the resampler's FIR holds samples past the catchup
-        tail, leaving a content gap before the first live chunk. Drain emits
-        those held samples on the live timeline so live picks up seamlessly.
-        """
-        cached: list[CachedChunk] = []
-        for resampler_state in resamplers.values():
-            cached.extend(
-                self._flush_resampler_to_chunks(
-                    resampler_state, quantizers, encoder, req, channel_id
-                )
-            )
-        return cached
 
     async def _start_catchup_encoding(  # noqa: PLR0915
         self,
