@@ -12,7 +12,7 @@ from dataclasses import dataclass
 
 # Residual threshold as fraction of max_error for triggering adaptive forgetting.
 # When residual > CUTOFF * max_error, the filter applies forgetting to recover from outliers.
-ADAPTIVE_FORGETTING_CUTOFF = 0.75
+ADAPTIVE_FORGETTING_CUTOFF = 3.0
 
 # Scale factor applied to max_error before it is used as the measurement standard deviation.
 # Values < 1 indicate the round-trip half-delay overestimates true measurement noise.
@@ -66,8 +66,8 @@ class SendspinTimeFilter:
 
     def __init__(
         self,
-        process_std_dev: float = 0.01,
-        forget_factor: float = 1.001,
+        process_std_dev: float = 0.0,
+        forget_factor: float = 2.0,
         drift_process_std_dev: float = 1e-11,
     ) -> None:
         """Initialise the Kalman filter with noise and forgetting parameters."""
