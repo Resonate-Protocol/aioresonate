@@ -14,6 +14,10 @@ from dataclasses import dataclass
 # When residual > CUTOFF * max_error, the filter applies forgetting to recover from outliers.
 ADAPTIVE_FORGETTING_CUTOFF = 0.75
 
+# Scale factor applied to max_error before it is used as the measurement standard deviation.
+# Values < 1 indicate the round-trip half-delay overestimates true measurement noise.
+MAX_ERROR_SCALE = 0.5
+
 
 @dataclass(slots=True)
 class TimeElement:
@@ -95,7 +99,7 @@ class SendspinTimeFilter:
         dt: float = float(time_added - self._last_update)
         self._last_update = time_added
 
-        update_std_dev: float = float(max_error)
+        update_std_dev: float = float(max_error) * MAX_ERROR_SCALE
         measurement_variance: float = update_std_dev * update_std_dev
 
         # Filter initialization: First measurement establishes offset baseline
