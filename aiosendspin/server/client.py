@@ -22,8 +22,10 @@ from aiosendspin.models.types import (
     BinaryMessageType,
     ClientStateType,
     GoodbyeReason,
+    PlaybackStateType,
     Roles,
     has_role,
+    has_role_family,
 )
 from aiosendspin.util import create_task
 
@@ -100,6 +102,13 @@ class SendspinClient:
 
         # Client-level state (reported by client/state). Persists across reconnects until updated.
         self._client_state: ClientStateType = ClientStateType.SYNCHRONIZED
+
+        # External-source recovery state (persists across reconnects).
+        self._previous_group_id: str | None = None
+        """Group ID to rejoin after external_source ends."""
+        self._external_source_solo_group_id: str | None = None
+        """Solo group ID created when entering external_source."""
+        self._switch_lock: asyncio.Lock = asyncio.Lock()
 
         # Role-owned persistent state (per role family).
         self._role_state: dict[str, object] = {}
@@ -211,6 +220,166 @@ class SendspinClient:
             coro = role.on_state_transition(old_state, new_state)
             if coro is not None:
                 await coro
+
+        if new_state == ClientStateType.EXTERNAL_SOURCE:
+            await self._handle_external_source_transition()
+
+    async def _handle_external_source_transition(self) -> None:
+        """Move the client out of any shared group when it switches to external_source.
+
+        - Multi-client group: remember the previous group and move to a solo group.
+        - Solo group: stop playback so the client is no longer streaming.
+        """
+        if len(self.group.clients) > 1:
+            self._previous_group_id = self.group.group_id
+            self._logger.debug(
+                "Storing previous group %s for external_source client",
+                self._previous_group_id,
+            )
+            await self.group.remove_client(self)
+            self._external_source_solo_group_id = self.group.group_id
+            return
+
+        self._logger.debug("Client already in solo group, stopping playback for external_source")
+        await self.group.stop()
+
+    async def handle_switch_command(self) -> None:
+        """Cycle this client through available groups (spec §561-605)."""
+        if self._switch_lock.locked():
+            self._logger.debug("Ignoring switch command; switch already in progress")
+            return
+        async with self._switch_lock:
+            await self._handle_switch_command_locked()
+
+    async def _handle_switch_command_locked(self) -> None:
+        # Clients in external_source can't participate in playback.
+        if self._client_state == ClientStateType.EXTERNAL_SOURCE:
+            self._logger.debug("Ignoring switch command while client is in external_source state")
+            return
+
+        # External-source recovery takes priority over the normal cycle.
+        if await self._try_rejoin_previous_group():
+            return
+
+        current_group = self.group
+        all_groups = self._get_all_groups()
+        has_player_role = has_role_family("player", self._negotiated_roles)
+        cycle_groups = self._build_group_cycle(all_groups, current_group, has_player_role)
+
+        if not cycle_groups:
+            self._logger.debug("No groups available to switch to")
+            return
+
+        try:
+            current_index = cycle_groups.index(current_group)
+            next_index = (current_index + 1) % len(cycle_groups)
+        except ValueError:
+            next_index = 0
+
+        next_group = cycle_groups[next_index]
+
+        if next_group is None:
+            self._logger.info("Switching client %s to solo group", self._client_id)
+            await current_group.remove_client(self)
+        elif next_group != current_group:
+            self._logger.info(
+                "Switching client %s to group %s", self._client_id, next_group.group_id
+            )
+            await current_group.remove_client(self)
+            await next_group.add_client(self)
+
+    def _get_all_groups(self) -> list[SendspinGroup]:
+        """Return all unique groups across currently connected clients."""
+        groups_seen: set[str] = set()
+        unique_groups: list[SendspinGroup] = []
+        for client in self._server.connected_clients:
+            group = client.group
+            if group.group_id not in groups_seen:
+                groups_seen.add(group.group_id)
+                unique_groups.append(group)
+        return unique_groups
+
+    def _build_group_cycle(
+        self,
+        all_groups: list[SendspinGroup],
+        current_group: SendspinGroup,
+        has_player_role: bool,  # noqa: FBT001
+    ) -> list[SendspinGroup | None]:
+        """Build the switch cycle list (spec README:597-605).
+
+        ``None`` in the list represents "switch to a new solo group" for clients
+        that hold the player role.
+        """
+        multi_client_playing: list[SendspinGroup] = []
+        single_client: list[SendspinGroup] = []
+
+        for group in all_groups:
+            client_count = len(group.clients)
+            is_playing = group.state == PlaybackStateType.PLAYING
+            if client_count > 1 and is_playing:
+                if any(has_role_family("player", c.negotiated_roles) for c in group.clients):
+                    multi_client_playing.append(group)
+            elif client_count == 1 and is_playing:
+                single_client_obj = group.clients[0]
+                if group != current_group and has_role_family(
+                    "player", single_client_obj.negotiated_roles
+                ):
+                    single_client.append(group)
+
+        multi_client_playing.sort(key=lambda g: g.group_id)
+        single_client.sort(key=lambda g: g.group_id)
+
+        if has_player_role:
+            current_is_solo = len(current_group.clients) == 1
+            solo_option: list[SendspinGroup | None] = [current_group] if current_is_solo else [None]
+            return multi_client_playing + single_client + solo_option
+        return [*multi_client_playing, *single_client]
+
+    def _should_rejoin_previous_group(self) -> bool:
+        """Return True when switch should rejoin the pre-external-source group.
+
+        Per spec: if the client is still in the solo group created by its
+        ``external_source`` transition, switch prioritizes rejoining that group.
+        """
+        return (
+            self._previous_group_id is not None
+            and self._client_state != ClientStateType.EXTERNAL_SOURCE
+            and self._external_source_solo_group_id == self.group.group_id
+            and len(self.group.clients) == 1
+        )
+
+    async def _try_rejoin_previous_group(self) -> bool:
+        if not self._should_rejoin_previous_group():
+            return False
+
+        previous_group_id = self._previous_group_id
+        # Clear external_source tracking after attempt, regardless of outcome.
+        self._previous_group_id = None
+        self._external_source_solo_group_id = None
+
+        previous_group = self._find_group_by_id(previous_group_id)
+        if previous_group is not None and previous_group != self.group:
+            self._logger.info(
+                "Rejoining previous group %s after external_source", previous_group_id
+            )
+            await self.group.remove_client(self)
+            await previous_group.add_client(self)
+            return True
+
+        self._logger.debug(
+            "Previous group %s no longer exists or is current group, "
+            "falling back to normal switch cycle",
+            previous_group_id,
+        )
+        return False
+
+    def _find_group_by_id(self, group_id: str | None) -> SendspinGroup | None:
+        if group_id is None:
+            return None
+        for client in self._server.connected_clients:
+            if client.group.group_id == group_id:
+                return client.group
+        return None
 
     def check_role(self, role: Roles) -> bool:
         """Check if the client has a role active (by role family)."""
