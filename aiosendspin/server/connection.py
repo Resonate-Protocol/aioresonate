@@ -366,7 +366,7 @@ class SendspinConnection:
 
     def send_priority_message(self, message: ServerMessage) -> None:
         """Enqueue a high-priority message (processed before regular queue)."""
-        if self._queue_size >= MAX_PENDING_MSG:
+        if len(self._priority_messages) >= MAX_PENDING_MSG:
             self._disconnect_due_to_queue_overflow("Priority message queue full, client too slow")
             return
         self._queue_sequence += 1

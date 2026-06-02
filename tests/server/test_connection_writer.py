@@ -21,7 +21,12 @@ from aiosendspin.models.core import (
 from aiosendspin.models.player import StreamStartPlayer
 from aiosendspin.models.types import AudioCodec, BinaryMessageType
 from aiosendspin.server.clock import LoopClock, ManualClock
-from aiosendspin.server.connection import SendspinConnection, _BinaryData, _RoleQueueEntry
+from aiosendspin.server.connection import (
+    MAX_PENDING_MSG,
+    SendspinConnection,
+    _BinaryData,
+    _RoleQueueEntry,
+)
 from aiosendspin.server.roles.base import BinaryHandling
 from aiosendspin.server.roles.player.v1 import PlayerV1Role
 
@@ -466,6 +471,36 @@ async def test_send_binary_disconnects_on_per_role_queue_overflow() -> None:
     await asyncio.sleep(0)
 
     assert conn.disconnect.call_count == 1  # type: ignore[attr-defined]
+
+
+def test_priority_message_queue_cap_uses_own_length() -> None:
+    """Priority queue cap should ignore unrelated role-queue bytes in `_queue_size`."""
+    loop = asyncio.new_event_loop()
+    try:
+        server = _DummyServer(loop=loop, clock=LoopClock(loop))
+        wsock = MagicMock()
+        wsock.closed = False
+        conn = SendspinConnection(server, wsock_client=wsock)
+        conn.disconnect = AsyncMock()  # type: ignore[method-assign]
+
+        # Simulate saturated role queues: aggregate _queue_size above the priority cap
+        # without putting anything into _priority_messages itself.
+        conn._queue_size = MAX_PENDING_MSG * 2  # noqa: SLF001
+
+        conn.send_priority_message(
+            ServerTimeMessage(
+                payload=ServerTimePayload(
+                    client_transmitted=1,
+                    server_received=2,
+                    server_transmitted=0,
+                )
+            )
+        )
+
+        assert conn.disconnect.call_count == 0  # type: ignore[attr-defined]
+        assert len(conn._priority_messages) == 1  # noqa: SLF001
+    finally:
+        loop.close()
 
 
 def test_per_role_queue_limit_is_isolated_between_roles() -> None:
