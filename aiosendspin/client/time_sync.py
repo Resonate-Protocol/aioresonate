@@ -50,13 +50,20 @@ class SendspinTimeFilter:
     _drift_covariance: float = 0.0
 
     _process_variance: float
+    _drift_process_variance: float
     _forget_variance_factor: float
 
     _current_time_element: TimeElement
 
-    def __init__(self, process_std_dev: float = 0.01, forget_factor: float = 1.001) -> None:
+    def __init__(
+        self,
+        process_std_dev: float = 0.01,
+        forget_factor: float = 1.001,
+        drift_process_std_dev: float = 1e-11,
+    ) -> None:
         """Initialise the Kalman filter with noise and forgetting parameters."""
         self._process_variance = process_std_dev * process_std_dev
+        self._drift_process_variance = drift_process_std_dev * drift_process_std_dev
         self._forget_variance_factor = forget_factor * forget_factor
         self._current_time_element = TimeElement()
 
@@ -135,8 +142,9 @@ class SendspinTimeFilter:
         # State transition matrix F = [1, dt; 0, 1]
         dt_squared: float = dt * dt
 
-        # Process noise only applied to offset (modeling clock jitter/wander)
-        drift_process_variance: float = 0.0  # Drift assumed stable
+        # Process noise for both offset and drift (full random walk model).
+        # Independent clock jitter (offset noise) and wander (drift noise).
+        drift_process_variance: float = dt * self._drift_process_variance
         new_drift_covariance: float = self._drift_covariance + drift_process_variance
 
         offset_drift_process_variance: float = 0.0
