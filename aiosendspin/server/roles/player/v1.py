@@ -672,19 +672,22 @@ class PlayerV1Role(Role):
         if state.supported_commands is not None:
             self.state_supported_commands = state.supported_commands
 
-        if self.static_delay_ms != state.static_delay_ms:
+        if state.static_delay_ms is not None and self.static_delay_ms != state.static_delay_ms:
             self.static_delay_ms = state.static_delay_ms
             self._client._signal_event(  # noqa: SLF001
                 StaticDelayChangedEvent(static_delay_ms=state.static_delay_ms)
             )
 
-        if self.required_lead_time_ms != state.required_lead_time_ms:
+        if (
+            state.required_lead_time_ms is not None
+            and self.required_lead_time_ms != state.required_lead_time_ms
+        ):
             self.required_lead_time_ms = state.required_lead_time_ms
             self._client._signal_event(  # noqa: SLF001
                 RequiredLeadTimeChangedEvent(required_lead_time_ms=state.required_lead_time_ms)
             )
 
-        if self.min_buffer_ms != state.min_buffer_ms:
+        if state.min_buffer_ms is not None and self.min_buffer_ms != state.min_buffer_ms:
             self.min_buffer_ms = state.min_buffer_ms
             self._client._signal_event(  # noqa: SLF001
                 MinBufferChangedEvent(min_buffer_ms=state.min_buffer_ms)

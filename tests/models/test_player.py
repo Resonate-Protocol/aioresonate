@@ -8,12 +8,19 @@ from aiosendspin.models.player import PlayerCommandPayload, PlayerStatePayload
 from aiosendspin.models.types import PlayerCommand
 
 
-def test_player_state_static_delay_serializes_at_zero() -> None:
-    """static_delay_ms=0 is always serialized (not omitted by omit_none)."""
-    payload = PlayerStatePayload()
+def test_player_state_static_delay_serializes_when_set() -> None:
+    """static_delay_ms is serialized when explicitly set."""
+    payload = PlayerStatePayload(static_delay_ms=0)
     data = payload.to_dict()
     assert "static_delay_ms" in data
     assert data["static_delay_ms"] == 0
+
+
+def test_player_state_static_delay_omitted_when_unset() -> None:
+    """static_delay_ms is omitted when not provided so partial deltas don't reset it."""
+    payload = PlayerStatePayload()
+    data = payload.to_dict()
+    assert "static_delay_ms" not in data
 
 
 def test_player_state_static_delay_range_valid() -> None:
@@ -42,17 +49,17 @@ def test_player_state_supported_commands_serializes() -> None:
 
 
 def test_player_state_backward_compat_no_delay() -> None:
-    """Old clients that don't send static_delay_ms get default 0."""
+    """Omitted static_delay_ms parses as None so server treats it as 'unchanged'."""
     data = '{"volume": 50}'
     payload = PlayerStatePayload.from_json(data)
-    assert payload.static_delay_ms == 0
+    assert payload.static_delay_ms is None
 
 
-def test_player_state_timing_defaults() -> None:
-    """Clients that omit timing fields get the 250 ms defaults."""
+def test_player_state_timing_defaults_to_none() -> None:
+    """Omitted timing fields parse as None so server treats them as 'unchanged'."""
     payload = PlayerStatePayload.from_json('{"volume": 50}')
-    assert payload.required_lead_time_ms == 250
-    assert payload.min_buffer_ms == 250
+    assert payload.required_lead_time_ms is None
+    assert payload.min_buffer_ms is None
 
 
 def test_player_state_timing_serializes() -> None:

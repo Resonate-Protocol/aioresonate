@@ -25,6 +25,8 @@ from aiosendspin.server.roles.player.audio_transformers import FlacEncoder, PcmP
 from aiosendspin.server.roles.player.events import (
     MinBufferChangedEvent,
     RequiredLeadTimeChangedEvent,
+    StaticDelayChangedEvent,
+    VolumeChangedEvent,
 )
 
 # --- Basic properties ---
@@ -891,6 +893,45 @@ def test_on_client_state_updates_min_buffer() -> None:
     event = client._signal_event.call_args[0][0]  # noqa: SLF001
     assert isinstance(event, MinBufferChangedEvent)
     assert event.min_buffer_ms == 1500
+
+
+def test_partial_client_state_does_not_reset_timing_fields() -> None:
+    """A delta carrying only `volume` must leave timing fields and events untouched."""
+    client = _make_client_stub()
+    client.info.player_support = _make_player_support(
+        SupportedAudioFormat(codec=AudioCodec.PCM, channels=2, sample_rate=48000, bit_depth=16),
+    )
+    role = PlayerV1Role(client=client)
+
+    role.on_client_state(
+        ClientStatePayload(
+            player=PlayerStatePayload(
+                volume=80,
+                static_delay_ms=400,
+                required_lead_time_ms=120,
+                min_buffer_ms=600,
+            )
+        )
+    )
+    assert role.static_delay_ms == 400
+    assert role.required_lead_time_ms == 120
+    assert role.min_buffer_ms == 600
+
+    client._signal_event.reset_mock()  # noqa: SLF001
+
+    role.on_client_state(ClientStatePayload(player=PlayerStatePayload(volume=70)))
+
+    assert role.static_delay_ms == 400
+    assert role.required_lead_time_ms == 120
+    assert role.min_buffer_ms == 600
+    emitted_types = [
+        type(call.args[0])
+        for call in client._signal_event.call_args_list  # noqa: SLF001
+    ]
+    assert StaticDelayChangedEvent not in emitted_types
+    assert RequiredLeadTimeChangedEvent not in emitted_types
+    assert MinBufferChangedEvent not in emitted_types
+    assert VolumeChangedEvent in emitted_types
 
 
 def test_on_client_state_updates_supported_commands() -> None:
