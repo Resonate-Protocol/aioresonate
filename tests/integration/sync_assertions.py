@@ -475,7 +475,7 @@ def assert_pcm_chunks_continuous(events: Sequence[Any], *, max_gap_us: int) -> N
 
         if last_end_us is not None:
             gap_us = header.timestamp_us - last_end_us
-            assert gap_us <= max_gap_us
+            assert 0 <= gap_us <= max_gap_us
         last_end_us = header.timestamp_us + dur_us
 
 

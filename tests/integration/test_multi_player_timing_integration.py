@@ -542,7 +542,7 @@ def _assert_pcm_chunks_continuous(events: list[_Event], *, max_gap_us: int) -> N
         dur_us = int(frame_count * 1_000_000 / fmt.sample_rate)
         if last_end_us is not None:
             gap_us = header.timestamp_us - last_end_us
-            assert gap_us <= max_gap_us
+            assert 0 <= gap_us <= max_gap_us
         last_end_us = header.timestamp_us + dur_us
 
 
