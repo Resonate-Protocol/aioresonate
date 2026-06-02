@@ -18,6 +18,10 @@ ADAPTIVE_FORGETTING_CUTOFF = 0.75
 # Values < 1 indicate the round-trip half-delay overestimates true measurement noise.
 MAX_ERROR_SCALE = 0.5
 
+# SNR threshold for applying drift compensation in time conversions.
+# Drift is only used when drift^2 > threshold^2 * drift_covariance.
+DRIFT_SIGNIFICANCE_THRESHOLD_SQUARED = 2.0 * 2.0
+
 
 @dataclass(slots=True)
 class TimeElement:
@@ -26,6 +30,7 @@ class TimeElement:
     last_update: int = 0
     offset: float = 0.0
     drift: float = 0.0
+    use_drift: bool = False
 
 
 class SendspinTimeFilter:
@@ -200,10 +205,17 @@ class SendspinTimeFilter:
         )
         self._offset_covariance = new_offset_covariance - offset_gain * new_offset_covariance
 
+        # SNR gate: only apply drift when statistically significant
+        use_drift: bool = (
+            self._drift * self._drift
+            > DRIFT_SIGNIFICANCE_THRESHOLD_SQUARED * self._drift_covariance
+        )
+
         self._current_time_element = TimeElement(
             last_update=self._last_update,
             offset=self._offset,
             drift=self._drift,
+            use_drift=use_drift,
         )
 
     def compute_server_time(self, client_time: int) -> int:
@@ -228,9 +240,11 @@ class SendspinTimeFilter:
         # offset(t) = offset_base + drift * (t - t_last_update)
 
         # Retrieve latest time transformation parameters
+        element = self._current_time_element
+        effective_drift = element.drift if element.use_drift else 0.0
 
-        dt = float(client_time - self._current_time_element.last_update)
-        offset = round(self._current_time_element.offset + self._current_time_element.drift * dt)
+        dt = float(client_time - element.last_update)
+        offset = round(element.offset + effective_drift * dt)
         return client_time + offset
 
     def compute_client_time(self, server_time: int) -> int:
@@ -254,14 +268,12 @@ class SendspinTimeFilter:
         # T_server = T_client + offset + drift * (T_client - T_last_update)
         # T_server = (1 + drift) * T_client + offset - drift * T_last_update
         # T_client = (T_server - offset + drift * T_last_update) / (1 + drift)
+        element = self._current_time_element
+        effective_drift = element.drift if element.use_drift else 0.0
 
         return round(
-            (
-                float(server_time)
-                - self._current_time_element.offset
-                + self._current_time_element.drift * self._current_time_element.last_update
-            )
-            / (1.0 + self._current_time_element.drift)
+            (float(server_time) - element.offset + effective_drift * element.last_update)
+            / (1.0 + effective_drift)
         )
 
     def reset(self) -> None:
