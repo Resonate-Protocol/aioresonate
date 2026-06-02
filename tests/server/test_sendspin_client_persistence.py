@@ -19,6 +19,7 @@ from aiosendspin.server.client import SendspinClient
 from aiosendspin.server.clock import LoopClock
 from aiosendspin.server.connection import SendspinConnection
 from aiosendspin.server.group import SendspinGroup
+from aiosendspin.server.roles.player import v1 as player_v1_module
 from aiosendspin.server.roles.player.v1 import PlayerPersistentState
 
 
@@ -96,8 +97,11 @@ def _player_hello(
 
 
 @pytest.mark.asyncio
-async def test_goodbye_disconnect_delays_buffer_tracker_reset() -> None:
+async def test_goodbye_disconnect_delays_buffer_tracker_reset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Goodbye disconnect follows the same delayed reset policy."""
+    monkeypatch.setattr(player_v1_module, "BUFFER_TRACKER_RESET_DELAY_S", 0.05)
     loop = asyncio.get_running_loop()
     server = _DummyServer(loop=loop, clock=LoopClock(loop))
     client = SendspinClient(server, client_id="player-1")
@@ -118,13 +122,16 @@ async def test_goodbye_disconnect_delays_buffer_tracker_reset() -> None:
 
     client.detach_connection(GoodbyeReason.USER_REQUEST)
     assert state.buffer_tracker.buffered_bytes == 1234
-    await asyncio.sleep(2.2)
+    await asyncio.sleep(0.1)
     assert state.buffer_tracker.buffered_bytes == 0
 
 
 @pytest.mark.asyncio
-async def test_ungraceful_disconnect_delays_buffer_tracker_reset() -> None:
+async def test_ungraceful_disconnect_delays_buffer_tracker_reset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Ungraceful disconnect delays BufferTracker reset to tolerate brief blips."""
+    monkeypatch.setattr(player_v1_module, "BUFFER_TRACKER_RESET_DELAY_S", 0.05)
     loop = asyncio.get_running_loop()
     server = _DummyServer(loop=loop, clock=LoopClock(loop))
     client = SendspinClient(server, client_id="player-1")
@@ -144,7 +151,7 @@ async def test_ungraceful_disconnect_delays_buffer_tracker_reset() -> None:
     client.detach_connection(None)
 
     assert state.buffer_tracker.buffered_bytes == 1234
-    await asyncio.sleep(2.2)
+    await asyncio.sleep(0.1)
     assert state.buffer_tracker.buffered_bytes == 0
 
 

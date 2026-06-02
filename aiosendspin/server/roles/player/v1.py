@@ -55,6 +55,9 @@ if TYPE_CHECKING:
     from aiosendspin.server.client import SendspinClient
 
 
+BUFFER_TRACKER_RESET_DELAY_S = 2.0
+
+
 @dataclass
 class PlayerPersistentState:
     """Persistent player state stored on the SendspinClient."""
@@ -233,11 +236,10 @@ class PlayerV1Role(Role):
                 return
             state.buffer_tracker.reset()
 
-        reset_after_s = 2.0
         if state.buffer_reset_handle is not None:
             state.buffer_reset_handle.cancel()
         state.buffer_reset_handle = self._client._server.loop.call_later(  # noqa: SLF001
-            reset_after_s, _maybe_reset
+            BUFFER_TRACKER_RESET_DELAY_S, _maybe_reset
         )
 
     def requires_initial_state(self) -> bool:
