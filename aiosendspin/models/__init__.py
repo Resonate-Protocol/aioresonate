@@ -62,7 +62,7 @@ class BinaryHeader(NamedTuple):
     """Header structure for binary messages."""
 
     message_type: int  # message type identifier (B - unsigned char)
-    timestamp_us: int  # timestamp in microseconds (Q - unsigned long long)
+    timestamp_us: int  # timestamp in microseconds (q - signed long long)
 
 
 def unpack_binary_header(data: bytes) -> BinaryHeader:
