@@ -81,8 +81,8 @@ class SendspinTimeFilter:
             time_added: Client timestamp when this measurement was taken in
                 microseconds.
         """
-        if time_added == self._last_update:
-            # Skip duplicate timestamps to avoid division by zero in drift calculation
+        if time_added <= self._last_update:
+            # Skip non-monotonic timestamps to guard against backwards dt in predict
             return
 
         dt: float = float(time_added - self._last_update)
