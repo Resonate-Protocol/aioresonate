@@ -857,14 +857,22 @@ class SendspinClient:
             logger.warning("Unknown binary message type: %s", raw_type)
             return
 
-        if (
-            not self._stream_active
-            and not self._visualizer_stream_active
-            and not self._artwork_stream_active
-        ):
-            logger.debug(
-                "Ignoring binary message of type %s since no stream is active", message_type
-            )
+        role_active = {
+            BinaryMessageType.AUDIO_CHUNK: self._stream_active,
+            BinaryMessageType.ARTWORK_CHANNEL_0: self._artwork_stream_active,
+            BinaryMessageType.ARTWORK_CHANNEL_1: self._artwork_stream_active,
+            BinaryMessageType.ARTWORK_CHANNEL_2: self._artwork_stream_active,
+            BinaryMessageType.ARTWORK_CHANNEL_3: self._artwork_stream_active,
+            BinaryMessageType.VISUALIZATION_LOUDNESS: self._visualizer_stream_active,
+            BinaryMessageType.VISUALIZATION_BEAT: self._visualizer_stream_active,
+            BinaryMessageType.VISUALIZATION_F_PEAK: self._visualizer_stream_active,
+            BinaryMessageType.VISUALIZATION_SPECTRUM: self._visualizer_stream_active,
+            BinaryMessageType.VISUALIZATION_PEAK: self._visualizer_stream_active,
+            BinaryMessageType.VISUALIZATION_PITCH: self._visualizer_stream_active,
+        }.get(message_type, False)
+
+        if not role_active:
+            logger.debug("Ignoring binary message of type %s — role stream inactive", message_type)
             return
 
         if message_type is BinaryMessageType.AUDIO_CHUNK:
