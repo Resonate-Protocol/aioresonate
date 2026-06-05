@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, MagicMock
 import orjson
 import pytest
 from aiohttp import web
+from mashumaro.exceptions import MissingField
 
 from aiosendspin.models.core import (
     ClientHelloMessage,
@@ -24,6 +25,7 @@ from aiosendspin.server.client import SendspinClient
 from aiosendspin.server.clock import LoopClock
 from aiosendspin.server.connection import SendspinConnection
 from aiosendspin.server.group import SendspinGroup
+from aiosendspin.server.roles.negotiation import negotiate_active_roles
 from aiosendspin.server.roles.registry import ROLE_FACTORIES
 
 if TYPE_CHECKING:
@@ -562,6 +564,253 @@ class TestCustomRoleSupportParsing:
         msg = SendspinConnection._deserialize_client_message(raw)  # noqa: SLF001
         assert isinstance(msg, ClientHelloMessage)
         assert msg.payload.visualizer_support is not None
+
+    def test_unknown_future_visualizer_version_ignored_with_schema_drift(self) -> None:
+        """Unregistered spec-versioned roles must not be parsed against the family schema.
+
+        Reproduces the forward-compat trap: a client running a future protocol
+        version sends `visualizer@v99_support` whose schema diverges from the
+        registered v1 spec. The server has no role registered for `v99` so per
+        spec it must ignore the role and proceed. The current implementation
+        greedy-parses against the v1 schema and raises MissingField.
+        """
+        raw = orjson.dumps(
+            {
+                "type": "client/hello",
+                "payload": {
+                    "client_id": "c1",
+                    "name": "Client",
+                    "version": 1,
+                    "supported_roles": ["visualizer@v99"],
+                    "visualizer@v99_support": {
+                        "buffer_capacity": 65536,
+                        "spectrum": {
+                            "n_disp_bins": 48,
+                            "scale": "mel",
+                            "f_min": 20,
+                            "f_max": 20000,
+                            "rate_max": 30,
+                        },
+                    },
+                },
+            }
+        ).decode()
+
+        msg = SendspinConnection._deserialize_client_message(raw)  # noqa: SLF001
+        assert isinstance(msg, ClientHelloMessage)
+        assert msg.payload.visualizer_support is None
+
+    def test_unknown_future_player_version_ignored_with_schema_drift(self) -> None:
+        """A future player@vN support payload missing v1's required fields must not crash."""
+        raw = orjson.dumps(
+            {
+                "type": "client/hello",
+                "payload": {
+                    "client_id": "c1",
+                    "name": "Client",
+                    "version": 1,
+                    "supported_roles": ["player@v99"],
+                    "player@v99_support": {"buffer_capacity": 100_000},
+                },
+            }
+        ).decode()
+
+        msg = SendspinConnection._deserialize_client_message(raw)  # noqa: SLF001
+        assert isinstance(msg, ClientHelloMessage)
+        assert msg.payload.player_support is None
+
+    def test_unknown_future_artwork_version_ignored_with_schema_drift(self) -> None:
+        """A future artwork@vN support payload missing v1's required fields must not crash."""
+        raw = orjson.dumps(
+            {
+                "type": "client/hello",
+                "payload": {
+                    "client_id": "c1",
+                    "name": "Client",
+                    "version": 1,
+                    "supported_roles": ["artwork@v99"],
+                    "artwork@v99_support": {"some_new_field": "value"},
+                },
+            }
+        ).decode()
+
+        msg = SendspinConnection._deserialize_client_message(raw)  # noqa: SLF001
+        assert isinstance(msg, ClientHelloMessage)
+        assert msg.payload.artwork_support is None
+
+    def test_hello_with_draft_r1_only_parses_and_negotiates(self) -> None:
+        """Legacy `visualizer@_draft_r1` clients are still fully supported.
+
+        Wire-format round-trip: deserialize the hello, then run negotiation and
+        confirm the legacy role is the one that gets activated.
+        """
+        raw = orjson.dumps(
+            {
+                "type": "client/hello",
+                "payload": {
+                    "client_id": "c1",
+                    "name": "Client",
+                    "version": 1,
+                    "supported_roles": ["visualizer@_draft_r1"],
+                    "visualizer@_draft_r1_support": {
+                        "types": ["loudness"],
+                        "buffer_capacity": 65_536,
+                        "spectrum": {
+                            "n_disp_bins": 48,
+                            "scale": "mel",
+                            "f_min": 20,
+                            "f_max": 20000,
+                            "rate_max": 30,
+                        },
+                    },
+                },
+            }
+        ).decode()
+
+        msg = SendspinConnection._deserialize_client_message(raw)  # noqa: SLF001
+        assert isinstance(msg, ClientHelloMessage)
+        assert msg.payload.visualizer_draft_r1_support is not None
+        assert msg.payload.visualizer_support is None
+        assert "visualizer@_draft_r1" in negotiate_active_roles(msg.payload.supported_roles)
+
+    def test_hello_with_v2_and_v1_mixed_falls_back_to_v1(self) -> None:
+        """When client offers `[v2, v1]` and server knows only v1, v1 is activated.
+
+        Reaches the architecture limit gracefully: client lists a newer protocol
+        version first, but the server picks the highest version it actually
+        registers. The unknown v2 support payload must be ignored, not parsed.
+        """
+        raw = orjson.dumps(
+            {
+                "type": "client/hello",
+                "payload": {
+                    "client_id": "c1",
+                    "name": "Client",
+                    "version": 1,
+                    "supported_roles": ["visualizer@v2", "visualizer@v1"],
+                    "visualizer@v2_support": {"completely": "different schema"},
+                    "visualizer@v1_support": {
+                        "buffer_capacity": 65_536,
+                        "rate_max": 30,
+                        "types": ["loudness"],
+                    },
+                },
+            }
+        ).decode()
+
+        msg = SendspinConnection._deserialize_client_message(raw)  # noqa: SLF001
+        assert isinstance(msg, ClientHelloMessage)
+        assert msg.payload.visualizer_support is not None
+        assert negotiate_active_roles(msg.payload.supported_roles) == ["visualizer@v1"]
+
+    def test_hello_with_only_v2_drops_visualizer_role_entirely(self) -> None:
+        """Lone unsupported version → deserialize succeeds and family is inactive.
+
+        Spec: server should ignore unknown roles. Active_roles must reflect this
+        so the client can detect outdated servers and degrade gracefully.
+        """
+        raw = orjson.dumps(
+            {
+                "type": "client/hello",
+                "payload": {
+                    "client_id": "c1",
+                    "name": "Client",
+                    "version": 1,
+                    "supported_roles": ["visualizer@v2"],
+                    "visualizer@v2_support": {"unknown_field": 1},
+                },
+            }
+        ).decode()
+
+        msg = SendspinConnection._deserialize_client_message(raw)  # noqa: SLF001
+        assert isinstance(msg, ClientHelloMessage)
+        assert msg.payload.visualizer_support is None
+        assert msg.payload.visualizer_draft_r1_support is None
+        assert negotiate_active_roles(msg.payload.supported_roles) == []
+
+    def test_hello_with_brand_new_family_does_not_crash(self) -> None:
+        """A family the server has never heard of is silently ignored end-to-end.
+
+        Guards against future role additions on the client side that the server
+        doesn't know about yet.
+        """
+        raw = orjson.dumps(
+            {
+                "type": "client/hello",
+                "payload": {
+                    "client_id": "c1",
+                    "name": "Client",
+                    "version": 1,
+                    "supported_roles": ["crystalball@v1"],
+                    "crystalball@v1_support": {"forecast": "cloudy"},
+                },
+            }
+        ).decode()
+
+        msg = SendspinConnection._deserialize_client_message(raw)  # noqa: SLF001
+        assert isinstance(msg, ClientHelloMessage)
+        assert negotiate_active_roles(msg.payload.supported_roles) == []
+
+    def test_custom_underscore_player_version_with_v1_compatible_support_parses(self) -> None:
+        """`player@_experimental` (no registered factory) parses against v1 schema.
+
+        Pins the implicit contract: an underscore-prefixed custom version of a
+        spec family keeps its support payload v1-compatible since the family's
+        registered schema is what the deserializer uses. The custom role
+        implementer owns both ends, so this trade-off is intentional.
+        """
+        raw = orjson.dumps(
+            {
+                "type": "client/hello",
+                "payload": {
+                    "client_id": "c1",
+                    "name": "Client",
+                    "version": 1,
+                    "supported_roles": ["player@_experimental"],
+                    "player@_experimental_support": {
+                        "supported_formats": [
+                            {
+                                "codec": "pcm",
+                                "channels": 2,
+                                "sample_rate": 48000,
+                                "bit_depth": 16,
+                            },
+                        ],
+                        "buffer_capacity": 100_000,
+                        "supported_commands": [],
+                    },
+                },
+            }
+        ).decode()
+
+        msg = SendspinConnection._deserialize_client_message(raw)  # noqa: SLF001
+        assert isinstance(msg, ClientHelloMessage)
+        assert msg.payload.player_support is not None
+        assert msg.payload.player_support.buffer_capacity == 100_000
+
+    def test_custom_underscore_player_version_with_incompatible_support_raises(self) -> None:
+        """`player@_experimental` with schema-incompatible support raises.
+
+        Documents the implicit contract from the previous test: when an
+        underscore-prefixed custom version is the only role in its family, the
+        family's registered schema gets applied. Diverging from that schema is
+        the implementer's responsibility — the server cannot guess otherwise.
+        """
+        raw = orjson.dumps(
+            {
+                "type": "client/hello",
+                "payload": {
+                    "client_id": "c1",
+                    "name": "Client",
+                    "version": 1,
+                    "supported_roles": ["player@_experimental"],
+                    "player@_experimental_support": {"only": "garbage"},
+                },
+            }
+        ).decode()
+
+        with pytest.raises(MissingField):
+            SendspinConnection._deserialize_client_message(raw)  # noqa: SLF001
 
 
 class TestClientUrlRegistration:

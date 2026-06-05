@@ -457,10 +457,33 @@ class SendspinConnection:
         for family in ROLE_SUPPORT_SPECS:
             selected_role = cls._first_registered_role_id_in_family(supported_roles, family=family)
             if selected_role is None:
-                # No registered role for this family — check if client advertises
-                # any custom role in the family so we still parse its support key.
-                selected_role = next((r for r in supported_roles if role_family(r) == family), None)
+                # Restrict the fallback to spec-custom versions (those starting
+                # with `_`). Unknown spec-versioned IDs like `v2` may carry a
+                # schema-incompatible support payload, so parsing against the
+                # family's registered schema would crash on field drift.
+                selected_role = next(
+                    (
+                        r
+                        for r in supported_roles
+                        if role_family(r) == family and r.partition("@")[2].startswith("_")
+                    ),
+                    None,
+                )
             if selected_role is None:
+                # Log unknown spec-versioned roles per spec README "Detecting
+                # Outdated Servers" so operators can spot a client running a
+                # newer protocol revision.
+                unknown_versions = [
+                    r
+                    for r in supported_roles
+                    if role_family(r) == family and not r.partition("@")[2].startswith("_")
+                ]
+                if unknown_versions:
+                    logger.info(
+                        "Client offered unknown spec role versions in family '%s': %s",
+                        family,
+                        unknown_versions,
+                    )
                 continue
             primary_role_id = cls._primary_role_id_for_family(family)
             if selected_role == primary_role_id:
