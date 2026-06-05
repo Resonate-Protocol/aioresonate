@@ -87,16 +87,19 @@ class PlayerStatePayload(DataClassORJSONMixin):
     muted: bool | None = None
     """Mute state, only included if 'mute' in supported_commands."""
     static_delay_ms: int | None = None
-    """Static delay in milliseconds (0-5000), always present for players."""
+    """Static delay in milliseconds (0-5000). Required on the initial state message;
+    omitted in incremental updates means unchanged."""
     required_lead_time_ms: int | None = None
-    """Minimum startup lead time in milliseconds (0-30000), always present for players.
+    """Minimum startup lead time in milliseconds (0-30000). Required on the initial state
+    message; omitted in incremental updates means unchanged.
 
     Measured from the server transmit time of the start/restart trigger (stream/start
     or stream/clear) to the timestamp of the first subsequent audio chunk. Covers codec
     init, decode warmup, audio backend buffering, and DAC latency. Excludes static_delay_ms.
     """
     min_buffer_ms: int | None = None
-    """Requested minimum ongoing buffer duration in milliseconds (0-30000).
+    """Requested minimum ongoing buffer duration in milliseconds (0-30000). Required on
+    the initial state message; omitted in incremental updates means unchanged.
 
     Maintained during playback (primarily for live streams) to absorb network jitter and
     decode/playback timing variance. Excludes static_delay_ms.

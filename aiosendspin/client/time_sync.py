@@ -10,7 +10,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 
-# Residual threshold as fraction of max_error for triggering adaptive forgetting.
+# Residual threshold as multiple of max_error for triggering adaptive forgetting.
 # When residual > CUTOFF * max_error, the filter applies forgetting to recover from outliers.
 ADAPTIVE_FORGETTING_CUTOFF = 3.0
 
