@@ -934,6 +934,24 @@ def test_partial_client_state_does_not_reset_timing_fields() -> None:
     assert VolumeChangedEvent in emitted_types
 
 
+def test_explicit_zero_static_delay_in_delta_updates_field() -> None:
+    """A delta of static_delay_ms=0 sets the field to 0 and fires its event."""
+    client = _make_client_stub()
+    role = PlayerV1Role(client=client)
+
+    role.on_client_state(ClientStatePayload(player=PlayerStatePayload(static_delay_ms=400)))
+    assert role.static_delay_ms == 400
+
+    client._signal_event.reset_mock()  # noqa: SLF001
+
+    role.on_client_state(ClientStatePayload(player=PlayerStatePayload(static_delay_ms=0)))
+
+    assert role.static_delay_ms == 0
+    event = client._signal_event.call_args[0][0]  # noqa: SLF001
+    assert isinstance(event, StaticDelayChangedEvent)
+    assert event.static_delay_ms == 0
+
+
 def test_on_client_state_updates_supported_commands() -> None:
     """on_client_state() updates state_supported_commands."""
     client = _make_client_stub()
