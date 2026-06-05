@@ -173,7 +173,11 @@ class PlayerGroupRole(GroupRole):
             self._last_emitted_muted = self.get_group_muted()
 
     def on_client_removed(self, client: SendspinClient) -> None:
-        """Unsubscribe from per-client volume events and re-aggregate."""
+        """Unsubscribe from per-client volume events.
+
+        Membership still includes the leaver here (role unsubscribe runs later),
+        so emission is left to the per-client VolumeChangedEvent echo.
+        """
         if client in self._player_client_unsubs:
             self._player_client_unsubs[client]()
             del self._player_client_unsubs[client]
