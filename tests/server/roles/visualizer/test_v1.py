@@ -1153,3 +1153,23 @@ async def test_track_change_keeps_parked_periodic_frames() -> None:
     role._run_release_scheduler()  # noqa: SLF001
     assert _periodic_calls(client), "parked frame should release after the track change"
     role._cancel_release_timer()  # noqa: SLF001
+
+
+def test_request_format_partial_preserves_unchanged_fields() -> None:
+    """A partial stream/request-format keeps prior values for omitted fields."""
+    client = _make_client_stub()
+    role = VisualizerV1Role(client=client)
+    role.on_connect()
+    role.on_stream_start()
+
+    original_types = list(role._stream_config.types)  # noqa: SLF001
+    original_buffer = role._support.buffer_capacity  # noqa: SLF001
+    original_spectrum = role._stream_config.spectrum  # noqa: SLF001
+
+    payload = StreamRequestFormatPayload(visualizer=StreamRequestFormatVisualizer(rate_max=15))
+    role.on_stream_request_format(payload)
+
+    assert role._stream_config.rate_max == 15  # noqa: SLF001
+    assert list(role._stream_config.types) == original_types  # noqa: SLF001
+    assert role._support.buffer_capacity == original_buffer  # noqa: SLF001
+    assert role._stream_config.spectrum == original_spectrum  # noqa: SLF001

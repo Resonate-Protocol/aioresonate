@@ -6,8 +6,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from aiosendspin.models.artwork import ArtworkChannel
-from aiosendspin.models.core import StreamStartMessage
+from aiosendspin.models.artwork import ArtworkChannel, StreamRequestFormatArtwork
+from aiosendspin.models.core import StreamRequestFormatPayload, StreamStartMessage
 from aiosendspin.models.types import ArtworkSource, PictureFormat
 from aiosendspin.server.roles.artwork.group import ArtworkGroupRole
 from aiosendspin.server.roles.artwork.v1 import ArtworkV1Role
@@ -212,3 +212,32 @@ def test_artwork_role_on_connect_schedules_artwork_once_per_channel() -> None:
 
     channels_sent = [call.args[2] for call in schedule.call_args_list]
     assert sorted(channels_sent) == [0, 1]
+
+
+def test_artwork_partial_format_request_preserves_unchanged_fields() -> None:
+    """A partial stream/request-format only overwrites fields the client included."""
+    client = _make_client_stub()
+    support = MagicMock()
+    support.channels = [
+        ArtworkChannel(
+            source=ArtworkSource.ALBUM,
+            format=PictureFormat.JPEG,
+            media_width=300,
+            media_height=300,
+        ),
+    ]
+    client.info.artwork_support = support
+
+    role = ArtworkV1Role(client=client)
+    role.on_connect()
+
+    payload = StreamRequestFormatPayload(
+        artwork=StreamRequestFormatArtwork(channel=0, format=PictureFormat.PNG),
+    )
+    role.on_stream_request_format(payload)
+
+    configs = role.get_channel_configs()
+    assert configs[0].format == PictureFormat.PNG
+    assert configs[0].source == ArtworkSource.ALBUM
+    assert configs[0].media_width == 300
+    assert configs[0].media_height == 300

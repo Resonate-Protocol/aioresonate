@@ -209,3 +209,41 @@ def test_player_format_request_uses_client_priority_order_when_codec_missing(
     assert player_role.preferred_format.sample_rate == 44100
     assert player_role.preferred_format.channels == 2
     assert player_role.preferred_format.bit_depth == 32
+
+
+def test_player_partial_format_request_preserves_unchanged_fields(
+    mock_server: MagicMock,
+) -> None:
+    """A partial stream/request-format keeps prior values for omitted fields."""
+    client, _conn = _make_player_client(
+        mock_server,
+        "p1",
+        supported_formats=[
+            SupportedAudioFormat(
+                codec=AudioCodec.FLAC, sample_rate=48000, bit_depth=16, channels=2
+            ),
+            SupportedAudioFormat(
+                codec=AudioCodec.FLAC, sample_rate=44100, bit_depth=16, channels=2
+            ),
+        ],
+    )
+
+    initial = StreamRequestFormatPayload(
+        player=StreamRequestFormatPlayer(
+            codec=AudioCodec.FLAC, sample_rate=48000, channels=2, bit_depth=16
+        )
+    )
+    for role in client.active_roles:
+        role.on_stream_request_format(initial)
+
+    partial = StreamRequestFormatPayload(player=StreamRequestFormatPlayer(sample_rate=44100))
+    for role in client.active_roles:
+        role.on_stream_request_format(partial)
+
+    player_role = client.role("player@v1")
+    assert isinstance(player_role, PlayerV1Role)
+    assert player_role.preferred_codec == AudioCodec.FLAC
+    assert player_role.preferred_format is not None
+    assert player_role.preferred_format.sample_rate == 44100
+    assert player_role.preferred_format.bit_depth == 16
+    assert player_role.preferred_format.channels == 2
