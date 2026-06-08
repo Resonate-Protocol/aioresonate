@@ -906,9 +906,24 @@ class SendspinServer:
 
     def _handle_service_removed(self, name: str) -> None:
         url = self._mdns_client_urls.pop(name, None)
-        if url is not None:
+        if url is None:
+            return
+        # Keep the retry loop alive if a normal client still wants to be reached.
+        # mDNS can drop ahead of the device coming back, and the device may not
+        # re-announce until something else nudges it (router-side delay, ESP
+        # firmware that announces only on cold boot).
+        if not self._has_persistent_client_for_url(url):
             self.disconnect_from_client(url)
-            create_task(self._cleanup_retained_clients_for_removed_mdns_url(url))
+        create_task(self._cleanup_retained_clients_for_removed_mdns_url(url))
+
+    def _has_persistent_client_for_url(self, url: str) -> bool:
+        for client_id, known_url in self._client_urls.items():
+            if known_url != url:
+                continue
+            client = self._clients.get(client_id)
+            if client is not None and not client.cleanup_on_mdns_removal:
+                return True
+        return False
 
     async def _cleanup_retained_clients_for_removed_mdns_url(self, url: str) -> None:
         """Remove retained ANOTHER_SERVER clients when their mDNS URL disappears."""
@@ -916,7 +931,11 @@ class SendspinServer:
             client_id for client_id, known_url in self._client_urls.items() if known_url == url
         ]
         for client_id in client_ids:
-            self._client_urls.pop(client_id, None)
+            client = self._clients.get(client_id)
+            # Only forget the URL for clients we're about to remove. Persistent
+            # clients keep the URL so the still-running retry task can reconnect.
+            if client is None or client.cleanup_on_mdns_removal:
+                self._client_urls.pop(client_id, None)
 
         for client_id in client_ids:
             client = self._clients.get(client_id)

@@ -502,6 +502,66 @@ async def test_mdns_removal_keeps_non_retained_client() -> None:
     server.remove_client.assert_not_awaited()
 
 
+@pytest.mark.asyncio
+async def test_mdns_removal_keeps_connection_task_for_persistent_client() -> None:
+    """A persistent client must keep its retry task alive after mDNS withdrawal.
+
+    Without this guarantee, a transient mDNS drop (network blip while the
+    device is still alive) silently cancels the reconnect loop and the device
+    stays unavailable until MA restart.
+    """
+    session = _PersistentSuccessfulSession()
+    server = _make_server(session)
+    url = "ws://127.0.0.1:9999/sendspin"
+
+    persistent_client = MagicMock()
+    persistent_client.is_connected = False
+    persistent_client.cleanup_on_mdns_removal = False
+
+    server.connect_to_client(url)
+    task = server._connection_tasks.get(url)  # noqa: SLF001
+    assert task is not None
+
+    server._clients = {"client-1": persistent_client}  # noqa: SLF001
+    server._client_urls = {"client-1": url}  # noqa: SLF001
+    server._mdns_client_urls = {"service._sendspin._tcp.local.": url}  # noqa: SLF001
+
+    server._handle_service_removed("service._sendspin._tcp.local.")  # noqa: SLF001
+    await asyncio.sleep(0)
+
+    assert server._connection_tasks.get(url) is task  # noqa: SLF001
+    assert task.cancelling() == 0
+    assert server._client_urls.get("client-1") == url  # noqa: SLF001
+
+
+@pytest.mark.asyncio
+async def test_mdns_removal_cancels_connection_when_no_persistent_client() -> None:
+    """With no persistent client (or only an ANOTHER_SERVER retainer), tear the retry task down."""
+    session = _PersistentSuccessfulSession()
+    server = _make_server(session)
+    url = "ws://127.0.0.1:9999/sendspin"
+
+    retained_client = MagicMock()
+    retained_client.is_connected = False
+    retained_client.cleanup_on_mdns_removal = True
+
+    server.connect_to_client(url)
+    task = server._connection_tasks.get(url)  # noqa: SLF001
+    assert task is not None
+
+    server._clients = {"client-1": retained_client}  # noqa: SLF001
+    server._client_urls = {"client-1": url}  # noqa: SLF001
+    server._mdns_client_urls = {"service._sendspin._tcp.local.": url}  # noqa: SLF001
+    server.remove_client = AsyncMock()  # type: ignore[method-assign]
+
+    server._handle_service_removed("service._sendspin._tcp.local.")  # noqa: SLF001
+    await asyncio.sleep(0)
+
+    assert url not in server._connection_tasks  # noqa: SLF001
+    assert task.cancelling() > 0
+    assert "client-1" not in server._client_urls  # noqa: SLF001
+
+
 @pytest.mark.parametrize(
     ("addresses", "port", "path", "has_task", "expected_url", "expect_reconnect"),
     [
