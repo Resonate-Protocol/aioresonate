@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from contextlib import suppress
 from typing import TYPE_CHECKING
 from uuid import UUID
@@ -348,15 +348,8 @@ class SendspinGroup:
         # Cancel any pending delayed join for this client
         logger.debug("removing %s from group with members: %s", client.client_id, self._clients)
         if len(self._clients) == 1:
-            had_active_stream = self.has_active_stream
             # Delete this group if that was the last client
-            await self.stop()
-            if not had_active_stream:
-                # Group can be PLAYING without a stream during track transitions.
-                # stop() only fires on_stream_end via PushStream, so without one
-                # we must signal roles directly to invalidate stale binary.
-                for role in client.active_roles:
-                    role.on_stream_end()
+            await self._stop_and_invalidate_stale_binary([client])
             self._clients = []
         else:
             self._clients.remove(client)
@@ -370,20 +363,30 @@ class SendspinGroup:
         else:
             # Stop a remnant with no player-role client left to source audio.
             if not any(has_role_family("player", c.negotiated_roles) for c in self._clients):
-                had_active_stream = self.has_active_stream
-                await self.stop()
-                if not had_active_stream:
-                    # No PushStream to emit stream/end, so signal the surviving
-                    # roles directly to invalidate stale binary.
-                    for remaining in self._clients:
-                        for role in remaining.active_roles:
-                            role.on_stream_end()
+                await self._stop_and_invalidate_stale_binary(self._clients)
             # Emit event for client removal
             self._signal_event(GroupMemberRemovedEvent(client.client_id))
         # Each client needs to be in a group, add it to a new one
         new_group = SendspinGroup(self._server, client)
         # Send group update to notify client of their new solo group
         new_group.on_client_connected(client)
+
+    async def _stop_and_invalidate_stale_binary(self, clients: Iterable[SendspinClient]) -> None:
+        """Stop the group, directly signaling roles when mid-track-transition.
+
+        A group can be PLAYING without a PushStream during a track transition.
+        stop() only emits stream/end through an active PushStream, so without one
+        the given clients' roles are signaled directly to drop stale binary. A
+        STOPPED group has nothing buffered, so no stream/end is sent (sending one
+        would tear a client down right before it rejoins another group's stream).
+        """
+        was_playing = self._current_state != PlaybackStateType.STOPPED
+        had_active_stream = self.has_active_stream
+        await self.stop()
+        if was_playing and not had_active_stream:
+            for client in clients:
+                for role in client.active_roles:
+                    role.on_stream_end()
 
     def _finalize_empty_group(self) -> None:
         """Tear down a group with no remaining clients."""

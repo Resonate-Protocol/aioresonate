@@ -158,3 +158,45 @@ async def test_surviving_visualizer_gets_stream_end_without_active_stream() -> N
     # stop() emits stream/end only via an active PushStream, so the survivor's
     # role must be signaled directly to invalidate stale binary.
     assert any(isinstance(msg, StreamEndMessage) for _, msg in connection.role_messages)
+
+
+@pytest.mark.asyncio
+async def test_moving_stopped_solo_player_sends_no_stream_end() -> None:
+    """Moving a player out of a STOPPED solo group must not emit a spurious stream/end."""
+    loop = asyncio.get_running_loop()
+    server = _DummyServer(loop=loop, clock=LoopClock(loop))
+
+    mover = _make_client(server, "mover", supported_roles=[Roles.PLAYER.value])
+    target = _make_client(server, "target", supported_roles=[Roles.PLAYER.value])
+
+    # mover's solo group was never streamed, so there is no stale binary to drop.
+    assert mover.group.state == PlaybackStateType.STOPPED
+    connection = mover.connection
+    assert connection is not None
+    connection.role_messages.clear()
+
+    await target.group.add_client(mover)
+
+    # A stream/end here would tear down the device right before the new group's
+    # stream/start, leaving playback dead.
+    assert not any(isinstance(msg, StreamEndMessage) for _, msg in connection.role_messages)
+
+
+@pytest.mark.asyncio
+async def test_removing_sole_player_from_streamless_playing_group_sends_stream_end() -> None:
+    """Ungrouping a PLAYING-without-stream solo player still invalidates stale binary."""
+    loop = asyncio.get_running_loop()
+    server = _DummyServer(loop=loop, clock=LoopClock(loop))
+
+    player = _make_client(server, "web", supported_roles=[Roles.PLAYER.value])
+    group = player.group
+    group._set_playback_state(PlaybackStateType.PLAYING)  # noqa: SLF001
+    assert not group.has_active_stream
+
+    connection = player.connection
+    assert connection is not None
+    connection.role_messages.clear()
+
+    await group.remove_client(player)
+
+    assert any(isinstance(msg, StreamEndMessage) for _, msg in connection.role_messages)
