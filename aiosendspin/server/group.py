@@ -370,7 +370,14 @@ class SendspinGroup:
         else:
             # Stop a remnant with no player-role client left to source audio.
             if not any(has_role_family("player", c.negotiated_roles) for c in self._clients):
+                had_active_stream = self.has_active_stream
                 await self.stop()
+                if not had_active_stream:
+                    # No PushStream to emit stream/end, so signal the surviving
+                    # roles directly to invalidate stale binary.
+                    for remaining in self._clients:
+                        for role in remaining.active_roles:
+                            role.on_stream_end()
             # Emit event for client removal
             self._signal_event(GroupMemberRemovedEvent(client.client_id))
         # Each client needs to be in a group, add it to a new one

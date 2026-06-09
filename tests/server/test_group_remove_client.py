@@ -13,7 +13,7 @@ from dataclasses import dataclass
 
 import pytest
 
-from aiosendspin.models.core import ClientHelloPayload
+from aiosendspin.models.core import ClientHelloPayload, StreamEndMessage
 from aiosendspin.models.player import ClientHelloPlayerSupport, SupportedAudioFormat
 from aiosendspin.models.types import (
     AudioCodec,
@@ -54,6 +54,9 @@ class _DummyServer:
 
 
 class _DummyConnection:
+    def __init__(self) -> None:
+        self.role_messages: list[tuple[str, object]] = []
+
     async def disconnect(self, *, retry_connection: bool = True) -> None:  # noqa: ARG002
         return
 
@@ -61,7 +64,7 @@ class _DummyConnection:
         pass
 
     def send_role_message(self, role: str, message: object) -> None:
-        pass
+        self.role_messages.append((role, message))
 
     def send_binary(self, data: bytes, **kwargs: object) -> bool:  # noqa: ARG002
         return True
@@ -129,3 +132,29 @@ async def test_group_stops_when_last_player_leaves_visualizer_behind() -> None:
     # rather than linger as a phantom-led, still-playing group.
     assert visualizer.group is group
     assert group.state == PlaybackStateType.STOPPED
+
+
+@pytest.mark.asyncio
+async def test_surviving_visualizer_gets_stream_end_without_active_stream() -> None:
+    """Stopping a stream-less PLAYING remnant signals survivors' roles directly."""
+    loop = asyncio.get_running_loop()
+    server = _DummyServer(loop=loop, clock=LoopClock(loop))
+
+    player = _make_client(server, "web", supported_roles=[Roles.PLAYER.value])
+    visualizer = _make_client(server, "hue", supported_roles=[Roles.VISUALIZER.value])
+
+    group = player.group
+    await group.add_client(visualizer)
+    # PLAYING with no PushStream mirrors the track-transition window.
+    group._set_playback_state(PlaybackStateType.PLAYING)  # noqa: SLF001
+    assert not group.has_active_stream
+
+    connection = visualizer.connection
+    assert connection is not None
+    connection.role_messages.clear()
+
+    await group.remove_client(player)
+
+    # stop() emits stream/end only via an active PushStream, so the survivor's
+    # role must be signaled directly to invalidate stale binary.
+    assert any(isinstance(msg, StreamEndMessage) for _, msg in connection.role_messages)
