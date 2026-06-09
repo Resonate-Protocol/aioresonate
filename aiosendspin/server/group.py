@@ -14,7 +14,7 @@ from aiosendspin.models.core import (
     GroupUpdateServerMessage,
     GroupUpdateServerPayload,
 )
-from aiosendspin.models.types import PlaybackStateType
+from aiosendspin.models.types import PlaybackStateType, has_role_family
 from aiosendspin.server.events import (
     GroupDeletedEvent,
     GroupEvent,
@@ -368,6 +368,9 @@ class SendspinGroup:
         if not self._clients:
             self._finalize_empty_group()
         else:
+            # Stop a remnant with no player-role client left to source audio.
+            if not any(has_role_family("player", c.negotiated_roles) for c in self._clients):
+                await self.stop()
             # Emit event for client removal
             self._signal_event(GroupMemberRemovedEvent(client.client_id))
         # Each client needs to be in a group, add it to a new one
