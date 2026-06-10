@@ -6,6 +6,7 @@ import asyncio
 import sys
 from collections import deque
 from dataclasses import dataclass
+from itertools import pairwise
 from typing import Any
 from unittest.mock import MagicMock
 from uuid import UUID
@@ -1012,6 +1013,144 @@ async def test_non_main_pcm_catchup_does_not_anchor_to_far_channel_tail() -> Non
     assert role2.started == 1
     assert role2.received
     assert role2.received[0].timestamp_us - now_us < 500_000
+
+
+async def _setup_deep_buffer_catchup_join() -> tuple[PushStream, _DummyRole, int]:
+    """Build a deep-buffer main-channel catch-up join and return (stream, joiner, tail).
+
+    A live role drives an established 24-to-16-bit resampler, the PCM cache
+    spans near-now through a far-ahead tail, and the joiner has just joined
+    with its own TransformKey so its catch-up task is created but not yet run.
+    """
+
+    class TransformerA:
+        pending_timestamp_us: int | None = None
+
+        @property
+        def frame_duration_us(self) -> int:
+            return 25_000
+
+        def process(self, pcm: bytes, _ts: int, _dur: int) -> list[tuple[bytes, int]]:
+            return [(pcm, 25_000)]
+
+        def flush(self) -> list[tuple[bytes, int]]:
+            return []
+
+        def get_header(self) -> bytes | None:
+            return None
+
+        def reset(self) -> None:
+            return
+
+    class TransformerB(TransformerA):
+        pass
+
+    group = _DummyGroup(clients=[])
+    role1 = _DummyRole(
+        AudioRequirements(
+            sample_rate=48000,
+            bit_depth=16,
+            channels=2,
+            transformer=TransformerA(),
+            channel_id=MAIN_CHANNEL,
+            frame_duration_us=25_000,
+        )
+    )
+    group.clients.append(_DummyClient([role1]))
+
+    loop = asyncio.get_running_loop()
+    clock = ManualClock()
+    stream = PushStream(loop=loop, clock=clock, group=group)
+
+    stream.prepare_audio(
+        bytes(7200),  # 25ms @ 48kHz stereo 24-bit
+        AudioFormat(sample_rate=48000, bit_depth=24, channels=2),
+    )
+    await stream.commit_audio()
+
+    now_us = clock.now_us()
+    frame_duration_us = 25_000
+    chunk_count = 1240
+
+    pcm_chunks = deque[CachedPCMChunk]()
+    for i in range(chunk_count):
+        ts = now_us - 100_000 + i * frame_duration_us
+        pcm_chunks.append(
+            CachedPCMChunk(
+                timestamp_us=ts,
+                duration_us=frame_duration_us,
+                pcm_data=bytes(7200),
+                sample_rate=48000,
+                bit_depth=24,
+                channels=2,
+            )
+        )
+    tail_us = now_us - 100_000 + chunk_count * frame_duration_us
+    stream._pcm_chunk_cache[MAIN_CHANNEL.int] = pcm_chunks  # noqa: SLF001
+    stream._channel_timing[MAIN_CHANNEL] = tail_us  # noqa: SLF001
+    stream._channel_timing_residue[MAIN_CHANNEL] = 0  # noqa: SLF001
+
+    role2 = _DummyRole(
+        AudioRequirements(
+            sample_rate=48000,
+            bit_depth=16,
+            channels=2,
+            transformer=TransformerB(),
+            channel_id=MAIN_CHANNEL,
+            frame_duration_us=25_000,
+        )
+    )
+    group.clients.append(_DummyClient([role2]))
+
+    stream.on_role_join(role2)
+    return stream, role2, tail_us
+
+
+@pytest.mark.asyncio
+async def test_catchup_handoff_commit_race_does_not_overlap() -> None:
+    """A commit racing the catch-up hand-off must not deliver duplicate audio.
+
+    The commit caches its PCM, then yields so the catch-up task consumes it
+    through the shared encoder. The resumed commit must not feed the same
+    samples to that encoder again.
+    """
+    stream, role2, _tail_us = await _setup_deep_buffer_catchup_join()
+
+    # Commit immediately so the hand-off happens mid-commit.
+    stream.prepare_audio(
+        bytes(7200),
+        AudioFormat(sample_rate=48000, bit_depth=24, channels=2),
+    )
+    await stream.commit_audio()
+    for _ in range(50):
+        if role2.received:
+            break
+        await asyncio.sleep(0)
+
+    received = sorted(role2.received, key=lambda c: c.timestamp_us)
+    assert received
+    for prev, nxt in pairwise(received):
+        assert nxt.timestamp_us >= prev.timestamp_us + prev.duration_us
+
+
+@pytest.mark.asyncio
+async def test_catchup_handoff_delivers_contiguous_audio() -> None:
+    """Audio across the catch-up hand-off has no gaps through later commits."""
+    stream, role2, tail_us = await _setup_deep_buffer_catchup_join()
+
+    for _ in range(3):
+        stream.prepare_audio(
+            bytes(7200),
+            AudioFormat(sample_rate=48000, bit_depth=24, channels=2),
+        )
+        await stream.commit_audio()
+
+    received = sorted(role2.received, key=lambda c: c.timestamp_us)
+    assert received
+    for prev, nxt in pairwise(received):
+        assert nxt.timestamp_us == prev.timestamp_us + prev.duration_us
+    last = received[-1]
+    assert last.timestamp_us + last.duration_us == tail_us + 3 * 25_000
 
 
 @pytest.mark.asyncio
