@@ -1981,9 +1981,11 @@ class PushStream:
 
                 self._catchup_state[cache_key] = "catching_up"
                 self._catchup_roles[cache_key] = {role}
-                self._catchup_tasks[cache_key] = create_task(
-                    self._start_catchup_encoding(role, req, channel_id, cache_key)
-                )
+                task = create_task(self._start_catchup_encoding(role, req, channel_id, cache_key))
+                # An eager task can finish inside create_task, after its own
+                # cleanup already removed the map entry. Don't re-add it.
+                if not task.done():
+                    self._catchup_tasks[cache_key] = task
                 return
 
             if self._channel_timing:
