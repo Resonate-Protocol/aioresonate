@@ -1965,15 +1965,17 @@ class PushStream:
                             self._ensure_role_started(role)
                         return
 
-                if not role.replay_from_pcm_cache() and self._has_established_resampler_for(
-                    req, channel_id
+                if (
+                    not role.replay_from_pcm_cache()
+                    and self._has_established_resampler_for(req, channel_id)
+                    and self._skip_replay_keeps_join_near_playhead(channel_id, role)
                 ):
-                    # Sharing a resampler key with a live role would shift this
-                    # role's audio across the hand-off; skip historical replay.
-                    # Analysis-only roles opt out: their catch-up uses isolated
-                    # resampler state and an inaudible seam, so replaying the
-                    # buffered PCM now beats waiting for a live commit that may
-                    # sit far ahead behind the producer buffer.
+                    # A live role drives this resampler shape, so replaying through
+                    # it would shift the live role's audio across the hand-off. Skip
+                    # replay and pick up live audio, but only when it lands near the
+                    # playhead. Behind a deep producer buffer the shared tail sits far
+                    # ahead and cannot be clamped, so fall through to isolated-resampler
+                    # catch-up rather than strand the joiner until the tail.
                     self._rebase_far_ahead_join_tail(channel_id, role)
                     if self._channel_timing:
                         self._ensure_role_started(role)
@@ -2108,6 +2110,27 @@ class PushStream:
             self._channel_timing[channel_id], reference_timing_us
         )
         self._channel_timing_residue[channel_id] = 0
+
+    def _skip_replay_keeps_join_near_playhead(self, channel_id: UUID, role: Role) -> bool:
+        """Whether skipping PCM replay still lands the joiner near the playhead.
+
+        Skipping replay relies on live audio arriving soon. That holds when the
+        channel tail is already within a normal buffer of now, or when
+        _rebase_far_ahead_join_tail can clamp a far-ahead tail. Behind a deep
+        producer buffer with other roles holding the shared timeline, the tail
+        sits far ahead and cannot be clamped, so the joiner must replay instead.
+        """
+        tail_us = self._channel_timing.get(channel_id)
+        if tail_us is None:
+            return True
+        now_us = self._clock.now_us()
+        if tail_us <= now_us + self._role_send_ahead_us(role):
+            return True
+        clamp_blocked = (
+            self._channel_has_other_audio_roles(channel_id, role)
+            or channel_id in self._channels_with_committed_audio
+        )
+        return not clamp_blocked
 
     def _rebase_far_ahead_join_tail(self, channel_id: UUID, joining_role: Role) -> None:
         """Clamp far-ahead solo-channel timing so a rejoin can resume promptly."""

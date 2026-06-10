@@ -1015,6 +1015,110 @@ async def test_non_main_pcm_catchup_does_not_anchor_to_far_channel_tail() -> Non
 
 
 @pytest.mark.asyncio
+async def test_main_join_with_established_resampler_backfills_near_now() -> None:
+    """Deeply-buffered main-channel join must backfill near now, not inherit the tail.
+
+    When a live role already drives a non-passthrough resampler at the joiner's
+    target shape and the channel tail sits far ahead (deep producer buffer), the
+    join must still replay buffered PCM from the playhead instead of skipping to
+    live audio that does not arrive until the tail.
+    """
+
+    class TransformerA:
+        pending_timestamp_us: int | None = None
+
+        @property
+        def frame_duration_us(self) -> int:
+            return 25_000
+
+        def process(self, pcm: bytes, _ts: int, _dur: int) -> list[tuple[bytes, int]]:
+            return [(pcm, 25_000)]
+
+        def flush(self) -> list[tuple[bytes, int]]:
+            return []
+
+        def get_header(self) -> bytes | None:
+            return None
+
+        def reset(self) -> None:
+            return
+
+    class TransformerB(TransformerA):
+        pass
+
+    group = _DummyGroup(clients=[])
+    role1 = _DummyRole(
+        AudioRequirements(
+            sample_rate=48000,
+            bit_depth=16,
+            channels=2,
+            transformer=TransformerA(),
+            channel_id=MAIN_CHANNEL,
+            frame_duration_us=25_000,
+        )
+    )
+    group.clients.append(_DummyClient([role1]))
+
+    loop = asyncio.get_running_loop()
+    clock = ManualClock()
+    stream = PushStream(loop=loop, clock=clock, group=group)
+
+    # Commit one 24-bit chunk so role1 establishes a non-passthrough resampler
+    # (source 24-bit to target 16-bit) at the joiner's target shape.
+    stream.prepare_audio(
+        bytes(7200),  # 25ms @ 48kHz stereo 24-bit
+        AudioFormat(sample_rate=48000, bit_depth=24, channels=2),
+    )
+    await stream.commit_audio()
+    role1_req = role1.get_audio_requirements()
+    assert role1_req is not None
+    assert stream._has_established_resampler_for(role1_req, MAIN_CHANNEL)  # noqa: SLF001
+
+    now_us = clock.now_us()
+    frame_duration_us = 25_000
+
+    # ~31s of cached 24-bit PCM spanning near-now into the future, channel tail
+    # parked 30s ahead to model a deep buffered source.
+    pcm_chunks = deque[CachedPCMChunk]()
+    for i in range(1240):
+        ts = now_us - 100_000 + i * frame_duration_us
+        pcm_chunks.append(
+            CachedPCMChunk(
+                timestamp_us=ts,
+                duration_us=frame_duration_us,
+                pcm_data=bytes(7200),
+                sample_rate=48000,
+                bit_depth=24,
+                channels=2,
+            )
+        )
+    stream._pcm_chunk_cache[MAIN_CHANNEL.int] = pcm_chunks  # noqa: SLF001
+    stream._channel_timing[MAIN_CHANNEL] = now_us + 30_000_000  # noqa: SLF001
+
+    role2 = _DummyRole(
+        AudioRequirements(
+            sample_rate=48000,
+            bit_depth=16,
+            channels=2,
+            transformer=TransformerB(),
+            channel_id=MAIN_CHANNEL,
+            frame_duration_us=25_000,
+        )
+    )
+    group.clients.append(_DummyClient([role2]))
+
+    stream.on_role_join(role2)
+    for _ in range(50):
+        if role2.received:
+            break
+        await asyncio.sleep(0)
+
+    assert role2.started == 1
+    assert role2.received
+    assert role2.received[0].timestamp_us - now_us < 500_000
+
+
+@pytest.mark.asyncio
 async def test_non_main_join_without_cache_rebases_far_ahead_tail() -> None:
     """When no catch-up cache exists, non-main rejoin should not wait at a far channel tail."""
 
