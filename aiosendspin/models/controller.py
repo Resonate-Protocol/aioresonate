@@ -30,6 +30,10 @@ class ControllerCommandPayload(DataClassORJSONMixin):
     """Volume range 0-100, only set if command is volume."""
     mute: bool | None = None
     """True to mute, false to unmute, only set if command is mute."""
+    position_ms: int | None = None
+    """Absolute playback position in ms, only set if command is seek."""
+    offset_ms: int | None = None
+    """Signed offset in ms from current position, only set if command is seek_relative."""
 
     def __post_init__(self) -> None:
         """Validate field values and command consistency."""
@@ -46,6 +50,26 @@ class ControllerCommandPayload(DataClassORJSONMixin):
                 raise ValueError("Mute must be provided when command is 'mute'")
         elif self.mute is not None:
             raise ValueError(f"Mute should not be provided for command '{self.command.value}'")
+
+        if self.command == MediaCommand.SEEK:
+            if self.position_ms is None:
+                raise ValueError("position_ms must be provided when command is 'seek'")
+            if self.offset_ms is not None:
+                raise ValueError("offset_ms should not be provided for command 'seek'")
+        elif self.command == MediaCommand.SEEK_RELATIVE:
+            if self.offset_ms is None:
+                raise ValueError("offset_ms must be provided when command is 'seek_relative'")
+            if self.position_ms is not None:
+                raise ValueError("position_ms should not be provided for command 'seek_relative'")
+        else:
+            if self.position_ms is not None:
+                raise ValueError(
+                    f"position_ms should not be provided for command '{self.command.value}'"
+                )
+            if self.offset_ms is not None:
+                raise ValueError(
+                    f"offset_ms should not be provided for command '{self.command.value}'"
+                )
 
     class Config(BaseConfig):
         """Config for parsing json messages."""

@@ -175,6 +175,8 @@ class MediaCommand(Enum):
     SHUFFLE = "shuffle"
     UNSHUFFLE = "unshuffle"
     SWITCH = "switch"
+    SEEK = "seek"
+    SEEK_RELATIVE = "seek_relative"
 
 
 class PictureFormat(Enum):
