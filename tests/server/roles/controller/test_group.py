@@ -402,3 +402,15 @@ def test_controller_group_role_handle_unsupported_command() -> None:
     cgr.handle_command(cmd)
 
     group._signal_event.assert_not_called()  # noqa: SLF001
+
+
+def test_seek_events_exported_from_roles() -> None:
+    """Seek events are importable from the public roles package (MA depends on this)."""
+    from aiosendspin.server.roles import (  # noqa: PLC0415
+        ControllerSeekEvent,
+        ControllerSeekRelativeEvent,
+    )
+    from aiosendspin.server.roles.controller.events import ControllerEvent  # noqa: PLC0415
+
+    assert issubclass(ControllerSeekEvent, ControllerEvent)
+    assert issubclass(ControllerSeekRelativeEvent, ControllerEvent)
