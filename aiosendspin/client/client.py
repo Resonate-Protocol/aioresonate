@@ -296,7 +296,7 @@ class SendspinClient:
                 if player_support is provided; must include ARTWORK if
                 artwork_support is provided.
             device_info: Optional device information (product name, manufacturer,
-                software version).
+                software version, MAC address).
             player_support: Custom player capabilities. Required if PLAYER role
                 is specified; raises ValueError if missing.
             artwork_support: Custom artwork capabilities. Required if ARTWORK

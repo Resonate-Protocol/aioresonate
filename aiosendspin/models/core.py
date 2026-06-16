@@ -97,6 +97,8 @@ class DeviceInfo(DataClassORJSONMixin):
     """Device manufacturer name."""
     software_version: str | None = None
     """Software version of the client (not the Sendspin version)."""
+    mac_address: str | None = None
+    """MAC address of the connection's network interface, lowercase colon-separated."""
 
     class Config(BaseConfig):
         """Config for parsing json messages."""
