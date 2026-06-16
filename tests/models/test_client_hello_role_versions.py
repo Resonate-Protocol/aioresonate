@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from aiosendspin.models.core import ClientHelloPayload
+from aiosendspin.models.core import ClientHelloPayload, DeviceInfo
 from aiosendspin.models.player import ClientHelloPlayerSupport, SupportedAudioFormat
 from aiosendspin.models.types import AudioCodec
 
@@ -71,3 +71,14 @@ def test_player_support_serializes_with_spec_alias_name() -> None:
     serialized = payload.to_dict()
     assert "player@v1_support" in serialized
     assert "player_support" not in serialized
+
+
+def test_device_info_serializes_mac_address_under_spec_key() -> None:
+    """A set mac_address serializes under the spec wire key with its value."""
+    serialized = DeviceInfo(mac_address="aa:bb:cc:dd:ee:ff").to_dict()
+    assert serialized["mac_address"] == "aa:bb:cc:dd:ee:ff"
+
+
+def test_device_info_omits_mac_address_when_unset() -> None:
+    """An unset mac_address is omitted from the wire payload."""
+    assert "mac_address" not in DeviceInfo().to_dict()
