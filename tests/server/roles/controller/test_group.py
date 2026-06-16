@@ -14,6 +14,8 @@ from aiosendspin.server.roles.controller.events import (
     ControllerPlayEvent,
     ControllerPreviousEvent,
     ControllerRepeatEvent,
+    ControllerSeekEvent,
+    ControllerSeekRelativeEvent,
     ControllerShuffleEvent,
     ControllerStopEvent,
     ControllerSwitchEvent,
@@ -414,3 +416,95 @@ def test_seek_events_exported_from_roles() -> None:
 
     assert issubclass(ControllerSeekEvent, ControllerEvent)
     assert issubclass(ControllerSeekRelativeEvent, ControllerEvent)
+
+
+def test_get_supported_commands_hides_seek_without_max() -> None:
+    """'seek' is dropped from advertised commands while seek_max_ms is unknown."""
+    cgr = ControllerGroupRole(_make_group_stub())
+    cgr.set_supported_commands([MediaCommand.SEEK, MediaCommand.SEEK_RELATIVE])
+
+    commands = cgr._get_supported_commands()  # noqa: SLF001
+    assert MediaCommand.SEEK not in commands
+    assert MediaCommand.SEEK_RELATIVE in commands
+
+
+def test_get_supported_commands_shows_seek_with_max() -> None:
+    """'seek' is advertised once seek_max_ms is set."""
+    cgr = ControllerGroupRole(_make_group_stub())
+    cgr.set_supported_commands([MediaCommand.SEEK])
+    cgr.set_seek_max_ms(300_000)
+
+    assert MediaCommand.SEEK in cgr._get_supported_commands()  # noqa: SLF001
+
+
+def test_set_seek_max_ms_pushes_state() -> None:
+    """set_seek_max_ms() pushes controller state carrying seek_max_ms."""
+    cgr = ControllerGroupRole(_make_group_stub())
+    member = MagicMock()
+    cgr._members.append(member)  # noqa: SLF001
+    member.send_message.reset_mock()
+
+    cgr.set_seek_max_ms(300_000)
+
+    member.send_message.assert_called_once()
+    msg = member.send_message.call_args.args[0]
+    assert msg.payload.controller.seek_max_ms == 300_000
+
+
+def test_set_seek_max_ms_dedupes_unchanged_value() -> None:
+    """set_seek_max_ms() with the same value does not re-push state."""
+    cgr = ControllerGroupRole(_make_group_stub())
+    member = MagicMock()
+    cgr._members.append(member)  # noqa: SLF001
+
+    cgr.set_seek_max_ms(300_000)
+    member.send_message.reset_mock()
+
+    cgr.set_seek_max_ms(300_000)
+    member.send_message.assert_not_called()
+
+
+def test_handle_seek_command_emits_event_when_in_range() -> None:
+    """An in-range 'seek' emits ControllerSeekEvent with the target position."""
+    group = _make_group_stub()
+    cgr = ControllerGroupRole(group)
+    cgr.set_supported_commands([MediaCommand.SEEK])
+    cgr.set_seek_max_ms(300_000)
+    group._signal_event.reset_mock()  # noqa: SLF001
+
+    cgr.handle_command(ControllerCommandPayload(command=MediaCommand.SEEK, position_ms=120_000))
+
+    group._signal_event.assert_called_once()  # noqa: SLF001
+    event = group._signal_event.call_args.args[0]  # noqa: SLF001
+    assert isinstance(event, ControllerSeekEvent)
+    assert event.position_ms == 120_000
+
+
+def test_handle_seek_command_ignored_when_out_of_range() -> None:
+    """An out-of-range 'seek' is ignored (no event)."""
+    group = _make_group_stub()
+    cgr = ControllerGroupRole(group)
+    cgr.set_supported_commands([MediaCommand.SEEK])
+    cgr.set_seek_max_ms(300_000)
+    group._signal_event.reset_mock()  # noqa: SLF001
+
+    cgr.handle_command(ControllerCommandPayload(command=MediaCommand.SEEK, position_ms=400_000))
+
+    group._signal_event.assert_not_called()  # noqa: SLF001
+
+
+def test_handle_seek_relative_command_emits_event() -> None:
+    """'seek_relative' emits ControllerSeekRelativeEvent without needing seek_max_ms."""
+    group = _make_group_stub()
+    cgr = ControllerGroupRole(group)
+    cgr.set_supported_commands([MediaCommand.SEEK_RELATIVE])
+    group._signal_event.reset_mock()  # noqa: SLF001
+
+    cgr.handle_command(
+        ControllerCommandPayload(command=MediaCommand.SEEK_RELATIVE, offset_ms=-15_000)
+    )
+
+    group._signal_event.assert_called_once()  # noqa: SLF001
+    event = group._signal_event.call_args.args[0]  # noqa: SLF001
+    assert isinstance(event, ControllerSeekRelativeEvent)
+    assert event.offset_ms == -15_000

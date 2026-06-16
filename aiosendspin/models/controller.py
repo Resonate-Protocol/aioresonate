@@ -85,7 +85,7 @@ class ControllerStatePayload(DataClassORJSONMixin):
     supported_commands: list[MediaCommand]
     """
     Subset of: play, pause, stop, next, previous, volume, mute, repeat_off, repeat_one,
-    repeat_all, shuffle, unshuffle, switch.
+    repeat_all, shuffle, unshuffle, switch, seek, seek_relative.
     """
     volume: int
     """Volume of the whole group, range 0-100."""

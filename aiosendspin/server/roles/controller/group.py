@@ -20,6 +20,8 @@ from aiosendspin.server.roles.controller.events import (
     ControllerPlayEvent,
     ControllerPreviousEvent,
     ControllerRepeatEvent,
+    ControllerSeekEvent,
+    ControllerSeekRelativeEvent,
     ControllerShuffleEvent,
     ControllerStopEvent,
     ControllerSwitchEvent,
@@ -56,6 +58,8 @@ class ControllerGroupRole(GroupRole):
         self._last_sent_supported_commands: list[MediaCommand] | None = None
         self._last_sent_repeat: RepeatMode | None = None
         self._last_sent_shuffle: bool | None = None
+        self._seek_max_ms: int | None = None
+        self._last_sent_seek_max_ms: int | None = None
         # Track volume event subscriptions for player clients
         self._player_client_unsubs: dict[SendspinClient, Callable[[], None]] = {}
 
@@ -133,6 +137,11 @@ class ControllerGroupRole(GroupRole):
         self._supported_commands = commands
         self._push_state_to_members()
 
+    def set_seek_max_ms(self, value: int | None) -> None:
+        """Set the max seekable position in ms, or None when the seekable range is unknown."""
+        self._seek_max_ms = value
+        self._push_state_to_members()
+
     def on_member_join(self, role: Role) -> None:
         """Send current controller state to newly joined member."""
         self._send_state_to_role(role)
@@ -146,9 +155,15 @@ class ControllerGroupRole(GroupRole):
         ]
 
         if self._supported_commands:
-            return list(set(protocol_commands) | set(self._supported_commands))
+            commands = set(protocol_commands) | set(self._supported_commands)
+        else:
+            commands = set(protocol_commands)
 
-        return protocol_commands
+        # Absolute seek needs a known upper bound to advertise.
+        if self._seek_max_ms is None:
+            commands.discard(MediaCommand.SEEK)
+
+        return list(commands)
 
     def _send_state_to_role(self, role: Role) -> None:
         """Send current controller state to a single role."""
@@ -159,6 +174,7 @@ class ControllerGroupRole(GroupRole):
             muted=self.muted,
             repeat=self._repeat,
             shuffle=self._shuffle,
+            seek_max_ms=self._seek_max_ms,
         )
         state_message = ServerStateMessage(ServerStatePayload(controller=controller_state))
         role.send_message(state_message)
@@ -170,6 +186,7 @@ class ControllerGroupRole(GroupRole):
         current_supported_commands = self._get_supported_commands()
         current_repeat = self._repeat
         current_shuffle = self._shuffle
+        current_seek_max_ms = self._seek_max_ms
 
         if (
             self._last_sent_volume == current_volume
@@ -177,6 +194,7 @@ class ControllerGroupRole(GroupRole):
             and self._last_sent_supported_commands == current_supported_commands
             and self._last_sent_repeat == current_repeat
             and self._last_sent_shuffle == current_shuffle
+            and self._last_sent_seek_max_ms == current_seek_max_ms
         ):
             return
 
@@ -185,6 +203,7 @@ class ControllerGroupRole(GroupRole):
         self._last_sent_supported_commands = current_supported_commands
         self._last_sent_repeat = current_repeat
         self._last_sent_shuffle = current_shuffle
+        self._last_sent_seek_max_ms = current_seek_max_ms
 
         controller_state = ControllerStatePayload(
             supported_commands=current_supported_commands,
@@ -192,6 +211,7 @@ class ControllerGroupRole(GroupRole):
             muted=current_muted,
             repeat=current_repeat,
             shuffle=current_shuffle,
+            seek_max_ms=current_seek_max_ms,
         )
         state_message = ServerStateMessage(ServerStatePayload(controller=controller_state))
 
@@ -220,6 +240,20 @@ class ControllerGroupRole(GroupRole):
         if cmd.command == MediaCommand.MUTE and cmd.mute is not None:
             self.set_mute(cmd.mute)
             self.emit_group_event(ControllerMuteEvent(muted=cmd.mute))
+            return
+        if cmd.command == MediaCommand.SEEK:
+            if (
+                self._seek_max_ms is None
+                or cmd.position_ms is None
+                or not 0 <= cmd.position_ms <= self._seek_max_ms
+            ):
+                return
+            self.emit_group_event(ControllerSeekEvent(position_ms=cmd.position_ms))
+            return
+        if cmd.command == MediaCommand.SEEK_RELATIVE:
+            if cmd.offset_ms is None:
+                return
+            self.emit_group_event(ControllerSeekRelativeEvent(offset_ms=cmd.offset_ms))
             return
 
         event = self._command_to_event(cmd)
