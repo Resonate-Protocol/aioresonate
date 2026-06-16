@@ -95,6 +95,8 @@ class ControllerStatePayload(DataClassORJSONMixin):
     """Repeat mode: 'off' = no repeat, 'one' = repeat current track, 'all' = repeat all."""
     shuffle: bool
     """Whether shuffle is enabled."""
+    seek_max_ms: int | None = None
+    """Max absolute position (ms) a 'seek' may target. Set only when 'seek' is supported."""
 
     def __post_init__(self) -> None:
         """Validate field values."""
@@ -109,3 +111,8 @@ class ControllerStatePayload(DataClassORJSONMixin):
         data.setdefault("repeat", RepeatMode.OFF.value)
         data.setdefault("shuffle", False)
         return data
+
+    class Config(BaseConfig):
+        """Config for serializing state messages."""
+
+        omit_none = True
