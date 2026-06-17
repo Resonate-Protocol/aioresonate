@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import struct
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -25,6 +27,7 @@ from aiosendspin.models.types import (
     AudioCodec,
     BinaryMessageType,
     ConnectionReason,
+    MediaCommand,
     PictureFormat,
     Roles,
 )
@@ -279,3 +282,33 @@ async def test_artwork_binary_dispatched_when_artwork_stream_active() -> None:
     )
 
     assert captured == [(1, payload)]
+
+
+@pytest.mark.asyncio
+async def test_send_group_command_seek_forwards_position_ms() -> None:
+    """send_group_command must include position_ms in the outgoing JSON for seek."""
+    client = SendspinClient(
+        client_id="client-1",
+        client_name="Test Client",
+        roles=[Roles.PLAYER],
+        player_support=_player_support(),
+    )
+
+    mock_ws = MagicMock()
+    mock_ws.closed = False
+    client._ws = mock_ws  # noqa: SLF001
+    client._connected = True  # noqa: SLF001
+
+    sent: list[str] = []
+
+    async def _capture(payload: str) -> None:
+        sent.append(payload)
+
+    client._send_message = _capture  # noqa: SLF001
+
+    await client.send_group_command(MediaCommand.SEEK, position_ms=12_000)
+
+    assert len(sent) == 1
+    msg = json.loads(sent[0])
+    assert msg["payload"]["controller"]["command"] == "seek"
+    assert msg["payload"]["controller"]["position_ms"] == 12_000

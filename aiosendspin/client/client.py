@@ -578,11 +578,19 @@ class SendspinClient:
         *,
         volume: int | None = None,
         mute: bool | None = None,
+        position_ms: int | None = None,
+        offset_ms: int | None = None,
     ) -> None:
         """Send a group command (playback control) to the server."""
         if not self.connected:
             raise RuntimeError("Client is not connected")
-        controller_payload = ControllerCommandPayload(command=command, volume=volume, mute=mute)
+        controller_payload = ControllerCommandPayload(
+            command=command,
+            volume=volume,
+            mute=mute,
+            position_ms=position_ms,
+            offset_ms=offset_ms,
+        )
         payload = ClientCommandPayload(controller=controller_payload)
         message = ClientCommandMessage(payload=payload)
         await self._send_message(message.to_json())
