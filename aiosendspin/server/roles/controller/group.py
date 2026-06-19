@@ -139,6 +139,8 @@ class ControllerGroupRole(GroupRole):
 
     def set_seek_max_ms(self, value: int | None) -> None:
         """Set the max seekable position in ms, or None when the seekable range is unknown."""
+        if value is not None and value < 0:
+            raise ValueError(f"seek_max_ms must be non-negative, got {value}")
         self._seek_max_ms = value
         self._push_state_to_members()
 

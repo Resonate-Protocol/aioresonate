@@ -56,3 +56,9 @@ def test_state_omits_seek_max_ms_when_absent() -> None:
         shuffle=False,
     )
     assert "seek_max_ms" not in payload.to_dict()
+
+
+def test_seek_command_rejects_negative_position_ms() -> None:
+    """A 'seek' with a negative position_ms is rejected."""
+    with pytest.raises(ValueError, match="non-negative"):
+        ControllerCommandPayload(command=MediaCommand.SEEK, position_ms=-1)

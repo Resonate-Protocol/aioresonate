@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock
 
+import pytest
+
 from aiosendspin.models.controller import ControllerCommandPayload
 from aiosendspin.models.core import ServerStateMessage
 from aiosendspin.models.types import MediaCommand, RepeatMode
@@ -508,3 +510,10 @@ def test_handle_seek_relative_command_emits_event() -> None:
     event = group._signal_event.call_args.args[0]  # noqa: SLF001
     assert isinstance(event, ControllerSeekRelativeEvent)
     assert event.offset_ms == -15_000
+
+
+def test_set_seek_max_ms_rejects_negative() -> None:
+    """set_seek_max_ms() rejects a negative bound."""
+    cgr = ControllerGroupRole(_make_group_stub())
+    with pytest.raises(ValueError, match="non-negative"):
+        cgr.set_seek_max_ms(-1)
