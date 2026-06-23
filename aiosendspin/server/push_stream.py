@@ -1141,8 +1141,7 @@ class PushStream:
             if cached_any_pcm:
                 self._signal_pcm_cache_update()
                 if self._catchup_tasks:
-                    # Yield so any active catch-up task gets a chance to consume the new
-                    # PCM and finish before live encoding for its TransformKey resumes.
+                    # Yield so an active catch-up task can consume the new PCM before delivery.
                     await asyncio.sleep(0)
 
             # Role-based audio delivery via hooks
@@ -1591,7 +1590,7 @@ class PushStream:
         self._transform_last_input_end_us[tkey] = output_ts + duration_us
         return encoded
 
-    async def _transform_and_deliver(
+    async def _transform_and_deliver(  # noqa: PLR0915
         self,
         roles_by_pcm: dict[
             tuple[UUID, int, int, int], list[tuple[SendspinClient, Role, AudioRequirements]]
@@ -1645,6 +1644,10 @@ class PushStream:
             for tkey, grouped in grouped_by_key.items():
                 roles_by_transform[tkey].extend(role for _client, role, _req in grouped)
                 if self._catchup_state.get(tkey) == "catching_up":
+                    continue
+                # Skip a chunk catch-up already replayed to avoid a duplicate at the seam.
+                key_cache = self._role_chunk_cache.get(tkey)
+                if key_cache and key_cache[-1].timestamp_us + key_cache[-1].duration_us > output_ts:
                     continue
                 if tkey in encode_tasks:
                     continue
@@ -2457,6 +2460,31 @@ class PushStream:
                 if new_encoded and self._catchup_state.get(cache_key) == "catching_up":
                     self._role_chunk_cache[cache_key].extend(new_encoded)
                     last_encoded_end_us = new_encoded[-1].timestamp_us + new_encoded[-1].duration_us
+
+            # Drain PCM committed after the snapshot (a commit racing the hand-off) so it
+            # is replayed here, not dropped. The final empty check flows into the
+            # synchronous send/flip below with no await between, so a racing commit cannot
+            # slip a chunk past both this replay and the suppressed live delivery.
+            while True:
+                pending = [
+                    chunk
+                    for chunk in self._pcm_chunk_cache.get(channel_int, [])
+                    if chunk.timestamp_us >= last_source_end_us
+                ]
+                if not pending:
+                    break
+                last_source_end_us = pending[-1].timestamp_us + pending[-1].duration_us
+                drained = await self._encode_catchup_sequence(
+                    pending,
+                    encoder,
+                    req,
+                    channel_id,
+                    resamplers=catchup_resamplers,
+                    quantizers=catchup_quantizers,
+                )
+                if drained and self._catchup_state.get(cache_key) == "catching_up":
+                    self._role_chunk_cache[cache_key].extend(drained)
+                    last_encoded_end_us = drained[-1].timestamp_us + drained[-1].duration_us
 
             # Promote FIR-warmed catch-up state, skipping shared live keys.
             for rkey, rstate in catchup_resamplers.items():
