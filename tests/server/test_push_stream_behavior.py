@@ -1154,6 +1154,114 @@ async def test_catchup_handoff_delivers_contiguous_audio() -> None:
 
 
 @pytest.mark.asyncio
+async def test_late_joiner_shares_group_timeline() -> None:
+    """A late joiner must land on the same absolute timeline as the existing member.
+
+    Every device schedules playback off the absolute timestamp in each chunk, so
+    two players are in sync only if identical audio reaches them with identical
+    timestamps. This drives a normal (near-now) group: role1 plays, role2 joins
+    mid-stream through the PCM-cache catch-up path, then more live audio commits.
+
+    Invariant: every timestamp role2 receives is also a timestamp role1 receives
+    (a contiguous suffix of the shared timeline), with no anchor offset. A failure
+    here would reproduce the reported "out of sync after grouping" symptom.
+    """
+
+    class TransformerA:
+        pending_timestamp_us: int | None = None
+
+        @property
+        def frame_duration_us(self) -> int:
+            return 25_000
+
+        def process(self, pcm: bytes, _ts: int, _dur: int) -> list[tuple[bytes, int]]:
+            return [(pcm, 25_000)]
+
+        def flush(self) -> list[tuple[bytes, int]]:
+            return []
+
+        def get_header(self) -> bytes | None:
+            return None
+
+        def reset(self) -> None:
+            return
+
+    class TransformerB(TransformerA):
+        pass
+
+    group = _DummyGroup(clients=[])
+    role1 = _DummyRole(
+        AudioRequirements(
+            sample_rate=48000,
+            bit_depth=16,
+            channels=2,
+            transformer=TransformerA(),
+            channel_id=MAIN_CHANNEL,
+            frame_duration_us=25_000,
+        )
+    )
+    group.clients.append(_DummyClient([role1]))
+
+    loop = asyncio.get_running_loop()
+    clock = ManualClock()
+    stream = PushStream(loop=loop, clock=clock, group=group)
+
+    def commit_one() -> None:
+        stream.prepare_audio(
+            bytes(7200),  # 25ms @ 48kHz stereo 24-bit
+            AudioFormat(sample_rate=48000, bit_depth=24, channels=2),
+        )
+
+    # role1 plays two live chunks alone; both are cached as PCM for catch-up.
+    commit_one()
+    await stream.commit_audio()
+    commit_one()
+    await stream.commit_audio()
+
+    # role2 joins mid-stream. replay_from_pcm_cache forces the catch-up path
+    # (its own TransformKey, distinct transformer) rather than skipping replay.
+    role2 = _DummyRole(
+        AudioRequirements(
+            sample_rate=48000,
+            bit_depth=16,
+            channels=2,
+            transformer=TransformerB(),
+            channel_id=MAIN_CHANNEL,
+            frame_duration_us=25_000,
+        ),
+        replay_from_pcm_cache=True,
+    )
+    group.clients.append(_DummyClient([role2]))
+    stream.on_role_join(role2)
+
+    # Two more live chunks land after the join.
+    commit_one()
+    await stream.commit_audio()
+    commit_one()
+    await stream.commit_audio()
+
+    for _ in range(50):
+        if role2.received:
+            break
+        await asyncio.sleep(0)
+
+    assert role2.started >= 1
+    assert role2.received, "joiner was stranded with no audio"
+
+    role2_ts = sorted(c.timestamp_us for c in role2.received)
+    role1_ts = {c.timestamp_us for c in role1.received}
+
+    # role2's timeline is contiguous (no gap that would glitch playback).
+    for prev, nxt in pairwise(sorted(role2.received, key=lambda c: c.timestamp_us)):
+        assert nxt.timestamp_us == prev.timestamp_us + prev.duration_us
+
+    # Core sync invariant: role2 sits on role1's exact timeline, no offset.
+    assert set(role2_ts) <= role1_ts, (
+        f"joiner desynced from group: role2={role2_ts} not a subset of role1={sorted(role1_ts)}"
+    )
+
+
+@pytest.mark.asyncio
 async def test_main_join_with_established_resampler_backfills_near_now() -> None:
     """Deeply-buffered main-channel join must backfill near now, not inherit the tail.
 
