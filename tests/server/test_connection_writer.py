@@ -134,7 +134,6 @@ async def test_writer_registers_buffer_after_send() -> None:
     mock_role = MagicMock()
     mock_buffer_tracker = MagicMock()
     mock_buffer_tracker.time_until_duration_capacity.return_value = 0
-    mock_buffer_tracker.time_until_unblocked.return_value = 0
     mock_buffer_tracker.time_until_ready.return_value = 0
     mock_role.get_buffer_tracker.return_value = mock_buffer_tracker
     mock_role._stream_start_time_us = None  # noqa: SLF001
@@ -193,7 +192,6 @@ async def test_writer_does_not_register_without_metadata() -> None:
     mock_role = MagicMock()
     mock_buffer_tracker = MagicMock()
     mock_buffer_tracker.time_until_duration_capacity.return_value = 0
-    mock_buffer_tracker.time_until_unblocked.return_value = 0
     mock_buffer_tracker.time_until_ready.return_value = 0
     mock_role.get_buffer_tracker.return_value = mock_buffer_tracker
     mock_role._stream_start_time_us = None  # noqa: SLF001
@@ -239,7 +237,6 @@ async def test_writer_blocks_on_buffer_tracker_capacity() -> None:
 
     mock_role = MagicMock()
     mock_buffer_tracker = MagicMock()
-    mock_buffer_tracker.time_until_unblocked.return_value = 0
     mock_buffer_tracker.time_until_ready.return_value = 1_000_000
     mock_role.get_buffer_tracker.return_value = mock_buffer_tracker
     mock_role._stream_start_time_us = None  # noqa: SLF001

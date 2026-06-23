@@ -323,13 +323,8 @@ class PlayerV1Role(Role):
             )
         )
         self.send_message(stream_start)
-        is_initial = not self._stream_started
         self._stream_started = True
         self._last_sent_format = current_format
-
-        # Allow client to process stream/start before first binary audio (initial only).
-        if is_initial and self._buffer_tracker is not None:
-            self._buffer_tracker.set_send_blocked(200_000)
 
     def on_audio_chunk(self, chunk: AudioChunk) -> None:
         """Pack and send binary audio. Late audio is discarded by connection."""

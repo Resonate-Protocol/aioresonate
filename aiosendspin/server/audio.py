@@ -148,7 +148,6 @@ class BufferTracker:
         self.buffered_chunks: deque[BufferedChunk] = deque()
         self.buffered_bytes = 0
         self.buffered_duration_us = 0
-        self.blocked_until_us: int | None = None
 
     def prune_consumed(self, now_us: int | None = None) -> int:
         """Drop finished chunks and return the timestamp used for the calculation."""
@@ -374,31 +373,6 @@ class BufferTracker:
         self.buffered_chunks.clear()
         self.buffered_bytes = 0
         self.buffered_duration_us = 0
-        self.blocked_until_us = None
-
-    def set_send_blocked(self, delay_us: int) -> None:
-        """Block sending for delay_us microseconds from now.
-
-        Used to give clients time to process stream/start before receiving audio.
-
-        Args:
-            delay_us: Delay in microseconds before sending is allowed.
-        """
-        self.blocked_until_us = self._clock.now_us() + delay_us
-
-    def time_until_unblocked(self) -> int:
-        """Return microseconds until sending is unblocked, or 0 if not blocked.
-
-        Returns:
-            Time in microseconds to wait, or 0 if sending is allowed.
-        """
-        if self.blocked_until_us is None:
-            return 0
-        now_us = self._clock.now_us()
-        if now_us >= self.blocked_until_us:
-            self.blocked_until_us = None
-            return 0
-        return self.blocked_until_us - now_us
 
 
 def _convert_s24_to_s32(data: bytes) -> bytes:

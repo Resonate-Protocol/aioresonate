@@ -1056,7 +1056,6 @@ class SendspinConnection:
                 buffer_tracker = handling_role.get_buffer_tracker()
             if buffer_tracker is not None:
                 buffer_tracker.prune_consumed(now_us)
-                wait_us = max(wait_us, buffer_tracker.time_until_unblocked())
                 bytes_needed = entry.binary.buffer_byte_count or 0
                 duration_needed_us = entry.binary.duration_us or 0
                 wait_us = max(
