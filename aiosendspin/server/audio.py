@@ -97,8 +97,22 @@ class AudioFormat:
             layout = "mono"
         elif self.channels == 2:
             layout = "stereo"
+        elif self.channels == 3:
+            layout = "2.1"
+        elif self.channels == 4:
+            layout = "quad"
+        elif self.channels == 5:
+            layout = "4.1"
+        elif self.channels == 6:
+            layout = "5.1"
+        elif self.channels == 7:
+            layout = "6.1"
+        elif self.channels == 8:
+            layout = "7.1"
+        elif self.channels == 10:
+            layout = "9.1"
         else:
-            raise ValueError("Only mono and stereo layouts are supported")
+            raise ValueError(f"Unsupported channel count: {self.channels}")
 
         return wire_bytes_per_sample, av_format, layout, av_bytes_per_sample
 
