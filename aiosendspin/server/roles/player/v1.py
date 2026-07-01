@@ -71,7 +71,7 @@ class PlayerPersistentState:
     buffer_reset_handle: asyncio.TimerHandle | None = None
     static_delay_ms: int = 0
     required_lead_time_ms: int = 250
-    min_buffer_ms: int = 250
+    min_buffer_ms: int = 500
     state_supported_commands: list[PlayerCommand] = field(default_factory=list)
 
 
