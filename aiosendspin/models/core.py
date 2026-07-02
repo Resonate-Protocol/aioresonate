@@ -31,6 +31,12 @@ from .player import (
     StreamRequestFormatPlayer,
     StreamStartPlayer,
 )
+from .source import (
+    ClientHelloSourceSupport,
+    ClientStreamStartSource,
+    SourceCommandPayload,
+    SourceStatePayload,
+)
 from .types import (
     ClientMessage,
     ClientStateType,
@@ -133,6 +139,8 @@ class ClientHelloPayload(DataClassORJSONMixin):
         ClientHelloVisualizerSupportDraftR1 | None, Alias("visualizer@_draft_r1_support")
     ] = None
     """Visualizer support for clients on the legacy `visualizer@_draft_r1` wire."""
+    source_support: Annotated[ClientHelloSourceSupport | None, Alias("source@v1_support")] = None
+    """Source support configuration - only if source role is in supported_roles."""
 
     # Static mapping: unversioned support key -> actual alias key.
     _SUPPORT_KEY_ALIASES: ClassVar[dict[str, str]] = {
@@ -140,6 +148,7 @@ class ClientHelloPayload(DataClassORJSONMixin):
         "artwork_support": "artwork@v1_support",
         "visualizer_support": "visualizer@v1_support",
         "visualizer_draft_r1_support": "visualizer@_draft_r1_support",
+        "source_support": "source@v1_support",
     }
 
     @classmethod
@@ -207,6 +216,16 @@ class ClientHelloPayload(DataClassORJSONMixin):
         if not visualizer_draft_supported:
             self.visualizer_draft_r1_support = None
 
+        # Validate source role and support configuration.
+        source_role_supported = Roles.SOURCE.value in self.supported_roles
+        if source_role_supported and self.source_support is None:
+            raise ValueError(
+                "source@v1_support (source_support alias) must be provided when "
+                "'source@v1' is in supported_roles"
+            )
+        if not source_role_supported:
+            self.source_support = None
+
     class Config(BaseConfig):
         """Config for parsing json messages."""
 
@@ -255,6 +274,8 @@ class ClientStatePayload(DataClassORJSONMixin):
     """
     player: PlayerStatePayload | None = None
     """Player state - only if client has player role."""
+    source: SourceStatePayload | None = None
+    """Source state - only if client has source role."""
 
     class Config(BaseConfig):
         """Config for parsing json messages."""
@@ -290,6 +311,37 @@ class ClientCommandMessage(ClientMessage):
 
     payload: ClientCommandPayload
     type: Literal["client/command"] = "client/command"
+
+
+# Client -> Server: client_stream/start
+@dataclass
+class ClientStreamStartPayload(DataClassORJSONMixin):
+    """Announces the active input stream format for a source client."""
+
+    source: ClientStreamStartSource
+    """Format (and any codec header) of the source input stream."""
+
+
+@dataclass
+class ClientStreamStartMessage(ClientMessage):
+    """Message sent by a source client to announce its input stream format."""
+
+    payload: ClientStreamStartPayload
+    type: Literal["client_stream/start"] = "client_stream/start"
+
+
+# Client -> Server: client_stream/end
+@dataclass
+class ClientStreamEndPayload(DataClassORJSONMixin):
+    """Payload for client_stream/end message (no fields)."""
+
+
+@dataclass
+class ClientStreamEndMessage(ClientMessage):
+    """Message sent by a source client to end its current input stream."""
+
+    payload: ClientStreamEndPayload = field(default_factory=ClientStreamEndPayload)
+    type: Literal["client_stream/end"] = "client_stream/end"
 
 
 # Client -> Server: client/goodbye
@@ -429,6 +481,8 @@ class ServerCommandPayload(DataClassORJSONMixin):
 
     player: PlayerCommandPayload | None = None
     """Player commands - only sent to clients with player role."""
+    source: SourceCommandPayload | None = None
+    """Source commands - only sent to clients with source role."""
 
     class Config(BaseConfig):
         """Config for parsing json messages."""

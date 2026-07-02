@@ -22,6 +22,8 @@ if TYPE_CHECKING:
     from aiosendspin.models.core import (
         ClientCommandPayload,
         ClientStatePayload,
+        ClientStreamEndPayload,
+        ClientStreamStartPayload,
         StreamRequestFormatPayload,
     )
     from aiosendspin.models.types import ClientStateType, ServerMessage
@@ -429,4 +431,29 @@ class Role(ABC):
         """Handle client/command payload.
 
         Handlers must be synchronous. For async operations, launch eager tasks.
+        """
+
+    def on_client_stream_start(  # noqa: B027
+        self,
+        payload: ClientStreamStartPayload,
+    ) -> None:
+        """Handle client_stream/start payload (source role)."""
+
+    def on_client_stream_end(  # noqa: B027
+        self,
+        payload: ClientStreamEndPayload,
+    ) -> None:
+        """Handle client_stream/end payload (source role)."""
+
+    def on_client_binary(  # noqa: B027
+        self,
+        message_type: int,
+        timestamp_us: int,
+        data: bytes,
+    ) -> None:
+        """Handle an inbound binary frame from the client (e.g., source audio chunk).
+
+        The connection fans this out to every active role; roles must self-filter
+        on ``message_type``. ``timestamp_us`` is the server-clock capture time from
+        the binary header, and ``data`` is the payload after the 9-byte header.
         """

@@ -13,7 +13,12 @@ from dataclasses import dataclass
 from aiohttp import ClientSession, ClientWebSocketResponse, WSMessage, WSMsgType, web
 
 from aiosendspin.clock import Clock, RawMonotonicClock
-from aiosendspin.models import BINARY_HEADER_SIZE, BinaryMessageType, unpack_binary_header
+from aiosendspin.models import (
+    BINARY_HEADER_SIZE,
+    BinaryMessageType,
+    pack_binary_header_raw,
+    unpack_binary_header,
+)
 from aiosendspin.models.artwork import ClientHelloArtworkSupport
 from aiosendspin.models.controller import ControllerCommandPayload
 from aiosendspin.models.core import (
@@ -25,6 +30,10 @@ from aiosendspin.models.core import (
     ClientHelloPayload,
     ClientStateMessage,
     ClientStatePayload,
+    ClientStreamEndMessage,
+    ClientStreamEndPayload,
+    ClientStreamStartMessage,
+    ClientStreamStartPayload,
     ClientTimeMessage,
     ClientTimePayload,
     DeviceInfo,
@@ -47,6 +56,12 @@ from aiosendspin.models.player import (
     PlayerStatePayload,
     StreamStartPlayer,
 )
+from aiosendspin.models.source import (
+    ClientHelloSourceSupport,
+    ClientStreamStartSource,
+    SourceCommandPayload,
+    SourceStatePayload,
+)
 from aiosendspin.models.types import (
     AudioCodec,
     ConnectionReason,
@@ -56,6 +71,7 @@ from aiosendspin.models.types import (
     PlayerStateType,
     Roles,
     ServerMessage,
+    SourceSignal,
 )
 from aiosendspin.models.visualizer import (
     ClientHelloVisualizerSupport,
@@ -141,6 +157,9 @@ DisconnectCallback = Callable[[], None]
 # Callback invoked when server sends player commands (volume, mute).
 ServerCommandCallback = Callable[[ServerCommandPayload], None]
 
+# Callback invoked when the server sends a source start/stop command.
+SourceCommandCallback = Callable[[SourceCommandPayload], None]
+
 # Callback invoked when visualizer frames are received. Beat events are
 # delivered through the same callback as a `VisualizerFrame` carrying
 # only `timestamp_us` + `is_downbeat`.
@@ -183,6 +202,8 @@ class SendspinClient:
     """Artwork capabilities (only set if ARTWORK role is supported)."""
     _visualizer_support: ClientHelloVisualizerSupport | None
     """Visualizer capabilities (only set if VISUALIZER role is supported)."""
+    _source_support: ClientHelloSourceSupport | None
+    """Source capabilities (only set if SOURCE role is supported)."""
     _session: ClientSession | None
     """Optional aiohttp ClientSession for WebSocket connection."""
 
@@ -255,6 +276,8 @@ class SendspinClient:
     """Callbacks invoked when the client disconnects."""
     _server_command_callbacks: list[ServerCommandCallback]
     """Callbacks invoked when server sends player commands."""
+    _source_command_callbacks: list[SourceCommandCallback]
+    """Callbacks invoked when server sends source start/stop commands."""
     _visualizer_callbacks: list[VisualizerCallback]
     """Callbacks invoked when visualizer frames are received (beats included)."""
     _artwork_callbacks: list[ArtworkCallback]
@@ -267,7 +290,7 @@ class SendspinClient:
     _state_supported_commands: list[PlayerCommand]
     """Supported commands advertised in client/state messages."""
 
-    def __init__(  # noqa: PLR0913
+    def __init__(  # noqa: PLR0913, PLR0915
         self,
         client_id: str,
         client_name: str,
@@ -277,6 +300,7 @@ class SendspinClient:
         player_support: ClientHelloPlayerSupport | None = None,
         artwork_support: ClientHelloArtworkSupport | None = None,
         visualizer_support: ClientHelloVisualizerSupport | None = None,
+        source_support: ClientHelloSourceSupport | None = None,
         session: ClientSession | None = None,
         static_delay_ms: float = 0.0,
         required_lead_time_ms: float = 250.0,
@@ -303,6 +327,8 @@ class SendspinClient:
                 role is specified; raises ValueError if missing.
             visualizer_support: Visualizer capabilities. Required if
                 VISUALIZER role is specified; raises ValueError if missing.
+            source_support: Source capabilities. Required if SOURCE role is
+                specified; raises ValueError if missing.
             session: Optional aiohttp ClientSession. If None, a session is created
                 and managed by this client.
             static_delay_ms: Static playback delay in milliseconds applied after
@@ -357,6 +383,14 @@ class SendspinClient:
             self._visualizer_support = visualizer_support
         else:
             self._visualizer_support = None
+
+        # Validate and store source support
+        if Roles.SOURCE in self._roles:
+            if source_support is None:
+                raise ValueError("source_support is required when SOURCE role is specified")
+            self._source_support = source_support
+        else:
+            self._source_support = None
         self._session = session
         self._owns_session = session is None
         self._loop = asyncio.get_running_loop()
@@ -381,6 +415,7 @@ class SendspinClient:
         self._audio_chunk_callbacks = []
         self._disconnect_callbacks = []
         self._server_command_callbacks = []
+        self._source_command_callbacks = []
         self._visualizer_callbacks = []
         self._artwork_callbacks = []
 
@@ -572,6 +607,44 @@ class SendspinClient:
         )
         await self._send_message(message.to_json())
 
+    async def send_source_state(self, *, signal: SourceSignal | None = None) -> None:
+        """Send source state (line-sensing signal) to the server."""
+        if not self.connected:
+            return
+        message = ClientStateMessage(
+            payload=ClientStatePayload(source=SourceStatePayload(signal=signal))
+        )
+        await self._send_message(message.to_json())
+
+    async def send_client_stream_start(self, source: ClientStreamStartSource) -> None:
+        """Announce the source input stream format via client_stream/start."""
+        if not self.connected:
+            return
+        message = ClientStreamStartMessage(payload=ClientStreamStartPayload(source=source))
+        await self._send_message(message.to_json())
+
+    async def send_client_stream_end(self) -> None:
+        """End the current source input stream via client_stream/end."""
+        if not self.connected:
+            return
+        message = ClientStreamEndMessage(payload=ClientStreamEndPayload())
+        await self._send_message(message.to_json())
+
+    async def send_source_audio_chunk(self, data: bytes, *, capture_timestamp_us: int) -> bool:
+        """Send a captured source audio chunk to the server.
+
+        The capture timestamp (client monotonic clock, microseconds) is converted to
+        the server time domain and packed into the binary header. Returns True if the
+        chunk was sent, False if the client is not connected or not yet time-synchronized
+        (per spec, sources must not stream until synchronized).
+        """
+        if not self.connected or not self.is_time_synchronized():
+            return False
+        server_ts = self.compute_source_timestamp(capture_timestamp_us)
+        header = pack_binary_header_raw(BinaryMessageType.SOURCE_AUDIO_CHUNK.value, server_ts)
+        await self._send_binary(header + data)
+        return True
+
     async def send_group_command(
         self,
         command: MediaCommand,
@@ -742,6 +815,22 @@ class SendspinClient:
             else None
         )
 
+    def add_source_command_listener(self, callback: SourceCommandCallback) -> Callable[[], None]:
+        """Add a listener for source start/stop commands from the server.
+
+        Only fired for clients with the source role. The callback receives the
+        SourceCommandPayload from server/command.
+
+        Returns:
+            A function that removes this listener when called.
+        """
+        self._source_command_callbacks.append(callback)
+        return lambda: (
+            self._source_command_callbacks.remove(callback)
+            if callback in self._source_command_callbacks
+            else None
+        )
+
     def add_visualizer_listener(self, callback: VisualizerCallback) -> Callable[[], None]:
         """Add a listener for visualizer frame events.
 
@@ -781,6 +870,7 @@ class SendspinClient:
             player_support=self._player_support,
             artwork_support=self._artwork_support,
             visualizer_support=self._visualizer_support,
+            source_support=self._source_support,
         )
         return ClientHelloMessage(payload=payload)
 
@@ -800,6 +890,12 @@ class SendspinClient:
             raise RuntimeError("WebSocket is not connected")
         async with self._send_lock:
             await self._ws.send_str(payload)
+
+    async def _send_binary(self, data: bytes) -> None:
+        if self._ws is None:
+            raise RuntimeError("WebSocket is not connected")
+        async with self._send_lock:
+            await self._ws.send_bytes(data)
 
     async def _reader_loop(self) -> None:
         assert self._ws is not None
@@ -1051,6 +1147,8 @@ class SendspinClient:
                 and player_cmd.static_delay_ms is not None
             ):
                 self.set_static_delay_ms(float(player_cmd.static_delay_ms))
+        if payload.source is not None:
+            self._notify_source_command_callback(payload.source)
         self._notify_server_command_callback(payload)
 
     def _configure_audio_output(self, audio_format: AudioFormat) -> None:
@@ -1207,6 +1305,21 @@ class SendspinClient:
         adjusted_client_time = client_timestamp_us + self._static_delay_us
         return self._time_filter.compute_server_time(adjusted_client_time)
 
+    def compute_source_timestamp(self, capture_timestamp_us: int) -> int:
+        """Convert a source capture timestamp (client clock) to the server time domain.
+
+        Unlike compute_server_time (used by players), this does NOT apply the static
+        delay: a captured sample's timestamp marks when it was captured, independent of
+        any playback delay.
+
+        Args:
+            capture_timestamp_us: Capture time in microseconds (client monotonic clock).
+
+        Returns:
+            Server timestamp in microseconds.
+        """
+        return self._time_filter.compute_server_time(capture_timestamp_us)
+
     def _notify_metadata_callback(self, payload: ServerStatePayload) -> None:
         for callback in list(self._metadata_callbacks):
             try:
@@ -1276,6 +1389,13 @@ class SendspinClient:
                 callback(payload)
             except Exception:
                 logger.exception("Error in server command callback %s", callback)
+
+    def _notify_source_command_callback(self, payload: SourceCommandPayload) -> None:
+        for callback in list(self._source_command_callbacks):
+            try:
+                callback(payload)
+            except Exception:
+                logger.exception("Error in source command callback %s", callback)
 
     async def _time_sync_loop(self) -> None:
         try:

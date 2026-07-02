@@ -14,6 +14,7 @@ from aiosendspin.server.roles import (
     controller,  # noqa: F401
     metadata,  # noqa: F401
     player,  # noqa: F401
+    source,  # noqa: F401
     visualizer,  # noqa: F401
 )
 
@@ -71,6 +72,10 @@ from aiosendspin.server.roles.player import (
     PlayerV1Role,
 )
 from aiosendspin.server.roles.registry import register_role
+from aiosendspin.server.roles.source import (
+    SourceGroupRole,
+    SourceV1Role,
+)
 from aiosendspin.server.roles.visualizer import (
     VisualizerGroupRole,
     VisualizerV1Role,
@@ -117,6 +122,8 @@ __all__ = [
     "PlayerGroupVolumeChangedEvent",
     "PlayerV1Role",
     "Role",
+    "SourceGroupRole",
+    "SourceV1Role",
     "StreamRequirements",
     "VisualizerDraftR1Role",
     "VisualizerGroupRole",

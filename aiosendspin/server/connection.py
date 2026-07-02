@@ -42,12 +42,15 @@ from typing import TYPE_CHECKING, Any, cast
 import orjson
 from aiohttp import ClientWebSocketResponse, WSMsgType, web
 
+from aiosendspin.models import BINARY_HEADER_SIZE, unpack_binary_header
 from aiosendspin.models.core import (
     ClientCommandMessage,
     ClientGoodbyeMessage,
     ClientHelloMessage,
     ClientHelloPayload,
     ClientStateMessage,
+    ClientStreamEndMessage,
+    ClientStreamStartMessage,
     ClientTimeMessage,
     ServerHelloMessage,
     ServerHelloPayload,
@@ -597,7 +600,7 @@ class SendspinConnection:
                     break
 
                 if msg.type == WSMsgType.BINARY:
-                    self._logger.warning("Received binary message from client (spec violation)")
+                    self._handle_client_binary(cast("bytes", msg.data))
                     continue
 
                 if msg.type != WSMsgType.TEXT:
@@ -625,7 +628,9 @@ class SendspinConnection:
             if self._writer_task and not self._writer_task.done():
                 self._writer_task.cancel()
 
-    async def _handle_message(self, message: ClientMessage, timestamp_us: int) -> None:  # noqa: PLR0915
+    async def _handle_message(  # noqa: C901, PLR0912, PLR0915
+        self, message: ClientMessage, timestamp_us: int
+    ) -> None:
         if self._client_info is None and not isinstance(message, ClientHelloMessage):
             raise ValueError("First message must be client/hello")
         if (
@@ -734,6 +739,20 @@ class SendspinConnection:
                 role.on_command(message.payload)
             return
 
+        if isinstance(message, ClientStreamStartMessage):
+            if self._client is None:
+                return
+            for role in self._client.active_roles:
+                role.on_client_stream_start(message.payload)
+            return
+
+        if isinstance(message, ClientStreamEndMessage):
+            if self._client is None:
+                return
+            for role in self._client.active_roles:
+                role.on_client_stream_end(message.payload)
+            return
+
         if isinstance(message, ClientGoodbyeMessage):
             self._logger.debug(
                 "Received client/goodbye with reason: %s",
@@ -743,6 +762,25 @@ class SendspinConnection:
             retry = message.payload.reason == GoodbyeReason.RESTART
             await self.disconnect(retry_connection=retry)
             return
+
+    def _handle_client_binary(self, data: bytes) -> None:
+        """Route an inbound binary frame from the client to its active roles.
+
+        Source clients stream captured audio as binary frames (message type 12);
+        the 9-byte header carries the message type and the server-clock capture
+        timestamp. Roles self-filter on the message type in ``on_client_binary``.
+        """
+        if self._client is None or not self._server_hello_sent:
+            self._logger.warning("Received binary before handshake completed; dropping")
+            return
+        try:
+            header = unpack_binary_header(data)
+        except ValueError:
+            self._logger.warning("Received malformed binary header from client; dropping")
+            return
+        payload = data[BINARY_HEADER_SIZE:]
+        for role in self._client.active_roles:
+            role.on_client_binary(header.message_type, header.timestamp_us, payload)
 
     def _check_late_binary(
         self,

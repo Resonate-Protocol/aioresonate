@@ -26,6 +26,7 @@ __all__ = [
     "pack_binary_header",
     "pack_binary_header_raw",
     "player",
+    "source",
     "types",
     "undefined_field",
     "unpack_binary_header",
@@ -34,7 +35,7 @@ __all__ = [
 import struct
 from typing import NamedTuple
 
-from . import artwork, controller, core, metadata, player, types, visualizer
+from . import artwork, controller, core, metadata, player, source, types, visualizer
 from .core import DeviceInfo
 from .types import (
     AudioCodec,

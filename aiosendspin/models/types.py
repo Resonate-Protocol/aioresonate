@@ -74,6 +74,8 @@ class Roles(Enum):
     """
     COLOR = "color@v1"
     """Receives colors derived from the current audio."""
+    SOURCE = "source@v1"
+    """Captures audio from a local input and streams it to the server."""
 
 
 class BinaryMessageType(Enum):
@@ -92,6 +94,10 @@ class BinaryMessageType(Enum):
     """Artwork channel 2 (Artwork role, slot 2)."""
     ARTWORK_CHANNEL_3 = 11
     """Artwork channel 3 (Artwork role, slot 3)."""
+
+    # Source role (bits 000011xx, IDs 12-15):
+    SOURCE_AUDIO_CHUNK = 12
+    """Captured source audio chunk streamed client -> server (Source role, slot 0)."""
 
     # Visualizer role (bits 00010xxx, IDs 16-23):
     VISUALIZATION_LOUDNESS = 16
@@ -149,6 +155,24 @@ class AudioCodec(Enum):
     OPUS = "opus"
     FLAC = "flac"
     PCM = "pcm"
+
+
+class SourceCommand(Enum):
+    """Enum for Source Commands (server -> source client)."""
+
+    START = "start"
+    """Server requests the source to begin streaming."""
+    STOP = "stop"
+    """Server requests the source to stop streaming."""
+
+
+class SourceSignal(Enum):
+    """Enum for source line-sensing signal presence."""
+
+    PRESENT = "present"
+    """An input signal is present on the source's local input."""
+    ABSENT = "absent"
+    """No input signal is present on the source's local input."""
 
 
 class PlayerCommand(Enum):
