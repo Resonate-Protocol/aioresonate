@@ -30,7 +30,7 @@ from zeroconf.asyncio import AsyncServiceBrowser, AsyncServiceInfo, AsyncZerocon
 
 from aiosendspin.clock import Clock, RawMonotonicClock
 from aiosendspin.models.core import ClientHelloPayload
-from aiosendspin.models.types import ConnectionReason, GoodbyeReason
+from aiosendspin.models.types import ConnectionReason
 from aiosendspin.noise.keys import Identity
 from aiosendspin.noise.pairing import PairingAbortError, PairingAttempt
 from aiosendspin.noise.pin import DEFAULT_MIN_PIN_DIGITS, MAX_PIN_DIGITS, MIN_PIN_DIGITS
@@ -734,11 +734,12 @@ class SendspinServer:
                         backoff = 1.0
 
                     if not conn.should_retry_server_initiated_connection:
-                        if conn.goodbye_reason == GoodbyeReason.ANOTHER_SERVER:
-                            logger.debug(
-                                "Not reconnecting to %s after goodbye reason another_server",
-                                url,
-                            )
+                        reason = conn.goodbye_reason
+                        logger.debug(
+                            "Not reconnecting to %s (goodbye reason: %s)",
+                            url,
+                            reason.value if reason is not None else "none",
+                        )
                         break
 
                     if self._client_session.closed:
