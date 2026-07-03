@@ -1614,6 +1614,9 @@ class SendspinConnection:
                     server_transmitted=self._server.clock.now_us(),
                 )
             )
+        elif isinstance(message, StreamStartMessage | StreamClearMessage | StreamEndMessage):
+            # Stamp send time on the dequeued (send-once) payload.
+            message.payload.server_transmitted = self._server.clock.now_us()
         await wsock.send_str(message.to_json())
 
     async def _send_binary_data(

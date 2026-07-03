@@ -504,6 +504,29 @@ async def test_writer_rewrites_server_transmitted_at_send_time() -> None:
 
 
 @pytest.mark.asyncio
+async def test_send_message_stamps_stream_end_server_transmitted() -> None:
+    """stream/end carries the clock value at actual send, like server/time."""
+    loop = asyncio.get_running_loop()
+    clock = ManualClock(now_us_value=5_000_000)
+    server = _DummyServer(loop=loop, clock=clock)
+
+    sent: list[str] = []
+    wsock = MagicMock()
+    wsock.closed = False
+    wsock.send_str = AsyncMock(side_effect=sent.append)
+
+    conn = SendspinConnection(server, wsock_client=wsock)
+
+    await conn._send_message(  # noqa: SLF001
+        wsock, StreamEndMessage(payload=StreamEndPayload(roles=["player"]))
+    )
+
+    payload = json.loads(sent[0])["payload"]
+    assert payload["server_transmitted"] == 5_000_000
+    assert payload["roles"] == ["player"]
+
+
+@pytest.mark.asyncio
 async def test_send_binary_disconnects_on_per_role_queue_overflow() -> None:
     """Per-role queue overflow should trigger disconnect."""
     loop = asyncio.get_running_loop()

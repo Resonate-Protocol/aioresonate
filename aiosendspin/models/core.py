@@ -586,6 +586,8 @@ def _deserialize_stream_start_visualizer(
 class StreamStartPayload(DataClassORJSONMixin):
     """Information about an active streaming session."""
 
+    server_transmitted: int = 0
+    """Timestamp the server transmitted this message in microseconds. Stamped at send."""
     player: StreamStartPlayer | None = None
     """Information about the player."""
     artwork: StreamStartArtwork | None = None
@@ -633,6 +635,8 @@ STREAM_END_ROLE_FAMILIES = frozenset({"player", "artwork", "visualizer"})
 class StreamClearPayload(DataClassORJSONMixin):
     """Instructs clients to clear buffers without ending the stream."""
 
+    server_transmitted: int = 0
+    """Timestamp the server transmitted this message in microseconds. Stamped at send."""
     roles: list[str] | None = None
     """Roles to clear: player, visualizer, or both. If omitted, clears both roles."""
 
@@ -697,6 +701,8 @@ class StreamRequestFormatMessage(ClientMessage):
 class StreamEndPayload(DataClassORJSONMixin):
     """Payload for stream/end message."""
 
+    server_transmitted: int = 0
+    """Timestamp the server transmitted this message in microseconds. Stamped at send."""
     roles: list[str] | None = None
     """Roles to end streams for. If omitted, ends all active streams."""
 
