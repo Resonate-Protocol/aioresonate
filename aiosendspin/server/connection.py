@@ -574,6 +574,21 @@ class SendspinConnection:
                 return role_id
         return None
 
+    @staticmethod
+    def _unimplemented_roles(supported_roles: list[str]) -> list[str]:
+        """Client-offered roles/versions this server does not implement.
+
+        Excludes `_`-prefixed custom roles and versions. A non-empty result means the
+        client likely speaks a newer spec revision than this server.
+        """
+        return [
+            r
+            for r in supported_roles
+            if r not in ROLE_FACTORIES
+            and not r.startswith("_")
+            and not r.partition("@")[2].startswith("_")
+        ]
+
     @classmethod
     def _primary_role_id_for_family(cls, family: str) -> str | None:
         """Return built-in primary role id for a role family, if defined."""
@@ -611,20 +626,7 @@ class SendspinConnection:
                     None,
                 )
             if selected_role is None:
-                # Log unknown spec-versioned roles per spec README "Detecting
-                # Outdated Servers" so operators can spot a client running a
-                # newer protocol revision.
-                unknown_versions = [
-                    r
-                    for r in supported_roles
-                    if role_family(r) == family and not r.partition("@")[2].startswith("_")
-                ]
-                if unknown_versions:
-                    logger.info(
-                        "Client offered unknown spec role versions in family '%s': %s",
-                        family,
-                        unknown_versions,
-                    )
+                # Skip support parsing for unknown roles.
                 continue
             primary_role_id = cls._primary_role_id_for_family(family)
             if selected_role == primary_role_id:
@@ -877,6 +879,10 @@ class SendspinConnection:
         self._negotiated_roles = negotiate_roles(client_info.supported_roles)
         self._logger = logger.getChild(client_id)
         self._logger.debug("Received client/hello: %s", client_info)
+        if unimplemented := self._unimplemented_roles(client_info.supported_roles):
+            self._logger.info(
+                "Client offered roles/versions this server does not implement: %s", unimplemented
+            )
 
         if self._noise_psk is not None and self._noise_psk.category is PskCategory.SENTINEL:
             self._trusted_unpaired = (
