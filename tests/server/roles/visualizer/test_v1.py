@@ -717,6 +717,42 @@ def test_request_format_replaces_rate_max() -> None:
     assert role._stream_config.rate_max == 15  # noqa: SLF001
 
 
+def test_request_format_with_no_active_stream_does_not_start_stream() -> None:
+    """The server MUST NOT start a stream in response to request-format when none is active."""
+    client = _make_client_stub()
+    role = VisualizerV1Role(client=client)
+    role.on_connect()  # no on_stream_start yet -> no active stream
+    client.send_role_message.reset_mock()
+
+    role.on_stream_request_format(
+        StreamRequestFormatPayload(visualizer=StreamRequestFormatVisualizer(rate_max=15))
+    )
+
+    starts = [
+        c
+        for c in client.send_role_message.call_args_list
+        if isinstance(c.args[1], StreamStartMessage)
+    ]
+    assert starts == []
+    assert role._stream_started is False  # noqa: SLF001
+
+
+def test_request_format_with_no_active_stream_is_remembered_for_next_stream() -> None:
+    """With no active stream, the request is remembered and applied to the next stream/start."""
+    client = _make_client_stub()
+    role = VisualizerV1Role(client=client)
+    role.on_connect()  # no on_stream_start yet -> no active stream
+
+    role.on_stream_request_format(
+        StreamRequestFormatPayload(visualizer=StreamRequestFormatVisualizer(rate_max=15))
+    )
+    role.on_stream_start()
+
+    cfg = _last_stream_start(client).payload.visualizer
+    assert cfg is not None
+    assert cfg.rate_max == 15
+
+
 def test_request_format_replaces_types() -> None:
     """request-format replaces the negotiated types."""
     client = _make_client_stub()
