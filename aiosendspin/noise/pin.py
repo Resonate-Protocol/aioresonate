@@ -14,6 +14,12 @@ COMMIT_SIZE: Final[int] = 32
 MIN_PIN_DIGITS: Final[int] = 4
 MAX_PIN_DIGITS: Final[int] = 12
 DEFAULT_MIN_PIN_DIGITS: Final[int] = 6
+STATIC_PIN_DIGITS: Final[int] = 8
+
+
+def is_valid_static_pin(pin: str) -> bool:
+    """Return whether ``pin`` is exactly 8 ASCII decimal digits (the static-PIN format)."""
+    return len(pin) == STATIC_PIN_DIGITS and pin.isascii() and pin.isdigit()
 
 
 def generate_nonce() -> bytes:

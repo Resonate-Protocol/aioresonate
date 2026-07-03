@@ -172,6 +172,30 @@ async def test_static_pin_server_gesture_wait_times_out(
     assert server_raw.sent == []
 
 
+async def test_static_pin_server_rejects_non_8_digit_operator_pin() -> None:
+    """A non-8-digit operator PIN aborts the server before it emits its PAKE share."""
+    client_ews, server_ews, _client_raw, server_raw = _paired_encrypted_ws()
+    server_store = InMemoryServerPairingStore()
+
+    async def bad_pin() -> str:
+        return "12345"
+
+    await client_ews.send_str(
+        ClientPairInitMessage(payload=ClientPairInitPayload(pairing_index=0)).to_json(),
+    )
+    with pytest.raises(PairingError, match="8 decimal digits"):
+        await run_static_pin_server(
+            server_ews,
+            handshake_hash=_HANDSHAKE_HASH,
+            pairing_index=0,
+            pin_provider=bad_pin,
+            client_id="client-X",
+            store=server_store,
+        )
+    assert server_raw.sent == []
+    assert await server_store.record_by_client_id("client-X") is None
+
+
 async def test_dynamic_pin_server_times_out_mid_attempt(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

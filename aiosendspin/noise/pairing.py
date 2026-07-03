@@ -411,6 +411,8 @@ async def run_static_pin_server(
         await _receive_pair_init(ws, pairing_index)
     async with asyncio.timeout(_SERVER_ATTEMPT_TIMEOUT_S):
         pin = await pin_provider()
+        if not pin_mod.is_valid_static_pin(pin):
+            raise PairingError("static PIN must be exactly 8 decimal digits")
         try:
             cpace = CPace.start(
                 role=CPaceRole.INITIATOR, prs=pin.encode("ascii"), sid=sid, ad=_PAKE_AD_SERVER

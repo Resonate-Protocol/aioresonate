@@ -21,7 +21,7 @@ from .keys import (
     generate_psk,
     psk_id_for,
 )
-from .pin import DEFAULT_MIN_PIN_DIGITS
+from .pin import DEFAULT_MIN_PIN_DIGITS, is_valid_static_pin
 
 # A PIN-pairing method enters terminal lockout when its failure counter reaches
 # this value.
@@ -676,6 +676,8 @@ class _ClientPairingStoreBase(ClientPairingStore):
 
     async def set_static_pin(self, pin: str) -> None:
         """Set the configured static PIN, replacing any existing one."""
+        if not is_valid_static_pin(pin):
+            raise ValueError("static PIN must be exactly 8 decimal digits")
         self._static_pin = pin
         await self._save()
 
