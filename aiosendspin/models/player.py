@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from mashumaro.config import BaseConfig
 from mashumaro.mixins.orjson import DataClassORJSONMixin
 
-from .types import AudioCodec, PlayerCommand, PlayerStateType
+from .types import AudioCodec, PlayerCommand
 
 
 # Client -> Server client/hello player support object
@@ -74,7 +74,7 @@ class PlayerStatePayload(DataClassORJSONMixin):
 
     # DEPRECATED(before-spec-pr-50): Remove once all clients send state at client level.
     # State should now be sent at the ClientStatePayload level, not in the player object.
-    state: PlayerStateType | None = None
+    state: str | None = None
     """
     State of the player - should always be 'synchronized' unless there is
     an error preventing current or future playback (unable to keep up,

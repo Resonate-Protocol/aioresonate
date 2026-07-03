@@ -23,7 +23,6 @@ from aiosendspin.models.core import (
 from aiosendspin.models.player import ClientHelloPlayerSupport, SupportedAudioFormat
 from aiosendspin.models.types import (
     AudioCodec,
-    ClientStateType,
     MediaCommand,
     PlaybackStateType,
     PlayerCommand,
@@ -144,7 +143,7 @@ async def test_external_source_moves_player_only_client_out_of_multi_group() -> 
     shared_group_id = shared_group.group_id
 
     conn_a.sent_messages.clear()
-    await player_a.handle_state_transition(ClientStateType.EXTERNAL_SOURCE)
+    await player_a.handle_availability_change(available=False)
 
     # Player A left the shared group, landed in a solo group.
     assert player_a not in shared_group.clients
@@ -170,7 +169,7 @@ async def test_external_source_in_solo_group_stops_playback() -> None:
     group.start_stream()
     assert group.state == PlaybackStateType.PLAYING
 
-    await player.handle_state_transition(ClientStateType.EXTERNAL_SOURCE)
+    await player.handle_availability_change(available=False)
 
     # Same solo group, now stopped.
     assert player.group is group
@@ -198,12 +197,12 @@ async def test_switch_after_external_source_rejoins_previous_group() -> None:
     shared_group_id = shared_group.group_id
 
     # Enter external_source — moved to solo, previous group remembered.
-    await client.handle_state_transition(ClientStateType.EXTERNAL_SOURCE)
+    await client.handle_availability_change(available=False)
     assert client._previous_group_id == shared_group_id  # noqa: SLF001
     assert client.group is not shared_group
 
     # Leave external_source.
-    await client.handle_state_transition(ClientStateType.SYNCHRONIZED)
+    await client.handle_availability_change(available=True)
 
     # Switch command should rejoin the previous (shared) group.
     await client.handle_switch_command()
@@ -229,7 +228,7 @@ async def test_switch_while_in_external_source_is_ignored() -> None:
     other_group = other.group
     other_group.start_stream()
 
-    await client.handle_state_transition(ClientStateType.EXTERNAL_SOURCE)
+    await client.handle_availability_change(available=False)
     group_before = client.group
 
     await client.handle_switch_command()

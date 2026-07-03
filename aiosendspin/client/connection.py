@@ -63,7 +63,6 @@ from aiosendspin.models.types import (
     PairAbortReason,
     PairMethod,
     PlayerCommand,
-    PlayerStateType,
     Roles,
     ServerMessage,
     TrustLevel,
@@ -225,7 +224,7 @@ class SendspinConnection:
         self._client = client
         self._activities: list[Activity] = []
         self._active_roles: list[str] = []
-        self._reported_state: PlayerStateType = PlayerStateType.SYNCHRONIZED
+        self._reported_available: bool = True
         self._reported_volume = client.initial_volume
         self._reported_muted = client.initial_muted
         self._selected_pair_method: PairMethod | None = None
@@ -457,7 +456,7 @@ class SendspinConnection:
         if Roles.PLAYER not in self._client.roles or not self._is_role_active("player"):
             return
         await self.send_player_state(
-            state=self._reported_state,
+            available=self._reported_available,
             volume=self._reported_volume,
             muted=self._reported_muted,
         )
@@ -719,27 +718,27 @@ class SendspinConnection:
     async def send_player_state(
         self,
         *,
-        state: PlayerStateType,
+        available: bool,
         volume: int,
         muted: bool,
     ) -> None:
         """Send the current player state to the server."""
         if not self.connected:
             raise RuntimeError("Client is not connected")
-        self._reported_state = state
+        self._reported_available = available
         self._reported_volume = volume
         self._reported_muted = muted
         message = ClientStateMessage(
             payload=ClientStatePayload(
+                available=available,
                 player=PlayerStatePayload(
-                    state=state,
                     volume=volume,
                     muted=muted,
                     static_delay_ms=round(self._static_delay_us / 1_000),
                     required_lead_time_ms=round(self._client.required_lead_time_ms),
                     min_buffer_ms=round(self._client.min_buffer_ms),
                     supported_commands=self._client.state_supported_commands or None,
-                )
+                ),
             )
         )
         await self._send_message(message.to_json())

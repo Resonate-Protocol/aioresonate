@@ -34,7 +34,6 @@ from .player import (
 from .types import (
     Activity,
     ClientMessage,
-    ClientStateType,
     ConnectionReason,
     GoodbyeReason,
     PairMethod,
@@ -281,17 +280,23 @@ class ClientTimeMessage(ClientMessage):
 class ClientStatePayload(DataClassORJSONMixin):
     """Client sends state updates to the server."""
 
-    state: ClientStateType | None = None
+    available: bool | None = None
     """
-    Client operational state.
+    Whether the client is available to participate in Sendspin playback.
 
-    - 'synchronized': Client is operational and synchronized with server timestamps.
-    - 'error': Client has a problem preventing normal operation.
-    - 'external_source': Client is in use by an external system and cannot participate
-      in Sendspin playback.
+    - true: operational and ready; for a player, its clock is synchronized.
+    - false: output is in use by an external system, not currently participating.
     """
     player: PlayerStatePayload | None = None
     """Player state - only if client has player role."""
+
+    @classmethod
+    def __pre_deserialize__(cls, d: dict[str, Any]) -> dict[str, Any]:
+        """Normalize a legacy `state` enum to `available` (only external_source is unavailable)."""
+        if d.get("available") is None and "state" in d:
+            d = dict(d)
+            d["available"] = d["state"] != "external_source"
+        return d
 
     class Config(BaseConfig):
         """Config for parsing json messages."""
