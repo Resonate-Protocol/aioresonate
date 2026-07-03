@@ -1068,6 +1068,18 @@ def test_refresh_pitch_setting_noop_when_unchanged() -> None:
     assert _stream_start_count(client) == before
 
 
+async def test_visualizer_pitch_disabled_by_default() -> None:
+    """Pitch is off by default; emitting reserved type 21 is opt-in and non-spec."""
+    server = SendspinServer(
+        asyncio.get_running_loop(),
+        Identity.generate(),
+        "Srv",
+        MagicMock(),
+        pairing_store=MagicMock(),
+    )
+    assert server.visualizer_pitch_enabled is False
+
+
 async def test_server_set_pitch_enabled_fans_out_to_roles() -> None:
     """SendspinServer.set_visualizer_pitch_enabled refreshes every active role once."""
     server = SendspinServer(
@@ -1084,13 +1096,12 @@ async def test_server_set_pitch_enabled_fans_out_to_roles() -> None:
     client.active_roles = [role, other]
     server._clients["c1"] = client  # noqa: SLF001
 
+    server.set_visualizer_pitch_enabled(enabled=True)
     assert server.visualizer_pitch_enabled is True
-    server.set_visualizer_pitch_enabled(enabled=False)
-    assert server.visualizer_pitch_enabled is False
     role.refresh_pitch_setting.assert_called_once()
 
     role.refresh_pitch_setting.reset_mock()
-    server.set_visualizer_pitch_enabled(enabled=False)  # idempotent
+    server.set_visualizer_pitch_enabled(enabled=True)  # idempotent
     role.refresh_pitch_setting.assert_not_called()
 
 
