@@ -598,7 +598,8 @@ class VisualizerV1Role(Role):
             if last is not None and beat.timestamp_us <= last:
                 continue
             self._reserve_wire_ts(beat.timestamp_us)
-            flags = FLAG_DOWNBEAT if beat.is_downbeat else 0
+            # The downbeat bit is only meaningful when the role tracks downbeats.
+            flags = FLAG_DOWNBEAT if beat.is_downbeat and self._tracks_downbeats else 0
             message = pack_visualizer_frame(
                 BinaryMessageType.VISUALIZATION_BEAT, beat.timestamp_us, bytes((flags,))
             )

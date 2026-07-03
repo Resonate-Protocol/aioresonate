@@ -22,6 +22,7 @@ from aiosendspin.models.visualizer import (
 )
 from aiosendspin.noise.keys import Identity
 from aiosendspin.server.roles.base import AudioChunk
+from aiosendspin.server.roles.visualizer.packing import FLAG_DOWNBEAT
 from aiosendspin.server.roles.visualizer.v1 import VisualizerV1Role
 from aiosendspin.server.server import SendspinServer
 from tests.server.roles.visualizer.conftest import sine_pcm_16bit
@@ -437,6 +438,36 @@ def test_beats_drain_on_next_audio_chunk() -> None:
     assert beat_ts == [500_000, 1_500_000]
 
 
+def test_downbeat_flag_masked_when_not_tracking_downbeats() -> None:
+    """The downbeat bit must be 0 when the role does not track downbeats."""
+    client = _make_beat_client_stub()
+    role = VisualizerV1Role(client=client)
+    role.set_tracks_downbeats(tracks=False)
+    role.on_connect()
+    role.on_stream_start()
+    role.append_beats([BeatTiming(500_000, is_downbeat=True)])
+    role.on_audio_chunk(_audio_chunk(1_000_000))
+
+    calls = _beat_calls(client)
+    assert len(calls) == 1
+    assert calls[0].args[0][-1] & FLAG_DOWNBEAT == 0
+
+
+def test_downbeat_flag_set_when_tracking_downbeats() -> None:
+    """A downbeat sets the bit when the role tracks downbeats."""
+    client = _make_beat_client_stub()
+    role = VisualizerV1Role(client=client)
+    role.set_tracks_downbeats(tracks=True)
+    role.on_connect()
+    role.on_stream_start()
+    role.append_beats([BeatTiming(500_000, is_downbeat=True)])
+    role.on_audio_chunk(_audio_chunk(1_000_000))
+
+    calls = _beat_calls(client)
+    assert len(calls) == 1
+    assert calls[0].args[0][-1] & FLAG_DOWNBEAT == FLAG_DOWNBEAT
+
+
 def test_beats_interleave_with_periodic_frames_in_ts_order() -> None:
     """All wire timestamps stay non-decreasing across periodic + beat frames."""
     client = _make_beat_client_stub()
@@ -457,6 +488,7 @@ def test_beat_binary_layout() -> None:
     """`beat` binary: [17][ts:8][flags:1] = 10 bytes."""
     client = _make_beat_client_stub()
     role = VisualizerV1Role(client=client)
+    role.set_tracks_downbeats(tracks=True)  # so the downbeat bit is exposed
     role.on_connect()
     role.on_stream_start()
     role.append_beats(
