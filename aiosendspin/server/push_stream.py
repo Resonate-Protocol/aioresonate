@@ -1695,21 +1695,24 @@ class PushStream:
 
             # Deliver live chunks directly; connection layer enforces late-drop/backpressure.
             roles = roles_by_transform.get(tkey, [])
+            # Share one AudioChunk across roles so its packed frame is built once.
+            audio_chunks = [
+                AudioChunk(
+                    data=cached_chunk.payload,
+                    timestamp_us=cached_chunk.timestamp_us,
+                    duration_us=cached_chunk.duration_us,
+                    byte_count=cached_chunk.byte_count,
+                )
+                for cached_chunk in cached_for_key
+            ]
             for role in roles:
                 if role not in active_roles:
                     continue
                 self._ensure_role_started(role)
                 if role not in self._started_roles:
                     continue
-                for cached_chunk in cached_for_key:
-                    role.on_audio_chunk(
-                        AudioChunk(
-                            data=cached_chunk.payload,
-                            timestamp_us=cached_chunk.timestamp_us,
-                            duration_us=cached_chunk.duration_us,
-                            byte_count=cached_chunk.byte_count,
-                        )
-                    )
+                for audio_chunk in audio_chunks:
+                    role.on_audio_chunk(audio_chunk)
 
         return cache_results
 
