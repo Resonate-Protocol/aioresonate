@@ -47,6 +47,18 @@ def test_count_zero_branch_seeds_offset_from_first_sample() -> None:
     assert filter_._drift == 0.0
 
 
+def test_zero_error_measurements_do_not_divide_by_zero() -> None:
+    """Repeated zero-error loopback measurements must not raise ZeroDivisionError."""
+    filter_ = SendspinTimeFilter()  # default process_std_dev=0.0
+
+    t = 1_000_000
+    for _ in range(5):
+        filter_.update(measurement=0, max_error=0, time_added=t)
+        t += 1_000_000
+
+    assert filter_.count == 5
+
+
 def test_count_one_branch_estimates_drift_from_two_point_slope() -> None:
     """Second update estimates drift from the two-point slope."""
     filter_ = SendspinTimeFilter()

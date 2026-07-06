@@ -187,7 +187,8 @@ class SendspinTimeFilter:
 
         ### Kalman Update Step ###
         # Innovation covariance: S = H * P * H^T + R, where H = [1, 0]
-        uncertainty: float = 1.0 / (new_offset_covariance + measurement_variance)
+        # Floor the denominator so zero-error loopback can't divide by zero.
+        uncertainty: float = 1.0 / max(new_offset_covariance + measurement_variance, 1e-9)
 
         # Kalman gain: K = P * H^T * S^(-1)
         offset_gain: float = new_offset_covariance * uncertainty
