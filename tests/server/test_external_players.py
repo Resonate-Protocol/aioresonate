@@ -569,6 +569,69 @@ async def test_reclaim_timeout_full_unregisters_disconnected_client(
 
 
 @pytest.mark.asyncio
+async def test_full_unregister_skips_client_with_reconnect_in_flight() -> None:
+    """A reconnect handshake in flight keeps the client until it attaches or fails."""
+    server = _make_server()
+    server.get_or_create_client("reconnecting")
+    url = "ws://127.0.0.1:9003/sendspin"
+    server.register_client_url("reconnecting", url)
+
+    async def _never() -> None:
+        await asyncio.Event().wait()
+
+    task = asyncio.get_running_loop().create_task(_never())
+    server._connection_tasks[url] = task  # noqa: SLF001
+    try:
+        await server._full_unregister_disconnected_client("reconnecting")  # noqa: SLF001
+        assert server.get_client("reconnecting") is not None
+    finally:
+        task.cancel()
+
+
+async def _defer_unregister_with_task(server: SendspinServer, client_id: str, url: str) -> None:
+    """Register a client and defer its unregister behind an in-flight reconnect task."""
+    server.get_or_create_client(client_id)
+    server.register_client_url(client_id, url)
+    task = asyncio.get_running_loop().create_task(asyncio.Event().wait())
+    server._connection_tasks[url] = task  # noqa: SLF001
+    try:
+        await server._full_unregister_disconnected_client(client_id)  # noqa: SLF001
+        assert server.get_client(client_id) is not None
+    finally:
+        task.cancel()
+    server._connection_tasks.pop(url, None)  # noqa: SLF001
+
+
+@pytest.mark.asyncio
+async def test_deferred_unregister_completes_when_reconnect_gives_up() -> None:
+    """A deferred unregister fires once the reconnect task ends without connecting."""
+    server = _make_server()
+    url = "ws://127.0.0.1:9004/sendspin"
+    await _defer_unregister_with_task(server, "reconnecting", url)
+
+    await server._complete_deferred_unregister(  # noqa: SLF001
+        url, connection_succeeded=False, cancelled=False
+    )
+
+    assert server.get_client("reconnecting") is None
+    assert server.get_client_url("reconnecting") is None
+
+
+@pytest.mark.asyncio
+async def test_deferred_unregister_suppressed_when_reconnect_attaches() -> None:
+    """A deferred unregister is dropped, not fired, when the reconnect established a session."""
+    server = _make_server()
+    url = "ws://127.0.0.1:9005/sendspin"
+    await _defer_unregister_with_task(server, "reconnecting", url)
+
+    await server._complete_deferred_unregister(  # noqa: SLF001
+        url, connection_succeeded=True, cancelled=False
+    )
+
+    assert server.get_client("reconnecting") is not None
+
+
+@pytest.mark.asyncio
 async def test_reclaim_timeout_refreshes_on_repeated_requests(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
