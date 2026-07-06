@@ -105,6 +105,17 @@ def test_artwork_role_on_deactivate_sends_stream_end_when_started() -> None:
     assert any(isinstance(m, StreamEndMessage) and m.payload.roles == ["artwork"] for m in sent)
 
 
+def test_artwork_role_on_deactivate_clears_stream_started() -> None:
+    """on_deactivate() resets _stream_started so a reused instance holds no stale flag."""
+    client = _make_client_stub_with_channel()
+    role = ArtworkV1Role(client=client)
+    role.on_connect()
+
+    role.on_deactivate()
+
+    assert role._stream_started is False  # noqa: SLF001
+
+
 def test_artwork_role_on_deactivate_noop_without_stream() -> None:
     """on_deactivate() sends nothing when no stream/start was ever sent."""
     client = _make_client_stub()  # no artwork_support -> no stream/start
