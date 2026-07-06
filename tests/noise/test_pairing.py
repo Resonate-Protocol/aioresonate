@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Sequence
+from dataclasses import replace
 from datetime import UTC, datetime
 
 import pytest
@@ -440,6 +441,46 @@ async def test_dynamic_pin_length_below_client_floor_aborts() -> None:
     assert excinfo.value.reason is PairAbortReason.PIN_LENGTH_UNACCEPTABLE
     assert emitted == []  # no PIN emitted on a length rejection
     assert await client_store.pin_failure_count(PairMethod.DYNAMIC_PIN) == 0
+    assert _added_records(await client_store.list_records()) == []
+    assert await server_store.record_by_client_id("client-A") is None
+
+
+async def test_dynamic_pin_length_below_spec_minimum_aborts() -> None:
+    """A config min under MIN_PIN_DIGITS still aborts cleanly rather than raising ValueError."""
+    client_ews, server_ews, _client_raw, _server_raw = _paired_encrypted_ws()
+    client_store = InMemoryClientPairingStore()
+    cfg = await client_store.get_pairing_config()
+    await client_store.store_pairing_config(replace(cfg, dynamic_pin_min_length=2))
+    server_store = InMemoryServerPairingStore()
+
+    async def emit(pin: str) -> None:
+        pass
+
+    async def provide() -> str:
+        return "00"
+
+    with pytest.raises(PairingAbortError) as excinfo:
+        await asyncio.gather(
+            run_dynamic_pin_client(
+                client_ews,
+                handshake_hash=_HANDSHAKE_HASH,
+                pairing_index=0,
+                pin_emitter=emit,
+                server_id="server-X",
+                store=client_store,
+            ),
+            run_dynamic_pin_server(
+                server_ews,
+                handshake_hash=_HANDSHAKE_HASH,
+                pairing_index=0,
+                pin_length=2,
+                pin_provider=provide,
+                client_id="client-A",
+                store=server_store,
+            ),
+        )
+
+    assert excinfo.value.reason is PairAbortReason.PIN_LENGTH_UNACCEPTABLE
     assert _added_records(await client_store.list_records()) == []
     assert await server_store.record_by_client_id("client-A") is None
 
