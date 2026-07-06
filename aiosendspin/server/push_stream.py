@@ -202,7 +202,7 @@ def _encode_for_transform_key(
     output_ts: int,
     duration_us: int,
 ) -> list[tuple[bytes, int, int]]:
-    """Encode PCM for a single TransformKey. Thread-safe (no shared state)."""
+    """Encode PCM for a single TransformKey."""
     if transformer is None:
         return [(pcm_data, output_ts, duration_us)]
 
@@ -1597,7 +1597,7 @@ class PushStream:
     ) -> dict[TransformKey, list[CachedChunk]]:
         """Transform PCM, deliver live chunks to roles, and return cache results.
 
-        Encoding is parallelized across unique TransformKeys via a thread pool.
+        Encoding runs sequentially on the event loop, yielding every few keys.
         """
         # Collect unique encoding tasks: tkey -> (transformer, pcm_data, output_ts, duration_us)
         encode_tasks: dict[TransformKey, tuple[AudioTransformer | None, bytes, int, int]] = {}
