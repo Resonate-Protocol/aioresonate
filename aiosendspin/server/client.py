@@ -267,7 +267,8 @@ class SendspinClient:
         old_available = self._available
         self._available = available
 
-        for role in self._roles.values():
+        # Snapshot: an awaited hook can trigger a cold reconnect that rebuilds _roles.
+        for role in list(self._roles.values()):
             coro = role.on_availability_changed(old_available, available)
             if coro is not None:
                 await coro
