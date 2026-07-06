@@ -8,7 +8,7 @@ from unittest.mock import MagicMock
 from uuid import UUID
 
 from aiosendspin.models.player import ClientHelloPlayerSupport, SupportedAudioFormat
-from aiosendspin.models.types import AudioCodec, PlayerCommand
+from aiosendspin.models.types import AudioCodec, GoodbyeReason, PlayerCommand
 from aiosendspin.server.audio_transformers import TransformerPool
 from aiosendspin.server.channels import MAIN_CHANNEL
 from aiosendspin.server.client import SendspinClient
@@ -165,9 +165,29 @@ class TestClientRoles:
         assert len(roles) == 1
         assert roles[0] is client.role("player@v1")
 
+    def test_active_roles_cache_invalidated_on_hard_detach(self, mock_loop: Any) -> None:
+        """The cached active_roles tuple reflects a hard detach that clears roles."""
+        server = _DummyServer(loop=mock_loop, clock=LoopClock(mock_loop))
+        group = _DummyGroup(clients=[])
+        client = SendspinClient(server, client_id="test")
+        client._group = group  # noqa: SLF001
+        group.clients.append(client)
+
+        client.attach_connection(
+            _FakeConnection(),
+            client_info=_make_client_hello(),
+            negotiated_roles=["player@v1"],
+            active_roles=["player@v1"],
+        )
+        assert len(client.active_roles) == 1  # populate the cache
+
+        client.detach_connection(GoodbyeReason.SHUTDOWN)
+
+        assert client.active_roles == ()
+
     def test_active_roles_empty_when_no_roles(self, mock_loop: Any) -> None:
-        """active_roles returns empty list when no roles active."""
+        """active_roles returns an empty tuple when no roles active."""
         server = _DummyServer(loop=mock_loop, clock=LoopClock(mock_loop))
         client = SendspinClient(server, client_id="test")
 
-        assert client.active_roles == []
+        assert client.active_roles == ()

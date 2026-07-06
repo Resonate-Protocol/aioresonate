@@ -99,6 +99,8 @@ class SendspinClient:
         self._info: ClientHelloPayload | None = None
         self._negotiated_role_ids: list[str] = []
         self._roles: dict[str, Role] = {}
+        # Cached tuple of active roles, rebuilt when the role set changes.
+        self._active_roles: tuple[Role, ...] | None = None
         self._group: SendspinGroup | None = None
 
         self._connection: SendspinConnection | None = None
@@ -167,9 +169,11 @@ class SendspinClient:
         return self._negotiated_role_ids
 
     @property
-    def active_roles(self) -> list[Role]:
+    def active_roles(self) -> tuple[Role, ...]:
         """All active role instances for iteration."""
-        return list(self._roles.values())
+        if self._active_roles is None:
+            self._active_roles = tuple(self._roles.values())
+        return self._active_roles
 
     @property
     def active_role_ids(self) -> list[str]:
@@ -695,6 +699,7 @@ class SendspinClient:
             for role in self._roles.values():
                 role.on_disconnect()
         self._roles.clear()
+        self._active_roles = None
         self._binary_handling_cache.clear()
         self._roles_cold_preinitialized = False
         self._roles_attached = False
@@ -715,6 +720,7 @@ class SendspinClient:
 
     def _rebuild_binary_handling_cache(self) -> None:
         """Build binary handling cache for fast lookup."""
+        self._active_roles = None
         self._binary_handling_cache.clear()
         for msg_type in BinaryMessageType:
             for role in self._roles.values():
