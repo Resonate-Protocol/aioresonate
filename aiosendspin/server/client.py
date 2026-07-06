@@ -441,10 +441,7 @@ class SendspinClient:
     ) -> None:
         """Attach a new WebSocket connection to this client."""
         # Cancel pending cleanup if client reconnected before cleanup fired
-        if self._cleanup_handle is not None:
-            self._logger.debug("Cancelling pending cleanup due to reconnect")
-            self._cleanup_handle.cancel()
-            self._cleanup_handle = None
+        self._cancel_cleanup()
 
         if self._connection is not None and self._connection is not connection:
             # Replace an existing connection for the same device.
@@ -574,6 +571,8 @@ class SendspinClient:
                 f"Cannot cold-preinitialize roles for {self._client_id!r} while connected"
             )
 
+        # Disarm a pending cleanup so a just-registered client isn't removed.
+        self._cancel_cleanup()
         self._hard_detach_roles(call_disconnect_hooks=self._roles_attached)
         self._set_identity_from_hello(client_info)
         self._roles_warm_disconnected = False
@@ -642,6 +641,13 @@ class SendspinClient:
                 self._client_id,
                 old_group_id,
             )
+
+    def _cancel_cleanup(self) -> None:
+        """Disarm a pending registry-cleanup timer, if one is armed."""
+        if self._cleanup_handle is not None:
+            self._logger.debug("Cancelling pending cleanup")
+            self._cleanup_handle.cancel()
+            self._cleanup_handle = None
 
     def _schedule_cleanup(self, goodbye_reason: GoodbyeReason | None) -> None:
         """Schedule cleanup from server registry based on disconnect reason."""

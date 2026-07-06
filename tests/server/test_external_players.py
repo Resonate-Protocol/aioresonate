@@ -783,3 +783,29 @@ async def test_info_accessors_before_and_after_hello() -> None:
 
     assert client.info_or_none is hello
     assert client.info is hello
+
+
+@pytest.mark.asyncio
+async def test_register_external_player_cancels_pending_cleanup() -> None:
+    """Registering just after a warm disconnect disarms the pending cleanup timer."""
+    server = _make_server()
+    client = server.get_or_create_client("late-register")
+    client.attach_connection(
+        _DummyConnection(),
+        client_info=_player_hello("late-register"),
+        negotiated_roles=[Roles.PLAYER.value],
+        active_roles=[Roles.PLAYER.value],
+    )
+    client.mark_connected()
+
+    # Warm disconnect arms the delayed registry-cleanup timer.
+    client.detach_connection(goodbye_reason=None)
+    assert client._cleanup_handle is not None  # noqa: SLF001
+
+    server.register_external_player(
+        _player_hello("late-register"),
+        on_stream_start=lambda _req: None,
+    )
+
+    assert client._cleanup_handle is None  # noqa: SLF001
+    assert server.get_client("late-register") is client
