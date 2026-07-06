@@ -500,8 +500,7 @@ def _resample_pcm_standalone(  # noqa: PLR0915
     output_sample_count = 0
     for out_frame in out_frames:
         expected = resampler_state.target_av_frame_stride * out_frame.samples
-        pcm_bytes = bytes(out_frame.planes[0])[:expected]
-        out_pcm.extend(pcm_bytes)
+        out_pcm.extend(memoryview(out_frame.planes[0])[:expected])
         output_sample_count += out_frame.samples
 
     output_start_ts = resampler_state.pending_timestamp_us
@@ -553,8 +552,7 @@ def _flush_resampler(resampler_state: _ResamplerState) -> _ResampledPCM:
     output_sample_count = 0
     for out_frame in out_frames:
         expected = resampler_state.target_av_frame_stride * out_frame.samples
-        pcm_bytes = bytes(out_frame.planes[0])[:expected]
-        out_pcm.extend(pcm_bytes)
+        out_pcm.extend(memoryview(out_frame.planes[0])[:expected])
         output_sample_count += out_frame.samples
 
     if output_sample_count > 0:
