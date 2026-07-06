@@ -631,11 +631,11 @@ class SendspinClient:
         self._roles_attached = False
 
     async def _handle_takeover_disconnect(self) -> None:
-        """Handle ANOTHER_SERVER disconnect by ungrouping first, then stopping."""
+        """Handle ANOTHER_SERVER disconnect by ungrouping the client from its group."""
         old_group_id = self.group.group_id
         try:
+            # ungroup() already leaves the client in a fresh stopped solo group.
             await self.ungroup()
-            await self.group.stop()
         except Exception:
             self._logger.exception(
                 "Takeover disconnect sequence failed for %s (old_group=%s)",

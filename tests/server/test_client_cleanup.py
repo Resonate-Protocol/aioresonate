@@ -162,37 +162,30 @@ async def test_no_cleanup_on_another_server_disconnect(
 
 
 @pytest.mark.asyncio
-async def test_another_server_disconnect_runs_ungroup_then_stop(
+async def test_another_server_disconnect_ungroups_client(
     mock_server: _MockServer, client: SendspinClient
 ) -> None:
-    """Takeover disconnect runs ungroup before stop."""
+    """Takeover disconnect ungroups the client out of its shared group."""
     other = SendspinClient(mock_server, client_id="player-2")
     SendspinGroup(mock_server, other)
     await client.group.add_client(other)
+    shared_group = client.group
 
-    call_order: list[str] = []
+    ungroup_calls: list[str] = []
+    original_ungroup = client.ungroup
 
     async def _record_ungroup() -> None:
-        call_order.append("ungroup")
+        ungroup_calls.append("ungroup")
         await original_ungroup()
 
-    async def _record_stop(group: SendspinGroup) -> bool:
-        if client in group.clients:
-            call_order.append("stop")
-        return await original_stop(group)
-
-    original_ungroup = client.ungroup
-    original_stop = SendspinGroup.stop
     client.ungroup = _record_ungroup  # type: ignore[method-assign]
-    SendspinGroup.stop = _record_stop  # type: ignore[method-assign]
 
-    try:
-        client.detach_connection(GoodbyeReason.ANOTHER_SERVER)
-        await asyncio.sleep(0)
-    finally:
-        SendspinGroup.stop = original_stop  # type: ignore[method-assign]
+    client.detach_connection(GoodbyeReason.ANOTHER_SERVER)
+    await asyncio.sleep(0)
 
-    assert call_order == ["ungroup", "stop"]
+    assert ungroup_calls == ["ungroup"]
+    assert client.group is not shared_group
+    assert client.group.clients == [client]
 
 
 @pytest.mark.asyncio
