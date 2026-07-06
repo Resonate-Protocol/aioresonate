@@ -34,10 +34,21 @@ from aiosendspin.noise.keys import Identity
 from aiosendspin.noise.pairing import PairingError
 from aiosendspin.noise.trust_store import ClientPairingStore, ResolvedPsk
 
-from .connection import UNSYNCED_PLAY_LEAD_US, SendspinConnection
+from .connection import DECODABLE_CODECS, UNSYNCED_PLAY_LEAD_US, SendspinConnection
 from .models import AudioFormat, ServerInfo
 
 logger = logging.getLogger(__name__)
+
+
+def _validate_decodable_formats(player_support: ClientHelloPlayerSupport) -> None:
+    """Reject advertised codecs the SDK cannot decode."""
+    undecodable = {f.codec for f in player_support.supported_formats}.difference(DECODABLE_CODECS)
+    if undecodable:
+        names = ", ".join(sorted(c.value for c in undecodable))
+        raise ValueError(
+            f"player_support advertises codecs the SDK cannot decode ({names}); "
+            "only PCM and FLAC are supported"
+        )
 
 
 # Callback invoked when server state metadata updates are received.
@@ -202,6 +213,7 @@ class SendspinClient:
         if Roles.PLAYER in self._roles:
             if player_support is None:
                 raise ValueError("player_support is required when PLAYER role is specified")
+            _validate_decodable_formats(player_support)
             self._player_support = player_support
         else:
             self._player_support = None

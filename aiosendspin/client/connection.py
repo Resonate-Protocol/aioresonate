@@ -113,6 +113,9 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# Codecs the SDK can decode. Anything else would be silently dropped.
+DECODABLE_CODECS = (AudioCodec.PCM, AudioCodec.FLAC)
+
 _ManagementRequest = (
     ManagementListRecordsMessage
     | ManagementAddRecordMessage
@@ -1035,7 +1038,7 @@ class SendspinConnection:
                 logger.debug("Stream start message without player payload")
             return
 
-        if player.codec not in (AudioCodec.PCM, AudioCodec.FLAC):
+        if player.codec not in DECODABLE_CODECS:
             logger.error(
                 "Unsupported codec '%s' - only PCM and FLAC are supported", player.codec.value
             )
