@@ -844,9 +844,10 @@ class SendspinConnection:
         await self._send_message(message.to_json())
 
     async def _send_message(self, payload: str) -> None:
-        if self._ws is None:
-            raise RuntimeError("WebSocket is not connected")
         async with self._send_lock:
+            # Re-check under the lock: disconnect() can null _ws while we await it.
+            if self._ws is None:
+                raise RuntimeError("WebSocket is not connected")
             if self._exchange_in_progress:
                 return
             await self._ws.send_str(payload)
