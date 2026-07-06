@@ -658,6 +658,18 @@ class SendspinServer:
         if handle is not None:
             handle.cancel()
 
+    def _cancel_all_timers(self) -> None:
+        """Disarm all pending registry timers."""
+        for handle in (
+            *self._external_registration_timeouts.values(),
+            *self._reclaim_timeouts.values(),
+        ):
+            handle.cancel()
+        self._external_registration_timeouts.clear()
+        self._reclaim_timeouts.clear()
+        for client in self._clients.values():
+            client._cancel_cleanup()  # noqa: SLF001
+
     def _schedule_external_registration_timeout(self, client_id: str, timeout_s: float) -> None:
         """Schedule full unregister if an externally registered client never connects."""
         self._cancel_external_registration_timeout(client_id)
@@ -933,6 +945,9 @@ class SendspinServer:
                     await wsock.close()
             except TimeoutError:
                 logger.debug("Timeout while closing pending client websocket")
+            except RuntimeError:
+                # Not past wsock.prepare() yet, nothing to close.
+                logger.debug("Pending client websocket not prepared, skipping close")
 
         disconnect_tasks: list[asyncio.Task[None]] = []
         for client in self._clients.values():
@@ -943,6 +958,9 @@ class SendspinServer:
             )
         if disconnect_tasks:
             await asyncio.gather(*disconnect_tasks, return_exceptions=True)
+
+        # Disarm timers after disconnect, which re-arms per-client cleanup.
+        self._cancel_all_timers()
 
         await self.stop_server()
         if self._owns_session and not self._client_session.closed:
