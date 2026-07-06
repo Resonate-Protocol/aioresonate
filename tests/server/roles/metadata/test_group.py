@@ -89,6 +89,20 @@ def test_metadata_group_role_clear_metadata() -> None:
     assert isinstance(event, MetadataClearedEvent)
 
 
+def test_metadata_group_role_clear_when_already_cleared_is_noop() -> None:
+    """Clearing already-cleared metadata sends nothing and emits no event."""
+    group = _make_group_stub()
+    mgr = MetadataGroupRole(group)
+
+    member = MagicMock()
+    mgr._members = [member]  # noqa: SLF001
+
+    mgr.clear()
+
+    member.send_message.assert_not_called()
+    group._signal_event.assert_not_called()  # noqa: SLF001
+
+
 def test_metadata_group_role_update_title() -> None:
     """update() updates only the title field."""
     group = _make_group_stub()
