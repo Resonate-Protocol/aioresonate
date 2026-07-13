@@ -92,6 +92,16 @@ class _MockServer:
             SendspinGroup(self, client)
         return client
 
+    def _signal_client_connected(self, client_id: str) -> None:
+        pass
+
+    def _signal_client_disconnected(self, client_id: str, goodbye_reason: object = None) -> None:
+        pass
+
+    def _signal_client_reconnected(self, client_id: str) -> None:
+        pass
+
+
 
 class _DummyConnection:
     def __init__(self) -> None:

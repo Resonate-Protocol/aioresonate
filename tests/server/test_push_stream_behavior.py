@@ -52,6 +52,16 @@ class _DummyServer:
     def is_external_player(self, client_id: str) -> bool:  # noqa: ARG002
         return False
 
+    def _signal_client_connected(self, client_id: str) -> None:
+        pass
+
+    def _signal_client_disconnected(self, client_id: str, goodbye_reason: object = None) -> None:
+        pass
+
+    def _signal_client_reconnected(self, client_id: str) -> None:
+        pass
+
+
 
 class _DummyGroup:
     def __init__(self, clients: list[SendspinClient]) -> None:

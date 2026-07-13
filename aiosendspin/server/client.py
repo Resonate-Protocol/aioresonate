@@ -478,9 +478,14 @@ class SendspinClient:
             on_transport_attached(self._client_id)
 
         previous_info = self._info
+        previous_roles = list(self._negotiated_role_ids)
         self._set_identity_from_hello(client_info, negotiated_roles=negotiated_roles)
+        self._server._signal_client_connected(self._client_id)  # noqa: SLF001
         if previous_info is not None and previous_info != client_info:
             self._server._signal_client_updated(self._client_id)  # noqa: SLF001
+        elif previous_info is not None:
+            # Client reconnected with unchanged hello payload
+            self._server._signal_client_reconnected(self._client_id)  # noqa: SLF001
         self._logger = logger.getChild(self._client_id)
         if not self._roles_warm_disconnected and not self._roles_cold_preinitialized:
             # First attach for this device: clear stale state, then reconcile from empty.
@@ -636,6 +641,10 @@ class SendspinClient:
             self._roles_warm_disconnected = False
 
         self._connection = None
+
+        self._server._signal_client_disconnected(  # noqa: SLF001
+            self._client_id, goodbye_reason
+        )
 
         if goodbye_reason == GoodbyeReason.ANOTHER_SERVER:
             create_task(self._handle_takeover_disconnect())
