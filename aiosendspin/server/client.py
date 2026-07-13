@@ -110,6 +110,7 @@ class SendspinClient:
         self._roles_warm_disconnected: bool = False
         self._roles_cold_preinitialized: bool = False
         self._roles_attached: bool = False
+        self._has_ever_attached: bool = False
 
         self.disconnect_behaviour = DisconnectBehaviour.UNGROUP
 
@@ -483,9 +484,10 @@ class SendspinClient:
         self._server._signal_client_connected(self._client_id)  # noqa: SLF001
         if previous_info is not None and previous_info != client_info:
             self._server._signal_client_updated(self._client_id)  # noqa: SLF001
-        elif previous_info is not None:
+        elif previous_info is not None and self._has_ever_attached:
             # Client reconnected with unchanged hello payload
             self._server._signal_client_reconnected(self._client_id)  # noqa: SLF001
+        self._has_ever_attached = True
         self._logger = logger.getChild(self._client_id)
         if not self._roles_warm_disconnected and not self._roles_cold_preinitialized:
             # First attach for this device: clear stale state, then reconcile from empty.
