@@ -51,7 +51,7 @@ logger = logging.getLogger(__name__)
 _T = TypeVar("_T")
 
 # Cleanup delay for reconnect-friendly disconnect reasons (seconds)
-CLIENT_CLEANUP_DELAY = 30.0
+CLIENT_CLEANUP_DELAY = 180.0
 
 # Reasons that trigger immediate client cleanup from the registry.
 # Note: ANOTHER_SERVER is intentionally excluded and never auto-cleaned up.
