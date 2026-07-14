@@ -6,6 +6,7 @@ import asyncio
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from aiohttp import web
 
 from aiosendspin.models.core import ClientHelloPayload
 from aiosendspin.models.player import ClientHelloPlayerSupport, SupportedAudioFormat
@@ -62,15 +63,19 @@ def _player_hello(client_id: str) -> ClientHelloPayload:
 
 
 @pytest.mark.asyncio
-async def test_close_tolerates_unprepared_pending_connection() -> None:
-    """A pending connection not past wsock.prepare() must not abort close()."""
+async def test_close_skips_unprepared_pending_connection() -> None:
+    """A pending connection not past wsock.prepare() is skipped, not closed."""
     server = _make_server()
     conn = MagicMock()
+    conn.websocket_connection = MagicMock(spec=web.WebSocketResponse)
     conn.websocket_connection.closed = False
-    conn.websocket_connection.close = AsyncMock(side_effect=RuntimeError("Call .prepare() first"))
+    conn.websocket_connection.prepared = False
+    conn.websocket_connection.close = AsyncMock()
     server._pending_connections.add(conn)  # noqa: SLF001
 
     await server.close()  # must not raise
+
+    conn.websocket_connection.close.assert_not_awaited()
 
 
 @pytest.mark.asyncio

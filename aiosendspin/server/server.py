@@ -937,7 +937,8 @@ class SendspinServer:
         # Close pending incoming connections so their handlers can exit promptly.
         for conn in list(self._pending_connections):
             wsock = conn.websocket_connection
-            if wsock.closed:
+            # An incoming socket not past wsock.prepare() has nothing to close.
+            if wsock.closed or (isinstance(wsock, web.WebSocketResponse) and not wsock.prepared):
                 continue
             logger.debug("Closing pending client connection")
             try:
@@ -945,9 +946,6 @@ class SendspinServer:
                     await wsock.close()
             except TimeoutError:
                 logger.debug("Timeout while closing pending client websocket")
-            except RuntimeError:
-                # Not past wsock.prepare() yet, nothing to close.
-                logger.debug("Pending client websocket not prepared, skipping close")
 
         disconnect_tasks: list[asyncio.Task[None]] = []
         for client in self._clients.values():
