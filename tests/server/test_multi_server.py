@@ -9,23 +9,39 @@ from unittest.mock import AsyncMock, MagicMock
 
 import orjson
 import pytest
-from aiohttp import web
+from aiohttp import WSMessage, WSMsgType, web
 from mashumaro.exceptions import MissingField
 
 from aiosendspin.models.core import (
     ClientHelloMessage,
     ClientHelloPayload,
-    ServerHelloMessage,
+    ServerActivateMessage,
     ServerStateMessage,
     ServerStatePayload,
+    UnpairedAccess,
 )
 from aiosendspin.models.player import ClientHelloPlayerSupport, SupportedAudioFormat
-from aiosendspin.models.types import AudioCodec, ConnectionReason, PlayerCommand, Roles
+from aiosendspin.models.types import (
+    Activity,
+    AudioCodec,
+    ConnectionReason,
+    PlaybackStateType,
+    PlayerCommand,
+    Roles,
+)
+from aiosendspin.noise.keys import generate_psk, psk_id_for
+from aiosendspin.noise.trust_store import (
+    InMemoryServerPairingStore,
+    PskCategory,
+    ResolvedPsk,
+    ServerPairingStore,
+    TrustedUnpairedClient,
+)
 from aiosendspin.server.client import SendspinClient
 from aiosendspin.server.clock import LoopClock
 from aiosendspin.server.connection import SendspinConnection
 from aiosendspin.server.group import SendspinGroup
-from aiosendspin.server.roles.negotiation import negotiate_active_roles
+from aiosendspin.server.roles.negotiation import negotiate_roles
 from aiosendspin.server.roles.registry import ROLE_FACTORIES
 
 if TYPE_CHECKING:
@@ -40,6 +56,7 @@ class _MockServer:
     clock: LoopClock
     id: str = "srv"
     name: str = "server"
+    pairing_store: ServerPairingStore = field(default_factory=InMemoryServerPairingStore)
     remove_client: AsyncMock = field(default_factory=AsyncMock)
 
     _connection_reasons: dict[str, ConnectionReason] = field(default_factory=dict)
@@ -49,6 +66,9 @@ class _MockServer:
 
     def is_external_player(self, client_id: str) -> bool:  # noqa: ARG002
         return False
+
+    def on_client_first_connect(self, client_id: str) -> None:  # noqa: ARG002
+        return
 
     def get_connection_reason(self, url: str) -> ConnectionReason:
         return self._connection_reasons.get(url, ConnectionReason.DISCOVERY)
@@ -95,12 +115,13 @@ class _DummyConnection:
         return True
 
 
-def _player_hello(client_id: str) -> ClientHelloPayload:
+def _player_hello(client_id: str, *, unpaired_access: bool = False) -> ClientHelloPayload:
     return ClientHelloPayload(
         client_id=client_id,
         name=client_id,
         version=1,
         supported_roles=[Roles.PLAYER.value],
+        unpaired_access=UnpairedAccess(enabled=unpaired_access),
         player_support=ClientHelloPlayerSupport(
             supported_formats=[
                 SupportedAudioFormat(
@@ -114,6 +135,54 @@ def _player_hello(client_id: str) -> ClientHelloPayload:
             supported_commands=[PlayerCommand.VOLUME, PlayerCommand.MUTE],
         ),
     )
+
+
+def _client_hello_frame(client_id: str, *, unpaired_access: bool = False) -> WSMessage:
+    return WSMessage(
+        WSMsgType.TEXT,
+        ClientHelloMessage(
+            payload=_player_hello(client_id, unpaired_access=unpaired_access)
+        ).to_json(),
+        "",
+    )
+
+
+class _FakeTransport:
+    """Transport double: records sent frames and yields queued inbound frames."""
+
+    def __init__(self, incoming: list[WSMessage] | None = None) -> None:
+        self.sent: list[str] = []
+        self._incoming = iter(incoming or [])
+        self.closed = False
+        self.close_code: int | None = None
+
+    async def send_str(self, data: str) -> None:
+        self.sent.append(data)
+
+    async def receive(self) -> WSMessage | None:
+        return next(self._incoming, None)
+
+    def sent_payloads(self) -> list[dict]:
+        return [orjson.loads(s) for s in self.sent]
+
+
+async def _exchange_hellos_encrypted(
+    conn: SendspinConnection,
+    *,
+    client_id: str = "client-1",
+    category: PskCategory = PskCategory.LONG_TERM,
+    unpaired_access: bool = False,
+) -> _FakeTransport:
+    """Drive a non-legacy (encrypted) hello exchange and return the recording transport."""
+    psk = generate_psk()
+    conn._client_id = client_id  # noqa: SLF001
+    conn._noise_psk = ResolvedPsk(  # noqa: SLF001
+        psk_id=psk_id_for(psk), psk=psk, category=category, counterparty_id=client_id
+    )
+    fake = _FakeTransport([_client_hello_frame(client_id, unpaired_access=unpaired_access)])
+    conn._transport = fake  # type: ignore[assignment]  # noqa: SLF001
+    await conn._exchange_hellos()  # noqa: SLF001
+    return fake
 
 
 @pytest.fixture
@@ -152,122 +221,137 @@ class TestClientUrlTracking:
         assert mock_server.get_client_url("unknown-client") is None
 
 
-class TestConnectionSendsCorrectReason:
-    """Tests that SendspinConnection uses the correct connection_reason in server/hello."""
+class TestEncryptedActivities:
+    """Tests that the encrypted hello exchange declares activities from PSK + capabilities."""
 
     @pytest.mark.asyncio
-    async def test_server_initiated_uses_discovery_by_default(
-        self, mock_server: _MockServer
-    ) -> None:
-        """Server-initiated connection with no stored reason uses DISCOVERY."""
-        url = "ws://192.168.1.100:8927/sendspin"
-        # No reason stored for this URL
+    async def test_long_term_idle_declares_no_activities(self, mock_server: _MockServer) -> None:
+        """An idle long-term connection declares no activities but advertises active roles."""
+        conn = SendspinConnection(mock_server, wsock_client=AsyncMock())
+        fake = await _exchange_hellos_encrypted(conn, category=PskCategory.LONG_TERM)
 
-        # Create a connection with URL but no stored reason
-        conn = SendspinConnection(mock_server, wsock_client=AsyncMock(), url=url)
-
-        # Capture priority messages — server/hello must use the priority queue
-        sent_messages: list[ServerMessage] = []
-        original_priority_send = conn.send_priority_message
-
-        def capture_priority_send(msg: ServerMessage) -> None:
-            sent_messages.append(msg)
-            original_priority_send(msg)
-
-        conn.send_priority_message = capture_priority_send  # type: ignore[method-assign]
-
-        # Simulate receiving client/hello
-        await conn._handle_message(  # noqa: SLF001
-            ClientHelloMessage(payload=_player_hello("client-1")),
-            timestamp_us=0,
-        )
-
-        # Find the server/hello message
-        server_hello = next(m for m in sent_messages if isinstance(m, ServerHelloMessage))
-        assert server_hello.payload.connection_reason == ConnectionReason.DISCOVERY
+        payloads = fake.sent_payloads()
+        assert [p["type"] for p in payloads] == ["server/hello", "server/activate"]
+        activate = payloads[1]["payload"]
+        assert activate["activities"] == []
+        # active_roles present because the connection is playback-capable.
+        assert Roles.PLAYER.value in activate["active_roles"]
 
     @pytest.mark.asyncio
-    async def test_server_initiated_uses_playback_when_stored(
-        self, mock_server: _MockServer
-    ) -> None:
-        """Server-initiated connection uses stored PLAYBACK reason."""
+    async def test_dialed_for_playback_declares_playback(self, mock_server: _MockServer) -> None:
+        """A connection dialed for playback declares the playback activity up front."""
         url = "ws://192.168.1.100:8927/sendspin"
         mock_server._connection_reasons[url] = ConnectionReason.PLAYBACK  # noqa: SLF001
-
         conn = SendspinConnection(mock_server, wsock_client=AsyncMock(), url=url)
+        fake = await _exchange_hellos_encrypted(conn, category=PskCategory.LONG_TERM)
 
-        # Capture priority messages — server/hello must use the priority queue
-        sent_messages: list[ServerMessage] = []
-        original_priority_send = conn.send_priority_message
-
-        def capture_priority_send(msg: ServerMessage) -> None:
-            sent_messages.append(msg)
-            original_priority_send(msg)
-
-        conn.send_priority_message = capture_priority_send  # type: ignore[method-assign]
-
-        await conn._handle_message(  # noqa: SLF001
-            ClientHelloMessage(payload=_player_hello("client-1")),
-            timestamp_us=0,
-        )
-
-        server_hello = next(m for m in sent_messages if isinstance(m, ServerHelloMessage))
-        assert server_hello.payload.connection_reason == ConnectionReason.PLAYBACK
+        activate = fake.sent_payloads()[1]["payload"]
+        assert activate["activities"] == [Activity.PLAYBACK.value]
+        assert Roles.PLAYER.value in activate["active_roles"]
 
     @pytest.mark.asyncio
-    async def test_client_initiated_uses_discovery(self, mock_server: _MockServer) -> None:
-        """Client-initiated connection (no URL) uses DISCOVERY."""
-        request = MagicMock(spec=web.Request)
-        request.remote = "192.168.1.50"
+    async def test_playback_state_change_resends_activate(self, mock_server: _MockServer) -> None:
+        """A group playback-state change re-sends server/activate (active_roles omitted)."""
+        conn = SendspinConnection(mock_server, wsock_client=AsyncMock())
+        await _exchange_hellos_encrypted(conn, category=PskCategory.LONG_TERM)
+        conn._subscribe_activity_events()  # noqa: SLF001
+        assert conn._client is not None  # noqa: SLF001
 
-        conn = SendspinConnection(mock_server, request=request)
-        # Prepare the websocket response mock
-        conn._wsock_server = AsyncMock()  # noqa: SLF001
-        conn._wsock_server.closed = False  # noqa: SLF001
+        # Idle → playing: a fresh server/activate with [playback] is enqueued.
+        conn._client.group._set_playback_state(PlaybackStateType.PLAYING)  # noqa: SLF001
+        activates = [m for m in conn._priority_messages if isinstance(m, ServerActivateMessage)]  # noqa: SLF001
+        assert activates, "expected a re-sent server/activate"
+        assert activates[-1].payload.activities == [Activity.PLAYBACK]
+        assert activates[-1].payload.active_roles is None  # sticky: omitted on re-send
 
-        # Capture priority messages — server/hello must use the priority queue
-        sent_messages: list[ServerMessage] = []
-        original_priority_send = conn.send_priority_message
+        # Playing → stopped: re-sent with an empty activity set.
+        conn._client.group._set_playback_state(PlaybackStateType.STOPPED)  # noqa: SLF001
+        activates = [m for m in conn._priority_messages if isinstance(m, ServerActivateMessage)]  # noqa: SLF001
+        assert activates[-1].payload.activities == []
 
-        def capture_priority_send(msg: ServerMessage) -> None:
-            sent_messages.append(msg)
-            original_priority_send(msg)
-
-        conn.send_priority_message = capture_priority_send  # type: ignore[method-assign]
-
-        await conn._handle_message(  # noqa: SLF001
-            ClientHelloMessage(payload=_player_hello("client-1")),
-            timestamp_us=0,
+    @pytest.mark.asyncio
+    async def test_sentinel_untrusted_declares_no_roles(self, mock_server: _MockServer) -> None:
+        """A Sentinel client the server hasn't trusted activates no roles."""
+        conn = SendspinConnection(mock_server, wsock_client=AsyncMock())
+        fake = await _exchange_hellos_encrypted(
+            conn, category=PskCategory.SENTINEL, unpaired_access=True
         )
 
-        server_hello = next(m for m in sent_messages if isinstance(m, ServerHelloMessage))
-        assert server_hello.payload.connection_reason == ConnectionReason.DISCOVERY
+        activate = fake.sent_payloads()[1]["payload"]
+        assert activate["activities"] == []
+        # active_roles is empty (no active roles) when not playback-capable; absent would
+        # mean "unchanged" (sticky).
+        assert activate["active_roles"] == []
+
+    @pytest.mark.asyncio
+    async def test_sentinel_trusted_activates_roles(self, mock_server: _MockServer) -> None:
+        """A trusted Sentinel client that admits unpaired access gets its roles provisioned."""
+        await mock_server.pairing_store.add_trusted_unpaired(
+            TrustedUnpairedClient(client_id="client-1")
+        )
+        conn = SendspinConnection(mock_server, wsock_client=AsyncMock())
+        fake = await _exchange_hellos_encrypted(
+            conn, category=PskCategory.SENTINEL, unpaired_access=True
+        )
+
+        activate = fake.sent_payloads()[1]["payload"]
+        # Idle (no playback yet) so no activity declared, but roles are provisioned.
+        assert activate["activities"] == []
+        assert activate["active_roles"] == [Roles.PLAYER.value]
+
+    @pytest.mark.asyncio
+    async def test_sentinel_trusted_but_client_disables_unpaired(
+        self, mock_server: _MockServer
+    ) -> None:
+        """A trusted client that itself refuses unpaired access gets no roles."""
+        await mock_server.pairing_store.add_trusted_unpaired(
+            TrustedUnpairedClient(client_id="client-1")
+        )
+        conn = SendspinConnection(mock_server, wsock_client=AsyncMock())
+        fake = await _exchange_hellos_encrypted(
+            conn, category=PskCategory.SENTINEL, unpaired_access=False
+        )
+
+        activate = fake.sent_payloads()[1]["payload"]
+        assert activate["active_roles"] == []
+
+
+class TestLegacyServerHello:
+    """Tests for the legacy (transition-mode) server/hello path."""
+
+    @pytest.mark.asyncio
+    async def test_legacy_hello_carries_connection_reason(self, mock_server: _MockServer) -> None:
+        """A legacy (unencrypted) hello exchange uses connection_reason, no server/activate."""
+        url = "ws://192.168.1.100:8927/sendspin"
+        mock_server._connection_reasons[url] = ConnectionReason.PLAYBACK  # noqa: SLF001
+        conn = SendspinConnection(mock_server, wsock_client=AsyncMock(), url=url)
+
+        fake = _FakeTransport()
+        conn._transport = fake  # type: ignore[assignment]  # noqa: SLF001
+        # Legacy connections peek client/hello before the transport is encrypted.
+        conn._pending_first_text = ClientHelloMessage(  # noqa: SLF001
+            payload=_player_hello("client-1")
+        ).to_json()
+        await conn._exchange_hellos()  # noqa: SLF001
+
+        payloads = fake.sent_payloads()
+        assert [p["type"] for p in payloads] == ["server/hello"]
+        assert payloads[0]["payload"]["connection_reason"] == ConnectionReason.PLAYBACK.value
 
 
 class TestHandshakeOrdering:
     """Tests for server/hello ordering relative to role messages."""
 
     @pytest.mark.asyncio
-    async def test_server_hello_queued_before_role_messages(
+    async def test_no_role_messages_sent_before_server_activate(
         self, mock_server: _MockServer, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """server/hello must be enqueued before any role-scoped server messages."""
+        """Role messages enqueued during attach must not be sent until after the hello exchange.
+
+        The writer only starts after server/activate, so a role message enqueued
+        while attaching the client cannot land on the wire before the hello-exchange frames.
+        """
         conn = SendspinConnection(mock_server, wsock_client=AsyncMock())
-        call_order: list[str] = []
-
-        original_priority_send = conn.send_priority_message
-        original_role_send = conn.send_role_message
-
-        def capture_priority_send(msg: ServerMessage) -> None:
-            call_order.append(msg.type)
-            original_priority_send(msg)
-
-        def capture_role_send(role: str, msg: ServerMessage) -> None:
-            call_order.append(msg.type)
-            original_role_send(role, msg)
-
-        conn.send_priority_message = capture_priority_send  # type: ignore[method-assign]
-        conn.send_role_message = capture_role_send  # type: ignore[method-assign]
 
         original_attach_connection = SendspinClient.attach_connection
 
@@ -277,25 +361,26 @@ class TestHandshakeOrdering:
             *,
             client_info: ClientHelloPayload,
             active_roles: list[str],
+            negotiated_roles: list[str] | None = None,
         ) -> None:
             connection.send_role_message(
                 "metadata",
                 ServerStateMessage(payload=ServerStatePayload()),
             )
             original_attach_connection(
-                self, connection, client_info=client_info, active_roles=active_roles
+                self,
+                connection,
+                client_info=client_info,
+                active_roles=active_roles,
+                negotiated_roles=negotiated_roles,
             )
 
         monkeypatch.setattr(SendspinClient, "attach_connection", attach_with_early_role_message)
 
-        await conn._handle_message(  # noqa: SLF001
-            ClientHelloMessage(payload=_player_hello("client-1")),
-            timestamp_us=0,
-        )
+        fake = await _exchange_hellos_encrypted(conn)
 
-        assert call_order
-        assert call_order[0] == "server/hello"
-        assert call_order.index("server/state") > 0
+        # Only the hello-exchange frames reach the wire; the role message stays queued.
+        assert [p["type"] for p in fake.sent_payloads()] == ["server/hello", "server/activate"]
 
 
 class TestCustomRoleSupportParsing:
@@ -671,7 +756,7 @@ class TestCustomRoleSupportParsing:
         assert isinstance(msg, ClientHelloMessage)
         assert msg.payload.visualizer_draft_r1_support is not None
         assert msg.payload.visualizer_support is None
-        assert "visualizer@_draft_r1" in negotiate_active_roles(msg.payload.supported_roles)
+        assert "visualizer@_draft_r1" in negotiate_roles(msg.payload.supported_roles)
 
     def test_hello_with_v2_and_v1_mixed_falls_back_to_v1(self) -> None:
         """When client offers `[v2, v1]` and server knows only v1, v1 is activated.
@@ -701,7 +786,7 @@ class TestCustomRoleSupportParsing:
         msg = SendspinConnection._deserialize_client_message(raw)  # noqa: SLF001
         assert isinstance(msg, ClientHelloMessage)
         assert msg.payload.visualizer_support is not None
-        assert negotiate_active_roles(msg.payload.supported_roles) == ["visualizer@v1"]
+        assert negotiate_roles(msg.payload.supported_roles) == ["visualizer@v1"]
 
     def test_hello_with_only_v2_drops_visualizer_role_entirely(self) -> None:
         """Lone unsupported version → deserialize succeeds and family is inactive.
@@ -726,7 +811,7 @@ class TestCustomRoleSupportParsing:
         assert isinstance(msg, ClientHelloMessage)
         assert msg.payload.visualizer_support is None
         assert msg.payload.visualizer_draft_r1_support is None
-        assert negotiate_active_roles(msg.payload.supported_roles) == []
+        assert negotiate_roles(msg.payload.supported_roles) == []
 
     def test_hello_with_brand_new_family_does_not_crash(self) -> None:
         """A family the server has never heard of is silently ignored end-to-end.
@@ -749,7 +834,7 @@ class TestCustomRoleSupportParsing:
 
         msg = SendspinConnection._deserialize_client_message(raw)  # noqa: SLF001
         assert isinstance(msg, ClientHelloMessage)
-        assert negotiate_active_roles(msg.payload.supported_roles) == []
+        assert negotiate_roles(msg.payload.supported_roles) == []
 
     def test_custom_underscore_player_version_with_v1_compatible_support_parses(self) -> None:
         """`player@_experimental` (no registered factory) parses against v1 schema.
@@ -818,14 +903,11 @@ class TestClientUrlRegistration:
 
     @pytest.mark.asyncio
     async def test_url_registered_after_handshake(self, mock_server: _MockServer) -> None:
-        """Client URL is registered after receiving client/hello for server-initiated connection."""
+        """Client URL is registered after the hello exchange for a server-initiated connection."""
         url = "ws://192.168.1.100:8927/sendspin"
         conn = SendspinConnection(mock_server, wsock_client=AsyncMock(), url=url)
 
-        await conn._handle_message(  # noqa: SLF001
-            ClientHelloMessage(payload=_player_hello("my-speaker")),
-            timestamp_us=0,
-        )
+        await _exchange_hellos_encrypted(conn, client_id="my-speaker")
 
         assert mock_server.get_client_url("my-speaker") == url
 
@@ -839,10 +921,7 @@ class TestClientUrlRegistration:
         conn._wsock_server = AsyncMock()  # noqa: SLF001
         conn._wsock_server.closed = False  # noqa: SLF001
 
-        await conn._handle_message(  # noqa: SLF001
-            ClientHelloMessage(payload=_player_hello("my-speaker")),
-            timestamp_us=0,
-        )
+        await _exchange_hellos_encrypted(conn, client_id="my-speaker")
 
         # No URL should be registered since we don't know the client's WebSocket URL
         assert mock_server.get_client_url("my-speaker") is None
@@ -885,6 +964,7 @@ class TestAutomaticReclaim:
         client.attach_connection(
             conn,
             client_info=_player_hello("speaker-1"),
+            negotiated_roles=[Roles.PLAYER.value],
             active_roles=[Roles.PLAYER.value],
         )
         client.mark_connected()
@@ -918,6 +998,7 @@ class TestAutomaticReclaim:
         client1.attach_connection(
             conn1,
             client_info=_player_hello("speaker-1"),
+            negotiated_roles=[Roles.PLAYER.value],
             active_roles=[Roles.PLAYER.value],
         )
         client1.mark_connected()
@@ -931,6 +1012,7 @@ class TestAutomaticReclaim:
         client2.attach_connection(
             conn2,
             client_info=_player_hello("speaker-2"),
+            negotiated_roles=[Roles.PLAYER.value],
             active_roles=[Roles.PLAYER.value],
         )
         client2.mark_connected()
@@ -962,6 +1044,7 @@ class TestAutomaticReclaim:
         client1.attach_connection(
             conn1,
             client_info=_player_hello("speaker-1"),
+            negotiated_roles=[Roles.PLAYER.value],
             active_roles=[Roles.PLAYER.value],
         )
         client1.mark_connected()
@@ -970,6 +1053,7 @@ class TestAutomaticReclaim:
         client2.attach_connection(
             conn2,
             client_info=_player_hello("speaker-2"),
+            negotiated_roles=[Roles.PLAYER.value],
             active_roles=[Roles.PLAYER.value],
         )
         client2.mark_connected()
@@ -1001,6 +1085,7 @@ class TestAutomaticReclaim:
         client1.attach_connection(
             conn1,
             client_info=_player_hello("speaker-1"),
+            negotiated_roles=[Roles.PLAYER.value],
             active_roles=[Roles.PLAYER.value],
         )
         client1.mark_connected()
@@ -1010,6 +1095,7 @@ class TestAutomaticReclaim:
         client2.attach_connection(
             conn2,
             client_info=_player_hello("speaker-2"),
+            negotiated_roles=[Roles.PLAYER.value],
             active_roles=[Roles.PLAYER.value],
         )
         client2.mark_connected()

@@ -35,12 +35,13 @@ import heapq
 import logging
 import time
 from collections import defaultdict, deque
+from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast
 
 import orjson
-from aiohttp import ClientWebSocketResponse, WSMsgType, web
+from aiohttp import ClientWebSocketResponse, WSMessage, WSMsgType, web
 
 from aiosendspin.models.core import (
     ClientCommandMessage,
@@ -49,6 +50,10 @@ from aiosendspin.models.core import (
     ClientHelloPayload,
     ClientStateMessage,
     ClientTimeMessage,
+    LegacyServerHelloMessage,
+    LegacyServerHelloPayload,
+    ServerActivateMessage,
+    ServerActivatePayload,
     ServerHelloMessage,
     ServerHelloPayload,
     ServerTimeMessage,
@@ -58,29 +63,102 @@ from aiosendspin.models.core import (
     StreamRequestFormatMessage,
     StreamStartMessage,
 )
+from aiosendspin.models.management import (
+    ManagementAddRecordMessage,
+    ManagementAddRecordPayload,
+    ManagementGetPairingConfigMessage,
+    ManagementListRecordsMessage,
+    ManagementRemoveRecordMessage,
+    ManagementRemoveRecordPayload,
+    ManagementResultData,
+    ManagementResultMessage,
+    ManagementResultPayload,
+    ManagementSetPairingConfigMessage,
+    ManagementSetPairingConfigPayload,
+    RecordSummary,
+    ServerUnpairMessage,
+    StorageAccounting,
+)
 from aiosendspin.models.types import (
+    Activity,
     ClientMessage,
     ConnectionReason,
     GoodbyeReason,
+    ManagementResult,
+    PairAbortReason,
+    PairMethod,
+    PlaybackStateType,
     Roles,
     ServerMessage,
     role_family,
 )
+from aiosendspin.noise.constants import SENTINEL_PSK
+from aiosendspin.noise.driver import (
+    HandshakeAbortedError,
+    receive_text_frame,
+    run_handshake_server,
+    run_rehandshake_server,
+)
+from aiosendspin.noise.keys import b64url_encode, psk_id_for
+from aiosendspin.noise.pairing import (
+    LocalPairingAbortError,
+    PairingAttempt,
+    PairingError,
+    abort_pairing,
+    run_dynamic_pin_server,
+    run_pairing_psk_server,
+    run_static_pin_server,
+)
+from aiosendspin.noise.pin import MAX_PIN_DIGITS, MIN_PIN_DIGITS
+from aiosendspin.noise.session import NoiseSession
+from aiosendspin.noise.trust_store import PskCategory, ResolvedPsk, ServerPairingRecord
+from aiosendspin.noise.wire import EncryptedWebSocket
 from aiosendspin.util import create_task
 
 from .client import SendspinClient
-from .roles.negotiation import negotiate_active_roles
+from .events import ClientEvent, ClientGroupChangedEvent, GroupEvent, GroupStateChangedEvent
+from .roles.negotiation import negotiate_roles
 from .roles.registry import ROLE_FACTORIES, ROLE_SUPPORT_SPECS
 
 if TYPE_CHECKING:
     from .audio import BufferTracker
+    from .group import SendspinGroup
     from .roles.base import BinaryHandling, Role
     from .server import SendspinServer
+
+# Transport used by the writer and message loop: the encrypted wrapper post-handshake,
+# or the raw aiohttp socket for a legacy (transition-mode) connection.
+Transport = EncryptedWebSocket | web.WebSocketResponse | ClientWebSocketResponse
 
 
 logger = logging.getLogger(__name__)
 
 MAX_PENDING_MSG = 4096  # Default queue cap (per role queues, and global control queues)
+
+# Bound the wait for the writer to drain when quiescing.
+QUIESCE_TIMEOUT_S: float = 30.0
+
+_PAIRING_MESSAGE_TYPES: frozenset[str] = frozenset(
+    {
+        "client/pair-init",
+        "client/pair-finalize",
+        "client/pair-auth",
+        "client/pair-confirm",
+        "pair/abort",
+    }
+)
+
+_PAIR_TRANSITION_TYPES: frozenset[str] = frozenset(
+    {
+        "noise/handshake",
+        "client/hello",
+        "client/pair-init",
+        "client/pair-finalize",
+        "client/pair-auth",
+        "client/pair-confirm",
+        "pair/abort",
+    }
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -111,28 +189,58 @@ class _RoleQueueEntry:
     json_message: ServerMessage | None = None
 
 
+class _QueuedTransport(EncryptedWebSocket):
+    """``EncryptedWebSocket`` whose ``receive()`` pulls from a queue."""
+
+    def __init__(self, base: EncryptedWebSocket, queue: asyncio.Queue[WSMessage]) -> None:
+        super().__init__(base._ws, base._session)  # noqa: SLF001
+        self._base = base
+        self._queue = queue
+
+    def swap_session(self, session: NoiseSession) -> None:
+        super().swap_session(session)
+        self._base.swap_session(session)
+
+    async def receive(self) -> WSMessage:
+        return await self._queue.get()
+
+
 class SendspinConnection:
     """A single WebSocket connection to a Sendspin client device."""
 
-    def __init__(
+    def __init__(  # noqa: PLR0915
         self,
         server: SendspinServer,
         *,
         request: web.Request | None = None,
         wsock_client: ClientWebSocketResponse | None = None,
         url: str | None = None,
+        expected_client_id: str | None = None,
+        pairing_attempt: PairingAttempt | None = None,
     ) -> None:
         """Initialize a SendspinConnection.
 
         Exactly one of `request` (client-initiated) or `wsock_client` (server-initiated)
         must be provided. For server-initiated connections, `url` should be provided
-        for connection reason lookup and client URL registration.
+        for connection reason lookup and client URL registration, and
+        ``expected_client_id`` may be set to pin the handshake to a known peer.
+        ``pairing_attempt`` carries an operator-initiated pairing intent for this dial.
         """
         self._server = server
         self._wsock_client = wsock_client
         self._wsock_server: web.WebSocketResponse | None = None
         self._request = request
         self._url = url  # For server-initiated connections
+        self._expected_client_id = expected_client_id
+        self._in_pairing = False
+        self._pairing_attempt = pairing_attempt
+        self._pairing_task: asyncio.Task[bool] | None = None
+        self._pairing_message_queue: asyncio.Queue[WSMessage] | None = None
+        self._pairing_messages_started = False
+        self._pairing_index = 0
+        self._connection_done = asyncio.Event()
+        self._transport: Transport | None = None
+        self._pending_first_text: str | None = None  # legacy first frame held for the loop
 
         if request is not None:
             if wsock_client is not None:
@@ -161,18 +269,31 @@ class SendspinConnection:
         self._blocked_until_us: dict[str, int] = {}
         self._block_generation: defaultdict[str, int] = defaultdict(int)
         self._writer_wakeup = asyncio.Event()
+        self._writer_idle = asyncio.Event()
         self._writer_task: asyncio.Task[None] | None = None
         self._message_loop_task: asyncio.Task[None] | None = None
 
+        self._noise_psk: ResolvedPsk | None = None
+        self._handshake_hash: bytes | None = None
+
         self._client_id: str | None = None
         self._client_info: ClientHelloPayload | None = None
-        self._active_roles: list[str] = []
+        self._negotiated_roles: list[str] = []
         self._client: SendspinClient | None = None
+        self._trusted_unpaired = False
+
+        self._declared_activities: list[Activity] | None = None
+        self._client_event_unsub: Callable[[], None] | None = None
+        self._group_event_unsub: Callable[[], None] | None = None
+
+        self._management_active = (
+            url is not None and server.get_connection_reason(url) is ConnectionReason.MANAGEMENT
+        )
+        self._management_waiter: asyncio.Future[ManagementResultPayload] | None = None
 
         self._closing = False
         self._disconnecting = False
 
-        self._server_hello_sent = False
         self._initial_state_received = False
         self._initial_state_timeout_handle: asyncio.TimerHandle | None = None
 
@@ -207,6 +328,16 @@ class SendspinConnection:
         """Disconnect reason reported by client/goodbye, if available."""
         return self._last_goodbye_reason
 
+    @property
+    def psk_category(self) -> PskCategory | None:
+        """Category of the PSK that cryptographically admitted this connection."""
+        return None if self._noise_psk is None else self._noise_psk.category
+
+    @property
+    def is_encrypted(self) -> bool:
+        """Whether this connection was admitted through the Noise handshake."""
+        return self._noise_psk is not None
+
     def requires_initial_state(self) -> bool:
         """Whether this connection must receive initial client/state before being 'connected'."""
         if self._client is None:
@@ -223,7 +354,7 @@ class SendspinConnection:
         roles_to_drop = list(self._epoch_by_role.keys()) if roles is None else roles
         for role in roles_to_drop:
             self._epoch_by_role[role] += 1
-        self._writer_wakeup.set()
+        self._wake_writer()
 
     def send_binary(
         self,
@@ -299,6 +430,11 @@ class SendspinConnection:
             if head_sort_ts == sort_ts and head_seq == seq:
                 heapq.heappush(self._ready_roles, (head_sort_ts, head_seq, role))
 
+        self._wake_writer()
+
+    def _wake_writer(self) -> None:
+        """Signal the writer that new work is queued."""
+        self._writer_idle.clear()
         self._writer_wakeup.set()
 
     def send_role_message(self, role: str, message: ServerMessage) -> None:
@@ -351,7 +487,7 @@ class SendspinConnection:
 
         self._normal_messages.append(message)
         self._queue_size += 1
-        self._writer_wakeup.set()
+        self._wake_writer()
 
         if not isinstance(message, ServerTimeMessage):
             self._logger.debug("Enqueueing message: %s", type(message).__name__)
@@ -372,7 +508,7 @@ class SendspinConnection:
         self._queue_sequence += 1
         self._priority_messages.append(message)
         self._queue_size += 1
-        self._writer_wakeup.set()
+        self._wake_writer()
 
     async def disconnect(self, *, retry_connection: bool = True) -> None:
         """Disconnect this connection and detach from its persistent client."""
@@ -381,6 +517,11 @@ class SendspinConnection:
         if self._disconnecting:
             return
         self._disconnecting = True
+
+        if self._management_waiter is not None and not self._management_waiter.done():
+            self._management_waiter.set_exception(RuntimeError("connection closed"))
+
+        self._unsubscribe_activity_events()
 
         if self._initial_state_timeout_handle is not None:
             self._initial_state_timeout_handle.cancel()
@@ -556,15 +697,707 @@ class SendspinConnection:
         return parsed
 
     async def _setup_connection(self) -> None:
-        """Prepare a server-side WebSocketResponse, if applicable."""
+        """Prepare the socket and run the Noise handshake."""
         if self._wsock_server is not None:
             assert self._request is not None
             async with asyncio.timeout(10):
                 await self._wsock_server.prepare(self._request)
 
-        # Start writer task for both client-initiated and server-initiated connections.
+        raw = self._wsock_server or self._wsock_client
+        assert raw is not None
+        if self._transport is None:
+            self._transport = await self._establish_transport(raw)
+
         self._logger.debug("Connection established")
+
+    def _is_pairing(self) -> bool:
+        if self._pairing_attempt is not None:
+            return True
+        if self._noise_psk is None:
+            return False
+        # Pre-staged Pairing PSK (client-initiated admit via the store).
+        return self._noise_psk.category is PskCategory.PAIRING
+
+    @property
+    def _pairing_in_progress(self) -> bool:
+        """Whether operator-initiated pairing is currently being executed."""
+        return self._pairing_message_queue is not None
+
+    async def _establish_transport(
+        self, raw: web.WebSocketResponse | ClientWebSocketResponse
+    ) -> Transport:
+        """Dispatch on the first frame: run the Noise handshake or accept a legacy client.
+
+        A ``client/init`` first frame runs the Noise initiator handshake and yields
+        an encrypted transport. In transition mode, a ``client/hello`` first frame
+        is accepted unencrypted (the raw socket is the transport, and the frame is
+        held for the message loop). Anything else raises
+        ``HandshakeAbortedError``.
+        """
+        first_text = await receive_text_frame(raw, what="first frame")
+        msg_type = self._peek_message_type(first_text)
+        if msg_type == "client/init":
+            result = await run_handshake_server(
+                raw,
+                local_identity=self._server.identity,
+                psk_provider=self._psk_provider,
+                client_init_text=first_text,
+                expected_client_id=self._expected_client_id,
+            )
+            self._client_id = result.peer_id
+            self._noise_psk = result.psk
+            self._handshake_hash = result.handshake_hash
+            self._pairing_index = 0
+            self._logger = logger.getChild(result.peer_id)
+            return result.encrypted_ws
+        if msg_type == "client/hello" and self._server.allow_unencrypted:
+            if self._pairing_attempt is not None:
+                raise HandshakeAbortedError("pairing requires an encrypted connection")
+            self._logger.warning("Accepting unencrypted legacy connection (transition mode)")
+            self._pending_first_text = first_text
+            return raw
+        raise HandshakeAbortedError(f"unexpected first frame type {msg_type!r}")
+
+    @staticmethod
+    def _peek_message_type(text: str) -> str | None:
+        try:
+            decoded = orjson.loads(text)
+        except orjson.JSONDecodeError:
+            return None
+        return decoded.get("type") if isinstance(decoded, dict) else None
+
+    async def _psk_provider(self, client_id: str) -> ResolvedPsk | None:
+        """Pick the PSK to admit ``client_id`` with."""
+        if self._pairing_attempt is not None:
+            attempt = self._pairing_attempt
+            if attempt.method is PairMethod.PAIRING_PSK:
+                assert attempt.pairing_psk is not None
+                return ResolvedPsk(
+                    psk_id_for(attempt.pairing_psk),
+                    attempt.pairing_psk,
+                    PskCategory.PAIRING,
+                )
+            return ResolvedPsk(psk_id_for(SENTINEL_PSK), SENTINEL_PSK, PskCategory.SENTINEL)
+
+        store = self._server.pairing_store
+        record = await store.record_by_client_id(client_id)
+        if record is not None:
+            return record.as_resolved()
+        staged = await store.staged_pairing_psk(client_id)
+        if staged is not None:
+            return staged.as_resolved()
+        return ResolvedPsk(psk_id_for(SENTINEL_PSK), SENTINEL_PSK, PskCategory.SENTINEL)
+
+    async def _exchange_hellos(self) -> bool:
+        """Exchange hellos and send the initial server/activate; False if hello rejected."""
+        transport = self._transport
+        assert transport is not None
+
+        if not self.is_encrypted:
+            assert self._pending_first_text is not None
+            client_hello_text = self._pending_first_text
+            self._pending_first_text = None
+            if not await self._ingest_client_hello(client_hello_text):
+                return False
+            connection_reason = (
+                self._server.get_connection_reason(self._url)
+                if self._url is not None
+                else ConnectionReason.DISCOVERY
+            )
+            await transport.send_str(
+                LegacyServerHelloMessage(
+                    payload=LegacyServerHelloPayload(
+                        server_id=self._server.id,
+                        name=self._server.name,
+                        version=1,
+                        active_roles=self._negotiated_roles,
+                        connection_reason=connection_reason,
+                    )
+                ).to_json()
+            )
+        else:
+            if not await self._send_server_hello_and_recv(transport):
+                return False
+            if self._is_pairing():
+                assert isinstance(transport, EncryptedWebSocket)
+                if not await self._pair(transport):
+                    return False
+            await self._activate()
+
+        if self.requires_initial_state():
+            self._initial_state_timeout_handle = self._server.loop.call_later(
+                5.0, self._initial_state_timeout_callback
+            )
+        else:
+            assert self._client is not None
+            self._client.mark_connected()
+            self._server.on_client_first_connect(self._client.client_id)
+        return True
+
+    async def _send_server_hello_and_recv(self, transport: Transport) -> bool:
+        """Send ``server/hello`` and receive+ingest ``client/hello``."""
+        await transport.send_str(
+            ServerHelloMessage(payload=ServerHelloPayload(name=self._server.name)).to_json()
+        )
+        client_hello_text = await receive_text_frame(transport, what="client/hello")
+        return await self._ingest_client_hello(client_hello_text)
+
+    async def _ingest_client_hello(self, text: str) -> bool:
+        """Validate and record the client/hello, attaching the client; False if rejected."""
+        message = self._deserialize_client_message(text)
+        if not isinstance(message, ClientHelloMessage):
+            self._logger.error("Expected client/hello, got %s", type(message).__name__)
+            await self.disconnect(retry_connection=False)
+            return False
+
+        client_info = message.payload
+        # Encrypted clients omit version (it is in client/init); only a legacy
+        # client carries it in the hello, so validate it only when present.
+        if client_info.version is not None and client_info.version != 1:
+            self._logger.error(
+                "Incompatible protocol version %s (only '1' is supported)",
+                client_info.version,
+            )
+            await self.disconnect(retry_connection=False)
+            return False
+        # The Noise handshake sets client_id (authenticated); a legacy client
+        # instead carries it in the hello payload.
+        client_id = self._client_id or client_info.client_id
+        if client_id is None:
+            self._logger.error("client/hello has no client_id and no handshake identity")
+            await self.disconnect(retry_connection=False)
+            return False
+
+        if not self.is_encrypted and not await self._admit_legacy_client_id(client_id):
+            await self.disconnect(retry_connection=False)
+            return False
+
+        self._client_info = client_info
+        self._client_id = client_id
+        self._negotiated_roles = negotiate_roles(client_info.supported_roles)
+        self._logger = logger.getChild(client_id)
+        self._logger.debug("Received client/hello: %s", client_info)
+
+        if self._noise_psk is not None and self._noise_psk.category is PskCategory.SENTINEL:
+            self._trusted_unpaired = (
+                await self._server.pairing_store.trusted_unpaired(client_id) is not None
+            )
+
+        if self._client is None:
+            client = self._server.get_or_create_client(client_id)
+            if not self.is_encrypted:
+                initial_active = self._negotiated_roles  # legacy: no activation filtering
+            elif self._is_pairing():
+                initial_active = []
+            else:
+                initial_active = self._roles_to_activate
+            client.attach_connection(
+                self,
+                client_info=client_info,
+                negotiated_roles=self._negotiated_roles,
+                active_roles=initial_active,
+            )
+            self._client = client
+            if self._url is not None:
+                self._server.register_client_url(client_id, self._url)
+        return True
+
+    async def _admit_legacy_client_id(self, client_id: str) -> bool:
+        """Whether an unauthenticated (legacy) hello may claim ``client_id``."""
+        if self._expected_client_id is not None and client_id != self._expected_client_id:
+            self._logger.error(
+                "Unencrypted client/hello claims %r, expected %r",
+                client_id,
+                self._expected_client_id,
+            )
+            return False
+        # A paired, pairing-staged, or trusted-unpaired client has proven it can
+        # connect encrypted (its static key authenticated the Noise handshake);
+        # never admit it unencrypted (downgrade protection).
+        store = self._server.pairing_store
+        if (
+            await store.record_by_client_id(client_id) is not None
+            or await store.staged_pairing_psk(client_id) is not None
+            or await store.trusted_unpaired(client_id) is not None
+        ):
+            self._logger.error(
+                "Rejecting unencrypted connection claiming known client %s", client_id
+            )
+            return False
+        return True
+
+    @property
+    def _playback_capable(self) -> bool:
+        """Whether this connection may ever carry playback."""
+        assert self._noise_psk is not None
+        assert self._client_info is not None
+        if self._noise_psk.category is PskCategory.LONG_TERM:
+            return True
+        if self._noise_psk.category is PskCategory.SENTINEL:
+            return self._client_info.unpaired_access.enabled and self._trusted_unpaired
+        return False
+
+    @property
+    def _management_capable(self) -> bool:
+        """Whether this connection may carry management."""
+        return self._noise_psk is not None and self._noise_psk.category is PskCategory.LONG_TERM
+
+    @property
+    def _client_in_playback(self) -> bool:
+        """Whether the client's group is in active/upcoming (non-stopped) playback."""
+        return (
+            self._client is not None and self._client.group.state is not PlaybackStateType.STOPPED
+        )
+
+    @property
+    def _roles_to_activate(self) -> list[str]:
+        """Active roles to advertise — the negotiated set when playback-capable, else empty."""
+        if not self._playback_capable:
+            return []
+        return self._negotiated_roles
+
+    @property
+    def _desired_activities(self) -> list[Activity]:
+        """Activities the live group state warrants, plus management when enabled."""
+        activities: list[Activity] = []
+        if self._playback_capable and self._client_in_playback:
+            activities.append(Activity.PLAYBACK)
+        if self._management_active and self._management_capable:
+            activities.append(Activity.MANAGEMENT)
+        return activities
+
+    @property
+    def _initial_activities(self) -> list[Activity]:
+        """Activities for the first server/activate, seeded by the dial intent."""
+        activities: list[Activity] = []
+        dialed_playback = (
+            self._url is not None
+            and self._server.get_connection_reason(self._url) is ConnectionReason.PLAYBACK
+        )
+        if self._playback_capable and (dialed_playback or self._client_in_playback):
+            activities.append(Activity.PLAYBACK)
+        if self._management_active and self._management_capable:
+            activities.append(Activity.MANAGEMENT)
+        return activities
+
+    def _refresh_activities(self) -> None:
+        """Re-send server/activate if the desired activity set changed (active_roles sticky)."""
+        if self._pairing_in_progress:
+            return
+        if self._declared_activities is None:
+            return  # not an activated encrypted connection
+        desired = self._desired_activities
+        if desired == self._declared_activities:
+            return
+        self._declared_activities = desired
+        self.send_priority_message(
+            ServerActivateMessage(payload=ServerActivatePayload(activities=desired))
+        )
+
+    def _subscribe_activity_events(self) -> None:
+        """Watch the client's group/playback transitions to keep activities current."""
+        assert self._client is not None
+        self._client_event_unsub = self._client.add_event_listener(self._on_client_event)
+        self._subscribe_group_events(self._client.group)
+
+    def _subscribe_group_events(self, group: SendspinGroup) -> None:
+        if self._group_event_unsub is not None:
+            self._group_event_unsub()
+        self._group_event_unsub = group.add_event_listener(self._on_group_event)
+
+    def _on_client_event(self, _client: SendspinClient, event: ClientEvent) -> None:
+        if isinstance(event, ClientGroupChangedEvent):
+            self._subscribe_group_events(event.new_group)
+            self._refresh_activities()
+
+    def _on_group_event(self, _group: SendspinGroup, event: GroupEvent) -> None:
+        if isinstance(event, GroupStateChangedEvent):
+            self._refresh_activities()
+
+    def _unsubscribe_activity_events(self) -> None:
+        if self._client_event_unsub is not None:
+            self._client_event_unsub()
+            self._client_event_unsub = None
+        if self._group_event_unsub is not None:
+            self._group_event_unsub()
+            self._group_event_unsub = None
+
+    async def initiate_pairing(self, attempt: PairingAttempt) -> None:
+        """Run a pairing attempt on a connection.
+
+        A pair abort raises and leaves the connection for a retry or ``end_pairing``.
+        Any other failure propagates for the caller to disconnect.
+        """
+        if self._pairing_attempt is not None:
+            raise PairingError("connection is already in a pairing attempt")
+        transport = self._transport
+        if not isinstance(transport, EncryptedWebSocket):
+            raise PairingError("cannot pair over an unencrypted connection")
+        if not self._in_pairing:
+            await self._quiesce_for_pairing()
+            await self._pause_writer()
+            self._pairing_message_queue = asyncio.Queue()
+            self._in_pairing = True
+        assert self._pairing_message_queue is not None
+        self._pairing_attempt = attempt
+        self._pairing_messages_started = False
+        dispatched = _QueuedTransport(transport, self._pairing_message_queue)
+        task = create_task(self._pair(dispatched))
+        self._pairing_task = task
+        try:
+            if not await task:
+                raise PairingError("pairing failed")
+        except LocalPairingAbortError:
+            current_task = asyncio.current_task()
+            if current_task is not None and current_task.cancelling():
+                # Our own cancellation was forwarded into the child and converted; restore it.
+                raise asyncio.CancelledError from None
+            raise
+        finally:
+            self._pairing_attempt = None
+            self._pairing_task = None
+        await self._leave_pairing()
+
+    async def end_pairing(self) -> None:
+        """End pairing without finalizing, restoring the connection's activities and roles.
+
+        No-op if not in pairing. Aborts any in-progress attempt with ``user_cancelled``, keeping
+        the connection alive.
+        If an attempt has already been finalized by the client, it completes as a success instead.
+        """
+        if not self._in_pairing:
+            return
+        task = self._pairing_task
+        if task is not None and not task.done():
+            task.cancel()
+            with suppress(PairingError):
+                await task
+        await self._leave_pairing()
+
+    async def _leave_pairing(self) -> None:
+        """Exit the pairing state, returning the connection to normal service."""
+        if not self._in_pairing:  # a success and a concurrent end_pairing
+            return
+        self._pairing_message_queue = None
+        self._pairing_messages_started = False
+        self._in_pairing = False
+        await self._activate()
+        self._resume_writer()
+
+    async def _quiesce_for_pairing(self) -> None:
+        """Quiesce playback and roles for pairing, then wait for the teardown to flush."""
+        assert self._client is not None
+        await self._client.quiesce_to_solo_stopped()
+        self._client.set_active_roles([])
+        if self._writer_task is not None and not self._writer_task.done():
+            async with asyncio.timeout(QUIESCE_TIMEOUT_S):
+                await self._writer_idle.wait()
+
+    async def _pair(self, transport: EncryptedWebSocket) -> bool:
+        """Run the pairing exchange."""
+        try:
+            if not await self._rehandshake_for_pairing_if_needed(transport):
+                return False
+            assert self._client_info is not None
+            offered = {d.method for d in (self._client_info.supported_pair_methods or [])}
+            chosen = (
+                self._pairing_attempt.method
+                if self._pairing_attempt is not None
+                else PairMethod.PAIRING_PSK
+            )
+            method = chosen if chosen in offered else None
+            if method is None:
+                # Client doesn't offer the requested method — close silently per spec.
+                return False
+            await transport.send_str(
+                ServerActivateMessage(
+                    payload=ServerActivatePayload(
+                        activities=[Activity.PAIRING],
+                        active_roles=[],
+                        selected_pair_method=method,
+                    )
+                ).to_json()
+            )
+            record = await self._run_pairing_protocol(method, transport)
+        except asyncio.CancelledError:
+            # A cancelled attempt ends like any local abort: the task never reports
+            # cancelled(), so awaiting callers see the abort rather than the cancel.
+            await abort_pairing(transport, PairAbortReason.USER_CANCELLED)
+        self._pairing_attempt = None
+        if record is None:  # verified an existing pairing: no new record, no re-handshake
+            self._logger.info(
+                "Verified pairing with client %s via %s", self._client_id, method.value
+            )
+            return True
+        self._logger.info("Paired with client %s via %s", self._client_id, method.value)
+        # The client finalized, so the attempt has succeeded and both sides hold the record:
+        # a late cancel must not abort it or corrupt the re-handshake. Complete the tail and
+        # report the success; the one absorbed cancel ends with the pairing in effect.
+        rehandshake = create_task(self._rehandshake_to(transport, record.as_resolved()))
+        try:
+            return await asyncio.shield(rehandshake)
+        except asyncio.CancelledError:
+            return await rehandshake
+
+    async def _run_pairing_protocol(
+        self, method: PairMethod, transport: EncryptedWebSocket
+    ) -> ServerPairingRecord | None:
+        """Run ``method``'s exchange, returning the record (``None`` when verifying)."""
+        assert self._client_id is not None
+        self._pairing_index += 1
+        pairing_index = self._pairing_index
+        if method is PairMethod.PAIRING_PSK:
+            return await run_pairing_psk_server(
+                transport,
+                client_id=self._client_id,
+                store=self._server.pairing_store,
+            )
+        assert self._pairing_attempt is not None
+        assert self._pairing_attempt.pin_provider is not None
+        assert self._handshake_hash is not None
+        assert self._noise_psk is not None
+        verify = self._pairing_attempt.verify
+        if verify and self._noise_psk.category is not PskCategory.LONG_TERM:
+            raise PairingError("verification requires an existing pairing")
+        if method is PairMethod.STATIC_PIN:
+            return await run_static_pin_server(
+                transport,
+                handshake_hash=self._handshake_hash,
+                pairing_index=pairing_index,
+                pin_provider=self._pairing_attempt.pin_provider,
+                client_id=self._client_id,
+                store=self._server.pairing_store,
+                verify=verify,
+            )
+        return await run_dynamic_pin_server(
+            transport,
+            handshake_hash=self._handshake_hash,
+            pairing_index=pairing_index,
+            pin_provider=self._pairing_attempt.pin_provider,
+            pin_length=self._negotiated_dynamic_pin_length(),
+            client_id=self._client_id,
+            store=self._server.pairing_store,
+            verify=verify,
+        )
+
+    def _negotiated_dynamic_pin_length(self) -> int:
+        """Return negotiated dynamic PIN length."""
+        assert self._client_info is not None
+        descriptor = next(
+            (
+                d
+                for d in (self._client_info.supported_pair_methods or [])
+                if d.method is PairMethod.DYNAMIC_PIN
+            ),
+            None,
+        )
+        client_min = descriptor.min_pin_length if descriptor is not None else None
+        if client_min is None or not MIN_PIN_DIGITS <= client_min <= MAX_PIN_DIGITS:
+            raise PairingError("client does not (correctly) offer dynamic PIN pairing")
+        # Both floors are validated to [MIN_PIN_DIGITS, MAX_PIN_DIGITS], so the max stays in range.
+        return max(client_min, self._server.min_pin_length)
+
+    async def _rehandshake_for_pairing_if_needed(self, transport: Transport) -> bool:
+        """If the attempt needs a PSK other than the current one, rehandshake and redo hellos."""
+        attempt = self._pairing_attempt
+        if attempt is None:
+            return True
+        assert self._noise_psk is not None
+        if attempt.method is PairMethod.PAIRING_PSK:
+            assert attempt.pairing_psk is not None
+            if (
+                self._noise_psk.category is PskCategory.PAIRING
+                and self._noise_psk.psk == attempt.pairing_psk
+            ):
+                return True
+            target = ResolvedPsk(
+                psk_id_for(attempt.pairing_psk), attempt.pairing_psk, PskCategory.PAIRING
+            )
+        else:
+            if self._noise_psk.category in (PskCategory.SENTINEL, PskCategory.LONG_TERM):
+                # Long-term: verification runs over the existing PSK.
+                # Sentinel: a fresh PIN pairing.
+                return True
+            target = ResolvedPsk(psk_id_for(SENTINEL_PSK), SENTINEL_PSK, PskCategory.SENTINEL)
+        assert isinstance(transport, EncryptedWebSocket)
+        return await self._rehandshake_to(transport, target)
+
+    async def _rehandshake_to(self, transport: EncryptedWebSocket, psk: ResolvedPsk) -> bool:
+        """Re-handshake onto ``psk`` and redo the hello dance."""
+        assert self._client_id is not None
+        assert self._handshake_hash is not None
+        result = await run_rehandshake_server(
+            transport,
+            local_identity=self._server.identity,
+            client_id=self._client_id,
+            suite=transport.session.suite,
+            prologue=self._handshake_hash,
+            psk=psk,
+        )
+        self._noise_psk = result.psk
+        self._handshake_hash = result.handshake_hash
+        self._pairing_index = 0
+        return await self._send_server_hello_and_recv(transport)
+
+    async def _activate(self) -> None:
+        """Send ``server/activate`` and reconcile the client's active roles."""
+        assert self._transport is not None
+        if self._declared_activities is None:
+            self._declared_activities = self._initial_activities
+        else:
+            self._declared_activities = self._desired_activities
+        active_roles = self._roles_to_activate
+        await self._transport.send_str(
+            ServerActivateMessage(
+                payload=ServerActivatePayload(
+                    activities=self._declared_activities,
+                    active_roles=active_roles,
+                )
+            ).to_json()
+        )
+        assert self._client is not None
+        self._client.set_active_roles(active_roles)
+
+    async def refresh_trusted_unpaired(self) -> None:
+        """Re-read the trusted-unpaired approval and re-activate roles."""
+        if self._noise_psk is None or self._noise_psk.category is not PskCategory.SENTINEL:
+            return
+        if self._client is None or self._declared_activities is None:
+            return
+        assert self._client_id is not None
+        self._trusted_unpaired = (
+            await self._server.pairing_store.trusted_unpaired(self._client_id) is not None
+        )
+        active_roles = self._roles_to_activate
+        self._declared_activities = self._desired_activities
+        self.send_priority_message(
+            ServerActivateMessage(
+                payload=ServerActivatePayload(
+                    activities=self._declared_activities, active_roles=active_roles
+                )
+            )
+        )
+        self._client.set_active_roles(active_roles)
+
+    def enable_management(self) -> None:
+        """Add ``management`` to this connection's activities; requires a paired connection."""
+        if not self._management_capable:
+            msg = "management requires a paired (long-term Sendspin PSK) connection"
+            raise RuntimeError(msg)
+        if self._management_active:
+            return
+        self._management_active = True
+        self._refresh_activities()
+
+    def disable_management(self) -> None:
+        """Drop ``management`` from this connection's activities, leaving playback intact."""
+        if not self._management_active:
+            return
+        self._management_active = False
+        self._refresh_activities()
+
+    def _resolve_management(self, payload: ManagementResultPayload) -> None:
+        """Deliver a management reply, draining the waiter slot."""
+        waiter = self._management_waiter
+        if waiter is None:
+            self._logger.warning("Unsolicited management reply; ignoring")
+            return
+        # Clear even an abandoned waiter, so its late reply can't match the next request.
+        self._management_waiter = None
+        if not waiter.done():
+            waiter.set_result(payload)
+
+    async def _management_request[T: ManagementResultPayload](
+        self, message: ServerMessage, expected: type[T]
+    ) -> T:
+        """Send a management request and await its single reply of type ``expected``."""
+        # No timeout: replies are matched to requests by order, not id (one in flight).
+        if self._management_waiter is not None:
+            raise RuntimeError("a management request is already in flight")
+        if self._transport is None or self._disconnecting:
+            raise RuntimeError("connection is not active")
+        waiter: asyncio.Future[ManagementResultPayload] = asyncio.get_running_loop().create_future()
+        self._management_waiter = waiter
+        self.send_priority_message(message)
+        payload = await waiter
+        if not isinstance(payload, expected):
+            raise RuntimeError(  # noqa: TRY004 - protocol violation, not a type error
+                f"expected a {expected.__name__} reply, got {type(payload).__name__}"
+            )
+        return payload
+
+    def unpair(self) -> None:
+        """Tell the client to drop this server's pairing record (it then closes)."""
+        self.send_priority_message(ServerUnpairMessage())
+
+    async def list_records(
+        self,
+    ) -> tuple[ManagementResult, list[RecordSummary], StorageAccounting | None]:
+        """Return the result code, the client's pairing records, and its storage accounting."""
+        payload = await self._management_request(
+            ManagementListRecordsMessage(), ManagementResultPayload
+        )
+        records = payload.data.records if payload.data and payload.data.records else []
+        return payload.result, records, payload.storage
+
+    async def add_record(self, *, psk: bytes, server_id: str | None) -> ManagementResult:
+        """Add a pairing record on the client."""
+        payload = await self._management_request(
+            ManagementAddRecordMessage(
+                payload=ManagementAddRecordPayload(psk=b64url_encode(psk), server_id=server_id)
+            ),
+            ManagementResultPayload,
+        )
+        return payload.result
+
+    async def remove_record(self, *, psk_id: str) -> ManagementResult:
+        """Remove a pairing record from the client."""
+        payload = await self._management_request(
+            ManagementRemoveRecordMessage(payload=ManagementRemoveRecordPayload(psk_id=psk_id)),
+            ManagementResultPayload,
+        )
+        return payload.result
+
+    async def get_pairing_config(
+        self,
+    ) -> tuple[ManagementResult, ManagementResultData, StorageAccounting | None]:
+        """Return the result code, the client's pairing configuration (no secrets), and storage."""
+        payload = await self._management_request(
+            ManagementGetPairingConfigMessage(), ManagementResultPayload
+        )
+        data = payload.data if payload.data is not None else ManagementResultData()
+        return payload.result, data, payload.storage
+
+    async def set_pairing_config(
+        self, patch: ManagementSetPairingConfigPayload
+    ) -> ManagementResult:
+        """Apply a pairing-config patch on the client."""
+        payload = await self._management_request(
+            ManagementSetPairingConfigMessage(payload=patch), ManagementResultPayload
+        )
+        return payload.result
+
+    def _start_message_loops(self) -> None:
+        """Spawn the reader/writer tasks."""
         self._writer_task = create_task(self._writer())
+        self._message_loop_task = create_task(self._run_message_loop())
+
+    async def _pause_writer(self) -> None:
+        """Stop the writer task, leaving the reader loop running."""
+        # Cancelling mid-send is nonce-safe: no await separates encrypt() from the
+        # transport write.
+        if self._writer_task is not None and not self._writer_task.done():
+            self._writer_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await self._writer_task
+            self._writer_task = None
+
+    def _resume_writer(self) -> None:
+        """Restart the writer task, unless the connection is being torn down."""
+        if self._disconnecting or self._closing:
+            return
+        if self._writer_task is None or self._writer_task.done():
+            self._writer_task = create_task(self._writer())
 
     async def _cleanup_connection(self) -> None:
         wsock = self._wsock_client or self._wsock_server
@@ -573,27 +1406,33 @@ class SendspinConnection:
                 await wsock.close()
         await self.disconnect(retry_connection=not self._closing)
 
+    def _try_route_to_pairing_queue(self, msg: WSMessage) -> bool:
+        """Forward a message to the pairing handler; return whether it was routed."""
+        if self._pairing_message_queue is None:
+            return False
+        if (
+            msg.type is WSMsgType.TEXT
+            and self._peek_message_type(cast("str", msg.data)) in _PAIR_TRANSITION_TYPES
+        ):
+            self._pairing_messages_started = True
+        if not self._pairing_messages_started:
+            return False
+        self._pairing_message_queue.put_nowait(msg)
+        return True
+
     async def _run_message_loop(self) -> None:
-        wsock = self._wsock_server or self._wsock_client
-        assert wsock is not None
+        transport = self._transport
+        assert transport is not None
+        cancelled = False
         try:
-            async for msg in wsock:
+            async for msg in transport:
                 timestamp_us = self._server.clock.now_us()
 
-                if msg.type in (WSMsgType.CLOSE, WSMsgType.CLOSING, WSMsgType.CLOSED):
-                    close_code = wsock.close_code
-                    log_func = (
-                        self._logger.debug if close_code in (1000, 1001) else self._logger.warning
-                    )
-                    log_func(
-                        "WebSocket closed: type=%s close_code=%s",
-                        msg.type.name,
-                        close_code,
-                    )
-                    break
+                if self._try_route_to_pairing_queue(msg):
+                    continue
 
                 if msg.type == WSMsgType.ERROR:
-                    self._logger.warning("WebSocket error: %s", wsock.exception() or "unknown")
+                    self._logger.warning("WebSocket error: %s", transport.exception() or "unknown")
                     break
 
                 if msg.type == WSMsgType.BINARY:
@@ -604,12 +1443,22 @@ class SendspinConnection:
                     self._logger.debug("Ignoring message type: %s", msg.type.name)
                     continue
 
-                await self._handle_message(
-                    self._deserialize_client_message(cast("str", msg.data)), timestamp_us
-                )
+                if self._pairing_in_progress:
+                    continue
+
+                text = cast("str", msg.data)
+                try:
+                    message = self._deserialize_client_message(text)
+                except Exception:
+                    if self._peek_message_type(text) in _PAIRING_MESSAGE_TYPES:
+                        # In flight from before the client observed the leave activate.
+                        self._logger.debug("Discarding pairing message: not in pairing")
+                        continue
+                    raise
+                await self._handle_message(message, timestamp_us)
             else:
                 # Loop exited normally (iterator exhausted) - connection closed
-                close_code = wsock.close_code
+                close_code = transport.close_code
                 log_func = (
                     self._logger.debug if close_code in (1000, 1001) else self._logger.warning
                 )
@@ -618,73 +1467,23 @@ class SendspinConnection:
                     close_code,
                 )
         except asyncio.CancelledError:
+            cancelled = True
             self._logger.debug("Message loop cancelled")
         except Exception:
             self._logger.exception("Unexpected error inside websocket API")
         finally:
+            if self._pairing_message_queue is not None:
+                self._pairing_message_queue.put_nowait(WSMessage(WSMsgType.CLOSE, None, ""))
             if self._writer_task and not self._writer_task.done():
                 self._writer_task.cancel()
+            if not cancelled:
+                self._connection_done.set()
 
-    async def _handle_message(self, message: ClientMessage, timestamp_us: int) -> None:  # noqa: PLR0915
-        if self._client_info is None and not isinstance(message, ClientHelloMessage):
-            raise ValueError("First message must be client/hello")
-        if (
-            self._client_info is not None
-            and not self._server_hello_sent
-            and not isinstance(message, ClientHelloMessage)
-        ):
-            raise ValueError("Client must wait for server/hello before sending other messages")
+    async def _handle_message(self, message: ClientMessage, timestamp_us: int) -> None:
+        """Handle a single client message, dispatching to roles or the connection."""
         if isinstance(message, ClientHelloMessage):
-            client_info = message.payload
-            if client_info.version != 1:
-                self._logger.error(
-                    "Incompatible protocol version %s (only '1' is supported)",
-                    client_info.version,
-                )
-                await self.disconnect(retry_connection=False)
-                return
-
-            self._client_info = client_info
-            self._client_id = client_info.client_id
-            self._active_roles = negotiate_active_roles(client_info.supported_roles)
-            self._logger = logger.getChild(self._client_id)
-            self._logger.debug("Received client/hello: %s", client_info)
-
-            # Look up connection reason for server-initiated connections
-            connection_reason = (
-                self._server.get_connection_reason(self._url)
-                if self._url is not None
-                else ConnectionReason.DISCOVERY
-            )
-
-            self.send_priority_message(
-                ServerHelloMessage(
-                    payload=ServerHelloPayload(
-                        server_id=self._server.id,
-                        name=self._server.name,
-                        version=1,
-                        active_roles=self._active_roles,
-                        connection_reason=connection_reason,
-                    )
-                )
-            )
-            self._server_hello_sent = True
-
-            client = self._server.get_or_create_client(self._client_id)
-            client.attach_connection(self, client_info=client_info, active_roles=self._active_roles)
-            self._client = client
-
-            # Register client_id → URL mapping for server-initiated connections
-            if self._url is not None:
-                self._server.register_client_url(client_info.client_id, self._url)
-
-            if self.requires_initial_state():
-                self._initial_state_timeout_handle = self._server.loop.call_later(
-                    5.0, self._initial_state_timeout_callback
-                )
-            else:
-                client.mark_connected()
-                self._server.on_client_first_connect(client.client_id)
+            # client/hello is consumed during the hello exchange; a second one is a protocol error.
+            self._logger.warning("Unexpected client/hello after the hello exchange; ignoring")
             return
 
         if isinstance(message, ClientTimeMessage):
@@ -732,6 +1531,10 @@ class SendspinConnection:
                 return
             for role in self._client.active_roles:
                 role.on_command(message.payload)
+            return
+
+        if isinstance(message, ManagementResultMessage):
+            self._resolve_management(message.payload)
             return
 
         if isinstance(message, ClientGoodbyeMessage):
@@ -799,7 +1602,7 @@ class SendspinConnection:
 
     async def _send_message(
         self,
-        wsock: web.WebSocketResponse | ClientWebSocketResponse,
+        wsock: Transport,
         message: ServerMessage,
     ) -> None:
         """Send a single message, handling time message timestamps."""
@@ -816,7 +1619,7 @@ class SendspinConnection:
 
     async def _send_binary_data(
         self,
-        wsock: web.WebSocketResponse | ClientWebSocketResponse,
+        wsock: Transport,
         role: str,
         entry: _RoleQueueEntry,
         buffer_tracker: BufferTracker | None,
@@ -910,7 +1713,7 @@ class SendspinConnection:
 
     async def _process_priority_messages(
         self,
-        wsock: web.WebSocketResponse | ClientWebSocketResponse,
+        wsock: Transport,
     ) -> bool:
         """Send one queued priority message if available."""
         if not self._priority_messages:
@@ -922,7 +1725,7 @@ class SendspinConnection:
 
     async def _process_normal_messages(
         self,
-        wsock: web.WebSocketResponse | ClientWebSocketResponse,
+        wsock: Transport,
         ready_entry: tuple[str, _RoleQueueEntry, int, int] | None,
     ) -> bool:
         """Send one queued non-role message when no role entry is ready."""
@@ -1022,7 +1825,7 @@ class SendspinConnection:
 
     async def _process_binary_role_messages(
         self,
-        wsock: web.WebSocketResponse | ClientWebSocketResponse,
+        wsock: Transport,
         role: str,
         entry: _RoleQueueEntry,
         now_us: int,
@@ -1104,7 +1907,7 @@ class SendspinConnection:
 
     async def _process_role_messages(
         self,
-        wsock: web.WebSocketResponse | ClientWebSocketResponse,
+        wsock: Transport,
         ready_entry: tuple[str, _RoleQueueEntry, int, int],
         now_us: int,
     ) -> tuple[bool, int]:
@@ -1150,6 +1953,8 @@ class SendspinConnection:
         if self._delayed_roles:
             next_ready_us = self._delayed_roles[0][0]
             sleep_s = max((next_ready_us - now_us) / 1_000_000, 0.0)
+        else:
+            self._writer_idle.set()
 
         try:
             if sleep_s is None:
@@ -1160,7 +1965,8 @@ class SendspinConnection:
             pass
 
     async def _writer(self) -> None:
-        wsock = self._wsock_server or self._wsock_client
+        """Send queued messages to the client, respecting role timing and backpressure."""
+        wsock = self._transport
         assert wsock is not None
 
         clock_now_us = self._server.clock.now_us
@@ -1210,12 +2016,22 @@ class SendspinConnection:
             if not wsock.closed:
                 with suppress(Exception):
                     await wsock.close()
+        finally:
+            self._writer_idle.set()
 
-    async def _handle_client(self) -> None:
-        """Run the complete websocket connection lifecycle (internal)."""
+    async def handle_client(self) -> None:
+        """Run the complete websocket connection lifecycle."""
         try:
             await self._setup_connection()
-            self._message_loop_task = create_task(self._run_message_loop())
-            await self._message_loop_task
+            if not await self._exchange_hellos():
+                return
+            if self.is_encrypted:
+                self._subscribe_activity_events()
+            self._start_message_loops()
+            await self._connection_done.wait()
+        except HandshakeAbortedError as exc:
+            self._logger.debug("Noise handshake aborted: %s", exc)
+        except PairingError as exc:
+            self._logger.debug("Pairing aborted: %s", exc)
         finally:
             await self._cleanup_connection()

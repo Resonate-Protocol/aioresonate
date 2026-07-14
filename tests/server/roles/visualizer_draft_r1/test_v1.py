@@ -94,6 +94,20 @@ def test_visualizer_role_on_stream_start_sends_stream_start() -> None:
     assert message.payload.visualizer.batch_max == 8
 
 
+def test_visualizer_role_on_deactivate_ends_active_stream() -> None:
+    """on_deactivate() sends stream/end while a visualizer stream is active."""
+    client = _make_client_stub()
+    role = VisualizerDraftR1Role(client=client)
+    role.on_connect()
+    role.on_stream_start()
+    role.on_deactivate()
+
+    assert any(
+        isinstance(call.args[1], StreamEndMessage)
+        for call in client.send_role_message.call_args_list
+    )
+
+
 def test_visualizer_role_on_connect_does_not_send_stream_start() -> None:
     """on_connect() initializes config but does not send stream/start."""
     client = _make_client_stub()

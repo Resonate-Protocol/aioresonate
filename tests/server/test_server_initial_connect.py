@@ -12,6 +12,8 @@ import pytest
 from aiohttp import ClientConnectionError, ClientWebSocketResponse
 
 from aiosendspin.models.types import GoodbyeReason
+from aiosendspin.noise.keys import Identity
+from aiosendspin.noise.trust_store import InMemoryServerPairingStore
 from aiosendspin.server.connection import SendspinConnection
 from aiosendspin.server.server import SendspinServer
 
@@ -117,9 +119,10 @@ def _make_server(client_session: object) -> SendspinServer:
     loop = asyncio.get_running_loop()
     return SendspinServer(
         loop=loop,
-        server_id="srv",
+        identity=Identity.generate(),
         server_name="server",
         client_session=client_session,
+        pairing_store=InMemoryServerPairingStore(),
     )
 
 
@@ -186,10 +189,12 @@ async def test_connect_to_client_and_wait_can_retry_initial_failure(
             *,
             wsock_client: object,  # noqa: ARG002
             url: str | None = None,  # noqa: ARG002
+            expected_client_id: str | None = None,  # noqa: ARG002
+            pairing_attempt: object | None = None,  # noqa: ARG002
         ) -> None:
             return
 
-        async def _handle_client(self) -> None:
+        async def handle_client(self) -> None:
             return
 
     monkeypatch.setattr("aiosendspin.server.server.SendspinConnection", _FakeConnection)
@@ -246,10 +251,12 @@ async def test_connect_to_client_and_wait_returns_on_initial_success(
             *,
             wsock_client: object,
             url: str | None = None,  # noqa: ARG002
+            expected_client_id: str | None = None,  # noqa: ARG002
+            pairing_attempt: object | None = None,  # noqa: ARG002
         ) -> None:
             self._wsock_client = wsock_client
 
-        async def _handle_client(self) -> None:
+        async def handle_client(self) -> None:
             return
 
     monkeypatch.setattr("aiosendspin.server.server.SendspinConnection", _FakeConnection)
@@ -277,11 +284,13 @@ async def test_server_initiated_stops_retrying_on_another_server_goodbye(
             *,
             wsock_client: object,  # noqa: ARG002
             url: str | None = None,  # noqa: ARG002
+            expected_client_id: str | None = None,  # noqa: ARG002
+            pairing_attempt: object | None = None,  # noqa: ARG002
         ) -> None:
             self.goodbye_reason = GoodbyeReason.ANOTHER_SERVER
             self.should_retry_server_initiated_connection = False
 
-        async def _handle_client(self) -> None:
+        async def handle_client(self) -> None:
             return
 
     monkeypatch.setattr("aiosendspin.server.server.SendspinConnection", _FakeConnection)
@@ -333,13 +342,15 @@ async def test_server_initiated_backoff_resets_only_after_stable_session(
             *,
             wsock_client: object,  # noqa: ARG002
             url: str | None = None,  # noqa: ARG002
+            expected_client_id: str | None = None,  # noqa: ARG002
+            pairing_attempt: object | None = None,  # noqa: ARG002
         ) -> None:
             nonlocal attempts
             attempts += 1
             self.should_retry_server_initiated_connection = attempts < max_attempts
             self.goodbye_reason = None
 
-        async def _handle_client(self) -> None:
+        async def handle_client(self) -> None:
             return
 
     async def _fake_sleep(delay: float) -> None:
@@ -382,12 +393,14 @@ async def test_retry_indefinitely_keeps_reconnecting_after_backoff_ceiling(
             *,
             wsock_client: object,  # noqa: ARG002
             url: str | None = None,  # noqa: ARG002
+            expected_client_id: str | None = None,  # noqa: ARG002
+            pairing_attempt: object | None = None,  # noqa: ARG002
         ) -> None:
             nonlocal attempts
             attempts += 1
             self.should_retry_server_initiated_connection = attempts < 2
 
-        async def _handle_client(self) -> None:
+        async def handle_client(self) -> None:
             return
 
     async def _fake_sleep(delay: float) -> None:
@@ -503,7 +516,9 @@ async def test_mdns_removal_keeps_non_retained_client() -> None:
 
 
 @pytest.mark.asyncio
-async def test_mdns_removal_keeps_connection_task_for_persistent_client() -> None:
+async def test_mdns_removal_keeps_connection_task_for_persistent_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A persistent client must keep its retry task alive after mDNS withdrawal.
 
     Without this guarantee, a transient mDNS drop (network blip while the
@@ -513,6 +528,24 @@ async def test_mdns_removal_keeps_connection_task_for_persistent_client() -> Non
     session = _PersistentSuccessfulSession()
     server = _make_server(session)
     url = "ws://127.0.0.1:9999/sendspin"
+
+    class _HangingConnection:
+        def __init__(
+            self,
+            _server: SendspinServer,
+            *,
+            wsock_client: object,  # noqa: ARG002
+            url: str | None = None,  # noqa: ARG002
+            expected_client_id: str | None = None,  # noqa: ARG002
+            pairing_attempt: object | None = None,  # noqa: ARG002
+        ) -> None:
+            self.goodbye_reason = None
+            self.should_retry_server_initiated_connection = True
+
+        async def handle_client(self) -> None:
+            await asyncio.Event().wait()
+
+    monkeypatch.setattr("aiosendspin.server.server.SendspinConnection", _HangingConnection)
 
     persistent_client = MagicMock()
     persistent_client.is_connected = False

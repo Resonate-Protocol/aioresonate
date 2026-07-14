@@ -97,7 +97,12 @@ def _make_player_client(
     hello.artwork_support = None
     hello.visualizer_support = None
 
-    client.attach_connection(conn, client_info=hello, active_roles=[Roles.PLAYER.value])
+    client.attach_connection(
+        conn,
+        client_info=hello,
+        negotiated_roles=[Roles.PLAYER.value],
+        active_roles=[Roles.PLAYER.value],
+    )
     client.mark_connected()
     return client, conn
 
@@ -169,7 +174,6 @@ def test_player_format_request_uses_client_priority_order_when_codec_missing(
     owner = MagicMock()
     owner.client_id = "owner"
     owner.name = "owner"
-    owner.check_role.return_value = False
     owner.group = MagicMock()
     owner.group.stop = AsyncMock()
     SendspinGroup(mock_server, owner)

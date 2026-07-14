@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from aiosendspin.models.core import ServerStateMessage, ServerStatePayload
 from aiosendspin.server.roles.base import Role
 
 if TYPE_CHECKING:
@@ -43,6 +44,11 @@ class ColorV1Role(Role):
     def on_connect(self) -> None:
         """Subscribe to ColorGroupRole for state updates."""
         self._subscribe_to_group_role()
+
+    def on_deactivate(self) -> None:
+        """Clear color state when the role is deactivated while still connected."""
+        self.send_message(ServerStateMessage(ServerStatePayload(color=None)))
+        super().on_deactivate()
 
     def on_disconnect(self) -> None:
         """Unsubscribe from ColorGroupRole."""

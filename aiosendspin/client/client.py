@@ -3,107 +3,42 @@
 from __future__ import annotations
 
 import asyncio
-import base64
 import logging
-import struct
-from collections.abc import Callable, Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from contextlib import suppress
-from dataclasses import dataclass
 
-from aiohttp import ClientSession, ClientWebSocketResponse, WSMessage, WSMsgType, web
+from aiohttp import ClientSession, web
 
 from aiosendspin.clock import Clock, RawMonotonicClock
-from aiosendspin.models import BINARY_HEADER_SIZE, BinaryMessageType, unpack_binary_header
 from aiosendspin.models.artwork import ClientHelloArtworkSupport
-from aiosendspin.models.controller import ControllerCommandPayload
 from aiosendspin.models.core import (
-    ClientCommandMessage,
-    ClientCommandPayload,
-    ClientGoodbyeMessage,
-    ClientGoodbyePayload,
-    ClientHelloMessage,
-    ClientHelloPayload,
-    ClientStateMessage,
-    ClientStatePayload,
-    ClientTimeMessage,
-    ClientTimePayload,
     DeviceInfo,
-    GroupUpdateServerMessage,
     GroupUpdateServerPayload,
-    ServerCommandMessage,
     ServerCommandPayload,
-    ServerHelloMessage,
-    ServerHelloPayload,
-    ServerStateMessage,
     ServerStatePayload,
-    ServerTimeMessage,
-    ServerTimePayload,
-    StreamClearMessage,
-    StreamEndMessage,
     StreamStartMessage,
 )
-from aiosendspin.models.player import (
-    ClientHelloPlayerSupport,
-    PlayerStatePayload,
-    StreamStartPlayer,
-)
+from aiosendspin.models.player import ClientHelloPlayerSupport
 from aiosendspin.models.types import (
-    AudioCodec,
-    ConnectionReason,
+    Activity,
     GoodbyeReason,
     MediaCommand,
+    PairAbortReason,
+    PairMethod,
     PlayerCommand,
     PlayerStateType,
     Roles,
-    ServerMessage,
 )
-from aiosendspin.models.visualizer import (
-    ClientHelloVisualizerSupport,
-    StreamStartVisualizer,
-    VisualizerFrame,
-)
+from aiosendspin.models.visualizer import ClientHelloVisualizerSupport, VisualizerFrame
+from aiosendspin.noise.driver import HandshakeAbortedError
+from aiosendspin.noise.keys import Identity
+from aiosendspin.noise.pairing import PairingError
+from aiosendspin.noise.trust_store import ClientPairingStore, ResolvedPsk
 
-from .time_sync import SendspinTimeFilter
+from .connection import UNSYNCED_PLAY_LEAD_US, SendspinConnection
+from .models import AudioFormat, ServerInfo
 
 logger = logging.getLogger(__name__)
-
-
-@dataclass(slots=True)
-class PCMFormat:
-    """PCM audio format description."""
-
-    sample_rate: int
-    """Sample rate in Hz (e.g., 48000, 44100)."""
-    channels: int
-    """Number of audio channels (1=mono, 2=stereo)."""
-    bit_depth: int
-    """Bits per sample (e.g., 16, 24, 32)."""
-
-    def __post_init__(self) -> None:
-        """Validate the provided PCM audio format."""
-        if self.sample_rate <= 0:
-            raise ValueError("sample_rate must be positive")
-        if self.channels not in (1, 2):
-            raise ValueError("channels must be 1 or 2")
-        if self.bit_depth not in (16, 24, 32):
-            raise ValueError("bit_depth must be 16, 24, or 32")
-
-    @property
-    def frame_size(self) -> int:
-        """Return bytes per PCM frame."""
-        return self.channels * (self.bit_depth // 8)
-
-
-@dataclass(slots=True)
-class AudioFormat:
-    """Audio format description including codec type."""
-
-    codec: AudioCodec
-    """Audio codec used for encoding."""
-    pcm_format: PCMFormat
-    """Format of decoded PCM audio."""
-    codec_header: bytes | None = None
-    """Optional codec-specific header bytes (e.g., FLAC streaminfo)."""
 
 
 # Callback invoked when server state metadata updates are received.
@@ -120,9 +55,6 @@ ColorCallback = Callable[[ServerStatePayload], None]
 
 # Callback invoked when audio streaming begins.
 StreamStartCallback = Callable[[StreamStartMessage], None]
-
-# Callback invoked when server/hello is received.
-ServerHelloCallback = Callable[[ServerHelloPayload], None]
 
 # Callback invoked when audio streaming ends.
 # Receives list of roles to end, or None if all roles should be ended.
@@ -150,16 +82,6 @@ VisualizerCallback = Callable[[list[VisualizerFrame]], None]
 ArtworkCallback = Callable[[int, bytes], None]
 
 
-@dataclass(slots=True)
-class ServerInfo:
-    """Information about the connected server."""
-
-    server_id: str
-    name: str
-    version: int
-    connection_reason: ConnectionReason
-
-
 class SendspinClient:
     """
     Async Sendspin client for handling playback and metadata.
@@ -169,8 +91,10 @@ class SendspinClient:
     their respective roles are enabled.
     """
 
+    _identity: Identity
+    """This client's static public X25519 identity."""
     _client_id: str
-    """Unique identifier for this client."""
+    """The client's wire identifier — derived from ``_identity``."""
     _client_name: str
     """Human-readable name for this client."""
     _device_info: DeviceInfo | None
@@ -188,50 +112,27 @@ class SendspinClient:
 
     _loop: asyncio.AbstractEventLoop
     """Event loop for this client."""
-    _ws: ClientWebSocketResponse | web.WebSocketResponse | None = None
-    """WebSocket connection to the server."""
+    _pairing_store: ClientPairingStore
+    """Trust store consulted to resolve a PSK by ``psk_id`` during the handshake."""
     _owns_session: bool
     """Whether this client owns and should close the session."""
-    _connected: bool = False
-    """Whether the client is currently connected."""
-    _server_info: ServerInfo | None = None
-    """Information about the connected server."""
-    _server_hello_event: asyncio.Event | None = None
-    """Event signaled when server hello is received."""
-
-    _reader_task: asyncio.Task[None] | None = None
-    """Background task reading messages from server."""
-    _time_task: asyncio.Task[None] | None = None
-    """Background task for time synchronization."""
 
     _static_delay_us: int = 0
-    """Static playback delay in microseconds."""
+    """Default static playback delay seeding new connections, in microseconds."""
     _required_lead_time_us: int = 250_000
     """Reported startup lead time in microseconds."""
     _min_buffer_us: int = 250_000
     """Reported minimum ongoing buffer duration in microseconds."""
-    _send_lock: asyncio.Lock
-    """Lock for serializing WebSocket message sends."""
-    _time_filter: SendspinTimeFilter
-    """Kalman filter for time synchronization."""
 
-    _current_player: StreamStartPlayer | None = None
-    """Current active player configuration."""
-    _current_audio_format: AudioFormat | None = None
-    """Current audio format for active stream."""
-    _stream_active: bool = False
-    """True if player stream is active."""
-    _visualizer_stream_active: bool = False
-    """True if visualizer stream is active."""
-    _artwork_stream_active: bool = False
-    """True if artwork stream is active."""
-    _current_visualizer_config: StreamStartVisualizer | None = None
-    """Current visualizer config from stream/start."""
+    _admitted_connection: SendspinConnection | None = None
+    """The currently-admitted connection (at most one), if any."""
+    _provisional_connections: set[SendspinConnection]
+    """Incoming connections still being brought up / awaiting admission."""
+    _admission_lock: asyncio.Lock
+    """Serializes the admit/displace decision across concurrent connections."""
 
-    _group_state: GroupUpdateServerPayload | None = None
-    """Latest group state received from server."""
-    _server_state: ServerStatePayload | None = None
-    """Latest server state received from server."""
+    last_playback_server_id: str | None = None
+    """server_id of the last server admitted with the playback activity; the discovery tiebreak."""
 
     _metadata_callbacks: list[MetadataCallback]
     """Callbacks invoked on server/state messages with metadata."""
@@ -243,8 +144,6 @@ class SendspinClient:
     """Callbacks invoked on server/state messages with color."""
     _stream_start_callbacks: list[StreamStartCallback]
     """Callbacks invoked when a stream starts."""
-    _server_hello_callbacks: list[ServerHelloCallback]
-    """Callbacks invoked when server hello is received."""
     _stream_end_callbacks: list[StreamEndCallback]
     """Callbacks invoked when a stream ends."""
     _stream_clear_callbacks: list[StreamClearCallback]
@@ -267,12 +166,13 @@ class SendspinClient:
     _state_supported_commands: list[PlayerCommand]
     """Supported commands advertised in client/state messages."""
 
-    def __init__(  # noqa: PLR0913
+    def __init__(  # noqa: PLR0913, PLR0915
         self,
-        client_id: str,
+        identity: Identity,
         client_name: str,
         roles: Sequence[Roles],
         *,
+        pairing_store: ClientPairingStore,
         device_info: DeviceInfo | None = None,
         player_support: ClientHelloPlayerSupport | None = None,
         artwork_support: ClientHelloArtworkSupport | None = None,
@@ -284,54 +184,19 @@ class SendspinClient:
         initial_volume: int = 100,
         initial_muted: bool = False,
         state_supported_commands: list[PlayerCommand] | None = None,
+        pin_display: Callable[[str | None], Awaitable[None]] | None = None,
+        pairing_window: Callable[[], Awaitable[None]] | None = None,
         clock: Clock | None = None,
     ) -> None:
-        """
-        Create a new Sendspin client instance.
-
-        Args:
-            client_id: Unique identifier for this client.
-            client_name: Human-readable name for this client.
-            roles: Sequence of roles this client supports. Must include PLAYER
-                if player_support is provided; must include ARTWORK if
-                artwork_support is provided.
-            device_info: Optional device information (product name, manufacturer,
-                software version, MAC address).
-            player_support: Custom player capabilities. Required if PLAYER role
-                is specified; raises ValueError if missing.
-            artwork_support: Custom artwork capabilities. Required if ARTWORK
-                role is specified; raises ValueError if missing.
-            visualizer_support: Visualizer capabilities. Required if
-                VISUALIZER role is specified; raises ValueError if missing.
-            session: Optional aiohttp ClientSession. If None, a session is created
-                and managed by this client.
-            static_delay_ms: Static playback delay in milliseconds applied after
-                clock synchronization. Defaults to 0.0.
-            required_lead_time_ms: Startup lead time reported via client/state
-                (codec init, decode warmup, backend buffering, DAC latency).
-                Defaults to 250.0. Excludes static_delay_ms.
-            min_buffer_ms: Minimum ongoing buffer duration reported via client/state
-                to absorb network jitter and decode/playback variance. Defaults to
-                250.0. Excludes static_delay_ms.
-            initial_volume: Initial volume level (0-100) for player role.
-                Defaults to 100. Sent automatically after handshake if PLAYER
-                role is supported.
-            initial_muted: Initial mute state for player role. Defaults to False.
-                Sent automatically after handshake if PLAYER role is supported.
-            state_supported_commands: Optional list of player commands advertised
-                in client/state messages. Defaults to None (empty list).
-            clock: Monotonic clock used for time sync timestamps. Defaults to
-                RawMonotonicClock.
-
-        Raises:
-            ValueError: If PLAYER in roles but player_support is None, if
-                ARTWORK in roles but artwork_support is None, or if
-                VISUALIZER in roles but visualizer_support is None.
-        """
-        self._client_id = client_id
+        """Create a new Sendspin client instance."""
+        self._identity = identity
+        self._client_id = identity.peer_id
         self._client_name = client_name
         self._device_info = device_info
         self._roles = list(roles)
+        self._pairing_store = pairing_store
+        self._pin_display = pin_display
+        self._pairing_window = pairing_window
         self._clock: Clock = clock or RawMonotonicClock()
 
         # Validate and store player support
@@ -360,8 +225,6 @@ class SendspinClient:
         self._session = session
         self._owns_session = session is None
         self._loop = asyncio.get_running_loop()
-        self._send_lock = asyncio.Lock()
-        self._time_filter = SendspinTimeFilter()
         self._initial_volume = initial_volume
         self._initial_muted = initial_muted
         self.set_static_delay_ms(static_delay_ms)
@@ -369,13 +232,15 @@ class SendspinClient:
         self.set_min_buffer_ms(min_buffer_ms)
         self._state_supported_commands: list[PlayerCommand] = list(state_supported_commands or [])
 
+        self._provisional_connections = set()
+        self._admission_lock = asyncio.Lock()
+
         # Initialize callback lists
         self._metadata_callbacks = []
         self._group_callbacks = []
         self._controller_callbacks = []
         self._color_callbacks = []
         self._stream_start_callbacks = []
-        self._server_hello_callbacks = []
         self._stream_end_callbacks = []
         self._stream_clear_callbacks = []
         self._audio_chunk_callbacks = []
@@ -384,25 +249,149 @@ class SendspinClient:
         self._visualizer_callbacks = []
         self._artwork_callbacks = []
 
+    # --- Configuration ---
+
     @property
-    def server_info(self) -> ServerInfo | None:
-        """Return information about the connected server, if available."""
-        return self._server_info
+    def identity(self) -> Identity:
+        """This client's static public X25519 identity."""
+        return self._identity
+
+    @property
+    def client_name(self) -> str:
+        """Human-readable name for this client."""
+        return self._client_name
+
+    @property
+    def device_info(self) -> DeviceInfo | None:
+        """Optional device information."""
+        return self._device_info
+
+    @property
+    def roles(self) -> list[Roles]:
+        """List of roles this client supports."""
+        return self._roles
+
+    @property
+    def player_support(self) -> ClientHelloPlayerSupport | None:
+        """Player capabilities (only set if PLAYER role is supported)."""
+        return self._player_support
+
+    @property
+    def artwork_support(self) -> ClientHelloArtworkSupport | None:
+        """Artwork capabilities (only set if ARTWORK role is supported)."""
+        return self._artwork_support
+
+    @property
+    def visualizer_support(self) -> ClientHelloVisualizerSupport | None:
+        """Visualizer capabilities (only set if VISUALIZER role is supported)."""
+        return self._visualizer_support
+
+    @property
+    def pairing_store(self) -> ClientPairingStore:
+        """Trust store holding the long-term records and Pairing PSKs."""
+        return self._pairing_store
+
+    @property
+    def pin_display(self) -> Callable[[str | None], Awaitable[None]] | None:
+        """Out-channel that surfaces a derived pairing PIN, if configured.
+
+        Called with the PIN string when one is derived, and with ``None`` when the
+        pairing exchange ends (success or failure) so the channel can clear.
+        """
+        return self._pin_display
+
+    @property
+    def pairing_window(self) -> Callable[[], Awaitable[None]] | None:
+        """Gesture gate for static-PIN pairing, if configured.
+
+        Awaited when a static-PIN attempt is selected; resolves once the operator
+        opens the pairing window, and is cancelled if the server ends the attempt
+        first. The callable owns the window lifetime: an expired window must not
+        resolve the wait. Its presence enables offering ``static_pin``.
+        """
+        return self._pairing_window
+
+    @property
+    def implemented_pair_methods(self) -> frozenset[PairMethod]:
+        """Pairing methods this client implements: each PIN method needs its wiring."""
+        methods = {PairMethod.PAIRING_PSK}
+        if self._pairing_window is not None:
+            methods.add(PairMethod.STATIC_PIN)
+        if self._pin_display is not None:
+            methods.add(PairMethod.DYNAMIC_PIN)
+        return frozenset(methods)
+
+    @property
+    def initial_volume(self) -> int:
+        """Initial volume level for player role (0-100)."""
+        return self._initial_volume
+
+    @property
+    def initial_muted(self) -> bool:
+        """Initial mute state for player role."""
+        return self._initial_muted
+
+    @property
+    def state_supported_commands(self) -> list[PlayerCommand]:
+        """Supported commands advertised in client/state messages."""
+        return self._state_supported_commands
+
+    @property
+    def loop(self) -> asyncio.AbstractEventLoop:
+        """Event loop for this client."""
+        return self._loop
+
+    @property
+    def clock(self) -> Clock:
+        """Monotonic clock used for time sync timestamps."""
+        return self._clock
+
+    @property
+    def static_delay_us(self) -> int:
+        """Default static playback delay seeding new connections, in microseconds."""
+        return self._static_delay_us
+
+    # --- Connection state ---
 
     @property
     def connected(self) -> bool:
         """Return True if the client currently has an active connection."""
-        return self._connected and self._ws is not None and not self._ws.closed
+        return self._admitted_connection is not None and self._admitted_connection.connected
+
+    @property
+    def server_info(self) -> ServerInfo | None:
+        """Return information about the connected server, if available."""
+        if self._admitted_connection is None:
+            return None
+        return self._admitted_connection.server_info
+
+    @property
+    def noise_psk(self) -> ResolvedPsk | None:
+        """The PSK that admitted the current connection, or ``None`` if not connected."""
+        if self._admitted_connection is None:
+            return None
+        return self._admitted_connection.noise_psk
+
+    @property
+    def activities(self) -> list[Activity]:
+        """The server's currently-declared activities."""
+        if self._admitted_connection is None:
+            return []
+        return self._admitted_connection.activities
 
     @property
     def static_delay_ms(self) -> float:
         """Return the currently configured static playback delay in milliseconds."""
+        if self._admitted_connection is not None:
+            return self._admitted_connection.static_delay_ms
         return self._static_delay_us / 1_000.0
 
     def set_static_delay_ms(self, delay_ms: float) -> None:
         """Update the static playback delay applied after clock synchronisation."""
         delay_ms = max(0.0, min(5000.0, delay_ms))
         delay_us = round(delay_ms * 1_000.0)
+        if self._admitted_connection is not None:
+            self._admitted_connection.set_static_delay_ms(delay_ms)
         if delay_us == self._static_delay_us:
             return
         self._static_delay_us = delay_us
@@ -442,110 +431,162 @@ class SendspinClient:
         self._min_buffer_us = buffer_us
         logger.info("Set minimum ongoing buffer to %.1f ms", self.min_buffer_ms)
 
-    async def connect(self, url: str) -> None:
-        """Connect to a Sendspin server via WebSocket."""
-        if self.connected:
-            logger.debug("Already connected")
-            return
+    # --- Connection lifecycle ---
 
+    async def connect(self, url: str, *, expected_server_id: str | None = None) -> None:
+        """Dial a server (client-initiated) and admit it, displacing any current connection.
+
+        The user explicitly chose this server, so the new connection is admitted
+        unconditionally — an explicit switch. Returns once admitted; the reader and
+        time-sync loops then run in the background.
+        """
         if self._session is None:
             self._session = ClientSession()
 
         logger.info("Connecting to Sendspin server at %s", url)
-        self._ws = await self._session.ws_connect(url, heartbeat=30)
-        self._connected = True
 
-        await self._perform_handshake()
+        raw_ws = await self._session.ws_connect(url, heartbeat=30)
+        connection = SendspinConnection(self)
+        self._provisional_connections.add(connection)
+        try:
+            await connection.connect(raw_ws, expected_server_id=expected_server_id)
+        finally:
+            self._provisional_connections.discard(connection)
 
-    async def attach_websocket(self, ws: web.WebSocketResponse) -> None:
-        """
-        Attach an existing WebSocket connection from an incoming server.
+        # Hold the lock only for the admit decision, not for start()/pairing.
+        async with self._admission_lock:
+            await self._admit_connection(connection)
+        await connection.start()
 
-        This is used for server-initiated connections where the server connects
-        to the client. The client still sends client/hello and performs the
-        handshake, but uses the provided WebSocket instead of connecting out.
+    async def attach_websocket(
+        self, ws: web.WebSocketResponse, *, expected_server_id: str | None = None
+    ) -> None:
+        """Bring up an incoming (server-initiated) connection, arbitrate, and serve it.
+
+        The connection is provisional until its first ``server/activate``; it is
+        then admitted (displacing a lower-or-equal-ranked holder) or rejected per
+        the multi-server admission rules. If admitted, this blocks until the
+        connection closes, so it can drive an incoming WebSocket handler.
 
         Args:
             ws: An already-prepared WebSocketResponse from an incoming connection.
+            expected_server_id: If given, the server's advertised identity must
+                match or the handshake is aborted.
         """
-        if self.connected:
-            raise RuntimeError("Client is already connected")
-
-        self._ws = ws
-        self._connected = True
-
-        await self._perform_handshake()
-
-    async def _perform_handshake(self) -> None:
-        """Perform the handshake with the server after connection is established."""
-        self._server_hello_event = asyncio.Event()
-
-        self._reader_task = self._loop.create_task(self._reader_loop())
-        await self._send_client_hello()
-
+        connection = SendspinConnection(self)
+        self._provisional_connections.add(connection)
         try:
-            await asyncio.wait_for(self._server_hello_event.wait(), timeout=10)
-        except TimeoutError as err:
-            await self.disconnect()
-            raise TimeoutError("Timed out waiting for server/hello response") from err
-
-        # Send initial player state if player role is supported
-        if Roles.PLAYER in self._roles:
-            await self.send_player_state(
-                state=PlayerStateType.SYNCHRONIZED,
-                volume=self._initial_volume,
-                muted=self._initial_muted,
-            )
-
-        await self._send_time_message()
-        self._time_task = self._loop.create_task(self._time_sync_loop())
-        logger.info("Handshake with server complete")
-
-    async def send_goodbye(self, reason: GoodbyeReason) -> None:
-        """Send a client/goodbye message to the server before disconnecting."""
-        if not self.connected:
+            await connection.attach_websocket(ws, expected_server_id=expected_server_id)
+        except (HandshakeAbortedError, OSError, RuntimeError, TimeoutError) as exc:
+            # Bring-up failed; the connection/socket is already torn down.
+            self._provisional_connections.discard(connection)
+            logger.debug("Incoming connection failed bring-up: %s", exc)
             return
-        message = ClientGoodbyeMessage(
-            payload=ClientGoodbyePayload(reason=reason),
-        )
-        await self._send_message(message.to_json())
+        finally:
+            self._provisional_connections.discard(connection)
 
-    async def disconnect(self) -> None:
-        """Disconnect from the server and release resources."""
-        self._connected = False
-        current_task = asyncio.current_task(loop=self._loop)
+        # Hold the lock only for the admit/reject decision, not for start()/pairing.
+        async with self._admission_lock:
+            if not self._should_admit_connection(connection):
+                await self._reject_connection(connection)
+                return
+            await self._admit_connection(connection)
+        try:
+            await connection.start()
+        except (PairingError, OSError, RuntimeError, TimeoutError) as exc:
+            logger.debug("Admitted connection did not reach steady state: %s", exc)
+            return
+        await connection.wait_closed()
 
-        if self._time_task is not None and self._time_task is not current_task:
-            self._time_task.cancel()
-            with suppress(asyncio.CancelledError):
-                await self._time_task
-            self._time_task = None
-        if self._reader_task is not None:
-            if self._reader_task is not current_task:
-                self._reader_task.cancel()
-                with suppress(asyncio.CancelledError):
-                    await self._reader_task
-            self._reader_task = None
-        if self._ws is not None:
-            await self._ws.close()
-            self._ws = None
+    async def disconnect(self, reason: GoodbyeReason = GoodbyeReason.SHUTDOWN) -> None:
+        """Announce goodbye, disconnect all connections, and release the session."""
+        for connection in list(self._provisional_connections):
+            await connection.disconnect()
+        admitted = self._admitted_connection
+        if admitted is not None:
+            await admitted.send_goodbye(reason)
+            await admitted.disconnect()  # on_connection_closed fires the disconnect callback
+        else:
+            self.notify_disconnect_callback()
         if self._owns_session and self._session is not None:
             await self._session.close()
             self._session = None
-        self._time_filter.reset()
-        self._server_info = None
-        self._server_hello_event = None
-        self._group_state = None
-        self._server_state = None
-        self._stream_active = False
-        self._current_audio_format = None
-        self._current_player = None
-        self._artwork_stream_active = False
-        self._visualizer_stream_active = False
-        self._current_visualizer_config = None
 
-        # Notify disconnect callback
-        self._notify_disconnect_callback()
+    # --- Connection admission ---
+
+    @staticmethod
+    def _activity_rank(activities: list[Activity]) -> int:
+        """Rank a connection by its highest activity: management > playback > pairing > none."""
+        if Activity.MANAGEMENT in activities:
+            return 3
+        if Activity.PLAYBACK in activities:
+            return 2
+        if Activity.PAIRING in activities:
+            return 1
+        return 0
+
+    def _should_admit_connection(self, incoming: SendspinConnection) -> bool:
+        """Whether ``incoming`` should displace the current admitted connection."""
+        admitted = self._admitted_connection
+        if admitted is None or not admitted.connected:
+            return True
+        incoming_rank = self._activity_rank(incoming.activities)
+        admitted_rank = self._activity_rank(admitted.activities)
+        # A pairing attempt in progress is not displaced by an incoming playback or pairing.
+        if admitted.pairing_attempt_in_progress and incoming_rank in (1, 2):
+            return False
+        if incoming_rank != admitted_rank:
+            return incoming_rank > admitted_rank
+        # Equal rank is accepted, except both-empty resolves by the last-playback server.
+        if incoming_rank == 0:
+            return (
+                incoming.server_id == self.last_playback_server_id
+                and admitted.server_id != self.last_playback_server_id
+            )
+        return True
+
+    async def _admit_connection(self, connection: SendspinConnection) -> None:
+        """Make ``connection`` the admitted one, displacing any prior holder."""
+        previous = self._admitted_connection
+        if previous is connection:
+            return
+        self._admitted_connection = connection
+        self.note_playback_activity(connection)
+        if previous is not None:
+            await self._dismiss_connection(previous, GoodbyeReason.ANOTHER_SERVER)
+            await previous.disconnect()
+
+    def note_playback_activity(self, connection: SendspinConnection) -> None:
+        """Record the admitted server as last-playback when it carries the playback activity."""
+        if (
+            connection is self._admitted_connection
+            and Activity.PLAYBACK in connection.activities
+            and connection.server_id is not None
+        ):
+            self.last_playback_server_id = connection.server_id
+
+    async def _reject_connection(self, connection: SendspinConnection) -> None:
+        """Refuse an incoming connection that lost arbitration."""
+        await self._dismiss_connection(connection, GoodbyeReason.CONCURRENT_ATTEMPT)
+        await connection.disconnect()
+
+    @staticmethod
+    async def _dismiss_connection(connection: SendspinConnection, reason: GoodbyeReason) -> None:
+        """Tell a connection it's being dropped: pair/abort if pairing, else client/goodbye."""
+        with suppress(Exception):
+            if connection.is_pairing:
+                await connection.send_pair_abort(PairAbortReason.CONCURRENT_ATTEMPT)
+            else:
+                await connection.send_goodbye(reason)
+
+    def on_connection_closed(self, connection: SendspinConnection) -> None:
+        """Report a disconnect only when the admitted connection (not a provisional one) closes."""
+        self._provisional_connections.discard(connection)
+        if self._admitted_connection is connection:
+            self._admitted_connection = None
+            self.notify_disconnect_callback()
+
+    # --- Outbound protocol ---
 
     async def send_player_state(
         self,
@@ -555,22 +596,9 @@ class SendspinClient:
         muted: bool,
     ) -> None:
         """Send the current player state to the server."""
-        if not self.connected:
+        if self._admitted_connection is None:
             raise RuntimeError("Client is not connected")
-        message = ClientStateMessage(
-            payload=ClientStatePayload(
-                player=PlayerStatePayload(
-                    state=state,
-                    volume=volume,
-                    muted=muted,
-                    static_delay_ms=round(self._static_delay_us / 1_000),
-                    required_lead_time_ms=round(self._required_lead_time_us / 1_000),
-                    min_buffer_ms=round(self._min_buffer_us / 1_000),
-                    supported_commands=self._state_supported_commands or None,
-                )
-            )
-        )
-        await self._send_message(message.to_json())
+        await self._admitted_connection.send_player_state(state=state, volume=volume, muted=muted)
 
     async def send_group_command(
         self,
@@ -582,18 +610,41 @@ class SendspinClient:
         offset_ms: int | None = None,
     ) -> None:
         """Send a group command (playback control) to the server."""
-        if not self.connected:
+        if self._admitted_connection is None:
             raise RuntimeError("Client is not connected")
-        controller_payload = ControllerCommandPayload(
-            command=command,
+        await self._admitted_connection.send_group_command(
+            command,
             volume=volume,
             mute=mute,
             position_ms=position_ms,
             offset_ms=offset_ms,
         )
-        payload = ClientCommandPayload(controller=controller_payload)
-        message = ClientCommandMessage(payload=payload)
-        await self._send_message(message.to_json())
+
+    # --- Time synchronization ---
+
+    def is_time_synchronized(self) -> bool:
+        """Return whether time synchronization with the server has converged."""
+        if self._admitted_connection is None:
+            return False
+        return self._admitted_connection.is_time_synchronized()
+
+    def compute_play_time(self, server_timestamp_us: int) -> int:
+        """Convert a server timestamp to client play time, with static delay applied."""
+        if self._admitted_connection is None:
+            return self.now_us() + UNSYNCED_PLAY_LEAD_US - self._static_delay_us
+        return self._admitted_connection.compute_play_time(server_timestamp_us)
+
+    def compute_server_time(self, client_timestamp_us: int) -> int:
+        """Convert a client timestamp to a server timestamp, with static delay removed."""
+        if self._admitted_connection is None:
+            return client_timestamp_us + self._static_delay_us
+        return self._admitted_connection.compute_server_time(client_timestamp_us)
+
+    def now_us(self) -> int:
+        """Return current timestamp from the client's clock in microseconds."""
+        return self._clock.now_us()
+
+    # --- Listener registration ---
 
     def add_metadata_listener(self, callback: MetadataCallback) -> Callable[[], None]:
         """Add a listener for server/state messages with metadata.
@@ -655,15 +706,6 @@ class SendspinClient:
         return lambda: (
             self._stream_start_callbacks.remove(callback)
             if callback in self._stream_start_callbacks
-            else None
-        )
-
-    def add_server_hello_listener(self, callback: ServerHelloCallback) -> Callable[[], None]:
-        """Add a listener for server/hello payloads."""
-        self._server_hello_callbacks.append(callback)
-        return lambda: (
-            self._server_hello_callbacks.remove(callback)
-            if callback in self._server_hello_callbacks
             else None
         )
 
@@ -767,542 +809,102 @@ class SendspinClient:
             else None
         )
 
-    def is_time_synchronized(self) -> bool:
-        """Return whether time synchronization with the server has converged."""
-        return self._time_filter.is_synchronized
+    # --- Listener dispatch ---
 
-    def _build_client_hello(self) -> ClientHelloMessage:
-        payload = ClientHelloPayload(
-            client_id=self._client_id,
-            name=self._client_name,
-            version=1,
-            supported_roles=[r.value for r in self._roles],
-            device_info=self._device_info,
-            player_support=self._player_support,
-            artwork_support=self._artwork_support,
-            visualizer_support=self._visualizer_support,
-        )
-        return ClientHelloMessage(payload=payload)
-
-    async def _send_client_hello(self) -> None:
-        hello = self._build_client_hello()
-        await self._send_message(hello.to_json())
-
-    async def _send_time_message(self) -> None:
-        if not self.connected:
-            return
-        now_us = self._now_us()
-        message = ClientTimeMessage(payload=ClientTimePayload(client_transmitted=now_us))
-        await self._send_message(message.to_json())
-
-    async def _send_message(self, payload: str) -> None:
-        if self._ws is None:
-            raise RuntimeError("WebSocket is not connected")
-        async with self._send_lock:
-            await self._ws.send_str(payload)
-
-    async def _reader_loop(self) -> None:
-        assert self._ws is not None
-        try:
-            async for msg in self._ws:
-                await self._handle_ws_message(msg)
-        except asyncio.CancelledError:
-            pass
-        except Exception:
-            logger.exception("WebSocket reader encountered an error")
-        finally:
-            if self._connected:
-                await self.disconnect()
-
-    async def _handle_ws_message(self, msg: WSMessage) -> None:
-        if msg.type is WSMsgType.TEXT:
-            await self._handle_json_message(msg.data)
-        elif msg.type is WSMsgType.BINARY:
-            self._handle_binary_message(msg.data)
-        elif msg.type in (WSMsgType.CLOSE, WSMsgType.CLOSING, WSMsgType.CLOSED):
-            logger.debug("WebSocket closed by server")
-            await self.disconnect()
-        elif msg.type is WSMsgType.ERROR:
-            logger.error("WebSocket error: %s", self._ws.exception() if self._ws else "unknown")
-            await self.disconnect()
-
-    async def _handle_json_message(self, data: str) -> None:
-        try:
-            message = ServerMessage.from_json(data)
-        except Exception:
-            logger.exception("Failed to parse server message: %s", data)
-            return
-
-        match message:
-            case ServerHelloMessage(payload=payload):
-                self._handle_server_hello(payload)
-            case ServerTimeMessage(payload=payload):
-                self._handle_server_time(payload)
-            case StreamStartMessage():
-                await self._handle_stream_start(message)
-            case StreamClearMessage():
-                self._handle_stream_clear(message)
-            case StreamEndMessage():
-                self._handle_stream_end(message)
-            case GroupUpdateServerMessage(payload=payload):
-                self._handle_group_update(payload)
-            case ServerStateMessage(payload=payload):
-                self._handle_server_state(payload)
-            case ServerCommandMessage(payload=payload):
-                self._handle_server_command(payload)
-            case _:
-                logger.debug("Unhandled server message type: %s", type(message).__name__)
-
-    def _handle_binary_message(self, payload: bytes) -> None:
-        if len(payload) < 1:
-            logger.warning("Empty binary message")
-            return
-
-        raw_type = payload[0]
-        try:
-            message_type = BinaryMessageType(raw_type)
-        except ValueError:
-            logger.warning("Unknown binary message type: %s", raw_type)
-            return
-
-        role_active = {
-            BinaryMessageType.AUDIO_CHUNK: self._stream_active,
-            BinaryMessageType.ARTWORK_CHANNEL_0: self._artwork_stream_active,
-            BinaryMessageType.ARTWORK_CHANNEL_1: self._artwork_stream_active,
-            BinaryMessageType.ARTWORK_CHANNEL_2: self._artwork_stream_active,
-            BinaryMessageType.ARTWORK_CHANNEL_3: self._artwork_stream_active,
-            BinaryMessageType.VISUALIZATION_LOUDNESS: self._visualizer_stream_active,
-            BinaryMessageType.VISUALIZATION_BEAT: self._visualizer_stream_active,
-            BinaryMessageType.VISUALIZATION_F_PEAK: self._visualizer_stream_active,
-            BinaryMessageType.VISUALIZATION_SPECTRUM: self._visualizer_stream_active,
-            BinaryMessageType.VISUALIZATION_PEAK: self._visualizer_stream_active,
-            BinaryMessageType.VISUALIZATION_PITCH: self._visualizer_stream_active,
-        }.get(message_type, False)
-
-        if not role_active:
-            logger.debug("Ignoring binary message of type %s — role stream inactive", message_type)
-            return
-
-        if message_type is BinaryMessageType.AUDIO_CHUNK:
-            try:
-                header = unpack_binary_header(payload)
-            except Exception:
-                logger.exception("Failed to unpack binary header")
-                return
-            self._handle_audio_chunk(header.timestamp_us, payload[BINARY_HEADER_SIZE:])
-        elif message_type in {
-            BinaryMessageType.ARTWORK_CHANNEL_0,
-            BinaryMessageType.ARTWORK_CHANNEL_1,
-            BinaryMessageType.ARTWORK_CHANNEL_2,
-            BinaryMessageType.ARTWORK_CHANNEL_3,
-        }:
-            try:
-                unpack_binary_header(payload)
-            except Exception:
-                logger.exception("Failed to unpack binary header")
-                return
-            self._handle_artwork_chunk(message_type, payload[BINARY_HEADER_SIZE:])
-        elif message_type in {
-            BinaryMessageType.VISUALIZATION_LOUDNESS,
-            BinaryMessageType.VISUALIZATION_F_PEAK,
-            BinaryMessageType.VISUALIZATION_SPECTRUM,
-            BinaryMessageType.VISUALIZATION_PEAK,
-            BinaryMessageType.VISUALIZATION_PITCH,
-        }:
-            self._handle_visualization_frame(message_type, payload[1:])
-        elif message_type is BinaryMessageType.VISUALIZATION_BEAT:
-            self._handle_visualization_beat(payload[1:])
-        else:
-            logger.debug("Ignoring unsupported binary message type: %s", message_type)
-
-    def _handle_server_hello(self, payload: ServerHelloPayload) -> None:
-        self._server_info = ServerInfo(
-            server_id=payload.server_id,
-            name=payload.name,
-            version=payload.version,
-            connection_reason=payload.connection_reason,
-        )
-        self._notify_server_hello_callbacks(payload)
-        if self._server_hello_event:
-            self._server_hello_event.set()
-        logger.info(
-            "Connected to server '%s' (%s) version %s",
-            payload.name,
-            payload.server_id,
-            payload.version,
-        )
-
-    def _handle_server_time(self, payload: ServerTimePayload) -> None:
-        now_us = self._now_us()
-        offset = (
-            (payload.server_received - payload.client_transmitted)
-            + (payload.server_transmitted - now_us)
-        ) / 2
-        delay = (
-            (now_us - payload.client_transmitted)
-            - (payload.server_transmitted - payload.server_received)
-        ) / 2
-        self._time_filter.update(round(offset), round(delay), now_us)
-
-    async def _handle_stream_start(self, message: StreamStartMessage) -> None:
-        # Handle visualizer stream start (client SDK is v1-only; older
-        # draft_r1 schema is ignored — those servers expect the legacy SDK).
-        if isinstance(message.payload.visualizer, StreamStartVisualizer):
-            self._current_visualizer_config = message.payload.visualizer
-            self._visualizer_stream_active = True
-        if message.payload.artwork is not None:
-            self._artwork_stream_active = True
-
-        player = message.payload.player
-        if player is None:
-            # stream/start without player payload - may be for artwork/visualizer only
-            if message.payload.visualizer is not None or message.payload.artwork is not None:
-                self._notify_stream_start(message)
-            else:
-                logger.debug("Stream start message without player payload")
-            return
-
-        if player.codec not in (AudioCodec.PCM, AudioCodec.FLAC):
-            logger.error(
-                "Unsupported codec '%s' - only PCM and FLAC are supported", player.codec.value
-            )
-            return
-
-        is_format_update = self._stream_active and self._current_player is not None
-        if is_format_update:
-            logger.info("Stream format updated to %s", player.codec.value)
-        else:
-            logger.info("Stream started with codec %s", player.codec.value)
-            self._stream_active = True
-
-        pcm_format = PCMFormat(
-            sample_rate=player.sample_rate,
-            channels=player.channels,
-            bit_depth=player.bit_depth,
-        )
-        codec_header_bytes: bytes | None = None
-        if player.codec_header:
-            codec_header_bytes = base64.b64decode(player.codec_header)
-
-        self._configure_audio_output(
-            AudioFormat(
-                codec=player.codec,
-                pcm_format=pcm_format,
-                codec_header=codec_header_bytes,
-            )
-        )
-        self._current_player = StreamStartPlayer(
-            codec=player.codec,
-            sample_rate=player.sample_rate,
-            channels=player.channels,
-            bit_depth=player.bit_depth,
-            codec_header=player.codec_header,
-        )
-
-        if not is_format_update:
-            self._notify_stream_start(message)
-            await self._send_time_message()
-
-    def _handle_stream_clear(self, message: StreamClearMessage) -> None:
-        roles = message.payload.roles
-        logger.debug("Stream clear received for roles: %s", roles or "all")
-        self._notify_stream_clear(roles)
-
-    def _handle_stream_end(self, message: StreamEndMessage) -> None:
-        roles = message.payload.roles
-        logger.debug("Stream ended for roles: %s", roles or "all")
-
-        # If roles is None or includes player role, end the player stream
-        if roles is None or "player" in roles:
-            self._stream_active = False
-            self._current_player = None
-            self._current_audio_format = None
-
-        # If roles is None or includes visualizer role, end the visualizer stream
-        if roles is None or "visualizer" in roles:
-            self._visualizer_stream_active = False
-            self._current_visualizer_config = None
-        if roles is None or "artwork" in roles:
-            self._artwork_stream_active = False
-
-        self._notify_stream_end(roles)
-
-    def _handle_group_update(self, payload: GroupUpdateServerPayload) -> None:
-        self._group_state = payload
-        self._notify_group_callback(payload)
-
-    def _handle_server_state(self, payload: ServerStatePayload) -> None:
-        self._server_state = payload
-        # Notify controller callback for controller state
-        self._notify_controller_callback(payload)
-        # Notify metadata callback when metadata is present
-        if payload.metadata is not None:
-            self._notify_metadata_callback(payload)
-        # Notify color callback when color is present
-        if payload.color is not None:
-            self._notify_color_callback(payload)
-
-    def _handle_server_command(self, payload: ServerCommandPayload) -> None:
-        """Handle server/command message."""
-        if payload.player is not None:
-            player_cmd = payload.player
-            if (
-                player_cmd.command == PlayerCommand.SET_STATIC_DELAY
-                and player_cmd.static_delay_ms is not None
-            ):
-                self.set_static_delay_ms(float(player_cmd.static_delay_ms))
-        self._notify_server_command_callback(payload)
-
-    def _configure_audio_output(self, audio_format: AudioFormat) -> None:
-        """Store the current audio format for use in callbacks."""
-        self._current_audio_format = audio_format
-
-    def _handle_audio_chunk(self, timestamp_us: int, payload: bytes) -> None:
-        """Handle incoming audio chunk and notify callbacks."""
-        if not self._audio_chunk_callbacks:
-            return
-        if self._current_audio_format is None:
-            logger.debug("Dropping audio chunk without format")
-            return
-
-        # Pass server timestamp directly to callback - it handles time conversion
-        # to allow for dynamic time base updates
-        for callback in list(self._audio_chunk_callbacks):
-            try:
-                callback(timestamp_us, payload, self._current_audio_format)
-            except Exception:
-                logger.exception("Error in audio chunk callback %s", callback)
-
-    def _handle_artwork_chunk(self, message_type: BinaryMessageType, payload: bytes) -> None:
-        """Handle incoming artwork chunk and notify callbacks."""
-        channel = int(message_type.value - BinaryMessageType.ARTWORK_CHANNEL_0.value)
-        for callback in list(self._artwork_callbacks):
-            try:
-                callback(channel, payload)
-            except Exception:
-                logger.exception("Error in artwork callback %s", callback)
-
-    def _handle_visualization_frame(self, message_type: BinaryMessageType, payload: bytes) -> None:
-        """Parse a single-type visualization binary and notify callbacks."""
-        if not self._visualizer_callbacks:
-            return
-        if self._current_visualizer_config is None:
-            return
-        try:
-            frame = self._parse_visualization_frame(
-                message_type, payload, self._current_visualizer_config
-            )
-        except Exception:
-            logger.exception("Failed to parse visualization frame")
-            return
-        if frame is not None:
-            self._notify_visualizer_callbacks([frame])
-
-    @staticmethod
-    def _parse_visualization_frame(
-        message_type: BinaryMessageType,
-        data: bytes,
-        config: StreamStartVisualizer,
-    ) -> VisualizerFrame | None:
-        """Parse `[ts:8][data]` payload for one of the v1 visualizer types."""
-        if len(data) < 8:
-            return None
-        (timestamp_us,) = struct.unpack_from(">q", data, 0)
-        rest = data[8:]
-
-        if message_type is BinaryMessageType.VISUALIZATION_LOUDNESS:
-            if len(rest) != 2:
-                return None
-            (value,) = struct.unpack(">H", rest)
-            return VisualizerFrame(timestamp_us=timestamp_us, loudness=value)
-        if message_type is BinaryMessageType.VISUALIZATION_F_PEAK:
-            if len(rest) != 4:
-                return None
-            freq, amp = struct.unpack(">HH", rest)
-            return VisualizerFrame(timestamp_us=timestamp_us, f_peak_freq=freq, f_peak_amp=amp)
-        if message_type is BinaryMessageType.VISUALIZATION_SPECTRUM:
-            n_disp_bins = config.spectrum.n_disp_bins if config.spectrum is not None else 0
-            if n_disp_bins <= 0 or len(rest) != n_disp_bins * 2:
-                return None
-            bins = list(struct.unpack(f">{n_disp_bins}H", rest))
-            return VisualizerFrame(timestamp_us=timestamp_us, spectrum=bins)
-        if message_type is BinaryMessageType.VISUALIZATION_PEAK:
-            if len(rest) != 1:
-                return None
-            return VisualizerFrame(timestamp_us=timestamp_us, peak_strength=rest[0])
-        if message_type is BinaryMessageType.VISUALIZATION_PITCH:
-            if len(rest) != 3:
-                return None
-            (midi_q88,) = struct.unpack(">H", rest[:2])
-            return VisualizerFrame(
-                timestamp_us=timestamp_us,
-                pitch_midi_q88=midi_q88,
-                pitch_confidence=rest[2],
-            )
-        return None
-
-    def _notify_visualizer_callbacks(self, frames: list[VisualizerFrame]) -> None:
-        for callback in list(self._visualizer_callbacks):
-            try:
-                callback(frames)
-            except Exception:
-                logger.exception("Error in visualizer callback %s", callback)
-
-    def _handle_visualization_beat(self, payload: bytes) -> None:
-        """Handle a `beat` binary message (type 17). 9 bytes of payload.
-
-        Routed through the same `VisualizerCallback` as the periodic
-        frames; the dispatched `VisualizerFrame` carries only
-        `timestamp_us` + `is_downbeat`.
-        """
-        if not self._visualizer_callbacks:
-            return
-        if len(payload) != 9:
-            return
-        try:
-            (ts,) = struct.unpack_from(">q", payload, 0)
-        except Exception:
-            logger.exception("Failed to parse beat data")
-            return
-        is_downbeat = bool(payload[8] & 0b0000_0001)
-        self._notify_visualizer_callbacks(
-            [VisualizerFrame(timestamp_us=ts, is_downbeat=is_downbeat)]
-        )
-
-    def compute_play_time(self, server_timestamp_us: int) -> int:
-        """
-        Convert server timestamp to client play time with static delay applied.
-
-        This method converts a server timestamp to the equivalent client timestamp
-        (based on the client's monotonic clock) and subtracts the configured
-        static delay. Use this to determine when audio should be played on the
-        client.
-
-        Args:
-            server_timestamp_us: Server timestamp in microseconds.
-
-        Returns:
-            Client play time in microseconds (client monotonic clock - static delay).
-        """
-        if self._time_filter.is_synchronized:
-            client_time = self._time_filter.compute_client_time(server_timestamp_us)
-            return client_time - self._static_delay_us
-        return self._now_us() + 500_000 - self._static_delay_us
-
-    def compute_server_time(self, client_timestamp_us: int) -> int:
-        """
-        Convert client timestamp to server timestamp with static delay removed.
-
-        This is the inverse of compute_play_time. It converts a client timestamp
-        (client monotonic clock) to the equivalent server timestamp, adding the
-        static delay back first.
-
-        Args:
-            client_timestamp_us: Client timestamp in microseconds (client monotonic clock).
-
-        Returns:
-            Server timestamp in microseconds.
-        """
-        # Add static delay back, then convert to server time
-        adjusted_client_time = client_timestamp_us + self._static_delay_us
-        return self._time_filter.compute_server_time(adjusted_client_time)
-
-    def _notify_metadata_callback(self, payload: ServerStatePayload) -> None:
+    def notify_metadata_callback(self, payload: ServerStatePayload) -> None:
+        """Dispatch a server/state with metadata to the registered listeners."""
         for callback in list(self._metadata_callbacks):
             try:
                 callback(payload)
             except Exception:
                 logger.exception("Error in metadata callback %s", callback)
 
-    def _notify_group_callback(self, payload: GroupUpdateServerPayload) -> None:
+    def notify_group_callback(self, payload: GroupUpdateServerPayload) -> None:
+        """Dispatch a group/update to the registered listeners."""
         for callback in list(self._group_callbacks):
             try:
                 callback(payload)
             except Exception:
                 logger.exception("Error in group callback %s", callback)
 
-    def _notify_controller_callback(self, payload: ServerStatePayload) -> None:
+    def notify_controller_callback(self, payload: ServerStatePayload) -> None:
+        """Dispatch a server/state to the registered controller listeners."""
         for callback in list(self._controller_callbacks):
             try:
                 callback(payload)
             except Exception:
                 logger.exception("Error in controller callback %s", callback)
 
-    def _notify_color_callback(self, payload: ServerStatePayload) -> None:
+    def notify_color_callback(self, payload: ServerStatePayload) -> None:
+        """Dispatch a server/state with color to the registered listeners."""
         for callback in list(self._color_callbacks):
             try:
                 callback(payload)
             except Exception:
                 logger.exception("Error in color callback %s", callback)
 
-    def _notify_stream_start(self, message: StreamStartMessage) -> None:
+    def notify_stream_start(self, message: StreamStartMessage) -> None:
+        """Dispatch a stream/start to the registered listeners."""
         for callback in list(self._stream_start_callbacks):
             try:
                 callback(message)
             except Exception:
                 logger.exception("Error in stream start callback %s", callback)
 
-    def _notify_server_hello_callbacks(self, payload: ServerHelloPayload) -> None:
-        for callback in list(self._server_hello_callbacks):
-            try:
-                callback(payload)
-            except Exception:
-                logger.exception("Error in server hello callback %s", callback)
-
-    def _notify_stream_end(self, roles: list[str] | None) -> None:
+    def notify_stream_end(self, roles: list[str] | None) -> None:
+        """Dispatch a stream/end to the registered listeners."""
         for callback in list(self._stream_end_callbacks):
             try:
                 callback(roles)
             except Exception:
                 logger.exception("Error in stream end callback %s", callback)
 
-    def _notify_stream_clear(self, roles: list[str] | None) -> None:
+    def notify_stream_clear(self, roles: list[str] | None) -> None:
+        """Dispatch a stream/clear to the registered listeners."""
         for callback in list(self._stream_clear_callbacks):
             try:
                 callback(roles)
             except Exception:
                 logger.exception("Error in stream clear callback %s", callback)
 
-    def _notify_disconnect_callback(self) -> None:
+    def notify_disconnect_callback(self) -> None:
+        """Dispatch a disconnect to the registered listeners."""
         for callback in list(self._disconnect_callbacks):
             try:
                 callback()
             except Exception:
                 logger.exception("Error in disconnect callback %s", callback)
 
-    def _notify_server_command_callback(self, payload: ServerCommandPayload) -> None:
+    def notify_server_command_callback(self, payload: ServerCommandPayload) -> None:
+        """Dispatch a server/command to the registered listeners."""
         for callback in list(self._server_command_callbacks):
             try:
                 callback(payload)
             except Exception:
                 logger.exception("Error in server command callback %s", callback)
 
-    async def _time_sync_loop(self) -> None:
-        try:
-            while self.connected:
-                try:
-                    await self._send_time_message()
-                except Exception:
-                    logger.exception("Failed to send time sync message")
-                await asyncio.sleep(self._compute_time_sync_interval())
-        except asyncio.CancelledError:
-            pass
+    def notify_visualizer_callbacks(self, frames: list[VisualizerFrame]) -> None:
+        """Dispatch visualizer frames to the registered listeners."""
+        for callback in list(self._visualizer_callbacks):
+            try:
+                callback(frames)
+            except Exception:
+                logger.exception("Error in visualizer callback %s", callback)
 
-    def _compute_time_sync_interval(self) -> float:
-        if not self._time_filter.is_synchronized:
-            return 0.2
-        error = self._time_filter.error
-        if error < 1_000:
-            return 3.0
-        if error < 2_000:
-            return 1.0
-        if error < 5_000:
-            return 0.5
-        return 0.2
+    def notify_audio_chunk(
+        self, timestamp_us: int, payload: bytes, audio_format: AudioFormat
+    ) -> None:
+        """Dispatch an audio chunk to the registered listeners."""
+        for callback in list(self._audio_chunk_callbacks):
+            try:
+                callback(timestamp_us, payload, audio_format)
+            except Exception:
+                logger.exception("Error in audio chunk callback %s", callback)
 
-    def now_us(self) -> int:
-        """Return current timestamp from the client's clock in microseconds."""
-        return self._clock.now_us()
-
-    # Keep private alias for internal callers.
-    _now_us = now_us
+    def notify_artwork(self, channel: int, payload: bytes) -> None:
+        """Dispatch an artwork chunk to the registered listeners."""
+        for callback in list(self._artwork_callbacks):
+            try:
+                callback(channel, payload)
+            except Exception:
+                logger.exception("Error in artwork callback %s", callback)

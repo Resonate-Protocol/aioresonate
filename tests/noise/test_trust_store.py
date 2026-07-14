@@ -1,0 +1,501 @@
+"""Tests for :mod:`aiosendspin.noise.trust_store`."""
+
+from __future__ import annotations
+
+import json
+from typing import TYPE_CHECKING
+
+import pytest
+
+from aiosendspin.models.types import PairMethod
+from aiosendspin.noise.keys import generate_psk, psk_id_for
+from aiosendspin.noise.trust_store import (
+    PIN_LOCKOUT_THRESHOLD,
+    ClientPairingRecord,
+    ClientPairingStore,
+    FileClientPairingStore,
+    FileServerPairingStore,
+    InMemoryClientPairingStore,
+    InMemoryServerPairingStore,
+    PairingPsk,
+    PskCategory,
+    ServerPairingRecord,
+    ServerPairingStore,
+    StagedPairingPsk,
+    TrustedUnpairedClient,
+)
+from tests.pairing_stores import ExhaustedClientStore
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+
+def _server_record(client_id: str = "client-A") -> ServerPairingRecord:
+    psk = generate_psk()
+    return ServerPairingRecord(
+        psk_id=psk_id_for(psk), psk=psk, client_id=client_id, pair_methods=[]
+    )
+
+
+def _client_record(server_id: str = "server-X") -> ClientPairingRecord:
+    psk = generate_psk()
+    return ClientPairingRecord(psk_id=psk_id_for(psk), psk=psk, server_id=server_id)
+
+
+def _shared_record() -> ClientPairingRecord:
+    psk = generate_psk()
+    return ClientPairingRecord(psk_id=psk_id_for(psk), psk=psk, server_id=None)
+
+
+def _pairing_psk() -> PairingPsk:
+    psk = generate_psk()
+    return PairingPsk(psk_id=psk_id_for(psk), psk=psk)
+
+
+def _staged_psk() -> StagedPairingPsk:
+    psk = generate_psk()
+    return StagedPairingPsk(psk_id=psk_id_for(psk), psk=psk)
+
+
+@pytest.fixture(params=["memory", "file"])
+async def client_store(request: pytest.FixtureRequest, tmp_path: Path) -> ClientPairingStore:
+    """Each concrete client store, so conformance tests cover both implementations."""
+    if request.param == "file":
+        return await FileClientPairingStore.open(tmp_path / "client.json")
+    return InMemoryClientPairingStore()
+
+
+@pytest.fixture(params=["memory", "file"])
+async def server_store(request: pytest.FixtureRequest, tmp_path: Path) -> ServerPairingStore:
+    """Each concrete server store, so conformance tests cover both implementations."""
+    if request.param == "file":
+        return await FileServerPairingStore.open(tmp_path / "server.json")
+    return InMemoryServerPairingStore()
+
+
+def test_records_reject_wrong_psk_size() -> None:
+    """Each record type enforces the 32-byte PSK invariant."""
+    with pytest.raises(ValueError, match="PSK must be 32 bytes"):
+        ServerPairingRecord(psk_id="x", psk=b"short", client_id="c", pair_methods=[])
+    with pytest.raises(ValueError, match="PSK must be 32 bytes"):
+        ClientPairingRecord(psk_id="x", psk=b"short", server_id="s")
+    with pytest.raises(ValueError, match="PSK must be 32 bytes"):
+        PairingPsk(psk_id="x", psk=b"short")
+
+
+def test_server_record_round_trips_and_resolves() -> None:
+    """ServerPairingRecord to/from dict round-trips; as_resolved names the client."""
+    record = _server_record(client_id="client-A")
+    assert ServerPairingRecord.from_dict(record.to_dict()) == record
+    resolved = record.as_resolved()
+    assert resolved.category is PskCategory.LONG_TERM
+    assert resolved.counterparty_id == "client-A"
+    assert "trust" not in record.to_dict()  # server never persists trust level
+
+
+def test_server_record_with_method_appends_in_first_use_order() -> None:
+    """with_method appends unseen methods in order and is a no-op for ones already present."""
+    record = _server_record()
+    assert record.pair_methods == []
+    first = record.with_method(PairMethod.PAIRING_PSK)
+    second = first.with_method(PairMethod.DYNAMIC_PIN)
+    assert first.pair_methods == [PairMethod.PAIRING_PSK]
+    assert second.pair_methods == [PairMethod.PAIRING_PSK, PairMethod.DYNAMIC_PIN]
+    assert second.with_method(PairMethod.PAIRING_PSK) is second  # already present, unchanged
+
+
+def test_server_record_pair_methods_round_trip_and_back_compat() -> None:
+    """pair_methods round-trips; a legacy dict without the key loads as an empty list."""
+    record = _server_record().with_method(PairMethod.DYNAMIC_PIN)
+    assert ServerPairingRecord.from_dict(record.to_dict()) == record
+    legacy = record.to_dict()
+    del legacy["pair_methods"]
+    assert ServerPairingRecord.from_dict(legacy).pair_methods == []
+
+
+def test_client_record_round_trips_and_resolves() -> None:
+    """ClientPairingRecord to/from dict round-trips; as_resolved names the server."""
+    record = _client_record(server_id="server-X")
+    restored = ClientPairingRecord.from_dict(record.to_dict())
+    assert restored == record
+    resolved = record.as_resolved()
+    assert resolved.category is PskCategory.LONG_TERM
+    assert resolved.counterparty_id == "server-X"
+
+
+def test_pairing_psk_round_trips_and_resolves() -> None:
+    """PairingPsk to/from dict round-trips; as_resolved has no counterparty."""
+    pairing = _pairing_psk()
+    assert PairingPsk.from_dict(pairing.to_dict()) == pairing
+    resolved = pairing.as_resolved()
+    assert resolved.category is PskCategory.PAIRING
+    assert resolved.counterparty_id is None
+
+
+def test_staged_pairing_psk_round_trips_and_resolves() -> None:
+    """StagedPairingPsk to/from dict round-trips (created_at included) and resolves as pairing."""
+    staged = _staged_psk()
+    assert StagedPairingPsk.from_dict(staged.to_dict()) == staged
+    resolved = staged.as_resolved()
+    assert resolved.category is PskCategory.PAIRING
+    assert resolved.counterparty_id is None
+
+
+def test_psk_serialized_as_unpadded_base64url() -> None:
+    """to_dict emits the PSK as an unpadded base64url string."""
+    record = _server_record()
+    psk_field = record.to_dict()["psk"]
+    assert isinstance(psk_field, str)
+    assert "=" not in psk_field
+
+
+async def test_server_store_record_round_trip(server_store: ServerPairingStore) -> None:
+    """store_record then record_by_client_id returns the record by client_id."""
+    record = _server_record(client_id="client-A")
+    await server_store.store_record(record)
+    assert await server_store.record_by_client_id("client-A") == record
+    assert await server_store.record_by_client_id("client-B") is None
+
+
+async def test_server_store_remove_record(server_store: ServerPairingStore) -> None:
+    """remove_record deletes the record by client_id; removing an absent one is a no-op."""
+    await server_store.store_record(_server_record(client_id="client-A"))
+    await server_store.remove_record("client-A")
+    assert await server_store.record_by_client_id("client-A") is None
+    await server_store.remove_record("client-A")  # no-op
+
+
+def test_trusted_unpaired_client_round_trip() -> None:
+    """TrustedUnpairedClient.to_dict/from_dict preserves every field."""
+    client = TrustedUnpairedClient(client_id="client-A")
+    restored = TrustedUnpairedClient.from_dict(client.to_dict())
+    assert restored == client
+
+
+async def test_server_store_trusted_unpaired_lifecycle(server_store: ServerPairingStore) -> None:
+    """Trusted-unpaired approvals: add, look up, list, remove (no-op when absent)."""
+    assert await server_store.trusted_unpaired("client-A") is None
+    assert list(await server_store.list_trusted_unpaired()) == []
+
+    client = TrustedUnpairedClient(client_id="client-A")
+    await server_store.add_trusted_unpaired(client)
+    assert await server_store.trusted_unpaired("client-A") == client
+    assert list(await server_store.list_trusted_unpaired()) == [client]
+
+    await server_store.remove_trusted_unpaired("client-A")
+    assert await server_store.trusted_unpaired("client-A") is None
+    await server_store.remove_trusted_unpaired("client-A")  # no-op
+
+
+async def test_server_store_list_staged_pairing_psks(server_store: ServerPairingStore) -> None:
+    """list_staged_pairing_psks returns every staged PSK; unstaging removes it."""
+    assert list(await server_store.list_staged_pairing_psks()) == []
+    pp = _staged_psk()
+    await server_store.stage_pairing_psk("client-A", pp)
+    assert list(await server_store.list_staged_pairing_psks()) == [pp]
+    await server_store.unstage_pairing_psk("client-A")
+    assert list(await server_store.list_staged_pairing_psks()) == []
+
+
+async def test_file_server_store_absent_file_is_empty(tmp_path: Path) -> None:
+    """A FileServerPairingStore over a missing path opens empty."""
+    store = await FileServerPairingStore.open(tmp_path / "pairings.json")
+    assert await store.record_by_client_id("client-A") is None
+    assert list(await store.list_records()) == []
+    assert await store.trusted_unpaired("client-A") is None
+
+
+async def test_file_server_store_persists_all_categories(tmp_path: Path) -> None:
+    """Records, staged Pairing PSKs, and trusted-unpaired clients survive a reload."""
+    path = tmp_path / "sub" / "pairings.json"  # parent dir created on write
+    store = await FileServerPairingStore.open(path)
+    record = _server_record(client_id="client-A")
+    staged = _staged_psk()
+    trusted = TrustedUnpairedClient(client_id="client-T")
+    await store.store_record(record)
+    await store.stage_pairing_psk("client-S", staged)
+    await store.add_trusted_unpaired(trusted)
+
+    reloaded = await FileServerPairingStore.open(path)
+    assert await reloaded.record_by_client_id("client-A") == record
+    assert list(await reloaded.list_records()) == [record]
+    assert await reloaded.staged_pairing_psk("client-S") == staged
+    assert list(await reloaded.list_staged_pairing_psks()) == [staged]
+    assert await reloaded.trusted_unpaired("client-T") == trusted
+
+
+async def test_file_server_store_removal_persists(tmp_path: Path) -> None:
+    """Removing a trusted-unpaired approval is reflected after a reload."""
+    path = tmp_path / "pairings.json"
+    store = await FileServerPairingStore.open(path)
+    await store.add_trusted_unpaired(TrustedUnpairedClient(client_id="client-T"))
+    await store.remove_trusted_unpaired("client-T")
+    reloaded = await FileServerPairingStore.open(path)
+    assert await reloaded.trusted_unpaired("client-T") is None
+
+
+async def test_file_server_store_tolerates_absent_sections(tmp_path: Path) -> None:
+    """An older-format file missing newer sections loads what's present; the rest are empty."""
+    path = tmp_path / "pairings.json"
+    record = _server_record(client_id="client-A")
+    path.write_text(json.dumps({"records": {"client-A": record.to_dict()}}), encoding="utf-8")
+    store = await FileServerPairingStore.open(path)
+    assert await store.record_by_client_id("client-A") == record
+    assert list(await store.list_staged_pairing_psks()) == []
+    assert list(await store.list_trusted_unpaired()) == []
+
+
+async def test_file_server_store_rejects_malformed_file(tmp_path: Path) -> None:
+    """A present-but-malformed store fails loud rather than silently dropping credentials."""
+    non_object = tmp_path / "top.json"
+    non_object.write_text(json.dumps([1, 2, 3]), encoding="utf-8")
+    with pytest.raises(TypeError, match="must contain a JSON object"):
+        await FileServerPairingStore.open(non_object)
+
+    bad_section = tmp_path / "section.json"
+    bad_section.write_text(json.dumps({"records": "nope"}), encoding="utf-8")
+    with pytest.raises(TypeError, match="must be an object"):
+        await FileServerPairingStore.open(bad_section)
+
+    bad_entry = tmp_path / "entry.json"
+    bad_entry.write_text(json.dumps({"records": {"client-A": 5}}), encoding="utf-8")
+    with pytest.raises(TypeError, match="must be an object"):
+        await FileServerPairingStore.open(bad_entry)
+
+
+async def test_file_client_store_seeds_shared_record_on_first_open(tmp_path: Path) -> None:
+    """First open provisions a shared-PSK fallback record referenced by record_mode."""
+    path = tmp_path / "client.json"
+    store = await FileClientPairingStore.open(path)
+    config = await store.get_pairing_config()
+    records = list(await store.list_records())
+    assert len(records) == 1
+    shared = records[0]
+    assert shared.server_id is None  # shared-PSK record
+    assert config.record_mode_psk_id == shared.psk_id
+    # The seed is persisted, so it is stable across reopen.
+    reopened = await FileClientPairingStore.open(path)
+    assert (await reopened.get_pairing_config()).record_mode_psk_id == shared.psk_id
+
+
+async def test_file_client_store_persists_state(tmp_path: Path) -> None:
+    """Records, config, accepted Pairing PSK, static PIN, and PIN failures survive a reload."""
+    path = tmp_path / "client.json"
+    store = await FileClientPairingStore.open(path)
+    record = _client_record(server_id="server-X")
+    pairing = _pairing_psk()
+    await store.store_record(record)
+    await store.set_pairing_psk(pairing)
+    await store.set_static_pin("12345678")
+    await store.record_pin_failure(PairMethod.DYNAMIC_PIN)
+
+    reloaded = await FileClientPairingStore.open(path)
+    assert await reloaded.record_by_server_id("server-X") == record
+    assert await reloaded.pairing_psk() == pairing
+    assert await reloaded.static_pin() == "12345678"
+    assert await reloaded.pin_failure_count(PairMethod.DYNAMIC_PIN) == 1
+
+
+async def test_file_client_store_pairing_outcome_generates_per_server_record(
+    tmp_path: Path,
+) -> None:
+    """An unbounded file client mints a fresh per-server record on pairing."""
+    store = await FileClientPairingStore.open(tmp_path / "client.json")
+    psk, record = await store.resolve_pairing_outcome(server_id="server-Y")
+    assert record is not None
+    assert record.server_id == "server-Y"
+    assert record.psk == psk
+
+
+async def test_client_pairing_psk_lifecycle(client_store: ClientPairingStore) -> None:
+    """The client's accepted Pairing PSK: set, look up, replace, clear."""
+    pairing = _pairing_psk()
+    await client_store.set_pairing_psk(pairing)
+    assert await client_store.pairing_psk() == pairing
+    assert await client_store.resolve_by_psk_id(pairing.psk_id) == pairing.as_resolved()
+    # Setting a new one replaces the old.
+    other = _pairing_psk()
+    await client_store.set_pairing_psk(other)
+    assert await client_store.pairing_psk() == other
+    assert await client_store.resolve_by_psk_id(pairing.psk_id) is None
+    await client_store.clear_pairing_psk()
+    assert await client_store.pairing_psk() is None
+    assert await client_store.resolve_by_psk_id(other.psk_id) is None
+    # Clearing when absent is a no-op.
+    await client_store.clear_pairing_psk()
+
+
+async def test_client_static_pin_lifecycle(client_store: ClientPairingStore) -> None:
+    """The client's configured static PIN: set, look up, replace, clear."""
+    assert await client_store.static_pin() is None
+    await client_store.set_static_pin("12345678")
+    assert await client_store.static_pin() == "12345678"
+    await client_store.set_static_pin("87654321")
+    assert await client_store.static_pin() == "87654321"
+    await client_store.clear_static_pin()
+    assert await client_store.static_pin() is None
+    # Clearing when absent is a no-op.
+    await client_store.clear_static_pin()
+
+
+async def test_client_store_resolves_by_psk_id_and_finds_by_server_id(
+    client_store: ClientPairingStore,
+) -> None:
+    """ClientPairingStore resolves a record by psk_id and finds it by server_id."""
+    record = _client_record(server_id="server-X")
+    await client_store.store_record(record)
+    assert await client_store.resolve_by_psk_id(record.psk_id) == record.as_resolved()
+    assert await client_store.record_by_server_id("server-X") == record
+    assert await client_store.resolve_by_psk_id("nope") is None
+    assert await client_store.record_by_server_id("server-Y") is None
+
+
+async def test_client_store_record_takes_precedence_over_pairing_psk(
+    client_store: ClientPairingStore,
+) -> None:
+    """When a long-term record and a Pairing PSK share a psk_id, the record wins."""
+    record = _client_record(server_id="server-X")
+    pairing = PairingPsk(psk_id=record.psk_id, psk=record.psk)
+    await client_store.set_pairing_psk(pairing)
+    await client_store.store_record(record)
+    assert await client_store.resolve_by_psk_id(record.psk_id) == record.as_resolved()
+
+
+async def test_client_store_mark_record_used(client_store: ClientPairingStore) -> None:
+    """mark_record_used flips the flag once; absent or already-used calls are no-ops."""
+    record = _client_record(server_id="server-X")
+    await client_store.store_record(record)
+    stored = await client_store.record_by_psk_id(record.psk_id)
+    assert stored is not None
+    assert stored.used is False
+
+    await client_store.mark_record_used(record.psk_id)
+    used = await client_store.record_by_psk_id(record.psk_id)
+    assert used is not None
+    assert used.used is True
+
+    await client_store.mark_record_used(record.psk_id)  # already used, no-op
+    await client_store.mark_record_used("absent")  # no-op
+
+
+async def test_client_store_remove_and_list(client_store: ClientPairingStore) -> None:
+    """Removing deletes a record; records() reflects current contents."""
+    a = _client_record(server_id="server-A")
+    b = _client_record(server_id="server-B")
+    await client_store.store_record(a)
+    await client_store.store_record(b)
+    added = {r for r in await client_store.list_records() if r.server_id is not None}
+    assert added == {a, b}
+    await client_store.remove_record(a.psk_id)
+    assert await client_store.resolve_by_psk_id(a.psk_id) is None
+    added = {r for r in await client_store.list_records() if r.server_id is not None}
+    assert added == {b}
+    # Removing an absent record is a no-op.
+    await client_store.remove_record("absent")
+
+
+async def test_client_store_reports_no_storage_accounting_by_default(
+    client_store: ClientPairingStore,
+) -> None:
+    """The default store is unbounded and reports no storage accounting."""
+    assert await client_store.storage_accounting() is None
+
+
+async def test_pin_failure_counter_increments_and_resets(client_store: ClientPairingStore) -> None:
+    """Failures accumulate per method and reset clears the counter."""
+    assert await client_store.pin_failure_count(PairMethod.DYNAMIC_PIN) == 0
+    assert await client_store.record_pin_failure(PairMethod.DYNAMIC_PIN) == 1
+    assert await client_store.record_pin_failure(PairMethod.DYNAMIC_PIN) == 2
+    await client_store.reset_pin_failures(PairMethod.DYNAMIC_PIN)
+    assert await client_store.pin_failure_count(PairMethod.DYNAMIC_PIN) == 0
+
+
+async def test_pin_failure_counter_is_per_method(client_store: ClientPairingStore) -> None:
+    """static_pin and dynamic_pin counters are tracked independently."""
+    await client_store.record_pin_failure(PairMethod.DYNAMIC_PIN)
+    assert await client_store.pin_failure_count(PairMethod.STATIC_PIN) == 0
+    assert await client_store.pin_failure_count(PairMethod.DYNAMIC_PIN) == 1
+
+
+async def test_pin_lockout_at_threshold_and_clears_on_reset(
+    client_store: ClientPairingStore,
+) -> None:
+    """Lockout trips at the threshold and clears only on reset."""
+    for _ in range(PIN_LOCKOUT_THRESHOLD - 1):
+        await client_store.record_pin_failure(PairMethod.DYNAMIC_PIN)
+    assert not await client_store.is_pin_locked_out(PairMethod.DYNAMIC_PIN)
+    await client_store.record_pin_failure(PairMethod.DYNAMIC_PIN)
+    assert await client_store.is_pin_locked_out(PairMethod.DYNAMIC_PIN)
+    await client_store.reset_pin_failures(PairMethod.DYNAMIC_PIN)
+    assert not await client_store.is_pin_locked_out(PairMethod.DYNAMIC_PIN)
+
+
+# --- shared-PSK records --------------------------------------------------
+
+
+def test_shared_record_round_trips_and_resolves() -> None:
+    """A shared-PSK record omits server_id; as_resolved carries no counterparty."""
+    record = _shared_record()
+    assert record.server_id is None
+    restored = ClientPairingRecord.from_dict(record.to_dict())
+    assert restored == record
+    assert restored.server_id is None
+    resolved = record.as_resolved()
+    assert resolved.category is PskCategory.LONG_TERM
+    assert resolved.counterparty_id is None
+
+
+async def test_shared_record_excluded_from_server_id_lookup(
+    client_store: ClientPairingStore,
+) -> None:
+    """A shared-PSK record is found by psk_id but never by server_id."""
+    record = _shared_record()
+    await client_store.store_record(record)
+    assert await client_store.resolve_by_psk_id(record.psk_id) == record.as_resolved()
+    assert await client_store.record_by_server_id("any-server") is None
+
+
+async def test_set_record_mode_psk_id_validates_reference(
+    client_store: ClientPairingStore,
+) -> None:
+    """The record_mode psk_id must reference an existing shared-PSK record."""
+    shared = _shared_record()
+    pubkey = _client_record(server_id="server-X")
+    await client_store.store_record(shared)
+    await client_store.store_record(pubkey)
+
+    # The store is pre-provisioned with a shared fallback at construction.
+    initial = (await client_store.get_pairing_config()).record_mode_psk_id
+    assert initial is not None
+    assert await client_store.record_by_psk_id(initial) is not None
+
+    with pytest.raises(ValueError, match="references no record"):
+        await client_store.set_record_mode_psk_id("missing")
+    with pytest.raises(ValueError, match="must reference a shared-PSK record"):
+        await client_store.set_record_mode_psk_id(pubkey.psk_id)
+
+    await client_store.set_record_mode_psk_id(shared.psk_id)
+    assert (await client_store.get_pairing_config()).record_mode_psk_id == shared.psk_id
+    assert not await client_store.can_remove_record(shared.psk_id)
+
+
+async def test_resolve_outcome_mints_stored_pubkey_record(
+    client_store: ClientPairingStore,
+) -> None:
+    """A storable store generates a fresh PSK bound to the server_id."""
+    psk, record = await client_store.resolve_pairing_outcome(server_id="server-X")
+    assert record is not None
+    assert record.psk == psk
+    assert record.psk_id == psk_id_for(psk)
+    assert record.server_id == "server-X"
+
+
+async def test_resolve_outcome_falls_back_to_shared_on_exhaustion() -> None:
+    """A configured shared fallback admits under the shared record when full."""
+    store = ExhaustedClientStore()
+    shared = _shared_record()
+    await store.store_record(shared)
+    await store.set_record_mode_psk_id(shared.psk_id)
+    psk, record = await store.resolve_pairing_outcome(server_id="server-X")
+    assert psk == shared.psk
+    assert record is None

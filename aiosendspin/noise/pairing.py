@@ -1,0 +1,609 @@
+"""Pairing exchanges that run over the encrypted channel."""
+
+from __future__ import annotations
+
+import asyncio
+import hashlib
+from contextlib import suppress
+from dataclasses import dataclass, replace
+from typing import TYPE_CHECKING, NoReturn, Protocol, cast
+
+from aiohttp import WSMsgType
+from cpace import CPace, CPaceError, CPaceRole
+from cryptography.exceptions import InvalidTag
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM, ChaCha20Poly1305
+
+from aiosendspin.models.types import PairAbortReason, PairMethod
+
+from . import pin as pin_mod
+from .keys import PSK_SIZE, b64url_decode, b64url_encode, psk_id_for
+from .models import (
+    ClientPairAuthMessage,
+    ClientPairAuthPayload,
+    ClientPairConfirmMessage,
+    ClientPairConfirmPayload,
+    ClientPairFinalizeMessage,
+    ClientPairFinalizePayload,
+    ClientPairInitMessage,
+    ClientPairInitPayload,
+    PairAbortMessage,
+    PairAbortPayload,
+    PairingMessage,
+    ServerPairAuthMessage,
+    ServerPairAuthPayload,
+    ServerPairConfirmMessage,
+    ServerPairConfirmPayload,
+    ServerPairFinalizeMessage,
+    ServerPairInitMessage,
+    ServerPairInitPayload,
+)
+from .session import NoiseCipherSuite
+from .trust_store import ServerPairingRecord
+
+if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+
+    from .trust_store import ClientPairingStore, ServerPairingStore
+    from .wire import EncryptedWebSocket
+
+_PAKE_SID_LABEL = b"sendspin-pair-pake-v1"
+_PAKE_AD_SERVER = b"server"  # CPace ADa (initiator)
+_PAKE_AD_CLIENT = b"client"  # CPace ADb (responder)
+_PAKE_SHARE_SIZE = 32
+_KC_TAG_SIZE = 64
+_PSK_WRAP_LABEL = b"sendspin-pair-psk-wrap-v1"
+_PSK_WRAP_NONCE = bytes(12)
+_CLIENT_ATTEMPT_TIMEOUT_S = 120.0
+# Server bounds are local (expiry raises TimeoutError, nothing on the wire) and exceed the
+# client's attempt timeout so the client's in-band abort wins when both sides are live.
+_SERVER_ATTEMPT_TIMEOUT_S = 180.0
+_SERVER_FIRST_MESSAGE_TIMEOUT_S = 60.0
+_SERVER_GESTURE_TIMEOUT_S = 360.0
+
+
+class PairingError(Exception):
+    """A pairing attempt could not complete (malformed message, early close, etc.)."""
+
+
+class PairingAbortError(PairingError):
+    """A pairing attempt ended with a ``pair/abort`` carrying ``reason`` (base)."""
+
+    def __init__(self, reason: PairAbortReason) -> None:
+        """Record the abort ``reason``."""
+        super().__init__(f"pairing aborted: {reason.value}")
+        self.reason = reason
+
+
+class LocalPairingAbortError(PairingAbortError):
+    """This side aborted the pairing and sent the ``pair/abort``."""
+
+
+class RemotePairingAbortError(PairingAbortError):
+    """The peer aborted the pairing; its ``pair/abort`` was received."""
+
+
+class PinProvider(Protocol):
+    """Supplies the PIN the operator entered into the server."""
+
+    def __call__(self) -> Awaitable[str]:
+        """Return the operator-entered PIN as an awaitable."""
+
+
+@dataclass(frozen=True, slots=True)
+class PairingAttempt:
+    """Operator-initiated pairing intent attached to a server-side dial."""
+
+    method: PairMethod
+    pin_provider: PinProvider | None = None
+    """Required for PIN methods; supplies the operator-entered PIN."""
+    pairing_psk: bytes | None = None
+    """Required for the Pairing PSK method; the live PSK pasted from a token."""
+    verify: bool = False
+    """Re-verify an already-paired client instead of pairing anew."""
+
+    def __post_init__(self) -> None:
+        """Validate ``method`` / material agree."""
+        if self.method is PairMethod.PAIRING_PSK:
+            if self.pairing_psk is None:
+                msg = "PAIRING_PSK requires pairing_psk"
+                raise ValueError(msg)
+            if len(self.pairing_psk) != PSK_SIZE:
+                msg = f"pairing_psk must be {PSK_SIZE} bytes, got {len(self.pairing_psk)}"
+                raise ValueError(msg)
+            if self.pin_provider is not None:
+                msg = "PAIRING_PSK does not use pin_provider"
+                raise ValueError(msg)
+            if self.verify:
+                msg = "PAIRING_PSK does not support verification"
+                raise ValueError(msg)
+        else:  # PIN methods (dynamic_pin, static_pin)
+            if self.pin_provider is None:
+                msg = f"{self.method.value} requires pin_provider"
+                raise ValueError(msg)
+            if self.pairing_psk is not None:
+                msg = f"{self.method.value} does not use pairing_psk"
+                raise ValueError(msg)
+
+
+if TYPE_CHECKING:
+    PinEmitter = Callable[[str], Awaitable[None]]
+
+
+async def run_pairing_psk_client(
+    ws: EncryptedWebSocket,
+    *,
+    server_id: str,
+    store: ClientPairingStore,
+) -> str | None:
+    """Run the client side of the Pairing PSK flow.
+
+    Returns ``None`` on finalize, else the raw ``server/activate`` leave frame.
+    """
+    try:
+        async with asyncio.timeout(_CLIENT_ATTEMPT_TIMEOUT_S):
+            return await _finalize_client(ws, server_id=server_id, store=store)
+    except TimeoutError:
+        await abort_pairing(ws, PairAbortReason.ATTEMPT_TIMEOUT)
+
+
+async def run_pairing_psk_server(
+    ws: EncryptedWebSocket,
+    *,
+    client_id: str,
+    store: ServerPairingStore,
+) -> ServerPairingRecord:
+    """Run the server side of the Pairing PSK flow."""
+    async with asyncio.timeout(_SERVER_FIRST_MESSAGE_TIMEOUT_S):
+        record = await _finalize_server(
+            ws, client_id=client_id, store=store, method=PairMethod.PAIRING_PSK
+        )
+    assert record is not None
+    return record
+
+
+async def run_dynamic_pin_client(
+    ws: EncryptedWebSocket,
+    *,
+    handshake_hash: bytes,
+    pairing_index: int,
+    pin_emitter: PinEmitter,
+    server_id: str,
+    store: ClientPairingStore,
+) -> str | None:
+    """Run the client side of the dynamic-PIN flow.
+
+    Returns ``None`` on finalize, else the raw ``server/activate`` leave frame.
+    """
+    sid = _pake_sid(handshake_hash, pairing_index)
+    nonce_b = pin_mod.generate_nonce()
+    try:
+        async with asyncio.timeout(_CLIENT_ATTEMPT_TIMEOUT_S):
+            await ws.send_str(
+                ClientPairInitMessage(
+                    payload=ClientPairInitPayload(
+                        pairing_index=pairing_index,
+                        commit_B=b64url_encode(pin_mod.commit(nonce_b)),
+                    ),
+                ).to_json(),
+            )
+
+            init = await _receive_pairing(ws, ServerPairInitMessage)
+            nonce_a = _decode_field(init.payload.nonce_A, "nonce_A", expect_len=pin_mod.NONCE_SIZE)
+            pin_length = init.payload.pin_length
+            min_length = (await store.get_pairing_config()).dynamic_pin_min_length
+            if not min_length <= pin_length <= pin_mod.MAX_PIN_DIGITS:
+                await abort_pairing(ws, PairAbortReason.PIN_LENGTH_UNACCEPTABLE)
+            pin = pin_mod.derive_pin(handshake_hash, nonce_a, nonce_b, pin_length)
+            await pin_emitter(pin)
+            try:
+                cpace = CPace.start(
+                    role=CPaceRole.RESPONDER, prs=pin.encode("ascii"), sid=sid, ad=_PAKE_AD_CLIENT
+                )
+            except CPaceError as exc:
+                raise PairingError("CPace initialization failed") from exc
+
+            auth = await _receive_pairing(ws, ServerPairAuthMessage)
+            await ws.send_str(
+                ClientPairAuthMessage(
+                    payload=ClientPairAuthPayload(pake_msg_2=b64url_encode(cpace.public_share)),
+                ).to_json(),
+            )
+            peer_share = _decode_field(
+                auth.payload.pake_msg_1, "pake_msg_1", expect_len=_PAKE_SHARE_SIZE
+            )
+            try:
+                cpace.derive(peer_share, _PAKE_AD_SERVER)
+            except CPaceError as exc:
+                raise PairingError("malformed pake_msg_1: invalid CPace share") from exc
+
+            confirm = await _receive_pairing(ws, ServerPairConfirmMessage)
+            if not cpace.verify(
+                _decode_field(confirm.payload.server_kc, "server_kc", expect_len=_KC_TAG_SIZE)
+            ):
+                await store.record_pin_failure(PairMethod.DYNAMIC_PIN)
+                await abort_pairing(ws, PairAbortReason.PIN_MISMATCH)
+            await store.reset_pin_failures(PairMethod.DYNAMIC_PIN)
+            await ws.send_str(
+                ClientPairConfirmMessage(
+                    payload=ClientPairConfirmPayload(
+                        client_kc=b64url_encode(cpace.tag()),
+                        nonce_B=b64url_encode(nonce_b),
+                    ),
+                ).to_json(),
+            )
+
+            return await _finalize_client(
+                ws,
+                server_id=server_id,
+                store=store,
+                wrap_key=_wrap_key(sid, cpace),
+            )
+    except TimeoutError:
+        await abort_pairing(ws, PairAbortReason.ATTEMPT_TIMEOUT)
+
+
+async def run_dynamic_pin_server(
+    ws: EncryptedWebSocket,
+    *,
+    handshake_hash: bytes,
+    pairing_index: int,
+    pin_provider: PinProvider,
+    pin_length: int,
+    client_id: str,
+    store: ServerPairingStore,
+    verify: bool = False,
+) -> ServerPairingRecord | None:
+    """Run the server side of the dynamic-PIN flow.
+
+    Returns the persisted record, or ``None`` when ``verify`` is set (re-verified, left pairing).
+    """
+    sid = _pake_sid(handshake_hash, pairing_index)
+    async with asyncio.timeout(_SERVER_FIRST_MESSAGE_TIMEOUT_S):
+        init = await _receive_pair_init(ws, pairing_index)
+    if init.payload.commit_B is None:
+        raise PairingError("client/pair-init missing commit_B for dynamic PIN")
+    commit_b = _decode_field(init.payload.commit_B, "commit_B", expect_len=pin_mod.COMMIT_SIZE)
+    async with asyncio.timeout(_SERVER_ATTEMPT_TIMEOUT_S):
+        nonce_a = pin_mod.generate_nonce()
+        await ws.send_str(
+            ServerPairInitMessage(
+                payload=ServerPairInitPayload(
+                    nonce_A=b64url_encode(nonce_a), pin_length=pin_length
+                ),
+            ).to_json(),
+        )
+        pin = await pin_provider()
+        try:
+            cpace = CPace.start(
+                role=CPaceRole.INITIATOR, prs=pin.encode("ascii"), sid=sid, ad=_PAKE_AD_SERVER
+            )
+        except CPaceError as exc:
+            raise PairingError("CPace initialization failed") from exc
+        await ws.send_str(
+            ServerPairAuthMessage(
+                payload=ServerPairAuthPayload(pake_msg_1=b64url_encode(cpace.public_share)),
+            ).to_json(),
+        )
+
+        auth = await _receive_pairing(ws, ClientPairAuthMessage)
+        peer_share = _decode_field(
+            auth.payload.pake_msg_2, "pake_msg_2", expect_len=_PAKE_SHARE_SIZE
+        )
+        try:
+            cpace.derive(peer_share, _PAKE_AD_CLIENT)
+        except CPaceError as exc:
+            raise PairingError("malformed pake_msg_2: invalid CPace share") from exc
+        await ws.send_str(
+            ServerPairConfirmMessage(
+                payload=ServerPairConfirmPayload(server_kc=b64url_encode(cpace.tag())),
+            ).to_json(),
+        )
+
+        confirm = await _receive_pairing(ws, ClientPairConfirmMessage)
+        if confirm.payload.nonce_B is None:
+            raise PairingError("client/pair-confirm missing nonce_B for dynamic PIN")
+        nonce_b = _decode_field(confirm.payload.nonce_B, "nonce_B", expect_len=pin_mod.NONCE_SIZE)
+        if not pin_mod.verify_commit(nonce_b, commit_b):
+            raise PairingError("revealed nonce_B does not match commit_B")
+        if (
+            not cpace.verify(
+                _decode_field(confirm.payload.client_kc, "client_kc", expect_len=_KC_TAG_SIZE)
+            )
+            or pin_mod.derive_pin(handshake_hash, nonce_a, nonce_b, pin_length) != pin
+        ):
+            await abort_pairing(ws, PairAbortReason.PIN_MISMATCH)
+
+        return await _finalize_server(
+            ws,
+            client_id=client_id,
+            store=store,
+            method=PairMethod.DYNAMIC_PIN,
+            verify=verify,
+            wrap_key=_wrap_key(sid, cpace),
+        )
+
+
+async def run_static_pin_client(
+    ws: EncryptedWebSocket,
+    *,
+    handshake_hash: bytes,
+    pairing_index: int,
+    static_pin: str,
+    server_id: str,
+    store: ClientPairingStore,
+) -> str | None:
+    """Run the client side of the static-PIN flow (the pairing window must already be open).
+
+    Returns ``None`` on finalize, else the raw ``server/activate`` leave frame.
+    """
+    sid = _pake_sid(handshake_hash, pairing_index)
+    try:
+        async with asyncio.timeout(_CLIENT_ATTEMPT_TIMEOUT_S):
+            await ws.send_str(
+                ClientPairInitMessage(
+                    payload=ClientPairInitPayload(pairing_index=pairing_index),
+                ).to_json(),
+            )
+            try:
+                cpace = CPace.start(
+                    role=CPaceRole.RESPONDER,
+                    prs=static_pin.encode("ascii"),
+                    sid=sid,
+                    ad=_PAKE_AD_CLIENT,
+                )
+            except CPaceError as exc:
+                raise PairingError("CPace initialization failed") from exc
+
+            auth = await _receive_pairing(ws, ServerPairAuthMessage)
+            await ws.send_str(
+                ClientPairAuthMessage(
+                    payload=ClientPairAuthPayload(pake_msg_2=b64url_encode(cpace.public_share)),
+                ).to_json(),
+            )
+            peer_share = _decode_field(
+                auth.payload.pake_msg_1, "pake_msg_1", expect_len=_PAKE_SHARE_SIZE
+            )
+            try:
+                cpace.derive(peer_share, _PAKE_AD_SERVER)
+            except CPaceError as exc:
+                raise PairingError("malformed pake_msg_1: invalid CPace share") from exc
+
+            confirm = await _receive_pairing(ws, ServerPairConfirmMessage)
+            if not cpace.verify(
+                _decode_field(confirm.payload.server_kc, "server_kc", expect_len=_KC_TAG_SIZE)
+            ):
+                await store.record_pin_failure(PairMethod.STATIC_PIN)
+                await abort_pairing(ws, PairAbortReason.PIN_MISMATCH)
+            await store.reset_pin_failures(PairMethod.STATIC_PIN)
+            await ws.send_str(
+                ClientPairConfirmMessage(
+                    payload=ClientPairConfirmPayload(client_kc=b64url_encode(cpace.tag())),
+                ).to_json(),
+            )
+
+            return await _finalize_client(
+                ws,
+                server_id=server_id,
+                store=store,
+                wrap_key=_wrap_key(sid, cpace),
+            )
+    except TimeoutError:
+        await abort_pairing(ws, PairAbortReason.ATTEMPT_TIMEOUT)
+
+
+async def run_static_pin_server(
+    ws: EncryptedWebSocket,
+    *,
+    handshake_hash: bytes,
+    pairing_index: int,
+    pin_provider: PinProvider,
+    client_id: str,
+    store: ServerPairingStore,
+    verify: bool = False,
+) -> ServerPairingRecord | None:
+    """Run the server side of the static-PIN flow.
+
+    Returns the persisted record, or ``None`` when ``verify`` is set (re-verified, left pairing).
+    """
+    sid = _pake_sid(handshake_hash, pairing_index)
+    async with asyncio.timeout(_SERVER_GESTURE_TIMEOUT_S):
+        await _receive_pair_init(ws, pairing_index)
+    async with asyncio.timeout(_SERVER_ATTEMPT_TIMEOUT_S):
+        pin = await pin_provider()
+        try:
+            cpace = CPace.start(
+                role=CPaceRole.INITIATOR, prs=pin.encode("ascii"), sid=sid, ad=_PAKE_AD_SERVER
+            )
+        except CPaceError as exc:
+            raise PairingError("CPace initialization failed") from exc
+        await ws.send_str(
+            ServerPairAuthMessage(
+                payload=ServerPairAuthPayload(pake_msg_1=b64url_encode(cpace.public_share)),
+            ).to_json(),
+        )
+
+        auth = await _receive_pairing(ws, ClientPairAuthMessage)
+        peer_share = _decode_field(
+            auth.payload.pake_msg_2, "pake_msg_2", expect_len=_PAKE_SHARE_SIZE
+        )
+        try:
+            cpace.derive(peer_share, _PAKE_AD_CLIENT)
+        except CPaceError as exc:
+            raise PairingError("malformed pake_msg_2: invalid CPace share") from exc
+        await ws.send_str(
+            ServerPairConfirmMessage(
+                payload=ServerPairConfirmPayload(server_kc=b64url_encode(cpace.tag())),
+            ).to_json(),
+        )
+
+        confirm = await _receive_pairing(ws, ClientPairConfirmMessage)
+        if not cpace.verify(
+            _decode_field(confirm.payload.client_kc, "client_kc", expect_len=_KC_TAG_SIZE)
+        ):
+            await abort_pairing(ws, PairAbortReason.PIN_MISMATCH)
+
+        return await _finalize_server(
+            ws,
+            client_id=client_id,
+            store=store,
+            method=PairMethod.STATIC_PIN,
+            verify=verify,
+            wrap_key=_wrap_key(sid, cpace),
+        )
+
+
+async def _finalize_client(
+    ws: EncryptedWebSocket,
+    *,
+    server_id: str,
+    store: ClientPairingStore,
+    wrap_key: bytes | None = None,
+) -> str | None:
+    """Send ``client/pair-finalize``, wrapping the PSK when ``wrap_key`` is set (PIN flows).
+
+    Returns ``None`` after persisting on the server's ack, else its raw leave frame.
+    """
+    psk, record = await store.resolve_pairing_outcome(server_id=server_id)
+    if wrap_key is None:
+        payload = ClientPairFinalizePayload(long_term_psk=b64url_encode(psk))
+    else:
+        wrapped = _wrap_aead(ws.session.suite, wrap_key).encrypt(_PSK_WRAP_NONCE, psk, None)
+        payload = ClientPairFinalizePayload(wrapped_psk=b64url_encode(wrapped))
+    await ws.send_str(ClientPairFinalizeMessage(payload=payload).to_json())
+    reply = await _receive_pairing_frame(ws, ServerPairFinalizeMessage)
+    if isinstance(reply, str):
+        return reply  # server left pairing without finalizing; nothing stored
+    if record is not None:
+        await store.store_record(record)
+    return None
+
+
+async def _finalize_server(
+    ws: EncryptedWebSocket,
+    *,
+    client_id: str,
+    store: ServerPairingStore,
+    method: PairMethod,
+    verify: bool = False,
+    wrap_key: bytes | None = None,
+) -> ServerPairingRecord | None:
+    """Consume ``client/pair-finalize``: finalize a record, or re-verify (returns ``None``)."""
+    finalize = await _receive_pairing(ws, ClientPairFinalizeMessage)
+    existing = await store.record_by_client_id(client_id)
+    record = existing.with_method(method) if existing is not None else None
+    if not verify:
+        psk = _unwrap_psk(ws.session.suite, finalize.payload, wrap_key)
+        if record is None:
+            record = ServerPairingRecord(
+                psk_id=psk_id_for(psk), psk=psk, client_id=client_id, pair_methods=[method]
+            )
+        else:
+            record = replace(record, psk_id=psk_id_for(psk), psk=psk)
+    if record is not None and record is not existing:
+        await store.store_record(record)  # persist before acking
+    if verify:
+        return None
+    # The new record supersedes the client's lesser grants.
+    await store.unstage_pairing_psk(client_id)
+    await store.remove_trusted_unpaired(client_id)
+    await ws.send_str(ServerPairFinalizeMessage().to_json())
+    return record
+
+
+def _unwrap_psk(
+    suite: NoiseCipherSuite, payload: ClientPairFinalizePayload, wrap_key: bytes | None
+) -> bytes:
+    """Extract the PSK from ``client/pair-finalize``, unwrapping when ``wrap_key`` is set."""
+    if wrap_key is None:
+        if payload.long_term_psk is None:
+            raise PairingError("client/pair-finalize is missing long_term_psk")
+        return _decode_field(payload.long_term_psk, "long_term_psk", expect_len=PSK_SIZE)
+    if payload.wrapped_psk is None:
+        raise PairingError("client/pair-finalize is missing wrapped_psk")
+    wrapped = _decode_field(payload.wrapped_psk, "wrapped_psk", expect_len=PSK_SIZE + 16)
+    try:
+        psk = _wrap_aead(suite, wrap_key).decrypt(_PSK_WRAP_NONCE, wrapped, None)
+    except InvalidTag as exc:
+        raise PairingError("malformed wrapped_psk: AEAD failure") from exc
+    return psk
+
+
+def _decode_field(value: str, what: str, *, expect_len: int | None = None) -> bytes:
+    """Base64url-decode a received pairing field, raising ``PairingError`` if malformed."""
+    try:
+        raw = b64url_decode(value)
+    except ValueError as exc:
+        raise PairingError(f"malformed {what}: not valid base64url") from exc
+    if expect_len is not None and len(raw) != expect_len:
+        raise PairingError(f"malformed {what}: expected {expect_len} bytes, got {len(raw)}")
+    return raw
+
+
+async def abort_pairing(ws: EncryptedWebSocket, reason: PairAbortReason) -> NoReturn:
+    """Send ``pair/abort`` (best-effort) and raise ``LocalPairingAbortError``."""
+    with suppress(Exception):
+        await ws.send_str(PairAbortMessage(payload=PairAbortPayload(reason=reason)).to_json())
+    raise LocalPairingAbortError(reason)
+
+
+async def _receive_pairing_frame[T: PairingMessage](
+    ws: EncryptedWebSocket, expected: type[T]
+) -> T | str:
+    """Receive a frame: the parsed ``expected`` message, or the raw text if it isn't pairing."""
+    msg = await ws.receive()
+    if msg.type in (WSMsgType.CLOSE, WSMsgType.CLOSING, WSMsgType.CLOSED):
+        raise PairingError(f"connection closed while awaiting {expected.__name__}")
+    if msg.type is not WSMsgType.TEXT:
+        raise PairingError(f"expected a JSON frame ({expected.__name__}), got {msg.type.name}")
+    data = cast("str", msg.data)
+    try:
+        message = PairingMessage.from_json(data)
+    except (ValueError, LookupError):
+        return data
+    if isinstance(message, PairAbortMessage):
+        raise RemotePairingAbortError(message.payload.reason)
+    if not isinstance(message, expected):
+        raise PairingError(f"expected {expected.__name__}, got {type(message).__name__}")
+    return message
+
+
+async def _receive_pairing[T: PairingMessage](ws: EncryptedWebSocket, expected: type[T]) -> T:
+    """Receive the next pairing frame, requiring it to be of type ``expected``."""
+    message = await _receive_pairing_frame(ws, expected)
+    if isinstance(message, str):
+        raise PairingError(f"malformed message awaiting {expected.__name__}")
+    return message
+
+
+async def receive_pairing_abort(ws: EncryptedWebSocket) -> NoReturn:
+    """Receive the ``pair/abort`` ending an unstarted attempt; every outcome raises."""
+    await _receive_pairing(ws, PairAbortMessage)
+    raise AssertionError("unreachable: receiving pair/abort raises")
+
+
+async def _receive_pair_init(ws: EncryptedWebSocket, pairing_index: int) -> ClientPairInitMessage:
+    """Receive this attempt's ``client/pair-init``, discarding stale leftovers."""
+    while True:
+        init = await _receive_pairing(ws, ClientPairInitMessage)
+        if init.payload.pairing_index > pairing_index:
+            raise PairingError("client/pair-init pairing_index is ahead of the server's count")
+        if init.payload.pairing_index == pairing_index:
+            return init
+        # A leftover from a superseded pairing server/activate: discard silently.
+
+
+def _pake_sid(handshake_hash: bytes, pairing_index: int) -> bytes:
+    """CPace session id binding the PAKE to the Noise handshake and PIN-pairing attempt."""
+    return _PAKE_SID_LABEL + handshake_hash + pairing_index.to_bytes(4, "big")
+
+
+def _wrap_key(sid: bytes, cpace: CPace) -> bytes:
+    """Derive the PSK wrap key from the CPace output."""
+    return hashlib.sha256(_PSK_WRAP_LABEL + sid + cpace.isk).digest()
+
+
+def _wrap_aead(suite: NoiseCipherSuite, wrap_key: bytes) -> AESGCM | ChaCha20Poly1305:
+    """Build the negotiated suite's AEAD, keyed for PSK wrapping."""
+    if suite is NoiseCipherSuite.AESGCM:
+        return AESGCM(wrap_key)
+    return ChaCha20Poly1305(wrap_key)

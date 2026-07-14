@@ -76,7 +76,9 @@ async def test_buffer_tracker_does_not_backpressure_until_send() -> None:
     wsock.send_bytes = AsyncMock(side_effect=slow_send_bytes)
 
     conn = SendspinConnection(server, wsock_client=wsock)
+    conn._transport = wsock  # noqa: SLF001
     await conn._setup_connection()  # noqa: SLF001
+    conn._writer_task = asyncio.create_task(conn._writer())  # noqa: SLF001
 
     group = _DummyGroup(clients=[])
     client = SendspinClient(server, client_id="p1")
@@ -101,7 +103,12 @@ async def test_buffer_tracker_does_not_backpressure_until_send() -> None:
     hello.artwork_support = None
     hello.visualizer_support = None
 
-    client.attach_connection(conn, client_info=hello, active_roles=[Roles.PLAYER.value])
+    client.attach_connection(
+        conn,
+        client_info=hello,
+        negotiated_roles=[Roles.PLAYER.value],
+        active_roles=[Roles.PLAYER.value],
+    )
     client.mark_connected()
     conn._client = client  # noqa: SLF001
 

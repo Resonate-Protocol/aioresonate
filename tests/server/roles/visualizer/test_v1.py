@@ -20,6 +20,7 @@ from aiosendspin.models.visualizer import (
     ClientHelloVisualizerSupport,
     StreamRequestFormatVisualizer,
 )
+from aiosendspin.noise.keys import Identity
 from aiosendspin.server.roles.base import AudioChunk
 from aiosendspin.server.roles.visualizer.v1 import VisualizerV1Role
 from aiosendspin.server.server import SendspinServer
@@ -206,6 +207,33 @@ def test_on_stream_start_not_resent_during_active_stream() -> None:
     role.on_stream_start()
 
     assert _stream_start_count(client) == 1
+
+
+def test_on_deactivate_ends_active_stream() -> None:
+    """on_deactivate emits stream/end while a visualizer stream is active."""
+    client = _make_client_stub()
+    role = VisualizerV1Role(client=client)
+    role.on_connect()
+    role.on_stream_start()
+    role.on_deactivate()
+
+    assert any(
+        isinstance(call.args[1], StreamEndMessage)
+        for call in client.send_role_message.call_args_list
+    )
+
+
+def test_on_deactivate_without_stream_sends_nothing() -> None:
+    """on_deactivate is a no-op when no visualizer stream was started."""
+    client = _make_client_stub()
+    role = VisualizerV1Role(client=client)
+    role.on_connect()
+    role.on_deactivate()
+
+    assert not any(
+        isinstance(call.args[1], StreamEndMessage)
+        for call in client.send_role_message.call_args_list
+    )
 
 
 def test_on_stream_clear_sends_clear_message() -> None:
@@ -1042,7 +1070,13 @@ def test_refresh_pitch_setting_noop_when_unchanged() -> None:
 
 async def test_server_set_pitch_enabled_fans_out_to_roles() -> None:
     """SendspinServer.set_visualizer_pitch_enabled refreshes every active role once."""
-    server = SendspinServer(asyncio.get_running_loop(), "srv", "Srv", MagicMock())
+    server = SendspinServer(
+        asyncio.get_running_loop(),
+        Identity.generate(),
+        "Srv",
+        MagicMock(),
+        pairing_store=MagicMock(),
+    )
     role = MagicMock()
     role.refresh_pitch_setting = MagicMock()
     other = MagicMock(spec=[])  # no refresh_pitch_setting attr → skipped

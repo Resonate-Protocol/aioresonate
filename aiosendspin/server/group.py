@@ -168,6 +168,20 @@ class SendspinGroup:
         if self._push_stream is not None and not self._push_stream.is_stopped:
             self._push_stream.on_role_format_changed(role)
 
+    def on_role_activated(self, role: Role) -> None:
+        """Join a role activated mid-connection to the active stream, if any."""
+        if (
+            self._push_stream is not None
+            and not self._push_stream.is_stopped
+            and role.get_audio_requirements() is not None
+        ):
+            self._push_stream.on_role_join(role)
+
+    def on_role_deactivated(self, role: Role) -> None:
+        """Drop a role deactivated mid-connection from the active stream, if any."""
+        if self._push_stream is not None and not self._push_stream.is_stopped:
+            self._push_stream.on_role_leave(role)
+
     def _send_group_update_to_clients(self) -> None:
         """Send group/update messages to all clients."""
         group_message = GroupUpdateServerMessage(
@@ -362,7 +376,7 @@ class SendspinGroup:
             self._finalize_empty_group()
         else:
             # Stop a remnant with no player-role client left to source audio.
-            if not any(has_role_family("player", c.negotiated_roles) for c in self._clients):
+            if not any(has_role_family("player", c.negotiated_role_ids) for c in self._clients):
                 await self._stop_and_invalidate_stale_binary(self._clients)
             # Emit event for client removal
             self._signal_event(GroupMemberRemovedEvent(client.client_id))

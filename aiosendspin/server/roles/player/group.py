@@ -157,7 +157,7 @@ class PlayerGroupRole(GroupRole):
         """Subscribe to per-client volume events to aggregate group transitions."""
         if client in self._player_client_unsubs:
             return
-        if not has_role_family("player", client.negotiated_roles):
+        if not has_role_family("player", client.negotiated_role_ids):
             return
 
         def on_client_event(_client: SendspinClient, event: ClientEvent) -> None:

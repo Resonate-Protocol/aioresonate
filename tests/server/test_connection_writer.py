@@ -96,6 +96,7 @@ async def test_send_binary_accepts_buffer_metadata() -> None:
     wsock.closed = False
 
     conn = SendspinConnection(server, wsock_client=wsock)
+    conn._transport = wsock  # noqa: SLF001
 
     conn.send_binary(
         b"audio_data",
@@ -128,7 +129,9 @@ async def test_writer_registers_buffer_after_send() -> None:
     wsock.send_bytes = AsyncMock()
 
     conn = SendspinConnection(server, wsock_client=wsock)
+    conn._transport = wsock  # noqa: SLF001
     await conn._setup_connection()  # noqa: SLF001
+    conn._writer_task = asyncio.create_task(conn._writer())  # noqa: SLF001
 
     # Mock a role that handles AUDIO_CHUNK with buffer tracking
     mock_role = MagicMock()
@@ -186,7 +189,9 @@ async def test_writer_does_not_register_without_metadata() -> None:
     wsock.send_bytes = AsyncMock()
 
     conn = SendspinConnection(server, wsock_client=wsock)
+    conn._transport = wsock  # noqa: SLF001
     await conn._setup_connection()  # noqa: SLF001
+    conn._writer_task = asyncio.create_task(conn._writer())  # noqa: SLF001
 
     # Mock a role that handles AUDIO_CHUNK with buffer tracking
     mock_role = MagicMock()
@@ -233,7 +238,9 @@ async def test_writer_blocks_on_buffer_tracker_capacity() -> None:
     wsock.send_bytes = AsyncMock()
 
     conn = SendspinConnection(server, wsock_client=wsock)
+    conn._transport = wsock  # noqa: SLF001
     await conn._setup_connection()  # noqa: SLF001
+    conn._writer_task = asyncio.create_task(conn._writer())  # noqa: SLF001
 
     mock_role = MagicMock()
     mock_buffer_tracker = MagicMock()
@@ -284,6 +291,7 @@ def test_check_late_binary_uses_player_effective_timestamp() -> None:
         wsock = MagicMock()
         wsock.closed = False
         conn = SendspinConnection(server, wsock_client=wsock)
+        conn._transport = wsock  # noqa: SLF001
 
         role = PlayerV1Role(client=_make_player_client_stub())
         role.static_delay_ms = 5_000
@@ -309,7 +317,9 @@ async def test_server_initiated_connection_starts_writer_task() -> None:
     wsock.send_bytes = AsyncMock()
 
     conn = SendspinConnection(server, wsock_client=wsock)
+    conn._transport = wsock  # noqa: SLF001
     await conn._setup_connection()  # noqa: SLF001
+    conn._writer_task = asyncio.create_task(conn._writer())  # noqa: SLF001
     assert conn._writer_task is not None  # noqa: SLF001
 
     conn.send_message(
@@ -352,7 +362,9 @@ async def test_role_stream_start_is_sent_before_binary_for_same_role() -> None:
     wsock.send_bytes = AsyncMock(side_effect=_record_binary)
 
     conn = SendspinConnection(server, wsock_client=wsock)
+    conn._transport = wsock  # noqa: SLF001
     await conn._setup_connection()  # noqa: SLF001
+    conn._writer_task = asyncio.create_task(conn._writer())  # noqa: SLF001
 
     conn.send_role_message(
         "player",
@@ -405,7 +417,9 @@ async def test_role_stream_lifecycle_json_is_sent_before_older_binary() -> None:
     wsock.send_bytes = AsyncMock(side_effect=_record_binary)
 
     conn = SendspinConnection(server, wsock_client=wsock)
+    conn._transport = wsock  # noqa: SLF001
     await conn._setup_connection()  # noqa: SLF001
+    conn._writer_task = asyncio.create_task(conn._writer())  # noqa: SLF001
 
     conn.send_role_message("player", StreamEndMessage(payload=StreamEndPayload(roles=None)))
     conn.send_role_message(
@@ -458,7 +472,9 @@ async def test_writer_rewrites_server_transmitted_at_send_time() -> None:
     wsock.send_bytes = AsyncMock()
 
     conn = SendspinConnection(server, wsock_client=wsock)
+    conn._transport = wsock  # noqa: SLF001
     await conn._setup_connection()  # noqa: SLF001
+    conn._writer_task = asyncio.create_task(conn._writer())  # noqa: SLF001
 
     conn.send_message(
         ServerTimeMessage(
@@ -497,6 +513,7 @@ async def test_send_binary_disconnects_on_per_role_queue_overflow() -> None:
     wsock.closed = False
 
     conn = SendspinConnection(server, wsock_client=wsock)
+    conn._transport = wsock  # noqa: SLF001
     conn._max_pending_msg_by_role["player"] = 1  # noqa: SLF001
     conn.disconnect = AsyncMock()  # type: ignore[method-assign]
 
@@ -556,6 +573,7 @@ def test_per_role_queue_limit_is_isolated_between_roles() -> None:
         wsock = MagicMock()
         wsock.closed = False
         conn = SendspinConnection(server, wsock_client=wsock)
+        conn._transport = wsock  # noqa: SLF001
         conn.disconnect = AsyncMock()  # type: ignore[method-assign]
         conn._max_pending_msg_by_role["player"] = 1  # noqa: SLF001
         conn._max_pending_msg_by_role["visualizer"] = 1  # noqa: SLF001

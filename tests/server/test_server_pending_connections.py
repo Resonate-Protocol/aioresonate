@@ -8,6 +8,8 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from aiohttp import web
 
+from aiosendspin.noise.keys import Identity
+from aiosendspin.noise.trust_store import InMemoryServerPairingStore
 from aiosendspin.server.server import SendspinServer
 
 
@@ -46,7 +48,11 @@ def _make_server() -> SendspinServer:
     client_session.closed = True
     client_session.close = AsyncMock()
     return SendspinServer(
-        loop=loop, server_id="srv", server_name="server", client_session=client_session
+        loop=loop,
+        identity=Identity.generate(),
+        server_name="server",
+        client_session=client_session,
+        pairing_store=InMemoryServerPairingStore(),
     )
 
 
@@ -99,7 +105,7 @@ async def test_on_client_connect_cleans_pending_set_on_handler_failure(
         ) -> None:
             self.websocket_connection = web.WebSocketResponse()
 
-        async def _handle_client(self) -> None:
+        async def handle_client(self) -> None:
             raise RuntimeError("boom")
 
     monkeypatch.setattr("aiosendspin.server.server.SendspinConnection", _FailingConnection)

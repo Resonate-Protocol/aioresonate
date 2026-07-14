@@ -106,6 +106,7 @@ def _make_client(
     client.attach_connection(
         _DummyConnection(),
         client_info=_hello(client_id, supported_roles=supported_roles),
+        negotiated_roles=supported_roles,
         active_roles=supported_roles,
     )
     client.mark_connected()

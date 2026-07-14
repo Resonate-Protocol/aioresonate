@@ -66,6 +66,19 @@ def test_metadata_role_on_disconnect_unsubscribes_from_group_role() -> None:
     group_role.unsubscribe.assert_called_once_with(role)
 
 
+def test_metadata_role_on_deactivate_clears_state() -> None:
+    """on_deactivate() sends server/state with a null metadata object."""
+    client = _make_client_stub()
+    role = MetadataV1Role(client=client)
+    role.on_connect()
+    client.send_role_message.reset_mock()
+
+    role.on_deactivate()
+
+    sent = [call.args[1] for call in client.send_role_message.call_args_list]
+    assert any(isinstance(m, ServerStateMessage) and m.payload.metadata is None for m in sent)
+
+
 def test_metadata_role_has_no_stream_requirements() -> None:
     """MetadataV1Role does not send binary streams."""
     client = _make_client_stub()

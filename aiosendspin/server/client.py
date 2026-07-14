@@ -11,6 +11,7 @@ import asyncio
 import logging
 from collections.abc import Callable
 from contextlib import suppress
+from dataclasses import dataclass
 from enum import Enum
 from typing import TYPE_CHECKING, TypeVar
 
@@ -24,15 +25,17 @@ from aiosendspin.models.types import (
     GoodbyeReason,
     PlaybackStateType,
     Roles,
+    TrustLevel,
     has_role,
     has_role_family,
 )
+from aiosendspin.noise.trust_store import PskCategory
 from aiosendspin.util import create_task
 
 from .events import ClientEvent, ClientGroupChangedEvent
 from .roles import Role
 from .roles.base import BinaryHandling
-from .roles.negotiation import negotiate_active_roles
+from .roles.negotiation import negotiate_roles, sort_role_ids
 from .roles.registry import create_role
 
 if TYPE_CHECKING:
@@ -76,6 +79,16 @@ class DisconnectBehaviour(Enum):
     """
 
 
+@dataclass(frozen=True, slots=True)
+class ConnectionSecurity:
+    """Read-only view of a live connection's security state."""
+
+    psk_category: PskCategory
+    """Category of the PSK that admitted the connection; a server-verified fact."""
+    trust_level: TrustLevel
+    """Trust the client declared toward this server; a client-asserted claim."""
+
+
 class SendspinClient:
     """Persistent client/device object."""
 
@@ -85,7 +98,7 @@ class SendspinClient:
         self._client_id = client_id
         self._name = client_id
         self._info: ClientHelloPayload | None = None
-        self._negotiated_roles: list[str] = []
+        self._negotiated_role_ids: list[str] = []
         self._roles: dict[str, Role] = {}
         self._group: SendspinGroup | None = None
 
@@ -94,6 +107,7 @@ class SendspinClient:
         self._added_event_fired: bool = False
         self._roles_warm_disconnected: bool = False
         self._roles_cold_preinitialized: bool = False
+        self._roles_attached: bool = False
 
         self.disconnect_behaviour = DisconnectBehaviour.UNGROUP
 
@@ -134,14 +148,34 @@ class SendspinClient:
 
     @property
     def info(self) -> ClientHelloPayload:
-        """Return the most recent `client/hello` payload."""
-        assert self._info is not None, "client/hello has not been processed yet"
+        """Return the most recent `client/hello` payload.
+
+        Raises RuntimeError before the first hello has been processed; use
+        `info_or_none` in contexts where that state is reachable.
+        """
+        if self._info is None:
+            raise RuntimeError("client/hello has not been processed yet")
         return self._info
 
     @property
-    def negotiated_roles(self) -> list[str]:
-        """Return the negotiated active roles for this connection (versioned role IDs)."""
-        return self._negotiated_roles
+    def info_or_none(self) -> ClientHelloPayload | None:
+        """Return the most recent `client/hello` payload, or None before the first hello."""
+        return self._info
+
+    @property
+    def negotiated_role_ids(self) -> list[str]:
+        """Return the mutually-supported role set for this device (versioned role IDs)."""
+        return self._negotiated_role_ids
+
+    @property
+    def active_roles(self) -> list[Role]:
+        """All active role instances for iteration."""
+        return list(self._roles.values())
+
+    @property
+    def active_role_ids(self) -> list[str]:
+        """Versioned IDs of the currently-active roles."""
+        return list(self._roles)
 
     def role(self, role_id: str) -> Role | None:
         """Get active role by versioned ID (e.g., 'player@v1')."""
@@ -192,6 +226,24 @@ class SendspinClient:
         return self._connection
 
     @property
+    def connection_security(self) -> ConnectionSecurity | None:
+        """Security state of the active connection, or ``None`` when disconnected."""
+        conn = self._connection
+        if conn is None or conn.psk_category is None:
+            return None
+        trust_level = self._info.trust_level if self._info is not None else TrustLevel.NONE
+        return ConnectionSecurity(
+            psk_category=conn.psk_category,
+            trust_level=trust_level,
+        )
+
+    @property
+    def is_paired(self) -> bool:
+        """Whether the active connection is authenticated by a long-term Sendspin PSK."""
+        conn = self._connection
+        return conn is not None and conn.psk_category is PskCategory.LONG_TERM
+
+    @property
     def has_warm_disconnected_roles(self) -> bool:
         """Whether role instances are retained while transport is down."""
         return self._roles_warm_disconnected and self._connection is None
@@ -230,21 +282,16 @@ class SendspinClient:
         - Multi-client group: remember the previous group and move to a solo group.
         - Solo group: stop playback so the client is no longer streaming.
         """
-        if len(self.group.clients) > 1:
-            self._previous_group_id = self.group.group_id
-            self._logger.debug(
-                "Storing previous group %s for external_source client",
-                self._previous_group_id,
-            )
-            await self.group.remove_client(self)
-            self._external_source_solo_group_id = self.group.group_id
+        previous_group_id = await self.quiesce_to_solo_stopped()
+        if previous_group_id is None:
+            self._logger.debug("Client already in solo group, stopped playback for external_source")
             return
-
-        self._logger.debug("Client already in solo group, stopping playback for external_source")
-        await self.group.stop()
+        self._previous_group_id = previous_group_id
+        self._external_source_solo_group_id = self.group.group_id
+        self._logger.debug("Stored previous group %s for external_source", previous_group_id)
 
     async def handle_switch_command(self) -> None:
-        """Cycle this client through available groups (spec §561-605)."""
+        """Cycle this client through available groups."""
         if self._switch_lock.locked():
             self._logger.debug("Ignoring switch command; switch already in progress")
             return
@@ -263,7 +310,7 @@ class SendspinClient:
 
         current_group = self.group
         all_groups = self._get_all_groups()
-        has_player_role = has_role_family("player", self._negotiated_roles)
+        has_player_role = has_role_family("player", self._negotiated_role_ids)
         cycle_groups = self._build_group_cycle(all_groups, current_group, has_player_role)
 
         if not cycle_groups:
@@ -305,7 +352,7 @@ class SendspinClient:
         current_group: SendspinGroup,
         has_player_role: bool,  # noqa: FBT001
     ) -> list[SendspinGroup | None]:
-        """Build the switch cycle list (spec README:597-605).
+        """Build the switch cycle list.
 
         ``None`` in the list represents "switch to a new solo group" for clients
         that hold the player role.
@@ -317,12 +364,12 @@ class SendspinClient:
             client_count = len(group.clients)
             is_playing = group.state == PlaybackStateType.PLAYING
             if client_count > 1 and is_playing:
-                if any(has_role_family("player", c.negotiated_roles) for c in group.clients):
+                if any(has_role_family("player", c.negotiated_role_ids) for c in group.clients):
                     multi_client_playing.append(group)
             elif client_count == 1 and is_playing:
                 single_client_obj = group.clients[0]
                 if group != current_group and has_role_family(
-                    "player", single_client_obj.negotiated_roles
+                    "player", single_client_obj.negotiated_role_ids
                 ):
                     single_client.append(group)
 
@@ -383,13 +430,14 @@ class SendspinClient:
 
     def check_role(self, role: Roles) -> bool:
         """Check if the client has a role active (by role family)."""
-        return has_role(role.value, self._negotiated_roles)
+        return has_role(role.value, self._negotiated_role_ids)
 
     def attach_connection(
         self,
         connection: SendspinConnection,
         *,
         client_info: ClientHelloPayload,
+        negotiated_roles: list[str],
         active_roles: list[str],
     ) -> None:
         """Attach a new WebSocket connection to this client."""
@@ -403,6 +451,14 @@ class SendspinClient:
             # Replace an existing connection for the same device.
             self._logger.debug("Replacing existing connection for %s", self._client_id)
             create_task(self._connection.disconnect(retry_connection=False))
+            # The replaced socket's disconnect() is guarded out of detach_connection, so
+            # retire its still-connected roles here to reuse them on this attach.
+            if (
+                self._roles
+                and not self._roles_warm_disconnected
+                and not self._roles_cold_preinitialized
+            ):
+                self._retire_roles_warm()
 
         self._connection = connection
         self._connected = False  # set True once initial state is received (spec)
@@ -412,48 +468,18 @@ class SendspinClient:
             on_transport_attached(self._client_id)
 
         previous_info = self._info
-        previous_roles = list(self._negotiated_roles)
-        self._set_identity_from_hello(client_info, active_roles=active_roles)
+        self._set_identity_from_hello(client_info, negotiated_roles=negotiated_roles)
         if previous_info is not None and previous_info != client_info:
             self._server._signal_client_updated(self._client_id)  # noqa: SLF001
         self._logger = logger.getChild(self._client_id)
-        expected_role_ids = set(self._negotiated_roles)
-
-        # Reuse warm-disconnected roles when the negotiated role IDs are unchanged.
-        can_reuse_warm_roles = (
-            self._roles_warm_disconnected
-            and bool(self._roles)
-            and set(previous_roles) == expected_role_ids
-            and set(self._roles.keys()) == expected_role_ids
-        )
-        can_reuse_cold_preinit = (
-            self._roles_cold_preinitialized
-            and bool(self._roles)
-            and set(previous_roles) == expected_role_ids
-            and set(self._roles.keys()) == expected_role_ids
-        )
-        if can_reuse_warm_roles or can_reuse_cold_preinit:
-            for role in self._roles.values():
-                role.on_connect()
-        else:
-            if self._roles_warm_disconnected:
-                # Roles already received on_disconnect() during detach_connection();
-                # just clear the mappings to avoid invoking disconnect hooks twice.
-                self._roles.clear()
-                self._binary_handling_cache.clear()
-            else:
-                self._hard_detach_roles(call_disconnect_hooks=not self._roles_cold_preinitialized)
-
-            # Create and register active roles via registry.
-            for role_id in self._negotiated_roles:
-                new_role = create_role(role_id, self)
-                if new_role is None:
-                    continue
-                new_role.on_connect()
-                self._roles[new_role.role_id] = new_role
+        if not self._roles_warm_disconnected and not self._roles_cold_preinitialized:
+            # First attach for this device: clear stale state, then reconcile from empty.
+            self._hard_detach_roles()
+        self._connect_active_roles(active_roles)
 
         self._roles_warm_disconnected = False
         self._roles_cold_preinitialized = False
+        self._roles_attached = True
 
         self._rebuild_binary_handling_cache()
 
@@ -468,6 +494,60 @@ class SendspinClient:
         # events) are skipped. Re-registering here ensures they are set up.
         # Guard: individual on_client_added() implementations are idempotent.
         self._group._register_client_events(self)  # noqa: SLF001
+
+    def _connect_active_roles(self, active_role_ids: list[str]) -> None:
+        """Connect the active role set, reusing existing instances and creating the rest."""
+        # A dropped role needs no on_disconnect: warm ran it at detach, cold never
+        # connected. Exception: cold roles attached without a transport
+        # (attach_preinitialized_roles) are live — reused instances skip the second
+        # on_connect and dropped ones get their disconnect hook below.
+        active_role_ids = sort_role_ids(active_role_ids)
+        roles: dict[str, Role] = {}
+        for role_id in active_role_ids:
+            role = self._roles.pop(role_id, None)
+            if role is None:
+                role = create_role(role_id, self)
+                if role is None:
+                    continue
+                role.on_connect()
+            elif not self._roles_attached:
+                role.on_connect()
+            roles[role.role_id] = role
+        if self._roles_attached:
+            for dropped_role in self._roles.values():
+                dropped_role.on_disconnect()
+        self._roles = roles
+
+    def set_active_roles(self, active_role_ids: list[str]) -> None:
+        """Reconcile active role instances to match a server/activate declaration."""
+        active_role_ids = sort_role_ids(active_role_ids)
+        desired_set = set(active_role_ids)
+        if desired_set == set(self._roles):
+            # Same set: no hooks to run, but keep dict order canonical.
+            if list(self._roles) != active_role_ids:
+                self._roles = {role_id: self._roles[role_id] for role_id in active_role_ids}
+                self._rebuild_binary_handling_cache()
+            return
+
+        for role_id in list(self._roles):
+            if role_id not in desired_set:
+                deactivated_role = self._roles.pop(role_id)
+                deactivated_role.on_deactivate()
+                self.group.on_role_deactivated(deactivated_role)
+
+        roles: dict[str, Role] = {}
+        for role_id in active_role_ids:
+            role = self._roles.get(role_id)
+            if role is None:
+                role = create_role(role_id, self)
+                if role is None:
+                    continue
+                role.on_connect()
+                self.group.on_role_activated(role)
+            roles[role.role_id] = role
+        self._roles = roles
+
+        self._rebuild_binary_handling_cache()
 
     def preload_hello(self, client_info: ClientHelloPayload) -> None:
         """Seed persistent client identity/capabilities without an active connection."""
@@ -487,7 +567,7 @@ class SendspinClient:
         - binary handling cache derived from those roles
         - cold-preinitialized role marker
 
-        Deferred until websocket attach:
+        Deferred until websocket attach (or attach_preinitialized_roles()):
         - role on_connect() lifecycle hooks
         """
         if self._connection is not None:
@@ -495,11 +575,11 @@ class SendspinClient:
                 f"Cannot cold-preinitialize roles for {self._client_id!r} while connected"
             )
 
-        self._hard_detach_roles(call_disconnect_hooks=False)
+        self._hard_detach_roles(call_disconnect_hooks=self._roles_attached)
         self._set_identity_from_hello(client_info)
         self._roles_warm_disconnected = False
 
-        for role_id in self._negotiated_roles:
+        for role_id in self._negotiated_role_ids:
             role = create_role(role_id, self)
             if role is None:
                 continue
@@ -507,6 +587,14 @@ class SendspinClient:
 
         self._roles_cold_preinitialized = True
         self._rebuild_binary_handling_cache()
+
+    def attach_preinitialized_roles(self) -> None:
+        """Run connect hooks for cold-preinitialized roles without a transport."""
+        if not self._roles_cold_preinitialized or self._roles_attached:
+            return
+        for role in self._roles.values():
+            role.on_connect()
+        self._roles_attached = True
 
     def mark_connected(self) -> None:
         """Mark this client as fully connected (after initial client/state if required)."""
@@ -521,13 +609,7 @@ class SendspinClient:
 
         warm_disconnect = goodbye_reason in {None, GoodbyeReason.RESTART}
         if warm_disconnect:
-            # Keep role instances alive for reconnect-aware processing, but run
-            # role disconnect hooks so reconnect always preserves lifecycle order.
-            for role in self._roles.values():
-                role.on_disconnect()
-            self._binary_handling_cache.clear()
-            self._roles_warm_disconnected = True
-            self._roles_cold_preinitialized = False
+            self._retire_roles_warm()
         else:
             self._hard_detach_roles()
             self._roles_warm_disconnected = False
@@ -539,6 +621,15 @@ class SendspinClient:
 
         # Schedule client cleanup from registry
         self._schedule_cleanup(goodbye_reason)
+
+    def _retire_roles_warm(self) -> None:
+        """Run role disconnect hooks but keep instances alive for warm reuse on reconnect."""
+        for role in self._roles.values():
+            role.on_disconnect()
+        self._binary_handling_cache.clear()
+        self._roles_warm_disconnected = True
+        self._roles_cold_preinitialized = False
+        self._roles_attached = False
 
     async def _handle_takeover_disconnect(self) -> None:
         """Handle ANOTHER_SERVER disconnect by ungrouping first, then stopping."""
@@ -600,20 +691,21 @@ class SendspinClient:
         self._roles.clear()
         self._binary_handling_cache.clear()
         self._roles_cold_preinitialized = False
+        self._roles_attached = False
 
     def _set_identity_from_hello(
         self,
         client_info: ClientHelloPayload,
         *,
-        active_roles: list[str] | None = None,
+        negotiated_roles: list[str] | None = None,
     ) -> None:
         """Store hello identity/capabilities with optional explicit negotiated roles."""
         self._info = client_info
         self._name = client_info.name
-        if active_roles is None:
-            self._negotiated_roles = negotiate_active_roles(client_info.supported_roles)
+        if negotiated_roles is None:
+            self._negotiated_role_ids = negotiate_roles(client_info.supported_roles)
         else:
-            self._negotiated_roles = active_roles
+            self._negotiated_role_ids = negotiated_roles
 
     def _rebuild_binary_handling_cache(self) -> None:
         """Build binary handling cache for fast lookup."""
@@ -667,11 +759,6 @@ class SendspinClient:
             duration_us=duration_us,
         )
 
-    @property
-    def active_roles(self) -> list[Role]:
-        """All active roles for iteration."""
-        return list(self._roles.values())
-
     def get_binary_handling_cached(self, message_type: int) -> tuple[BinaryHandling, Role] | None:
         """Return cached binary handling for a message type."""
         return self._binary_handling_cache.get(message_type)
@@ -718,3 +805,19 @@ class SendspinClient:
         if self._group is None:
             return
         await self._group.remove_client(self)
+
+    async def quiesce_to_solo_stopped(self) -> str | None:
+        """Leave any multi-client group for a solo stopped group, ending active streams."""
+        group = self.group
+        if len(group.clients) > 1:
+            previous_group_id = group.group_id
+            await group.remove_client(self)
+            return previous_group_id
+        had_active_stream = group.has_active_stream
+        await group.stop()
+        if not had_active_stream:
+            # A group can be PLAYING without a stream (track transition); stop() fires
+            # on_stream_end only via the PushStream, so end the streams explicitly here.
+            for role in self.active_roles:
+                role.on_stream_end()
+        return None

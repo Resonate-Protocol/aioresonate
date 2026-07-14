@@ -115,7 +115,12 @@ def _make_connected_player(
     hello.artwork_support = None
     hello.visualizer_support = None
 
-    client.attach_connection(conn, client_info=hello, active_roles=[Roles.PLAYER.value])
+    client.attach_connection(
+        conn,
+        client_info=hello,
+        negotiated_roles=[Roles.PLAYER.value],
+        active_roles=[Roles.PLAYER.value],
+    )
     client.mark_connected()
     role = client.role("player@v1")
     if role is not None:

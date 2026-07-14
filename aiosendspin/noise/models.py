@@ -1,0 +1,253 @@
+"""JSON dataclasses for the cleartext init exchange and Noise handshake frames."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import Literal
+
+from mashumaro.config import BaseConfig
+from mashumaro.mixins.orjson import DataClassORJSONMixin
+from mashumaro.types import Discriminator
+
+from aiosendspin.models.types import PairAbortReason, ServerMessage
+
+
+@dataclass
+class ClientInitPayload(DataClassORJSONMixin):
+    """Cleartext ``client/init`` payload — the client opens the conversation."""
+
+    client_id: str
+    """Client's static public key, 43-char base64url X25519 with no padding."""
+    version: int
+    """Core protocol version. Must be ``1`` for this implementation."""
+    suite: str
+    """The Noise cipher suite the client picked (see ``NoiseCipherSuite``)."""
+
+
+@dataclass
+class ClientInitMessage(DataClassORJSONMixin):
+    """Envelope for ``ClientInitPayload``."""
+
+    payload: ClientInitPayload
+    type: Literal["client/init"] = "client/init"
+
+
+@dataclass
+class ServerInitPayload(DataClassORJSONMixin):
+    """Cleartext ``server/init`` payload — server's response with its identity."""
+
+    server_id: str
+    """Server's static public key, 43-char base64url X25519 with no padding."""
+    version: int
+    """Core protocol version. Must be ``1`` for this implementation."""
+
+
+@dataclass
+class ServerInitMessage(DataClassORJSONMixin):
+    """Envelope for ``ServerInitPayload``."""
+
+    payload: ServerInitPayload
+    type: Literal["server/init"] = "server/init"
+
+
+@dataclass
+class NoiseHandshakePayload(DataClassORJSONMixin):
+    """Carries one Noise handshake message (base64url-encoded ciphertext)."""
+
+    data: str
+    """Base64url-encoded Noise handshake bytes, no padding."""
+
+
+@dataclass
+class NoiseHandshakeMessage(ServerMessage):
+    """Envelope for ``NoiseHandshakePayload``. Used for both Noise messages 1 and 2."""
+
+    payload: NoiseHandshakePayload
+    type: Literal["noise/handshake"] = "noise/handshake"
+
+
+@dataclass
+class NoiseMsg1Payload(DataClassORJSONMixin):
+    """Plaintext payload encrypted *inside* Noise handshake message 1 (server → client)."""
+
+    psk_id: str
+    """43-char base64url SHA-256 of the PSK (see ``psk_id_for``)."""
+
+
+@dataclass
+class NoiseMsg2Payload(DataClassORJSONMixin):
+    """Plaintext payload encrypted *inside* Noise handshake message 2 (client → server)."""
+
+
+@dataclass
+class PairingMessage(DataClassORJSONMixin):
+    """Discriminated base for pairing envelopes, keyed on the ``type`` field."""
+
+    class Config(BaseConfig):
+        """Config for parsing json messages."""
+
+        discriminator = Discriminator(field="type", include_subtypes=True)
+
+
+@dataclass
+class ClientPairFinalizePayload(DataClassORJSONMixin):
+    """Encrypted ``client/pair-finalize`` payload — the client delivers the long-term PSK."""
+
+    long_term_psk: str | None = None
+    """43-char base64url 32-byte PSK, sent directly. Pairing PSK flow only."""
+    wrapped_psk: str | None = None
+    """The PSK sealed under the CPace-derived wrap key (64-char base64url). PIN flows only."""
+
+    class Config(BaseConfig):
+        """Omit the field the flow doesn't use."""
+
+        omit_none = True
+
+
+@dataclass
+class ClientPairFinalizeMessage(PairingMessage):
+    """Envelope for ``ClientPairFinalizePayload``."""
+
+    payload: ClientPairFinalizePayload
+    type: Literal["client/pair-finalize"] = "client/pair-finalize"
+
+
+@dataclass
+class ServerPairFinalizePayload(DataClassORJSONMixin):
+    """Encrypted ``server/pair-finalize`` payload — empty ack that the server persisted."""
+
+
+@dataclass
+class ServerPairFinalizeMessage(PairingMessage):
+    """Envelope for ``ServerPairFinalizePayload``."""
+
+    payload: ServerPairFinalizePayload = field(default_factory=ServerPairFinalizePayload)
+    type: Literal["server/pair-finalize"] = "server/pair-finalize"
+
+
+@dataclass
+class PairAbortPayload(DataClassORJSONMixin):
+    """``pair/abort`` payload — aborts a pairing attempt; sender closes after sending."""
+
+    reason: PairAbortReason
+    """Why the pairing attempt was aborted."""
+
+
+@dataclass
+class PairAbortMessage(PairingMessage):
+    """Envelope for ``PairAbortPayload`` (sent by either side)."""
+
+    payload: PairAbortPayload
+    type: Literal["pair/abort"] = "pair/abort"
+
+
+@dataclass
+class ClientPairInitPayload(DataClassORJSONMixin):
+    """``client/pair-init`` payload — signals readiness for the PIN-pairing flow."""
+
+    pairing_index: int
+    """Pairing ``server/activate`` message count received since the last Noise handshake."""
+    commit_B: str | None = None  # noqa: N815 - spec wire field name
+    """``SHA-256(nonce_B)`` (43-char base64url). Present in dynamic PIN; absent in static."""
+
+    class Config(BaseConfig):
+        """Omit the optional commitment when absent (static PIN)."""
+
+        omit_none = True
+
+
+@dataclass
+class ClientPairInitMessage(PairingMessage):
+    """Envelope for ``ClientPairInitPayload``."""
+
+    payload: ClientPairInitPayload
+    type: Literal["client/pair-init"] = "client/pair-init"
+
+
+@dataclass
+class ServerPairInitPayload(DataClassORJSONMixin):
+    """``server/pair-init`` payload — the server's nonce contribution (dynamic PIN)."""
+
+    nonce_A: str  # noqa: N815 - spec wire field name
+    """32 bytes from a CSPRNG, base64url-encoded (43 chars)."""
+    pin_length: int
+    """Negotiated PIN length in digits: ``max(client_min, server_min)`` clamped to 4-12."""
+
+
+@dataclass
+class ServerPairInitMessage(PairingMessage):
+    """Envelope for ``ServerPairInitPayload``."""
+
+    payload: ServerPairInitPayload
+    type: Literal["server/pair-init"] = "server/pair-init"
+
+
+@dataclass
+class ServerPairAuthPayload(DataClassORJSONMixin):
+    """``server/pair-auth`` payload — the server's CPace public share."""
+
+    pake_msg_1: str
+    """CPace public share ``Ya`` (43-char base64url)."""
+
+
+@dataclass
+class ServerPairAuthMessage(PairingMessage):
+    """Envelope for ``ServerPairAuthPayload``."""
+
+    payload: ServerPairAuthPayload
+    type: Literal["server/pair-auth"] = "server/pair-auth"
+
+
+@dataclass
+class ClientPairAuthPayload(DataClassORJSONMixin):
+    """``client/pair-auth`` payload — the client's CPace public share."""
+
+    pake_msg_2: str
+    """CPace public share ``Yb`` (43-char base64url)."""
+
+
+@dataclass
+class ClientPairAuthMessage(PairingMessage):
+    """Envelope for ``ClientPairAuthPayload``."""
+
+    payload: ClientPairAuthPayload
+    type: Literal["client/pair-auth"] = "client/pair-auth"
+
+
+@dataclass
+class ServerPairConfirmPayload(DataClassORJSONMixin):
+    """``server/pair-confirm`` payload — the server's MCF confirmation tag."""
+
+    server_kc: str
+    """CPace MCF tag ``Ta`` (HMAC-SHA-512, 86-char base64url)."""
+
+
+@dataclass
+class ServerPairConfirmMessage(PairingMessage):
+    """Envelope for ``ServerPairConfirmPayload``."""
+
+    payload: ServerPairConfirmPayload
+    type: Literal["server/pair-confirm"] = "server/pair-confirm"
+
+
+@dataclass
+class ClientPairConfirmPayload(DataClassORJSONMixin):
+    """``client/pair-confirm`` payload — the client's MCF tag and commitment opening."""
+
+    client_kc: str
+    """CPace MCF tag ``Tb`` (HMAC-SHA-512, 86-char base64url)."""
+    nonce_B: str | None = None  # noqa: N815 - spec wire field name
+    """Preimage of ``commit_B`` (43-char base64url). Present in dynamic PIN only."""
+
+    class Config(BaseConfig):
+        """Omit the optional nonce opening when absent (static PIN)."""
+
+        omit_none = True
+
+
+@dataclass
+class ClientPairConfirmMessage(PairingMessage):
+    """Envelope for ``ClientPairConfirmPayload``."""
+
+    payload: ClientPairConfirmPayload
+    type: Literal["client/pair-confirm"] = "client/pair-confirm"
