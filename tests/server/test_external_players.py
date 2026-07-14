@@ -16,6 +16,8 @@ from aiosendspin.models.types import (
     PlayerCommand,
     Roles,
 )
+from aiosendspin.noise.keys import Identity
+from aiosendspin.noise.trust_store import InMemoryServerPairingStore
 from aiosendspin.server import ClientAddedEvent, ExternalStreamStartRequest, SendspinServer
 from aiosendspin.server.audio import AudioFormat
 from aiosendspin.server.client import SendspinClient
@@ -116,9 +118,10 @@ def _make_server() -> SendspinServer:
     client_session.close = AsyncMock()
     return SendspinServer(
         loop=loop,
-        server_id="srv",
+        identity=Identity.generate(),
         server_name="server",
         client_session=client_session,
+        pairing_store=InMemoryServerPairingStore(),
     )
 
 
@@ -198,6 +201,7 @@ async def test_attach_connection_reuses_external_cold_preinitialized_roles() -> 
     player.attach_connection(
         _DummyConnection(),
         client_info=_player_hello("external-reuse"),
+        negotiated_roles=[Roles.PLAYER.value],
         active_roles=[Roles.PLAYER.value],
     )
 
@@ -206,8 +210,8 @@ async def test_attach_connection_reuses_external_cold_preinitialized_roles() -> 
 
 
 @pytest.mark.asyncio
-async def test_attach_connection_rebuilds_roles_when_cold_preinit_mismatches() -> None:
-    """Attach should rebuild roles when negotiated roles differ from cold pre-init."""
+async def test_attach_connection_reconciles_roles_when_cold_preinit_mismatches() -> None:
+    """Attach reconciles a mismatched cold-preinit set: reuse survivors, add new roles."""
     server = _make_server()
 
     player = server.register_external_player(
@@ -221,10 +225,11 @@ async def test_attach_connection_rebuilds_roles_when_cold_preinit_mismatches() -
     player.attach_connection(
         _DummyConnection(),
         client_info=_player_and_metadata_hello("external-mismatch"),
+        negotiated_roles=[Roles.PLAYER.value, Roles.METADATA.value],
         active_roles=[Roles.PLAYER.value, Roles.METADATA.value],
     )
 
-    assert player.role(Roles.PLAYER.value) is not precreated_player_role
+    assert player.role(Roles.PLAYER.value) is precreated_player_role
     assert player.role(Roles.METADATA.value) is not None
 
 
@@ -325,6 +330,7 @@ async def test_add_external_player_to_active_group_requests_external_connect() -
     owner.attach_connection(
         _DummyConnection(),
         client_info=_player_hello("owner"),
+        negotiated_roles=[Roles.PLAYER.value],
         active_roles=[Roles.PLAYER.value],
     )
     owner.mark_connected()
@@ -391,6 +397,7 @@ async def test_add_external_preconnect_player_to_active_group_replays_cached_aud
     owner.attach_connection(
         _DummyConnection(),
         client_info=_player_hello("owner-preconnect"),
+        negotiated_roles=[Roles.PLAYER.value],
         active_roles=[Roles.PLAYER.value],
     )
     owner.mark_connected()
@@ -458,6 +465,7 @@ async def test_add_external_non_preconnect_player_to_active_group_skips_role_joi
     owner.attach_connection(
         _DummyConnection(),
         client_info=_player_hello("owner-cold"),
+        negotiated_roles=[Roles.PLAYER.value],
         active_roles=[Roles.PLAYER.value],
     )
     owner.mark_connected()
@@ -510,6 +518,7 @@ async def test_register_external_player_timeout_cancelled_on_transport_attach() 
     client.attach_connection(
         _DummyConnection(),
         client_info=_player_hello("external-connected"),
+        negotiated_roles=[Roles.PLAYER.value],
         active_roles=[Roles.PLAYER.value],
     )
 
@@ -607,6 +616,7 @@ async def test_reclaim_timeout_cancelled_on_transport_attach(
     client.attach_connection(
         _DummyConnection(),
         client_info=_player_hello("speaker-connected"),
+        negotiated_roles=[Roles.PLAYER.value],
         active_roles=[Roles.PLAYER.value],
     )
 
@@ -614,3 +624,162 @@ async def test_reclaim_timeout_cancelled_on_transport_attach(
     await _flush_asyncio_callbacks()
 
     assert server.get_client("speaker-connected") is client
+
+
+_TRACKING_ROLE_ID = "player@_tracking"
+
+
+class _TrackingRole(Role):
+    """Player-family role that records lifecycle hook invocations."""
+
+    def __init__(self, client: SendspinClient) -> None:
+        self._client = client
+        self.connects = 0
+        self.disconnects = 0
+
+    @property
+    def role_id(self) -> str:
+        return _TRACKING_ROLE_ID
+
+    @property
+    def role_family(self) -> str:
+        return "player"
+
+    def on_connect(self) -> None:
+        self.connects += 1
+        self._subscribe_to_group_role()
+
+    def on_disconnect(self) -> None:
+        self.disconnects += 1
+        self._unsubscribe_from_group_role()
+
+
+@pytest.mark.asyncio
+async def test_attach_preinitialized_roles_subscribes_and_is_idempotent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """attach_preinitialized_roles runs connect hooks exactly once and joins group roles."""
+    monkeypatch.setitem(ROLE_FACTORIES, _TRACKING_ROLE_ID, _TrackingRole)
+    server = _make_server()
+
+    player = server.register_external_player(
+        _custom_role_hello("external-attach", _TRACKING_ROLE_ID),
+        on_stream_start=lambda _req: None,
+    )
+    role = player.role(_TRACKING_ROLE_ID)
+    assert isinstance(role, _TrackingRole)
+    group_role = player.group.group_role("player")
+    assert group_role is not None
+    assert role not in group_role._members  # noqa: SLF001
+
+    player.attach_preinitialized_roles()
+    player.attach_preinitialized_roles()
+
+    assert role.connects == 1
+    assert role in group_role._members  # noqa: SLF001
+    assert player.has_cold_preinitialized_roles
+
+
+@pytest.mark.asyncio
+async def test_transport_attach_after_attach_preinitialized_roles_connects_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A later transport attach reuses externally attached roles without a second on_connect."""
+    monkeypatch.setitem(ROLE_FACTORIES, _TRACKING_ROLE_ID, _TrackingRole)
+    server = _make_server()
+
+    player = server.register_external_player(
+        _custom_role_hello("external-attach-reuse", _TRACKING_ROLE_ID),
+        on_stream_start=lambda _req: None,
+    )
+    player.attach_preinitialized_roles()
+    role = player.role(_TRACKING_ROLE_ID)
+    assert isinstance(role, _TrackingRole)
+
+    player.attach_connection(
+        _DummyConnection(),
+        client_info=_custom_role_hello("external-attach-reuse", _TRACKING_ROLE_ID),
+        negotiated_roles=[_TRACKING_ROLE_ID],
+        active_roles=[_TRACKING_ROLE_ID],
+    )
+
+    assert player.role(_TRACKING_ROLE_ID) is role
+    assert role.connects == 1
+    assert role.disconnects == 0
+    group_role = player.group.group_role("player")
+    assert group_role is not None
+    assert role in group_role._members  # noqa: SLF001
+
+
+@pytest.mark.asyncio
+async def test_transport_attach_disconnects_dropped_externally_attached_role(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A role set change on transport attach runs disconnect hooks on attached externals."""
+    monkeypatch.setitem(ROLE_FACTORIES, _TRACKING_ROLE_ID, _TrackingRole)
+    server = _make_server()
+
+    player = server.register_external_player(
+        _custom_role_hello("external-attach-drop", _TRACKING_ROLE_ID),
+        on_stream_start=lambda _req: None,
+    )
+    player.attach_preinitialized_roles()
+    role = player.role(_TRACKING_ROLE_ID)
+    assert isinstance(role, _TrackingRole)
+
+    player.attach_connection(
+        _DummyConnection(),
+        client_info=_player_hello("external-attach-drop"),
+        negotiated_roles=[Roles.PLAYER.value],
+        active_roles=[Roles.PLAYER.value],
+    )
+
+    assert player.role(_TRACKING_ROLE_ID) is None
+    assert role.disconnects == 1
+    group_role = player.group.group_role("player")
+    assert group_role is not None
+    assert role not in group_role._members  # noqa: SLF001
+
+
+@pytest.mark.asyncio
+async def test_reregister_disconnects_externally_attached_roles(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Re-registration after attach_preinitialized_roles unsubscribes the old roles."""
+    monkeypatch.setitem(ROLE_FACTORIES, _TRACKING_ROLE_ID, _TrackingRole)
+    server = _make_server()
+
+    player = server.register_external_player(
+        _custom_role_hello("external-rereg", _TRACKING_ROLE_ID),
+        on_stream_start=lambda _req: None,
+    )
+    player.attach_preinitialized_roles()
+    role = player.role(_TRACKING_ROLE_ID)
+    assert isinstance(role, _TrackingRole)
+
+    server.register_external_player(
+        _player_hello("external-rereg"),
+        on_stream_start=lambda _req: None,
+    )
+
+    assert role.disconnects == 1
+    group_role = player.group.group_role("player")
+    assert group_role is not None
+    assert role not in group_role._members  # noqa: SLF001
+
+
+@pytest.mark.asyncio
+async def test_info_accessors_before_and_after_hello() -> None:
+    """Info raises before the first hello; info_or_none returns None, then the payload."""
+    server = _make_server()
+    client = server.get_or_create_client("no-hello-yet")
+
+    assert client.info_or_none is None
+    with pytest.raises(RuntimeError, match="client/hello has not been processed"):
+        _ = client.info
+
+    hello = _player_hello("no-hello-yet")
+    server.register_external_player(hello, on_stream_start=lambda _req: None)
+
+    assert client.info_or_none is hello
+    assert client.info is hello

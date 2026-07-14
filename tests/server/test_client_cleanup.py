@@ -93,6 +93,7 @@ async def client(mock_server: _MockServer) -> SendspinClient:
     client.attach_connection(
         _DummyConnection(),
         client_info=_player_hello("player-1"),
+        negotiated_roles=[Roles.PLAYER.value],
         active_roles=[Roles.PLAYER.value],
     )
     client.mark_connected()
@@ -265,6 +266,7 @@ async def test_cleanup_cancelled_on_reconnect(
     client.attach_connection(
         _DummyConnection(),
         client_info=_player_hello("player-1"),
+        negotiated_roles=[Roles.PLAYER.value],
         active_roles=[Roles.PLAYER.value],
     )
     client.mark_connected()
@@ -287,6 +289,7 @@ async def test_cleanup_skipped_if_reconnected_before_callback(
     client.attach_connection(
         _DummyConnection(),
         client_info=_player_hello("player-1"),
+        negotiated_roles=[Roles.PLAYER.value],
         active_roles=[Roles.PLAYER.value],
     )
     client.mark_connected()

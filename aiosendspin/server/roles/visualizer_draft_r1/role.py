@@ -110,6 +110,12 @@ class VisualizerDraftR1Role(Role):
         self._init_stream_config()
         self._subscribe_to_group_role()
 
+    def on_deactivate(self) -> None:
+        """End the visualizer stream when the role is deactivated while still connected."""
+        if self._stream_started:
+            self.on_stream_end()
+        super().on_deactivate()
+
     def on_disconnect(self) -> None:
         """Unsubscribe from VisualizerGroupRole."""
         self._unsubscribe_from_group_role()

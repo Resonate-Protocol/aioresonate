@@ -121,6 +121,7 @@ def _make_client(
     client.attach_connection(
         conn,
         client_info=_hello(client_id, supported_roles=supported_roles),
+        negotiated_roles=supported_roles,
         active_roles=supported_roles,
     )
     client.mark_connected()
@@ -322,6 +323,7 @@ async def test_switch_cycle_for_non_player_client_omits_solo_option() -> None:
             version=1,
             supported_roles=[Roles.CONTROLLER.value],
         ),
+        negotiated_roles=[Roles.CONTROLLER.value],
         active_roles=[Roles.CONTROLLER.value],
     )
     client.mark_connected()

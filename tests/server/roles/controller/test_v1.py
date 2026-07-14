@@ -7,6 +7,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from aiosendspin.models.controller import ControllerCommandPayload
+from aiosendspin.models.core import ServerStateMessage
 from aiosendspin.models.types import MediaCommand
 from aiosendspin.server.roles.controller.v1 import ControllerV1Role
 
@@ -17,6 +18,19 @@ def _make_client_stub() -> MagicMock:
     client.group = MagicMock()
     client.group.group_role.return_value = None
     return client
+
+
+def test_controller_role_on_deactivate_clears_state() -> None:
+    """on_deactivate() sends server/state with a null controller object."""
+    client = _make_client_stub()
+    role = ControllerV1Role(client=client)
+    role.on_connect()
+    client.send_role_message.reset_mock()
+
+    role.on_deactivate()
+
+    sent = [call.args[1] for call in client.send_role_message.call_args_list]
+    assert any(isinstance(m, ServerStateMessage) and m.payload.controller is None for m in sent)
 
 
 def test_controller_role_has_role_id() -> None:

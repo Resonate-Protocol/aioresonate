@@ -6,7 +6,8 @@ import base64
 
 import pytest
 
-from aiosendspin.client.client import AudioFormat, SendspinClient
+from aiosendspin.client.client import AudioFormat
+from aiosendspin.client.connection import SendspinConnection
 from aiosendspin.models.core import StreamStartMessage, StreamStartPayload
 from aiosendspin.models.player import (
     ClientHelloPlayerSupport,
@@ -14,6 +15,8 @@ from aiosendspin.models.player import (
     SupportedAudioFormat,
 )
 from aiosendspin.models.types import AudioCodec, Roles
+
+from .conftest import make_sdk_client
 
 
 def _player_support() -> ClientHelloPlayerSupport:
@@ -34,8 +37,7 @@ def _player_support() -> ClientHelloPlayerSupport:
 @pytest.mark.asyncio
 async def test_stream_start_flac_decodes_codec_header_and_notifies_audio_callbacks() -> None:
     """Client should expose codec-aware format and decoded FLAC header in callbacks."""
-    client = SendspinClient(
-        client_id="client-1",
+    client = make_sdk_client(
         client_name="Test Client",
         roles=[Roles.PLAYER],
         player_support=_player_support(),
@@ -45,7 +47,8 @@ async def test_stream_start_flac_decodes_codec_header_and_notifies_audio_callbac
     captured: list[tuple[int, bytes, AudioFormat]] = []
     client.add_audio_chunk_listener(lambda ts, payload, fmt: captured.append((ts, payload, fmt)))
 
-    await client._handle_stream_start(  # noqa: SLF001
+    connection = SendspinConnection(client)
+    await connection._handle_stream_start(  # noqa: SLF001
         StreamStartMessage(
             payload=StreamStartPayload(
                 player=StreamStartPlayer(
@@ -58,7 +61,7 @@ async def test_stream_start_flac_decodes_codec_header_and_notifies_audio_callbac
             )
         )
     )
-    client._handle_audio_chunk(123_456, b"abc")  # noqa: SLF001
+    connection._handle_audio_chunk(123_456, b"abc")  # noqa: SLF001
 
     assert len(captured) == 1
     ts, payload, fmt = captured[0]

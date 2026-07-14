@@ -2,18 +2,16 @@
 
 from .client import (
     AudioChunkCallback,
-    AudioFormat,
     DisconnectCallback,
     GroupUpdateCallback,
     MetadataCallback,
-    PCMFormat,
     SendspinClient,
-    ServerInfo,
     StreamEndCallback,
     StreamStartCallback,
     VisualizerCallback,
 )
 from .listener import ClientListener
+from .models import AudioFormat, PCMFormat, ServerInfo
 from .time_sync import SendspinTimeFilter
 
 __all__ = [

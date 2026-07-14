@@ -41,6 +41,27 @@ def test_player_role_on_stream_end_uses_role_family() -> None:
     assert msg.payload.roles == ["player"]
 
 
+def test_player_role_on_deactivate_ends_active_stream() -> None:
+    """on_deactivate() sends stream/end for an active stream, and nothing otherwise."""
+    client = MagicMock()
+    client.send_role_message = MagicMock()
+
+    role = PlayerV1Role(client=client)
+    role._client.connection = MagicMock()  # noqa: SLF001
+    role._buffer_tracker = None  # noqa: SLF001
+
+    role._stream_started = True  # noqa: SLF001
+    role.on_deactivate()
+    _role, msg = client.send_role_message.call_args.args
+    assert isinstance(msg, StreamEndMessage)
+    assert msg.payload.roles == ["player"]
+
+    # on_stream_end cleared the flag, so a second deactivate is a no-op.
+    client.send_role_message.reset_mock()
+    role.on_deactivate()
+    client.send_role_message.assert_not_called()
+
+
 def test_player_role_on_audio_chunk_packs_header_and_tracks_duration() -> None:
     """on_audio_chunk uses role-controlled header packing and accurate duration tracking."""
 

@@ -22,7 +22,7 @@ class _ClientStub:
     """Minimal SendspinClient stub with event listener wiring."""
 
     def __init__(self, *, negotiated_roles: list[str] | None = None) -> None:
-        self.negotiated_roles = negotiated_roles or ["player@v1"]
+        self.negotiated_role_ids = negotiated_roles or ["player@v1"]
         self._cbs: list[Callable[[SendspinClient, ClientEvent], None]] = []
 
     def add_event_listener(

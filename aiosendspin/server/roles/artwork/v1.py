@@ -18,6 +18,8 @@ from aiosendspin.models.artwork import (
     StreamStartArtwork,
 )
 from aiosendspin.models.core import (
+    StreamEndMessage,
+    StreamEndPayload,
     StreamRequestFormatPayload,
     StreamStartMessage,
     StreamStartPayload,
@@ -70,6 +72,12 @@ class ArtworkV1Role(Role):
             self._send_stream_start()
         # Subscribe after stream/start so the on_member_join artwork snapshot lands second.
         self._subscribe_to_group_role()
+
+    def on_deactivate(self) -> None:
+        """End the artwork stream when the role is deactivated while still connected."""
+        if self._stream_started:
+            self.send_message(StreamEndMessage(payload=StreamEndPayload(roles=["artwork"])))
+        super().on_deactivate()
 
     def on_disconnect(self) -> None:
         """Unsubscribe from ArtworkGroupRole."""

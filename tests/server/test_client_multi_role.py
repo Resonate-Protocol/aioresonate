@@ -118,7 +118,9 @@ class TestClientRoles:
         conn = _FakeConnection()
         hello = _make_client_hello()
 
-        client.attach_connection(conn, client_info=hello, active_roles=["player@v1"])
+        client.attach_connection(
+            conn, client_info=hello, negotiated_roles=["player@v1"], active_roles=["player@v1"]
+        )
         client.mark_connected()
 
         role = client.role("player@v1")
@@ -136,7 +138,9 @@ class TestClientRoles:
         conn = _FakeConnection()
         hello = _make_client_hello()
 
-        client.attach_connection(conn, client_info=hello, active_roles=["player@v1"])
+        client.attach_connection(
+            conn, client_info=hello, negotiated_roles=["player@v1"], active_roles=["player@v1"]
+        )
 
         role = client.role("player@v1")
         assert role is not None
@@ -153,7 +157,9 @@ class TestClientRoles:
         conn = _FakeConnection()
         hello = _make_client_hello()
 
-        client.attach_connection(conn, client_info=hello, active_roles=["player@v1"])
+        client.attach_connection(
+            conn, client_info=hello, negotiated_roles=["player@v1"], active_roles=["player@v1"]
+        )
 
         roles = client.active_roles
         assert len(roles) == 1

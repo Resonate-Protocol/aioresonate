@@ -11,6 +11,7 @@ import logging
 from typing import TYPE_CHECKING
 
 from aiosendspin.models.controller import ControllerCommandPayload
+from aiosendspin.models.core import ServerStateMessage, ServerStatePayload
 from aiosendspin.models.types import MediaCommand
 from aiosendspin.server.roles.base import Role
 from aiosendspin.util import create_task
@@ -62,6 +63,11 @@ class ControllerV1Role(Role):
     def on_connect(self) -> None:
         """Subscribe to ControllerGroupRole for state updates."""
         self._subscribe_to_group_role()
+
+    def on_deactivate(self) -> None:
+        """Clear controller state when the role is deactivated while still connected."""
+        self.send_message(ServerStateMessage(ServerStatePayload(controller=None)))
+        super().on_deactivate()
 
     def on_disconnect(self) -> None:
         """Unsubscribe from ControllerGroupRole."""

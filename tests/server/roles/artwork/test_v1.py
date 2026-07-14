@@ -7,7 +7,11 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from aiosendspin.models.artwork import ArtworkChannel, StreamRequestFormatArtwork
-from aiosendspin.models.core import StreamRequestFormatPayload, StreamStartMessage
+from aiosendspin.models.core import (
+    StreamEndMessage,
+    StreamRequestFormatPayload,
+    StreamStartMessage,
+)
 from aiosendspin.models.types import ArtworkSource, PictureFormat
 from aiosendspin.server.roles.artwork.group import ArtworkGroupRole
 from aiosendspin.server.roles.artwork.v1 import ArtworkV1Role
@@ -24,6 +28,21 @@ def _make_client_stub() -> MagicMock:
     client.send_role_message = MagicMock()
     client.send_binary = MagicMock(return_value=True)
     client._logger = MagicMock()  # noqa: SLF001
+    return client
+
+
+def _make_client_stub_with_channel() -> MagicMock:
+    """Mock client whose hello advertises a single artwork channel."""
+    client = _make_client_stub()
+    client.info.artwork_support = MagicMock()
+    client.info.artwork_support.channels = [
+        ArtworkChannel(
+            source=ArtworkSource.ALBUM,
+            format=PictureFormat.JPEG,
+            media_width=300,
+            media_height=300,
+        )
+    ]
     return client
 
 
@@ -71,6 +90,31 @@ def test_artwork_role_on_disconnect_unsubscribes_from_group_role() -> None:
     role.on_disconnect()
 
     group_role.unsubscribe.assert_called_once_with(role)
+
+
+def test_artwork_role_on_deactivate_sends_stream_end_when_started() -> None:
+    """on_deactivate() ends the artwork stream once a stream/start was sent."""
+    client = _make_client_stub_with_channel()
+    role = ArtworkV1Role(client=client)
+    role.on_connect()
+    client.send_role_message.reset_mock()
+
+    role.on_deactivate()
+
+    sent = [call.args[1] for call in client.send_role_message.call_args_list]
+    assert any(isinstance(m, StreamEndMessage) and m.payload.roles == ["artwork"] for m in sent)
+
+
+def test_artwork_role_on_deactivate_noop_without_stream() -> None:
+    """on_deactivate() sends nothing when no stream/start was ever sent."""
+    client = _make_client_stub()  # no artwork_support -> no stream/start
+    role = ArtworkV1Role(client=client)
+    role.on_connect()
+    client.send_role_message.reset_mock()
+
+    role.on_deactivate()
+
+    client.send_role_message.assert_not_called()
 
 
 def test_artwork_role_init_channel_configs_from_support() -> None:

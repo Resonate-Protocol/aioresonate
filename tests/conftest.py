@@ -2,9 +2,33 @@
 
 from __future__ import annotations
 
+from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
+
+from aiosendspin.client.client import SendspinClient
+from aiosendspin.noise.keys import Identity
+from aiosendspin.noise.trust_store import ClientPairingStore, InMemoryClientPairingStore
+
+
+def make_sdk_client(
+    *,
+    identity: Identity | None = None,
+    pairing_store: ClientPairingStore | None = None,
+    **kwargs: Any,
+) -> SendspinClient:
+    """Build a client-SDK ``SendspinClient`` with the Noise dependencies defaulted.
+
+    Existing client tests don't drive the Noise handshake, so this supplies a
+    freshly generated identity and an empty in-memory pairing store, letting
+    callers pass only their domain-relevant kwargs.
+    """
+    return SendspinClient(
+        identity=identity or Identity.generate(),
+        pairing_store=pairing_store or InMemoryClientPairingStore(),
+        **kwargs,
+    )
 
 
 @pytest.fixture

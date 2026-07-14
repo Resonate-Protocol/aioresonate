@@ -15,6 +15,7 @@ __all__ = [
     "ClientRemovedEvent",
     "ClientRoleEvent",
     "ClientUpdatedEvent",
+    "ConnectionSecurity",
     "DisconnectBehaviour",
     "ExternalStreamStartCallback",
     "ExternalStreamStartRequest",
@@ -37,7 +38,7 @@ __all__ = [
 from aiosendspin.models.types import AudioCodec
 
 from .audio import AudioFormat
-from .client import DisconnectBehaviour, SendspinClient
+from .client import ConnectionSecurity, DisconnectBehaviour, SendspinClient
 from .events import (
     ClientEvent,
     ClientGroupChangedEvent,

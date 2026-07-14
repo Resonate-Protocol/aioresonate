@@ -6,6 +6,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from aiosendspin.models.core import ServerStateMessage
 from aiosendspin.server.roles.color.v1 import ColorV1Role
 
 
@@ -14,6 +15,19 @@ def _make_client_stub() -> MagicMock:
     client.group = MagicMock()
     client.group.group_role.return_value = None
     return client
+
+
+def test_color_role_on_deactivate_clears_state() -> None:
+    """on_deactivate() sends server/state with a null color object."""
+    client = _make_client_stub()
+    role = ColorV1Role(client=client)
+    role.on_connect()
+    client.send_role_message.reset_mock()
+
+    role.on_deactivate()
+
+    sent = [call.args[1] for call in client.send_role_message.call_args_list]
+    assert any(isinstance(m, ServerStateMessage) and m.payload.color is None for m in sent)
 
 
 def test_color_v1_role_id() -> None:

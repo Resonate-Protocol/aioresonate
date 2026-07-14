@@ -73,6 +73,8 @@ class PlayerPersistentState:
     required_lead_time_ms: int = 250
     min_buffer_ms: int = 500
     state_supported_commands: list[PlayerCommand] = field(default_factory=list)
+    preferred_format_override: AudioFormat | None = None
+    preferred_codec_override: AudioCodec | None = None
 
 
 class PlayerV1Role(Role):
@@ -106,8 +108,6 @@ class PlayerV1Role(Role):
         self._preferred_format_override = preferred_format
         self._preferred_format: AudioFormat | None = None
         self._preferred_codec: AudioCodec | None = None
-        self._persistent_preferred_format: AudioFormat | None = None
-        self._persistent_preferred_codec: AudioCodec | None = None
         self._audio_requirements = audio_requirements
         self._stream_started = False
         self._buffer_tracker = None
@@ -212,6 +212,12 @@ class PlayerV1Role(Role):
             state.buffer_tracker.reset()
         self._ensure_preferred_format()
         self._ensure_audio_requirements(force=True)
+
+    def on_deactivate(self) -> None:
+        """End the player stream when the role is deactivated while still connected."""
+        if self._stream_started:
+            self.on_stream_end()
+        super().on_deactivate()
 
     def on_disconnect(self) -> None:
         """Clean up, apply delayed buffer reset policy, and unsubscribe from PlayerGroupRole."""
@@ -536,8 +542,9 @@ class PlayerV1Role(Role):
                     channels=matched.channels,
                 )
             else:
-                self._persistent_preferred_format = None
-                self._persistent_preferred_codec = None
+                state = self._state()
+                state.preferred_format_override = None
+                state.preferred_codec_override = None
                 self._ensure_preferred_format()
                 self._ensure_audio_requirements(force=True)
                 if self._client.group.has_active_stream:
@@ -573,9 +580,10 @@ class PlayerV1Role(Role):
         if not can_encode_format(client_format):
             return False
 
-        # Persist the server-side override across reconnects.
-        self._persistent_preferred_format = audio_format
-        self._persistent_preferred_codec = codec
+        # Persist the server-side override across reconnects and role recreation.
+        state = self._state()
+        state.preferred_format_override = audio_format
+        state.preferred_codec_override = codec
 
         # Set the preferred format for current session.
         self._preferred_format = audio_format
@@ -660,33 +668,27 @@ class PlayerV1Role(Role):
                 changed = True
 
         if changed:
-            self._client._signal_event(  # noqa: SLF001
-                VolumeChangedEvent(volume=self.volume, muted=self.muted)
-            )
+            self.emit_client_event(VolumeChangedEvent(volume=self.volume, muted=self.muted))
 
         if state.supported_commands is not None:
             self.state_supported_commands = state.supported_commands
 
         if state.static_delay_ms is not None and self.static_delay_ms != state.static_delay_ms:
             self.static_delay_ms = state.static_delay_ms
-            self._client._signal_event(  # noqa: SLF001
-                StaticDelayChangedEvent(static_delay_ms=state.static_delay_ms)
-            )
+            self.emit_client_event(StaticDelayChangedEvent(static_delay_ms=state.static_delay_ms))
 
         if (
             state.required_lead_time_ms is not None
             and self.required_lead_time_ms != state.required_lead_time_ms
         ):
             self.required_lead_time_ms = state.required_lead_time_ms
-            self._client._signal_event(  # noqa: SLF001
+            self.emit_client_event(
                 RequiredLeadTimeChangedEvent(required_lead_time_ms=state.required_lead_time_ms)
             )
 
         if state.min_buffer_ms is not None and self.min_buffer_ms != state.min_buffer_ms:
             self.min_buffer_ms = state.min_buffer_ms
-            self._client._signal_event(  # noqa: SLF001
-                MinBufferChangedEvent(min_buffer_ms=state.min_buffer_ms)
-            )
+            self.emit_client_event(MinBufferChangedEvent(min_buffer_ms=state.min_buffer_ms))
 
     def on_stream_request_format(self, payload: StreamRequestFormatPayload) -> None:
         """Handle stream/request-format for player role."""
@@ -809,8 +811,9 @@ class PlayerV1Role(Role):
         # If a server-side override was explicitly set, keep it sticky across reconnects
         # while still validating it against the latest client capabilities.
         preferred_supported = compatible[0]
-        persistent_format = self._persistent_preferred_format
-        persistent_codec = self._persistent_preferred_codec
+        state = self._state()
+        persistent_format = state.preferred_format_override
+        persistent_codec = state.preferred_codec_override
         if persistent_format is not None and persistent_codec is not None:
             matched_persistent = next(
                 (
@@ -830,8 +833,8 @@ class PlayerV1Role(Role):
                     "Clearing incompatible preferred format override for client %s",
                     self._client.client_id,
                 )
-                self._persistent_preferred_format = None
-                self._persistent_preferred_codec = None
+                state.preferred_format_override = None
+                state.preferred_codec_override = None
 
         self._preferred_format = AudioFormat(
             sample_rate=preferred_supported.sample_rate,

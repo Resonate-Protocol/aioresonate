@@ -7,7 +7,7 @@ from uuid import UUID
 
 import pytest
 
-from aiosendspin.models.types import PlaybackStateType, Roles
+from aiosendspin.models.types import PlaybackStateType
 from aiosendspin.server.audio_transformers import TransformerPool
 from aiosendspin.server.channels import MAIN_CHANNEL
 from aiosendspin.server.clock import LoopClock
@@ -41,8 +41,6 @@ class TestGroupStartStream:
         """Create a mock client for the group."""
         client = MagicMock()
         client.client_id = "test-client"
-        # This mock client doesn't have the player role
-        client.check_role.return_value = False
         return client
 
     def test_start_stream_returns_push_stream(
@@ -302,8 +300,6 @@ class TestRoleJoinWithActiveStream:
         """Create a mock owner client for the group."""
         client = MagicMock()
         client.client_id = "owner-client"
-        # Owner client doesn't have player role
-        client.check_role.return_value = False
         client.group = MagicMock()
         client.group.stop = AsyncMock()
         return client
@@ -313,8 +309,6 @@ class TestRoleJoinWithActiveStream:
         """Create a mock player client to join the group."""
         client = MagicMock()
         client.client_id = "player-client"
-        # Make check_role return True only for PLAYER role
-        client.check_role.side_effect = lambda role: role == Roles.PLAYER
         # Mock the group property for ungroup() call
         client.group = MagicMock()
         client.group.stop = AsyncMock()
@@ -362,7 +356,6 @@ class TestRoleJoinWithActiveStream:
         # Create a client with no audio-capable roles
         visualizer_client = MagicMock()
         visualizer_client.client_id = "visualizer-client"
-        visualizer_client.check_role.return_value = False
         visualizer_client.group = MagicMock()
         visualizer_client.group.stop = AsyncMock()
         visualizer_client.group._clients = []  # noqa: SLF001
@@ -435,7 +428,6 @@ class TestRoleJoinWithActiveStream:
         """Removing a solo client from a no-stream PLAYING group should still emit stream/end."""
         owner_client = MagicMock()
         owner_client.client_id = "owner-client"
-        owner_client.check_role.return_value = True
         role = MagicMock()
         role.get_audio_requirements.return_value = MagicMock()
         owner_client.active_roles = [role]
@@ -475,8 +467,6 @@ class TestGroupTransformerPool:
         """Create a mock client for the group."""
         client = MagicMock()
         client.client_id = "test-client"
-        # This mock client doesn't have the player role
-        client.check_role.return_value = False
         return client
 
     def test_group_has_transformer_pool(
