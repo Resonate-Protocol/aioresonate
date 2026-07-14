@@ -113,6 +113,9 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# Codecs the SDK can decode. Anything else would be silently dropped.
+DECODABLE_CODECS = (AudioCodec.PCM, AudioCodec.FLAC)
+
 _ManagementRequest = (
     ManagementListRecordsMessage
     | ManagementAddRecordMessage
@@ -841,9 +844,10 @@ class SendspinConnection:
         await self._send_message(message.to_json())
 
     async def _send_message(self, payload: str) -> None:
-        if self._ws is None:
-            raise RuntimeError("WebSocket is not connected")
         async with self._send_lock:
+            # Re-check under the lock: disconnect() can null _ws while we await it.
+            if self._ws is None:
+                raise RuntimeError("WebSocket is not connected")
             if self._exchange_in_progress:
                 return
             await self._ws.send_str(payload)
@@ -1035,7 +1039,7 @@ class SendspinConnection:
                 logger.debug("Stream start message without player payload")
             return
 
-        if player.codec not in (AudioCodec.PCM, AudioCodec.FLAC):
+        if player.codec not in DECODABLE_CODECS:
             logger.error(
                 "Unsupported codec '%s' - only PCM and FLAC are supported", player.codec.value
             )

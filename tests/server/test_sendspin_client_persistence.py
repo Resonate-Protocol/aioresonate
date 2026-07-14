@@ -406,7 +406,7 @@ async def test_attach_with_empty_active_roles_creates_no_roles() -> None:
         negotiated_roles=[Roles.PLAYER.value],
     )
 
-    assert client.active_roles == []
+    assert client.active_roles == ()
     assert client.role("player@v1") is None
     # Capability set is retained even though no role is activated.
     assert client.negotiated_role_ids == [Roles.PLAYER.value]
@@ -432,7 +432,7 @@ async def test_set_active_roles_activates_then_deactivates() -> None:
 
     client.set_active_roles([])
     assert client.role("player@v1") is None
-    assert client.active_roles == []
+    assert client.active_roles == ()
 
 
 @pytest.mark.asyncio

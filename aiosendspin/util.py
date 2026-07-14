@@ -3,15 +3,27 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import socket
 import sys
 from collections.abc import Coroutine
 from typing import Any
 
+_LOGGER = logging.getLogger(__name__)
+
 # Check if eager_start is supported (Python 3.12+)
 _SUPPORTS_EAGER_START = sys.version_info >= (3, 12)
 
 TASKS: set[asyncio.Task[Any]] = set()
+
+
+def _log_task_exception(task: asyncio.Task[Any]) -> None:
+    """Log an unhandled exception from a fire-and-forget task."""
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        _LOGGER.error("Unhandled exception in background task %r", task.get_name(), exc_info=exc)
 
 
 def create_task[T](
@@ -49,12 +61,12 @@ def create_task[T](
     else:
         task = loop.create_task(coro, name=name)
 
+    task.add_done_callback(_log_task_exception)
     if task.done():
         return task
 
     TASKS.add(task)
     task.add_done_callback(TASKS.discard)
-    task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
 
     return task
 

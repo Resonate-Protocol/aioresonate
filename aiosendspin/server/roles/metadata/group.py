@@ -120,6 +120,8 @@ class MetadataGroupRole(GroupRole):
             else:
                 timestamp = metadata.timestamp_us
 
+        if metadata is None and self._current_metadata is None:
+            return
         if metadata is not None and metadata.equals(self._current_metadata):
             return
 

@@ -34,6 +34,25 @@ def _player_support() -> ClientHelloPlayerSupport:
     )
 
 
+def test_client_rejects_undecodable_advertised_codec() -> None:
+    """Advertising a codec the SDK cannot decode fails fast instead of silent no-audio."""
+    support = ClientHelloPlayerSupport(
+        supported_formats=[
+            SupportedAudioFormat(
+                codec=AudioCodec.OPUS, sample_rate=48_000, bit_depth=16, channels=2
+            ),
+        ],
+        buffer_capacity=100_000,
+        supported_commands=[],
+    )
+    with pytest.raises(ValueError, match="cannot decode"):
+        make_sdk_client(
+            client_name="Test Client",
+            roles=[Roles.PLAYER],
+            player_support=support,
+        )
+
+
 @pytest.mark.asyncio
 async def test_stream_start_flac_decodes_codec_header_and_notifies_audio_callbacks() -> None:
     """Client should expose codec-aware format and decoded FLAC header in callbacks."""

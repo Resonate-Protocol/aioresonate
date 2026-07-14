@@ -14,7 +14,7 @@ import base64
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
-from aiosendspin.models import AudioCodec, BinaryMessageType, pack_binary_header_raw
+from aiosendspin.models import AudioCodec, BinaryMessageType
 from aiosendspin.models.core import (
     ClientStatePayload,
     ServerCommandMessage,
@@ -348,17 +348,15 @@ class PlayerV1Role(Role):
                 )
             return
 
-        # Pack binary header and send
+        # Reuse the frame packed once and shared across subscribers.
         message_type = BinaryMessageType.AUDIO_CHUNK.value
-        header = pack_binary_header_raw(message_type, chunk.timestamp_us)
-        packed_data = header + chunk.data
         # Compute the wall-clock buffer horizon (effective play time) by shifting
         # the chunk's end time earlier by the configured static delay.
         static_delay_us = self.static_delay_ms * 1_000
         chunk_end_us = chunk.timestamp_us + chunk.duration_us - static_delay_us
 
         self._client.send_binary(
-            packed_data,
+            chunk.packed,
             role_family=self.role_family,
             timestamp_us=chunk.timestamp_us,
             message_type=message_type,

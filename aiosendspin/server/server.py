@@ -166,6 +166,8 @@ class SendspinServer:
         self._external_stream_start_cbs: dict[str, ExternalStreamStartCallback] = {}
         self._external_registration_timeouts: dict[str, asyncio.Handle] = {}
         self._reclaim_timeouts: dict[str, asyncio.Handle] = {}
+        # Clients whose unregister a one-shot timer deferred to an in-flight reconnect.
+        self._deferred_unregister: set[str] = set()
         self._pending_connections = set()
 
         self._mdns_client_urls: dict[str, str] = {}
@@ -656,6 +658,18 @@ class SendspinServer:
         if handle is not None:
             handle.cancel()
 
+    def _cancel_all_timers(self) -> None:
+        """Disarm all pending registry timers."""
+        for handle in (
+            *self._external_registration_timeouts.values(),
+            *self._reclaim_timeouts.values(),
+        ):
+            handle.cancel()
+        self._external_registration_timeouts.clear()
+        self._reclaim_timeouts.clear()
+        for client in self._clients.values():
+            client._cancel_cleanup()  # noqa: SLF001
+
     def _schedule_external_registration_timeout(self, client_id: str, timeout_s: float) -> None:
         """Schedule full unregister if an externally registered client never connects."""
         self._cancel_external_registration_timeout(client_id)
@@ -687,8 +701,28 @@ class SendspinServer:
         client = self._clients.get(client_id)
         if client is not None and client.connection is not None:
             return
+        # A reconnect mid-handshake: defer removal until the task settles so a
+        # failed reconnect is still unregistered instead of lingering forever.
+        url = self._client_urls.get(client_id)
+        if url is not None and url in self._connection_tasks:
+            self._deferred_unregister.add(client_id)
+            return
+        self._deferred_unregister.discard(client_id)
         self.unregister_external_player(client_id)
         await self.remove_client(client_id)
+
+    async def _complete_deferred_unregister(
+        self, url: str, *, connection_succeeded: bool, cancelled: bool
+    ) -> None:
+        """Finish an unregister deferred while this URL's reconnect task was in flight."""
+        client_id = self.get_client_id_for_url(url)
+        if client_id is None or client_id not in self._deferred_unregister:
+            return
+        self._deferred_unregister.discard(client_id)
+        # A reconnect that attached (or a shutdown cancellation) is handled elsewhere.
+        if connection_succeeded or cancelled:
+            return
+        await self._full_unregister_disconnected_client(client_id)
 
     def _resolve_initial_connect_waiters(self, url: str, err: BaseException | None = None) -> None:
         """Resolve or fail waiters for an initial connection attempt."""
@@ -809,6 +843,12 @@ class SendspinServer:
             self._initial_connect_succeeded.discard(url)
             self._connection_options.pop(url, None)
             self._connection_reasons.pop(url, None)
+            current = asyncio.current_task()
+            await self._complete_deferred_unregister(
+                url,
+                connection_succeeded=first_connection_succeeded,
+                cancelled=current is not None and current.cancelling() > 0,
+            )
 
     async def start_server(
         self,
@@ -897,7 +937,8 @@ class SendspinServer:
         # Close pending incoming connections so their handlers can exit promptly.
         for conn in list(self._pending_connections):
             wsock = conn.websocket_connection
-            if wsock.closed:
+            # An incoming socket not past wsock.prepare() has nothing to close.
+            if wsock.closed or (isinstance(wsock, web.WebSocketResponse) and not wsock.prepared):
                 continue
             logger.debug("Closing pending client connection")
             try:
@@ -915,6 +956,9 @@ class SendspinServer:
             )
         if disconnect_tasks:
             await asyncio.gather(*disconnect_tasks, return_exceptions=True)
+
+        # Disarm timers after disconnect, which re-arms per-client cleanup.
+        self._cancel_all_timers()
 
         await self.stop_server()
         if self._owns_session and not self._client_session.closed:

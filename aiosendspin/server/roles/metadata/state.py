@@ -102,7 +102,9 @@ class Metadata:
 
         # Calculate expected progress change based on elapsed time and playback speed
         time_diff_ms = (other.timestamp_us - self.timestamp_us) / 1000
-        playback_speed = (self.playback_speed or 1000) / 1000  # Convert to float multiplier
+        # Only None means unknown. A speed of 0 is a real paused rate.
+        speed = 1000 if self.playback_speed is None else self.playback_speed
+        playback_speed = speed / 1000
         expected_progress_change = time_diff_ms * playback_speed
 
         # Calculate actual progress change

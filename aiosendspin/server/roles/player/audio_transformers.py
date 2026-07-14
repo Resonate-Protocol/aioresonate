@@ -109,7 +109,7 @@ class PcmPassthrough:
         frames: list[tuple[bytes, int]] = []
 
         while len(self._buffer) >= self._frame_size:
-            frame = bytes(self._buffer[: self._frame_size])
+            frame = bytes(memoryview(self._buffer)[: self._frame_size])
             del self._buffer[: self._frame_size]
             # Advance pending timestamp using rational arithmetic. Each frame
             # represents exactly `chunk_samples / sample_rate` seconds. Tracking
@@ -318,7 +318,7 @@ class FlacEncoder:
         chunk_size = self._chunk_samples * self._frame_stride
 
         while len(self._buffer) >= chunk_size:
-            chunk_pcm = bytes(self._buffer[:chunk_size])
+            chunk_pcm = bytes(memoryview(self._buffer)[:chunk_size])
             del self._buffer[:chunk_size]
             encoded = self._encode_chunk(chunk_pcm)
             self._chunks_encoded_total += 1
@@ -555,7 +555,7 @@ class OpusEncoder:
         chunk_size = self._chunk_samples * self._frame_stride
 
         while len(self._buffer) >= chunk_size:
-            chunk_pcm = bytes(self._buffer[:chunk_size])
+            chunk_pcm = bytes(memoryview(self._buffer)[:chunk_size])
             del self._buffer[:chunk_size]
             encoded = self._encode_chunk(chunk_pcm)
             self._chunks_encoded_total += 1

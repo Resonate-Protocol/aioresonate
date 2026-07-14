@@ -99,6 +99,8 @@ class SendspinClient:
         self._info: ClientHelloPayload | None = None
         self._negotiated_role_ids: list[str] = []
         self._roles: dict[str, Role] = {}
+        # Cached tuple of active roles, rebuilt when the role set changes.
+        self._active_roles: tuple[Role, ...] | None = None
         self._group: SendspinGroup | None = None
 
         self._connection: SendspinConnection | None = None
@@ -167,9 +169,11 @@ class SendspinClient:
         return self._negotiated_role_ids
 
     @property
-    def active_roles(self) -> list[Role]:
+    def active_roles(self) -> tuple[Role, ...]:
         """All active role instances for iteration."""
-        return list(self._roles.values())
+        if self._active_roles is None:
+            self._active_roles = tuple(self._roles.values())
+        return self._active_roles
 
     @property
     def active_role_ids(self) -> list[str]:
@@ -267,7 +271,8 @@ class SendspinClient:
         old_available = self._available
         self._available = available
 
-        for role in self._roles.values():
+        # Snapshot: an awaited hook can trigger a cold reconnect that rebuilds _roles.
+        for role in list(self._roles.values()):
             coro = role.on_availability_changed(old_available, available)
             if coro is not None:
                 await coro
@@ -441,10 +446,7 @@ class SendspinClient:
     ) -> None:
         """Attach a new WebSocket connection to this client."""
         # Cancel pending cleanup if client reconnected before cleanup fired
-        if self._cleanup_handle is not None:
-            self._logger.debug("Cancelling pending cleanup due to reconnect")
-            self._cleanup_handle.cancel()
-            self._cleanup_handle = None
+        self._cancel_cleanup()
 
         if self._connection is not None and self._connection is not connection:
             # Replace an existing connection for the same device.
@@ -574,6 +576,8 @@ class SendspinClient:
                 f"Cannot cold-preinitialize roles for {self._client_id!r} while connected"
             )
 
+        # Disarm a pending cleanup so a just-registered client isn't removed.
+        self._cancel_cleanup()
         self._hard_detach_roles(call_disconnect_hooks=self._roles_attached)
         self._set_identity_from_hello(client_info)
         self._roles_warm_disconnected = False
@@ -631,17 +635,24 @@ class SendspinClient:
         self._roles_attached = False
 
     async def _handle_takeover_disconnect(self) -> None:
-        """Handle ANOTHER_SERVER disconnect by ungrouping first, then stopping."""
+        """Handle ANOTHER_SERVER disconnect by ungrouping the client from its group."""
         old_group_id = self.group.group_id
         try:
+            # ungroup() already leaves the client in a fresh stopped solo group.
             await self.ungroup()
-            await self.group.stop()
         except Exception:
             self._logger.exception(
                 "Takeover disconnect sequence failed for %s (old_group=%s)",
                 self._client_id,
                 old_group_id,
             )
+
+    def _cancel_cleanup(self) -> None:
+        """Disarm a pending registry-cleanup timer, if one is armed."""
+        if self._cleanup_handle is not None:
+            self._logger.debug("Cancelling pending cleanup")
+            self._cleanup_handle.cancel()
+            self._cleanup_handle = None
 
     def _schedule_cleanup(self, goodbye_reason: GoodbyeReason | None) -> None:
         """Schedule cleanup from server registry based on disconnect reason."""
@@ -688,6 +699,7 @@ class SendspinClient:
             for role in self._roles.values():
                 role.on_disconnect()
         self._roles.clear()
+        self._active_roles = None
         self._binary_handling_cache.clear()
         self._roles_cold_preinitialized = False
         self._roles_attached = False
@@ -708,6 +720,7 @@ class SendspinClient:
 
     def _rebuild_binary_handling_cache(self) -> None:
         """Build binary handling cache for fast lookup."""
+        self._active_roles = None
         self._binary_handling_cache.clear()
         for msg_type in BinaryMessageType:
             for role in self._roles.values():
