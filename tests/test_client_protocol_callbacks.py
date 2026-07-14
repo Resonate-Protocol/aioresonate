@@ -448,6 +448,38 @@ async def test_artwork_binary_dispatched_when_artwork_stream_active() -> None:
     assert captured == [(1, payload)]
 
 
+@pytest.mark.parametrize("available", [True, False])
+@pytest.mark.asyncio
+async def test_send_player_state_reports_client_level_available(
+    available: bool,  # noqa: FBT001
+) -> None:
+    """The SDK reports availability at the client/state level, not the deprecated player field."""
+    client = make_sdk_client(
+        client_name="Test Client",
+        roles=[Roles.PLAYER],
+        player_support=_player_support(),
+    )
+    connection = SendspinConnection(client)
+
+    sent: list[str] = []
+
+    async def _capture(payload: str) -> None:
+        sent.append(payload)
+
+    mock_ws = MagicMock()
+    mock_ws.closed = False
+    connection._ws = mock_ws  # noqa: SLF001
+    connection._connected = True  # noqa: SLF001
+    connection._send_message = _capture  # noqa: SLF001
+
+    await connection.send_player_state(available=available, volume=50, muted=False)
+
+    assert len(sent) == 1
+    msg = json.loads(sent[0])
+    assert msg["payload"]["available"] is available
+    assert "state" not in msg["payload"].get("player", {})
+
+
 @pytest.mark.asyncio
 async def test_send_group_command_seek_forwards_position_ms() -> None:
     """send_group_command must include position_ms in the outgoing JSON for seek."""

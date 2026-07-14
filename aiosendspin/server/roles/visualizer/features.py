@@ -271,6 +271,10 @@ class VisualizerFeatureExtractor:
                 spectrum = self._compute_spectrum(freqs, compensated)
 
             if "peak" in self._config.types:
+                # TODO: onset detection runs only at the periodic hop, so `peak` is
+                # throttled by rate_max. The spec says peak is event-driven and NOT
+                # throttled. Decouple onset detection to run per audio chunk,
+                # independent of the periodic frame hop.
                 peak = self._detect_onset(compensated, emit_ts)
 
             if "pitch" in self._config.types:

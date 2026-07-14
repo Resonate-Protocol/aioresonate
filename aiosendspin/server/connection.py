@@ -320,8 +320,20 @@ class SendspinConnection:
 
     @property
     def should_retry_server_initiated_connection(self) -> bool:
-        """Whether the server should reconnect this URL after disconnect."""
-        return not self._closing and self._last_goodbye_reason != GoodbyeReason.ANOTHER_SERVER
+        """Whether the server should reconnect this URL after disconnect.
+
+        Per client/goodbye reason: only ``restart`` (will reconnect) and
+        ``concurrent_attempt`` (may retry later) warrant it. With no goodbye, assume a
+        ``restart`` when the connection was idle or carried playback, else treat the drop
+        as a session end.
+        """
+        if self._closing:
+            return False
+        reason = self._last_goodbye_reason
+        if reason is None:
+            activities = self._declared_activities or []
+            return not activities or Activity.PLAYBACK in activities
+        return reason in (GoodbyeReason.RESTART, GoodbyeReason.CONCURRENT_ATTEMPT)
 
     @property
     def goodbye_reason(self) -> GoodbyeReason | None:
@@ -574,6 +586,21 @@ class SendspinConnection:
                 return role_id
         return None
 
+    @staticmethod
+    def _unimplemented_roles(supported_roles: list[str]) -> list[str]:
+        """Client-offered roles/versions this server does not implement.
+
+        Excludes `_`-prefixed custom roles and versions. A non-empty result means the
+        client likely speaks a newer spec revision than this server.
+        """
+        return [
+            r
+            for r in supported_roles
+            if r not in ROLE_FACTORIES
+            and not r.startswith("_")
+            and not r.partition("@")[2].startswith("_")
+        ]
+
     @classmethod
     def _primary_role_id_for_family(cls, family: str) -> str | None:
         """Return built-in primary role id for a role family, if defined."""
@@ -611,20 +638,7 @@ class SendspinConnection:
                     None,
                 )
             if selected_role is None:
-                # Log unknown spec-versioned roles per spec README "Detecting
-                # Outdated Servers" so operators can spot a client running a
-                # newer protocol revision.
-                unknown_versions = [
-                    r
-                    for r in supported_roles
-                    if role_family(r) == family and not r.partition("@")[2].startswith("_")
-                ]
-                if unknown_versions:
-                    logger.info(
-                        "Client offered unknown spec role versions in family '%s': %s",
-                        family,
-                        unknown_versions,
-                    )
+                # Skip support parsing for unknown roles.
                 continue
             primary_role_id = cls._primary_role_id_for_family(family)
             if selected_role == primary_role_id:
@@ -877,6 +891,10 @@ class SendspinConnection:
         self._negotiated_roles = negotiate_roles(client_info.supported_roles)
         self._logger = logger.getChild(client_id)
         self._logger.debug("Received client/hello: %s", client_info)
+        if unimplemented := self._unimplemented_roles(client_info.supported_roles):
+            self._logger.info(
+                "Client offered roles/versions this server does not implement: %s", unimplemented
+            )
 
         if self._noise_psk is not None and self._noise_psk.category is PskCategory.SENTINEL:
             self._trusted_unpaired = (
@@ -1512,9 +1530,8 @@ class SendspinConnection:
                 self._client.mark_connected()
                 self._server.on_client_first_connect(self._client.client_id)
 
-            new_state = payload.state
-            if new_state is not None and new_state != self._client.client_state:
-                await self._client.handle_state_transition(new_state)
+            if payload.available is not None and payload.available != self._client.available:
+                await self._client.handle_availability_change(available=payload.available)
             for role in self._client.active_roles:
                 role.on_client_state(payload)
             return
@@ -1615,6 +1632,9 @@ class SendspinConnection:
                     server_transmitted=self._server.clock.now_us(),
                 )
             )
+        elif isinstance(message, StreamStartMessage | StreamClearMessage | StreamEndMessage):
+            # Stamp send time on the dequeued (send-once) payload.
+            message.payload.server_transmitted = self._server.clock.now_us()
         await wsock.send_str(message.to_json())
 
     async def _send_binary_data(

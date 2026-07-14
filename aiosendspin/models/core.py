@@ -34,7 +34,6 @@ from .player import (
 from .types import (
     Activity,
     ClientMessage,
-    ClientStateType,
     ConnectionReason,
     GoodbyeReason,
     PairMethod,
@@ -281,17 +280,23 @@ class ClientTimeMessage(ClientMessage):
 class ClientStatePayload(DataClassORJSONMixin):
     """Client sends state updates to the server."""
 
-    state: ClientStateType | None = None
+    available: bool | None = None
     """
-    Client operational state.
+    Whether the client is available to participate in Sendspin playback.
 
-    - 'synchronized': Client is operational and synchronized with server timestamps.
-    - 'error': Client has a problem preventing normal operation.
-    - 'external_source': Client is in use by an external system and cannot participate
-      in Sendspin playback.
+    - true: operational and ready; for a player, its clock is synchronized.
+    - false: output is in use by an external system, not currently participating.
     """
     player: PlayerStatePayload | None = None
     """Player state - only if client has player role."""
+
+    @classmethod
+    def __pre_deserialize__(cls, d: dict[str, Any]) -> dict[str, Any]:
+        """Normalize a legacy `state` enum to `available` (only external_source is unavailable)."""
+        if d.get("available") is None and "state" in d:
+            d = dict(d)
+            d["available"] = d["state"] != "external_source"
+        return d
 
     class Config(BaseConfig):
         """Config for parsing json messages."""
@@ -581,6 +586,8 @@ def _deserialize_stream_start_visualizer(
 class StreamStartPayload(DataClassORJSONMixin):
     """Information about an active streaming session."""
 
+    server_transmitted: int = 0
+    """Timestamp the server transmitted this message in microseconds. Stamped at send."""
     player: StreamStartPlayer | None = None
     """Information about the player."""
     artwork: StreamStartArtwork | None = None
@@ -628,6 +635,8 @@ STREAM_END_ROLE_FAMILIES = frozenset({"player", "artwork", "visualizer"})
 class StreamClearPayload(DataClassORJSONMixin):
     """Instructs clients to clear buffers without ending the stream."""
 
+    server_transmitted: int = 0
+    """Timestamp the server transmitted this message in microseconds. Stamped at send."""
     roles: list[str] | None = None
     """Roles to clear: player, visualizer, or both. If omitted, clears both roles."""
 
@@ -692,6 +701,8 @@ class StreamRequestFormatMessage(ClientMessage):
 class StreamEndPayload(DataClassORJSONMixin):
     """Payload for stream/end message."""
 
+    server_transmitted: int = 0
+    """Timestamp the server transmitted this message in microseconds. Stamped at send."""
     roles: list[str] | None = None
     """Roles to end streams for. If omitted, ends all active streams."""
 

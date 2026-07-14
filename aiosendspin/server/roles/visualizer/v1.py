@@ -598,7 +598,8 @@ class VisualizerV1Role(Role):
             if last is not None and beat.timestamp_us <= last:
                 continue
             self._reserve_wire_ts(beat.timestamp_us)
-            flags = FLAG_DOWNBEAT if beat.is_downbeat else 0
+            # The downbeat bit is only meaningful when the role tracks downbeats.
+            flags = FLAG_DOWNBEAT if beat.is_downbeat and self._tracks_downbeats else 0
             message = pack_visualizer_frame(
                 BinaryMessageType.VISUALIZATION_BEAT, beat.timestamp_us, bytes((flags,))
             )
@@ -677,6 +678,12 @@ class VisualizerV1Role(Role):
         if not kept:
             kept = ["loudness"]
         new_support = replace(new_support, types=kept)
+        self._support = new_support
+
+        # No active stream: remember the requested config for the next stream/start;
+        # the server MUST NOT start a stream in response.
+        if not self._stream_started:
+            return
 
         # Pending beats are pinned to the old config (e.g. stale rate);
         # drop them and re-arm `_has_beats_landed` so the new config
@@ -684,7 +691,6 @@ class VisualizerV1Role(Role):
         self._pending_beats.clear()
         self._has_beats_landed = False
 
-        self._support = new_support
         self._stream_config = self._build_stream_config()
         # Held frames carry old-config payloads (e.g. stale spectrum bins);
         # drop them and re-evaluate the warmup cap against the new support.

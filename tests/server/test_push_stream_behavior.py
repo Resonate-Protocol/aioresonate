@@ -271,6 +271,25 @@ async def test_late_join_target_includes_player_static_delay() -> None:
 
 
 @pytest.mark.asyncio
+async def test_live_send_ahead_uses_min_buffer_not_required_lead() -> None:
+    """Live streams floor at min_buffer + static and do not extend toward required_lead."""
+    loop = asyncio.get_running_loop()
+    clock = ManualClock(now_us_value=1_000_000)
+    group = _DummyGroup(clients=[])
+    client, _ = _make_connected_player(loop, group, "p1", clock=clock)
+    role = client.role("player@v1")
+    assert role is not None
+    role.static_delay_ms = 0
+    role.min_buffer_ms = 200
+    role.required_lead_time_ms = 400  # must be ignored for live
+
+    stream = PushStream(loop=loop, clock=clock, group=group)
+    stream.set_live_source(is_live=True)
+
+    assert stream._role_send_ahead_us(role) == 200_000  # noqa: SLF001
+
+
+@pytest.mark.asyncio
 async def test_late_join_target_uses_required_lead_time() -> None:
     """Required lead time bumps the floor when it exceeds the static minimum."""
     loop = asyncio.get_running_loop()
@@ -306,7 +325,7 @@ async def test_non_main_join_rebase_includes_player_static_delay() -> None:
 
     stream._rebase_far_ahead_join_tail(channel_id, role)  # noqa: SLF001
 
-    assert stream._channel_timing[channel_id] == 6_250_000  # noqa: SLF001
+    assert stream._channel_timing[channel_id] == 6_500_000  # noqa: SLF001
 
 
 @pytest.mark.asyncio
@@ -3281,8 +3300,8 @@ async def test_commit_audio_min_buffer_floors_send_ahead() -> None:
 
 
 @pytest.mark.asyncio
-async def test_buffered_source_skips_min_buffer_at_startup() -> None:
-    """Buffered streams anchor startup at required_lead + static, ignoring min_buffer."""
+async def test_buffered_source_floors_at_min_buffer_at_startup() -> None:
+    """Buffered streams floor startup at min_buffer + static (spec 8181237)."""
     loop = asyncio.get_running_loop()
     clock = ManualClock(now_us_value=1_000_000)
     group = _DummyGroup(clients=[])
@@ -3295,8 +3314,8 @@ async def test_buffered_source_skips_min_buffer_at_startup() -> None:
     stream.prepare_audio(bytes(4800), fmt)
     play_start = await stream.commit_audio()
 
-    # Buffered: startup = lead(0) + static(0) = 0; min_buffer ignored upfront.
-    assert play_start == clock.now_us()
+    # Buffered floor = max(min_buffer=15s, lead=0) + static(0) = 15s.
+    assert play_start == clock.now_us() + 15_000_000
 
 
 @pytest.mark.asyncio

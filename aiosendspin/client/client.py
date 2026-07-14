@@ -26,7 +26,6 @@ from aiosendspin.models.types import (
     PairAbortReason,
     PairMethod,
     PlayerCommand,
-    PlayerStateType,
     Roles,
 )
 from aiosendspin.models.visualizer import ClientHelloVisualizerSupport, VisualizerFrame
@@ -591,14 +590,16 @@ class SendspinClient:
     async def send_player_state(
         self,
         *,
-        state: PlayerStateType,
+        available: bool,
         volume: int,
         muted: bool,
     ) -> None:
         """Send the current player state to the server."""
         if self._admitted_connection is None:
             raise RuntimeError("Client is not connected")
-        await self._admitted_connection.send_player_state(state=state, volume=volume, muted=muted)
+        await self._admitted_connection.send_player_state(
+            available=available, volume=volume, muted=muted
+        )
 
     async def send_group_command(
         self,

@@ -8,7 +8,6 @@ import pytest
 
 from aiosendspin.client.connection import SendspinConnection
 from aiosendspin.models.types import (
-    ClientStateType,
     MediaCommand,
     PairAbortReason,
     PairMethod,
@@ -102,7 +101,7 @@ async def test_app_and_time_sends_suppressed_during_exchange() -> None:
     connection._connected = True  # noqa: SLF001
 
     connection._exchange_in_progress = True  # noqa: SLF001
-    await connection.send_player_state(state=ClientStateType.SYNCHRONIZED, volume=7, muted=True)
+    await connection.send_player_state(available=True, volume=7, muted=True)
     await connection.send_group_command(MediaCommand.PLAY)
     await connection._send_time_message()  # noqa: SLF001
     assert ws.sent == []
@@ -110,5 +109,5 @@ async def test_app_and_time_sends_suppressed_during_exchange() -> None:
     assert connection._reported_muted is True  # noqa: SLF001
 
     connection._exchange_in_progress = False  # noqa: SLF001
-    await connection.send_player_state(state=ClientStateType.SYNCHRONIZED, volume=7, muted=True)
+    await connection.send_player_state(available=True, volume=7, muted=True)
     assert len(ws.sent) == 1

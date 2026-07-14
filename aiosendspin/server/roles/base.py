@@ -24,7 +24,7 @@ if TYPE_CHECKING:
         ClientStatePayload,
         StreamRequestFormatPayload,
     )
-    from aiosendspin.models.types import ClientStateType, ServerMessage
+    from aiosendspin.models.types import ServerMessage
     from aiosendspin.server.audio import AudioFormat, BufferTracker
     from aiosendspin.server.audio_transformers import AudioTransformer
     from aiosendspin.server.client import SendspinClient
@@ -413,15 +413,15 @@ class Role(ABC):
         if self.has_connection():
             self._subscribe_to_group_role()
 
-    def on_state_transition(
+    def on_availability_changed(
         self,
-        old_state: ClientStateType,  # noqa: ARG002
-        new_state: ClientStateType,  # noqa: ARG002
+        old_available: bool,  # noqa: ARG002, FBT001
+        new_available: bool,  # noqa: ARG002, FBT001
     ) -> Coroutine[Any, Any, None] | None:
-        """Handle client state transitions.
+        """Handle a client availability change.
 
         Return a coroutine if async work is needed, else None.
-        Called when client/state reports a new operational state.
+        Called when client/state reports a new availability.
         """
         return None
 

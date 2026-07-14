@@ -643,8 +643,10 @@ class PlayerV1Role(Role):
             return
 
         # DEPRECATED(before-spec-pr-50): fall back to player.state for older clients.
-        if payload.state is None and state.state is not None:
-            create_task(self._client.handle_state_transition(state.state))
+        if payload.available is None and state.state is not None:
+            create_task(
+                self._client.handle_availability_change(available=state.state != "external_source")
+            )
 
         support = self._client.info.player_support
         changed = False

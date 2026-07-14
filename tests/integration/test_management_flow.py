@@ -16,7 +16,6 @@ from aiosendspin.models.player import ClientHelloPlayerSupport, SupportedAudioFo
 from aiosendspin.models.types import (
     Activity,
     AudioCodec,
-    ClientStateType,
     GoodbyeReason,
     ManagementResult,
     PairMethod,
@@ -534,9 +533,7 @@ async def test_management_interleaves_with_role_traffic() -> None:
             assert conn._writer_task is not None  # noqa: SLF001
 
             # Active-role traffic still flows while the management session is open.
-            await client.send_player_state(
-                state=ClientStateType.SYNCHRONIZED, volume=42, muted=True
-            )
+            await client.send_player_state(available=True, volume=42, muted=True)
             await _await_player_state(conn, volume=42, muted=True)
 
             result, records, _ = await conn.list_records()

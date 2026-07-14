@@ -813,6 +813,22 @@ class TestCustomRoleSupportParsing:
         assert msg.payload.visualizer_draft_r1_support is None
         assert negotiate_roles(msg.payload.supported_roles) == []
 
+    @pytest.mark.parametrize(
+        ("supported_roles", "expected"),
+        [
+            (["controller@v2"], ["controller@v2"]),  # unknown version of a known family
+            (["foobar@v1"], ["foobar@v1"]),  # unknown family
+            (["controller@v1", "metadata@v1"], []),  # implemented
+            (["_custom@v1", "player@_draft"], []),  # custom family / version excluded
+            (["player@v1", "controller@v2", "foobar@v3"], ["controller@v2", "foobar@v3"]),
+        ],
+    )
+    def test_unimplemented_roles_flags_unknown_non_custom(
+        self, supported_roles: list[str], expected: list[str]
+    ) -> None:
+        """Roles/versions the server does not implement are tracked, excluding `_` custom ones."""
+        assert SendspinConnection._unimplemented_roles(supported_roles) == expected  # noqa: SLF001
+
     def test_hello_with_brand_new_family_does_not_crash(self) -> None:
         """A family the server has never heard of is silently ignored end-to-end.
 

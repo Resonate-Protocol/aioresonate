@@ -21,7 +21,6 @@ from aiosendspin.models.core import (
 )
 from aiosendspin.models.types import (
     BinaryMessageType,
-    ClientStateType,
     GoodbyeReason,
     PlaybackStateType,
     Roles,
@@ -114,8 +113,8 @@ class SendspinClient:
         self._event_cbs: list[Callable[[SendspinClient, ClientEvent], None]] = []
         self._logger = logger.getChild(client_id)
 
-        # Client-level state (reported by client/state). Persists across reconnects until updated.
-        self._client_state: ClientStateType = ClientStateType.SYNCHRONIZED
+        # Client-level availability (reported by client/state). Persists across reconnects.
+        self._available: bool = True
 
         # External-source recovery state (persists across reconnects).
         self._previous_group_id: str | None = None
@@ -259,21 +258,21 @@ class SendspinClient:
         return self._cleanup_on_mdns_removal
 
     @property
-    def client_state(self) -> ClientStateType:
-        """Return the current client operational state reported by `client/state`."""
-        return self._client_state
+    def available(self) -> bool:
+        """Return whether the client is available to participate, per `client/state`."""
+        return self._available
 
-    async def handle_state_transition(self, new_state: ClientStateType) -> None:
-        """Handle client state transitions by notifying all roles."""
-        old_state = self._client_state
-        self._client_state = new_state
+    async def handle_availability_change(self, available: bool) -> None:  # noqa: FBT001
+        """Handle a client availability change by notifying all roles."""
+        old_available = self._available
+        self._available = available
 
         for role in self._roles.values():
-            coro = role.on_state_transition(old_state, new_state)
+            coro = role.on_availability_changed(old_available, available)
             if coro is not None:
                 await coro
 
-        if new_state == ClientStateType.EXTERNAL_SOURCE:
+        if not available:
             await self._handle_external_source_transition()
 
     async def _handle_external_source_transition(self) -> None:
@@ -300,7 +299,7 @@ class SendspinClient:
 
     async def _handle_switch_command_locked(self) -> None:
         # Clients in external_source can't participate in playback.
-        if self._client_state == ClientStateType.EXTERNAL_SOURCE:
+        if not self._available:
             self._logger.debug("Ignoring switch command while client is in external_source state")
             return
 
@@ -390,7 +389,7 @@ class SendspinClient:
         """
         return (
             self._previous_group_id is not None
-            and self._client_state != ClientStateType.EXTERNAL_SOURCE
+            and self._available
             and self._external_source_solo_group_id == self.group.group_id
             and len(self.group.clients) == 1
         )

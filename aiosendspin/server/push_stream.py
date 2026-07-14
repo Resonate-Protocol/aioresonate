@@ -823,19 +823,16 @@ class PushStream:
     def _role_send_ahead_us(self, role: Role) -> int:
         """Per-role send-ahead floor.
 
-        Live: max(required_lead, min_buffer) + static. The first chunk lands at
-        least required_lead ahead and the timeline never sits below min_buffer
-        ahead, since a realtime queue cannot grow after playback begins.
-
-        Buffered: required_lead + static. The queue grows naturally past
-        min_buffer once playback starts, so paying min_buffer upfront would only
-        add startup latency without buying jitter resilience.
+        Both cases floor at min_buffer + static. Buffered streams extend the lead
+        toward required_lead (it adds no latency once the queue grows past
+        min_buffer); live streams do not, since a realtime queue cannot grow after
+        playback begins and extra lead would only add latency.
         """
-        lead_us = role.get_required_lead_time_us()
+        min_buffer_us = role.get_min_buffer_us()
         static_us = role.get_static_delay_us()
         if self._is_live:
-            return max(lead_us, role.get_min_buffer_us()) + static_us
-        return lead_us + static_us
+            return min_buffer_us + static_us
+        return max(min_buffer_us, role.get_required_lead_time_us()) + static_us
 
     def _min_send_ahead_us(self) -> int:
         """Return the common send-ahead floor across active audio roles."""

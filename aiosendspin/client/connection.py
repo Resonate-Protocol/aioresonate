@@ -63,7 +63,6 @@ from aiosendspin.models.types import (
     PairAbortReason,
     PairMethod,
     PlayerCommand,
-    PlayerStateType,
     Roles,
     ServerMessage,
     TrustLevel,
@@ -145,6 +144,25 @@ _CLOSING_ABORT_REASONS: list[PairAbortReason] = [
 # psk_id of the Sentinel PSK — the client matches it during PIN pairing / discovery.
 _SENTINEL_PSK_ID: str = psk_id_for(SENTINEL_PSK)
 
+_ARTWORK_BINARY_TYPES: frozenset[BinaryMessageType] = frozenset(
+    {
+        BinaryMessageType.ARTWORK_CHANNEL_0,
+        BinaryMessageType.ARTWORK_CHANNEL_1,
+        BinaryMessageType.ARTWORK_CHANNEL_2,
+        BinaryMessageType.ARTWORK_CHANNEL_3,
+    }
+)
+_VISUALIZATION_BINARY_TYPES: frozenset[BinaryMessageType] = frozenset(
+    {
+        BinaryMessageType.VISUALIZATION_LOUDNESS,
+        BinaryMessageType.VISUALIZATION_BEAT,
+        BinaryMessageType.VISUALIZATION_F_PEAK,
+        BinaryMessageType.VISUALIZATION_SPECTRUM,
+        BinaryMessageType.VISUALIZATION_PEAK,
+        BinaryMessageType.VISUALIZATION_PITCH,
+    }
+)
+
 
 def _activities_allowed(
     category: PskCategory, activities: set[Activity], *, unpaired_access: bool
@@ -225,7 +243,7 @@ class SendspinConnection:
         self._client = client
         self._activities: list[Activity] = []
         self._active_roles: list[str] = []
-        self._reported_state: PlayerStateType = PlayerStateType.SYNCHRONIZED
+        self._reported_available: bool = True
         self._reported_volume = client.initial_volume
         self._reported_muted = client.initial_muted
         self._selected_pair_method: PairMethod | None = None
@@ -457,7 +475,7 @@ class SendspinConnection:
         if Roles.PLAYER not in self._client.roles or not self._is_role_active("player"):
             return
         await self.send_player_state(
-            state=self._reported_state,
+            available=self._reported_available,
             volume=self._reported_volume,
             muted=self._reported_muted,
         )
@@ -719,27 +737,27 @@ class SendspinConnection:
     async def send_player_state(
         self,
         *,
-        state: PlayerStateType,
+        available: bool,
         volume: int,
         muted: bool,
     ) -> None:
         """Send the current player state to the server."""
         if not self.connected:
             raise RuntimeError("Client is not connected")
-        self._reported_state = state
+        self._reported_available = available
         self._reported_volume = volume
         self._reported_muted = muted
         message = ClientStateMessage(
             payload=ClientStatePayload(
+                available=available,
                 player=PlayerStatePayload(
-                    state=state,
                     volume=volume,
                     muted=muted,
                     static_delay_ms=round(self._static_delay_us / 1_000),
                     required_lead_time_ms=round(self._client.required_lead_time_ms),
                     min_buffer_ms=round(self._client.min_buffer_ms),
                     supported_commands=self._client.state_supported_commands or None,
-                )
+                ),
             )
         )
         await self._send_message(message.to_json())
@@ -925,19 +943,14 @@ class SendspinConnection:
             logger.warning("Unknown binary message type: %s", raw_type)
             return
 
-        role_active = {
-            BinaryMessageType.AUDIO_CHUNK: self._stream_active,
-            BinaryMessageType.ARTWORK_CHANNEL_0: self._artwork_stream_active,
-            BinaryMessageType.ARTWORK_CHANNEL_1: self._artwork_stream_active,
-            BinaryMessageType.ARTWORK_CHANNEL_2: self._artwork_stream_active,
-            BinaryMessageType.ARTWORK_CHANNEL_3: self._artwork_stream_active,
-            BinaryMessageType.VISUALIZATION_LOUDNESS: self._visualizer_stream_active,
-            BinaryMessageType.VISUALIZATION_BEAT: self._visualizer_stream_active,
-            BinaryMessageType.VISUALIZATION_F_PEAK: self._visualizer_stream_active,
-            BinaryMessageType.VISUALIZATION_SPECTRUM: self._visualizer_stream_active,
-            BinaryMessageType.VISUALIZATION_PEAK: self._visualizer_stream_active,
-            BinaryMessageType.VISUALIZATION_PITCH: self._visualizer_stream_active,
-        }.get(message_type, False)
+        if message_type is BinaryMessageType.AUDIO_CHUNK:
+            role_active = self._stream_active
+        elif message_type in _ARTWORK_BINARY_TYPES:
+            role_active = self._artwork_stream_active
+        elif message_type in _VISUALIZATION_BINARY_TYPES:
+            role_active = self._visualizer_stream_active
+        else:
+            role_active = False
 
         if not role_active:
             logger.debug(
@@ -953,28 +966,17 @@ class SendspinConnection:
                 logger.exception("Failed to unpack binary header")
                 return
             self._handle_audio_chunk(header.timestamp_us, payload[BINARY_HEADER_SIZE:])
-        elif message_type in {
-            BinaryMessageType.ARTWORK_CHANNEL_0,
-            BinaryMessageType.ARTWORK_CHANNEL_1,
-            BinaryMessageType.ARTWORK_CHANNEL_2,
-            BinaryMessageType.ARTWORK_CHANNEL_3,
-        }:
+        elif message_type in _ARTWORK_BINARY_TYPES:
             try:
                 unpack_binary_header(payload)
             except Exception:
                 logger.exception("Failed to unpack binary header")
                 return
             self._handle_artwork_chunk(message_type, payload[BINARY_HEADER_SIZE:])
-        elif message_type in {
-            BinaryMessageType.VISUALIZATION_LOUDNESS,
-            BinaryMessageType.VISUALIZATION_F_PEAK,
-            BinaryMessageType.VISUALIZATION_SPECTRUM,
-            BinaryMessageType.VISUALIZATION_PEAK,
-            BinaryMessageType.VISUALIZATION_PITCH,
-        }:
-            self._handle_visualization_frame(message_type, payload[1:])
         elif message_type is BinaryMessageType.VISUALIZATION_BEAT:
             self._handle_visualization_beat(payload[1:])
+        elif message_type in _VISUALIZATION_BINARY_TYPES:
+            self._handle_visualization_frame(message_type, payload[1:])
         else:
             logger.debug("Ignoring unsupported binary message type: %s", message_type)
 

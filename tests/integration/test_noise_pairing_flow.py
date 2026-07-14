@@ -25,7 +25,6 @@ from aiosendspin.models.types import (
     Activity,
     AudioCodec,
     ClientMessage,
-    ClientStateType,
     PairAbortReason,
     PairMethod,
     PlayerCommand,
@@ -1361,9 +1360,7 @@ async def test_resync_resends_current_player_state() -> None:
             conn = await _find_connection_by_client_id(server, client_identity.peer_id)
 
             # The app moves volume/mute off the initial defaults (100/False).
-            await client.send_player_state(
-                state=ClientStateType.SYNCHRONIZED, volume=42, muted=True
-            )
+            await client.send_player_state(available=True, volume=42, muted=True)
             await _await_player_state(conn, volume=42, muted=True)
 
             resync_state: asyncio.Future[tuple[int | None, bool | None]] = loop.create_future()

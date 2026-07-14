@@ -30,7 +30,7 @@ from zeroconf.asyncio import AsyncServiceBrowser, AsyncServiceInfo, AsyncZerocon
 
 from aiosendspin.clock import Clock, RawMonotonicClock
 from aiosendspin.models.core import ClientHelloPayload
-from aiosendspin.models.types import ConnectionReason, GoodbyeReason
+from aiosendspin.models.types import ConnectionReason
 from aiosendspin.noise.keys import Identity
 from aiosendspin.noise.pairing import PairingAbortError, PairingAttempt
 from aiosendspin.noise.pin import DEFAULT_MIN_PIN_DIGITS, MAX_PIN_DIGITS, MIN_PIN_DIGITS
@@ -142,11 +142,12 @@ class SendspinServer:
 
         self._clients: dict[str, SendspinClient] = {}
         self._event_cbs: list[Callable[[SendspinServer, SendspinEvent], None]] = []
-        # Server-wide toggle for the visualizer `pitch` feature. Pitch (YINFFT)
-        # is the heaviest per-frame visualizer computation; disable it to shed
-        # load on constrained hardware. Read by VisualizerV1Role when building
-        # its stream config.
-        self._visualizer_pitch_enabled: bool = True
+        # Server-wide toggle for the visualizer `pitch` feature. Off by default:
+        # `pitch` rides reserved binary type 21, so enabling it puts a
+        # spec-reserved type on the wire and is technically non-compliant. It is
+        # kept as an opt-in extension for constrained/experimental setups. Read by
+        # VisualizerV1Role when building its stream config.
+        self._visualizer_pitch_enabled: bool = False
 
         if client_session is None:
             self._client_session = ClientSession(loop=self._loop, timeout=ClientTimeout(total=30))
@@ -238,15 +239,17 @@ class SendspinServer:
 
     @property
     def visualizer_pitch_enabled(self) -> bool:
-        """Whether visualizer roles compute the `pitch` feature (default True)."""
+        """Whether visualizer roles compute the `pitch` feature (default False)."""
         return self._visualizer_pitch_enabled
 
     def set_visualizer_pitch_enabled(self, *, enabled: bool) -> None:
         """Enable or disable the visualizer `pitch` feature server-wide.
 
-        Pitch (YINFFT) is the heaviest per-frame visualizer computation.
-        Disabling sheds that cost on constrained hardware: live visualizer
-        roles drop `pitch` from their negotiated types and re-emit
+        Enabling is technically non-compliant: `pitch` uses reserved binary type
+        21, which the spec says must not be used. It stays available as an opt-in
+        extension. Pitch (YINFFT) is also the heaviest per-frame visualizer
+        computation, so leaving it off sheds that cost on constrained hardware.
+        Toggling drops/adds `pitch` on live roles' negotiated types and re-emits
         `stream/start`; new roles pick the setting up when they connect.
         """
         if enabled == self._visualizer_pitch_enabled:
@@ -734,11 +737,12 @@ class SendspinServer:
                         backoff = 1.0
 
                     if not conn.should_retry_server_initiated_connection:
-                        if conn.goodbye_reason == GoodbyeReason.ANOTHER_SERVER:
-                            logger.debug(
-                                "Not reconnecting to %s after goodbye reason another_server",
-                                url,
-                            )
+                        reason = conn.goodbye_reason
+                        logger.debug(
+                            "Not reconnecting to %s (goodbye reason: %s)",
+                            url,
+                            reason.value if reason is not None else "none",
+                        )
                         break
 
                     if self._client_session.closed:

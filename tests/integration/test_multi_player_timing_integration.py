@@ -579,7 +579,7 @@ async def test_multi_player_group_join_sync_stable_source() -> None:
 
     source_fmt = AudioFormat(sample_rate=48_000, bit_depth=16, channels=2)
 
-    next_play_start_us = clock.now_us() + 250_000
+    next_play_start_us = clock.now_us() + 500_000
 
     # Run 3 seconds virtual time; join B at t=1s.
     for i in range(120):  # 120 * 25ms = 3s
@@ -662,7 +662,7 @@ async def test_multi_player_sync_with_jittery_source_is_continuous() -> None:
 
     source_fmt = AudioFormat(sample_rate=48_000, bit_depth=16, channels=2)
 
-    next_play_start_us = clock.now_us() + 250_000
+    next_play_start_us = clock.now_us() + 500_000
 
     # Alternate 20ms and 30ms blocks (still "continuous" overall).
     pattern_frames = [960, 1440]  # 20ms, 30ms at 48kHz
@@ -735,7 +735,7 @@ async def test_production_gap_rebases_timeline() -> None:
     stream = group_a.start_stream()
     source_fmt = AudioFormat(sample_rate=48_000, bit_depth=16, channels=2)
 
-    next_play_start_us = clock.now_us() + 250_000
+    next_play_start_us = clock.now_us() + 500_000
 
     # Produce 1s of audio.
     for _ in range(40):
@@ -758,7 +758,7 @@ async def test_production_gap_rebases_timeline() -> None:
     )
     stream.prepare_audio(pcm, source_fmt)
     play_start_us = await stream.commit_audio()
-    assert resume_now_us + 250_000 <= play_start_us <= resume_now_us + 350_000
+    assert resume_now_us + 500_000 <= play_start_us <= resume_now_us + 600_000
 
     # Find the first audio chunk timestamp sent after the gap.
     first_after_gap_ts: int | None = None
@@ -770,7 +770,7 @@ async def test_production_gap_rebases_timeline() -> None:
         break
 
     assert first_after_gap_ts is not None
-    assert resume_now_us + 250_000 <= first_after_gap_ts <= resume_now_us + 350_000
+    assert resume_now_us + 500_000 <= first_after_gap_ts <= resume_now_us + 600_000
 
 
 @pytest.mark.asyncio
@@ -824,7 +824,7 @@ async def test_four_players_regroup_fast_start_and_sync() -> None:  # noqa: PLR0
     # 100ms per commit to ensure FLAC yields packets promptly.
     duration_us = 100_000
     frame_count = 4800  # 100ms @ 48kHz
-    next_play_start_us = clock.now_us() + 250_000
+    next_play_start_us = clock.now_us() + 500_000
 
     # Initial start latency (player A).
     first_idx_a = len(conn_a.events)
@@ -834,7 +834,7 @@ async def test_four_players_regroup_fast_start_and_sync() -> None:  # noqa: PLR0
     assert abs(play_start_us - next_play_start_us) <= 1_000
     ts_a = _first_audio_timestamp_after(conn_a.events, start_index=first_idx_a)
     assert ts_a is not None
-    assert 250_000 <= ts_a - clock.now_us() <= 350_000
+    assert 500_000 <= ts_a - clock.now_us() <= 600_000
     next_play_start_us = play_start_us + duration_us
 
     joins = _JoinTracker(clock)

@@ -77,6 +77,7 @@ class ArtworkV1Role(Role):
         """End the artwork stream when the role is deactivated while still connected."""
         if self._stream_started:
             self.send_message(StreamEndMessage(payload=StreamEndPayload(roles=["artwork"])))
+            self._stream_started = False
         super().on_deactivate()
 
     def on_disconnect(self) -> None:
