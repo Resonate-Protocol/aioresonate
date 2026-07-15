@@ -169,6 +169,10 @@ class ClientHelloPayload(DataClassORJSONMixin):
     legacy_support_keys_used: list[str] | None = None
     """Unversioned support keys the parser rewrote to versioned aliases, recorded for
     the server to flag. Not part of the wire schema (omitted when None)."""
+    unlisted_support_roles: list[str] | None = None
+    """Roles whose support object was provided without listing the role in
+    ``supported_roles`` (dropped during parse), recorded for the server to flag.
+    Not part of the wire schema (omitted when None)."""
 
     # Static mapping: unversioned support key -> actual alias key.
     _SUPPORT_KEY_ALIASES: ClassVar[dict[str, str]] = {
@@ -197,6 +201,7 @@ class ClientHelloPayload(DataClassORJSONMixin):
         # Require support objects only for the exact role version we parse (e.g. "player@v1").
         # Clients may advertise newer versions (e.g. "player@v2") which this server may not
         # implement. Those must not trigger v1 support requirements.
+        unlisted: list[str] = []
         player_role_supported = Roles.PLAYER.value in self.supported_roles
         if player_role_supported and self.player_support is None:
             raise ValueError(
@@ -204,6 +209,8 @@ class ClientHelloPayload(DataClassORJSONMixin):
                 "'player@v1' is in supported_roles"
             )
         if not player_role_supported:
+            if self.player_support is not None:
+                unlisted.append(Roles.PLAYER.value)
             self.player_support = None
 
         # Validate artwork role and support configuration
@@ -214,6 +221,8 @@ class ClientHelloPayload(DataClassORJSONMixin):
                 "'artwork@v1' is in supported_roles"
             )
         if not artwork_role_supported:
+            if self.artwork_support is not None:
+                unlisted.append(Roles.ARTWORK.value)
             self.artwork_support = None
 
         # Validate visualizer role and support configuration.
@@ -224,6 +233,8 @@ class ClientHelloPayload(DataClassORJSONMixin):
                 "provided when 'visualizer@v1' is in supported_roles"
             )
         if not visualizer_role_supported:
+            if self.visualizer_support is not None:
+                unlisted.append(Roles.VISUALIZER.value)
             self.visualizer_support = None
 
         # Validate legacy `visualizer@_draft_r1` support configuration.
@@ -234,7 +245,12 @@ class ClientHelloPayload(DataClassORJSONMixin):
                 "'visualizer@_draft_r1' is in supported_roles"
             )
         if not visualizer_draft_supported:
+            if self.visualizer_draft_r1_support is not None:
+                unlisted.append("visualizer@_draft_r1")
             self.visualizer_draft_r1_support = None
+
+        # Overwrite so a client cannot spoof the record via the wire.
+        self.unlisted_support_roles = unlisted or None
 
     class Config(BaseConfig):
         """Config for parsing json messages."""
