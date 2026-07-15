@@ -140,6 +140,8 @@ class SendspinClient:
 
     def flag_noncompliance(self, reason: str) -> None:
         """Log a tolerated spec violation, or reject it when the server is strict."""
+        # Logged at info while implementers migrate. Bump to warning once they have
+        # had time to fix these, then drop the backwards-compat paths altogether.
         self._logger.info("non-compliant client: %s", reason)
         if self._server.strict_clients:
             raise ClientComplianceError(reason)
