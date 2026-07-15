@@ -1593,7 +1593,6 @@ class SendspinConnection:
     async def _handle_message(self, message: ClientMessage, timestamp_us: int) -> None:
         """Handle a single client message, dispatching to roles or the connection."""
         if isinstance(message, ClientHelloMessage):
-            # client/hello is consumed during the hello exchange; a second one is a protocol error.
             self._flag_noncompliance("sent a second client/hello after the hello exchange")
             return
 
