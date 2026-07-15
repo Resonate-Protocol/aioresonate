@@ -102,7 +102,6 @@ class _MockServer:
         pass
 
 
-
 class _DummyConnection:
     def __init__(self) -> None:
         self.sent_messages: list[ServerMessage] = []
@@ -1356,15 +1355,13 @@ class _MockServerWithReclaim:
     def is_external_player(self, client_id: str) -> bool:  # noqa: ARG002
         return False
 
-    def _signal_client_connected(self, client_id: str) -> None:  # noqa: ARG002
+    def _signal_client_connected(self, client_id: str) -> None:
         pass
 
-    def _signal_client_reconnected(self, client_id: str) -> None:  # noqa: ARG002
+    def _signal_client_reconnected(self, client_id: str) -> None:
         pass
 
-    def _signal_client_disconnected(  # noqa: ARG002
-        self, client_id: str, goodbye_reason: object
-    ) -> None:
+    def _signal_client_disconnected(self, client_id: str, goodbye_reason: object) -> None:
         pass
 
 

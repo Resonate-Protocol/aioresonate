@@ -68,7 +68,6 @@ class _DummyServer:
         pass
 
 
-
 class _DummyConnection:
     def __init__(self) -> None:
         self.sent_messages: list[object] = []

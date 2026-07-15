@@ -40,7 +40,6 @@ class _MockServer:
         pass
 
 
-
 class _DummyConnection:
     async def disconnect(self, *, retry_connection: bool = True) -> None:  # noqa: ARG002
         return

@@ -43,7 +43,6 @@ class _DummyServer:
         pass
 
 
-
 class _DummyGroup:
     def __init__(self, clients: list[Any], group_id: str = "g1") -> None:
         self.clients = clients

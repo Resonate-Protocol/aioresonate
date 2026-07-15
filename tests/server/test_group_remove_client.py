@@ -63,7 +63,6 @@ class _DummyServer:
         pass
 
 
-
 class _DummyConnection:
     def __init__(self) -> None:
         self.role_messages: list[tuple[str, object]] = []

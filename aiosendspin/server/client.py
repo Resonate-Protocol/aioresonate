@@ -479,7 +479,6 @@ class SendspinClient:
             on_transport_attached(self._client_id)
 
         previous_info = self._info
-        previous_roles = list(self._negotiated_role_ids)
         self._set_identity_from_hello(client_info, negotiated_roles=negotiated_roles)
         self._server._signal_client_connected(self._client_id)  # noqa: SLF001
         if previous_info is not None and previous_info != client_info:
