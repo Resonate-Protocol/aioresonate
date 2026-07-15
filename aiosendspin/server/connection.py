@@ -539,6 +539,11 @@ class SendspinConnection:
             self._initial_state_timeout_handle.cancel()
             self._initial_state_timeout_handle = None
 
+        if self._pairing_task and not self._pairing_task.done():
+            # Ends like end_pairing: the attempt aborts instead of waiting out its timeout.
+            self._pairing_task.cancel()
+            with suppress(PairingError, OSError, asyncio.CancelledError):
+                await self._pairing_task
         if self._writer_task and not self._writer_task.done():
             self._writer_task.cancel()
             with suppress(asyncio.CancelledError):
