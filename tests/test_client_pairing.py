@@ -11,6 +11,7 @@ import pytest
 from aiosendspin.client.connection import SendspinConnection
 from aiosendspin.models.core import ServerActivatePayload
 from aiosendspin.models.types import (
+    Activity,
     MediaCommand,
     PairAbortReason,
     PairMethod,
@@ -122,6 +123,41 @@ async def _cancel_time_task(connection: SendspinConnection) -> None:
         task.cancel()
         with suppress(asyncio.CancelledError):
             await task
+
+
+async def test_leave_activate_redeclaring_pairing_runs_next_attempt() -> None:
+    """A leave activate that declares pairing again immediately admits the next attempt."""
+    connection, _ws = _client_with(PskCategory.LONG_TERM)
+    connection._connected = True  # noqa: SLF001
+    attempts = 0
+    activates = iter(
+        [
+            ServerActivatePayload(
+                activities=[Activity.PAIRING],
+                active_roles=[],
+                selected_pair_method=PairMethod.DYNAMIC_PIN,
+            ),
+            ServerActivatePayload(activities=[], active_roles=[]),
+        ]
+    )
+
+    async def fake_protocol() -> str:
+        nonlocal attempts
+        attempts += 1
+        return "leftover"
+
+    async def fake_resolve(leftover: str | None) -> ServerActivatePayload:  # noqa: ARG001
+        return next(activates)
+
+    connection._run_pairing_protocol = fake_protocol  # type: ignore[method-assign]  # noqa: SLF001
+    connection._resolve_pairing_activate = fake_resolve  # type: ignore[method-assign]  # noqa: SLF001
+
+    try:
+        await connection._pair()  # noqa: SLF001
+        assert attempts == 2
+        assert not connection.is_pairing
+    finally:
+        await _cancel_time_task(connection)
 
 
 async def test_leave_activate_resumes_time_sync() -> None:

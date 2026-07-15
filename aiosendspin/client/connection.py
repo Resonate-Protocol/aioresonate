@@ -499,6 +499,10 @@ class SendspinConnection:
         if (reason := await self._apply_activation(activate)) is not None:
             await self._goodbye_and_disconnect(reason)
             return
+        if self.is_pairing:
+            # The leave activate redeclared pairing: it admits the next attempt.
+            await self._pair()
+            return
         self._resume_time_sync()
         await self._send_full_client_state()
 
