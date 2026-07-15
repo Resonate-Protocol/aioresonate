@@ -49,6 +49,7 @@ from aiosendspin.models.core import (
     ClientHelloMessage,
     ClientHelloPayload,
     ClientStateMessage,
+    ClientStatePayload,
     ClientTimeMessage,
     LegacyServerHelloMessage,
     LegacyServerHelloPayload,
@@ -358,6 +359,25 @@ class SendspinConnection:
         if self._client is None:
             return False
         return any(role.requires_initial_state() for role in self._client.active_roles)
+
+    def _initial_state_deviations(self, payload: ClientStatePayload) -> list[str]:
+        """Spec requirements the initial client/state must satisfy but does not."""
+        reasons: list[str] = []
+        if payload.available is None:
+            reasons.append("omitted the required 'available' field")
+        if self._client is not None and any(
+            role.role_family == "player" for role in self._client.active_roles
+        ):
+            player = payload.player
+            if player is None:
+                reasons.append("has an active player role but no player state")
+            elif (
+                player.static_delay_ms is None
+                or player.required_lead_time_ms is None
+                or player.min_buffer_ms is None
+            ):
+                reasons.append("omitted required player timing fields")
+        return reasons
 
     def drop_pending_binary(self, roles: list[str] | None) -> None:
         """Drop queued binary payloads for the specified roles.
@@ -1591,6 +1611,8 @@ class SendspinConnection:
                 return
 
             if self.requires_initial_state() and not self._initial_state_received:
+                for reason in self._initial_state_deviations(payload):
+                    self._flag_noncompliance(f"initial client/state {reason}")
                 self._initial_state_received = True
                 if self._initial_state_timeout_handle is not None:
                     self._initial_state_timeout_handle.cancel()

@@ -16,6 +16,7 @@ from aiosendspin.models.core import (
     ClientStatePayload,
 )
 from aiosendspin.models.management import ManagementResultMessage, ManagementResultPayload
+from aiosendspin.models.player import PlayerStatePayload
 from aiosendspin.models.types import ManagementResult
 from aiosendspin.server.clock import LoopClock
 from aiosendspin.server.connection import SendspinConnection
@@ -82,3 +83,31 @@ async def test_unsolicited_management_result_is_flagged() -> None:
         timestamp_us=0,
     )
     client.flag_noncompliance.assert_called_once()
+
+
+def _player_role_mock() -> MagicMock:
+    role = MagicMock()
+    role.role_family = "player"
+    return role
+
+
+@pytest.mark.asyncio
+async def test_initial_state_deviations_flags_incomplete_player_state() -> None:
+    """An empty initial client/state for a player is flagged as incomplete."""
+    conn, client = _conn_with_client()
+    client.active_roles = [_player_role_mock()]
+    reasons = conn._initial_state_deviations(ClientStatePayload())  # noqa: SLF001
+    assert any("available" in r for r in reasons)
+    assert any("player" in r for r in reasons)
+
+
+@pytest.mark.asyncio
+async def test_initial_state_deviations_accepts_complete_player_state() -> None:
+    """A complete initial client/state for a player yields no deviations."""
+    conn, client = _conn_with_client()
+    client.active_roles = [_player_role_mock()]
+    payload = ClientStatePayload(
+        available=True,
+        player=PlayerStatePayload(static_delay_ms=0, required_lead_time_ms=100, min_buffer_ms=200),
+    )
+    assert conn._initial_state_deviations(payload) == []  # noqa: SLF001
