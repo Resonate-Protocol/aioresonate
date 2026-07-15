@@ -12,11 +12,13 @@ from aiosendspin.models.core import (
     ClientStatePayload,
     StreamClearMessage,
     StreamEndMessage,
+    StreamRequestFormatPayload,
     StreamStartMessage,
 )
 from aiosendspin.models.player import (
     ClientHelloPlayerSupport,
     PlayerStatePayload,
+    StreamRequestFormatPlayer,
     SupportedAudioFormat,
 )
 from aiosendspin.models.types import BinaryMessageType, PlayerCommand
@@ -78,6 +80,38 @@ async def test_player_role_no_flag_when_available_present() -> None:
     client.handle_availability_change = AsyncMock()
     role = PlayerV1Role(client=client)
     role.on_client_state(ClientStatePayload(available=True, player=PlayerStatePayload()))
+    client.flag_noncompliance.assert_not_called()
+
+
+def _stub_with_player_support() -> MagicMock:
+    client = _make_client_stub()
+    client.info.player_support = ClientHelloPlayerSupport(
+        supported_formats=[
+            SupportedAudioFormat(codec=AudioCodec.PCM, channels=2, sample_rate=48000, bit_depth=16)
+        ],
+        buffer_capacity=100_000,
+        supported_commands=[],
+    )
+    return client
+
+
+def test_player_role_flags_nonpositive_format_request() -> None:
+    """A stream/request-format with a non-positive numeric field is flagged."""
+    client = _stub_with_player_support()
+    role = PlayerV1Role(client=client)
+    role.on_stream_request_format(
+        StreamRequestFormatPayload(player=StreamRequestFormatPlayer(sample_rate=-1))
+    )
+    client.flag_noncompliance.assert_called_once()
+
+
+def test_player_role_no_flag_for_valid_format_request() -> None:
+    """A stream/request-format with positive fields is not flagged."""
+    client = _stub_with_player_support()
+    role = PlayerV1Role(client=client)
+    role.on_stream_request_format(
+        StreamRequestFormatPayload(player=StreamRequestFormatPlayer(sample_rate=48000))
+    )
     client.flag_noncompliance.assert_not_called()
 
 

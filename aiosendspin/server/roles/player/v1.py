@@ -699,6 +699,20 @@ class PlayerV1Role(Role):
         if player_req is None:
             return
 
+        invalid = [
+            name
+            for name, value in (
+                ("sample_rate", player_req.sample_rate),
+                ("channels", player_req.channels),
+                ("bit_depth", player_req.bit_depth),
+            )
+            if value is not None and value <= 0
+        ]
+        if invalid:
+            self._client.flag_noncompliance(
+                "stream/request-format player fields must be positive: " + ", ".join(invalid)
+            )
+
         support = self._client.info.player_support
         if support is None:
             raise ValueError(
