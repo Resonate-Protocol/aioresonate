@@ -8,7 +8,6 @@ synchronization, stream lifecycle management, and role-based state updates and c
 
 from __future__ import annotations
 
-import logging
 from dataclasses import dataclass, field, fields, is_dataclass
 from typing import Annotated, Any, ClassVar, Literal
 
@@ -55,8 +54,6 @@ from .visualizer_draft_r1 import (
 from .visualizer_draft_r1 import (
     StreamStartVisualizer as StreamStartVisualizerDraftR1,
 )
-
-logger = logging.getLogger(__name__)
 
 
 def _has_merge_value(value: Any) -> bool:
@@ -169,6 +166,9 @@ class ClientHelloPayload(DataClassORJSONMixin):
     """Pairing methods this client offers."""
     unpaired_access: UnpairedAccess = field(default_factory=UnpairedAccess)
     """Whether this client currently admits unpaired access."""
+    legacy_support_keys_used: list[str] | None = None
+    """Unversioned support keys the parser rewrote to versioned aliases, recorded for
+    the server to flag. Not part of the wire schema (omitted when None)."""
 
     # Static mapping: unversioned support key -> actual alias key.
     _SUPPORT_KEY_ALIASES: ClassVar[dict[str, str]] = {
@@ -180,22 +180,15 @@ class ClientHelloPayload(DataClassORJSONMixin):
 
     @classmethod
     def __pre_deserialize__(cls, d: dict[str, Any]) -> dict[str, Any]:
-        """Normalize legacy role support keys to versioned names."""
-        legacy_fields_used: list[tuple[str, str]] = []
+        """Rewrite legacy unversioned support keys to versioned aliases, recording which."""
         normalized = dict(d)
+        legacy_keys: list[str] = []
         for legacy_key, versioned_key in cls._SUPPORT_KEY_ALIASES.items():
             if legacy_key in normalized and versioned_key not in normalized:
-                legacy_fields_used.append((legacy_key, versioned_key))
+                legacy_keys.append(legacy_key)
                 normalized[versioned_key] = normalized.pop(legacy_key)
-        if legacy_fields_used:
-            old_names = ", ".join(old for old, _ in legacy_fields_used)
-            new_names = ", ".join(new for _, new in legacy_fields_used)
-            logger.warning(
-                "client/hello message used deprecated field names (%s), "
-                "please update client to use (%s) instead",
-                old_names,
-                new_names,
-            )
+        # Always overwrite so a client cannot spoof the record via the wire.
+        normalized["legacy_support_keys_used"] = legacy_keys or None
         return normalized
 
     def __post_init__(self) -> None:

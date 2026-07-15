@@ -59,6 +59,7 @@ class _MockServer:
     clock: LoopClock
     id: str = "srv"
     name: str = "server"
+    strict_clients: bool = False
     pairing_store: ServerPairingStore = field(default_factory=InMemoryServerPairingStore)
     remove_client: AsyncMock = field(default_factory=AsyncMock)
 
@@ -239,6 +240,44 @@ class TestEncryptedActivities:
         assert activate["activities"] == []
         # active_roles present because the connection is playback-capable.
         assert Roles.PLAYER.value in activate["active_roles"]
+
+    @pytest.mark.asyncio
+    async def test_legacy_support_keys_logged_on_ingest(
+        self, mock_server: _MockServer, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A hello carrying unversioned support keys is admitted and logged."""
+        raw = orjson.dumps(
+            {
+                "type": "client/hello",
+                "payload": {
+                    "client_id": "client-1",
+                    "name": "client-1",
+                    "version": 1,
+                    "supported_roles": ["player@v1"],
+                    "player_support": {
+                        "supported_formats": [
+                            {"codec": "pcm", "channels": 2, "sample_rate": 48000, "bit_depth": 16}
+                        ],
+                        "buffer_capacity": 100_000,
+                        "supported_commands": [],
+                    },
+                },
+            }
+        ).decode()
+        conn = SendspinConnection(mock_server, wsock_client=AsyncMock())
+        psk = generate_psk()
+        conn._client_id = "client-1"  # noqa: SLF001
+        conn._noise_psk = ResolvedPsk(  # noqa: SLF001
+            psk_id=psk_id_for(psk),
+            psk=psk,
+            category=PskCategory.LONG_TERM,
+            counterparty_id="client-1",
+        )
+        conn._transport = _FakeTransport([WSMessage(WSMsgType.TEXT, raw, "")])  # type: ignore[assignment]  # noqa: SLF001
+
+        with caplog.at_level("INFO"):
+            assert await conn._exchange_hellos() is True  # noqa: SLF001
+        assert "unversioned support keys" in caplog.text
 
     @pytest.mark.asyncio
     async def test_dialed_for_playback_declares_playback(self, mock_server: _MockServer) -> None:
@@ -547,11 +586,8 @@ class TestCustomRoleSupportParsing:
         with pytest.raises(ValueError, match=missing_support_key):
             SendspinConnection._deserialize_client_message(raw)  # noqa: SLF001
 
-    def test_deserialize_client_hello_logs_legacy_support_conversion_warning(
-        self, caplog: pytest.LogCaptureFixture
-    ) -> None:
-        """Legacy support alias conversion warning is preserved for v1 roles."""
-        caplog.set_level("WARNING")
+    def test_deserialize_client_hello_records_legacy_support_key_use(self) -> None:
+        """Unversioned support keys are rewritten to v1 aliases and recorded, not logged."""
         raw = orjson.dumps(
             {
                 "type": "client/hello",
@@ -578,7 +614,39 @@ class TestCustomRoleSupportParsing:
 
         msg = SendspinConnection._deserialize_client_message(raw)  # noqa: SLF001
         assert isinstance(msg, ClientHelloMessage)
-        assert "client/hello message used deprecated field names" in caplog.text
+        assert msg.payload.player_support is not None
+        assert msg.payload.legacy_support_keys_used == ["player_support"]
+
+    def test_deserialize_client_hello_ignores_spoofed_legacy_record(self) -> None:
+        """A versioned hello records nothing, even if it spoofs legacy_support_keys_used."""
+        raw = orjson.dumps(
+            {
+                "type": "client/hello",
+                "payload": {
+                    "client_id": "c1",
+                    "name": "Client",
+                    "version": 1,
+                    "supported_roles": ["player@v1"],
+                    "legacy_support_keys_used": ["player_support"],
+                    "player@v1_support": {
+                        "supported_formats": [
+                            {
+                                "codec": "pcm",
+                                "sample_rate": 48000,
+                                "bit_depth": 16,
+                                "channels": 2,
+                            }
+                        ],
+                        "buffer_capacity": 100_000,
+                        "supported_commands": [],
+                    },
+                },
+            }
+        ).decode()
+
+        msg = SendspinConnection._deserialize_client_message(raw)  # noqa: SLF001
+        assert isinstance(msg, ClientHelloMessage)
+        assert msg.payload.legacy_support_keys_used is None
 
     def test_legacy_visualizer_support_key_is_not_normalized_to_v1(self) -> None:
         """Legacy visualizer_support must not be rewritten to visualizer@v1_support."""
