@@ -698,25 +698,25 @@ class PlayerV1Role(Role):
         if player_req is None:
             return
 
-        invalid = [
-            name
-            for name, value in (
-                ("sample_rate", player_req.sample_rate),
-                ("channels", player_req.channels),
-                ("bit_depth", player_req.bit_depth),
-            )
-            if value is not None and value <= 0
-        ]
-        if invalid:
-            self._client.flag_noncompliance(
-                "stream/request-format player fields must be positive: " + ", ".join(invalid)
-            )
-
         support = self._client.info.player_support
         if support is None:
             raise ValueError(
                 f"Client {self._client.client_id} sent player format request "
                 "but has no player support"
+            )
+
+        # A requested format must be one the client declared in its hello
+        # supported_formats; only the fields the request actually carries are compared.
+        if not any(
+            (player_req.codec is None or fmt.codec == player_req.codec)
+            and (player_req.sample_rate is None or fmt.sample_rate == player_req.sample_rate)
+            and (player_req.bit_depth is None or fmt.bit_depth == player_req.bit_depth)
+            and (player_req.channels is None or fmt.channels == player_req.channels)
+            for fmt in support.supported_formats
+        ):
+            self._client.flag_noncompliance(
+                "stream/request-format requested a format not in the client's "
+                "declared supported_formats"
             )
 
         supported = filter_encodable_formats(support.supported_formats)

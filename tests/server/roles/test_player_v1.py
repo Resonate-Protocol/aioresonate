@@ -95,18 +95,18 @@ def _stub_with_player_support() -> MagicMock:
     return client
 
 
-def test_player_role_flags_nonpositive_format_request() -> None:
-    """A stream/request-format with a non-positive numeric field is flagged."""
+def test_player_role_flags_undeclared_format_request() -> None:
+    """A request for a format not in the client's declared supported_formats is flagged."""
     client = _stub_with_player_support()
     role = PlayerV1Role(client=client)
     role.on_stream_request_format(
-        StreamRequestFormatPayload(player=StreamRequestFormatPlayer(sample_rate=-1))
+        StreamRequestFormatPayload(player=StreamRequestFormatPlayer(sample_rate=96000))
     )
     client.flag_noncompliance.assert_called_once()
 
 
-def test_player_role_no_flag_for_valid_format_request() -> None:
-    """A stream/request-format with positive fields is not flagged."""
+def test_player_role_no_flag_for_declared_format_request() -> None:
+    """A request matching a declared supported_format is not flagged."""
     client = _stub_with_player_support()
     role = PlayerV1Role(client=client)
     role.on_stream_request_format(
