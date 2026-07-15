@@ -960,7 +960,9 @@ class SendspinConnection:
 
         self._client_info = client_info
         self._client_id = client_id
-        self._negotiated_roles = negotiate_roles(client_info.supported_roles)
+        self._negotiated_roles = negotiate_roles(
+            client_info.supported_roles, strict=self._server.strict_clients
+        )
         self._logger = logger.getChild(client_id)
         self._logger.debug("Received client/hello: %s", client_info)
         if client_info.legacy_support_keys_used:
@@ -973,8 +975,6 @@ class SendspinConnection:
                 "client/hello sent support objects for unlisted roles: "
                 + ", ".join(client_info.unlisted_support_roles)
             )
-        if "visualizer@_draft_r1" in self._negotiated_roles:
-            self._flag_noncompliance("client negotiated the legacy visualizer@_draft_r1 wire")
         if unimplemented := self._unimplemented_roles(client_info.supported_roles):
             self._logger.info(
                 "Client offered roles/versions this server does not implement: %s", unimplemented

@@ -38,6 +38,23 @@ def test_negotiate_orders_player_before_controller() -> None:
     assert active == ["player@v1", "controller@v1"]
 
 
+def test_negotiate_activates_draft_visualizer_by_default() -> None:
+    """The legacy visualizer@_draft_r1 wire is negotiated in the default (lenient) mode."""
+    assert negotiate_roles(["visualizer@_draft_r1"]) == ["visualizer@_draft_r1"]
+
+
+def test_strict_excludes_draft_visualizer() -> None:
+    """Under strict, the legacy draft wire is skipped and not activated."""
+    assert negotiate_roles(["visualizer@_draft_r1"], strict=True) == []
+
+
+def test_strict_falls_back_to_v1_visualizer() -> None:
+    """Under strict, a client offering both draft and v1 gets v1 for the family."""
+    assert negotiate_roles(["visualizer@_draft_r1", "visualizer@v1"], strict=True) == [
+        "visualizer@v1"
+    ]
+
+
 def test_negotiate_orders_player_before_controller_with_metadata() -> None:
     """Player before controller even when other families are present."""
     active = negotiate_roles(["metadata@v1", "controller@v1", "player@v1"])

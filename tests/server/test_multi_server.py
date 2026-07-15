@@ -281,10 +281,10 @@ class TestEncryptedActivities:
         assert "unversioned support keys" in caplog.text
 
     @pytest.mark.asyncio
-    async def test_draft_visualizer_wire_logged_on_ingest(
-        self, mock_server: _MockServer, caplog: pytest.LogCaptureFixture
-    ) -> None:
-        """A hello negotiating the legacy visualizer@_draft_r1 wire is admitted and logged."""
+    async def test_strict_server_excludes_draft_visualizer_without_rejecting(self) -> None:
+        """Strict mode does not activate the legacy draft wire, but admits the client."""
+        loop = asyncio.get_running_loop()
+        strict_server = _MockServer(loop=loop, clock=LoopClock(loop), strict_clients=True)
         raw = orjson.dumps(
             {
                 "type": "client/hello",
@@ -301,7 +301,7 @@ class TestEncryptedActivities:
                 },
             }
         ).decode()
-        conn = SendspinConnection(mock_server, wsock_client=AsyncMock())
+        conn = SendspinConnection(strict_server, wsock_client=AsyncMock())
         psk = generate_psk()
         conn._client_id = "client-1"  # noqa: SLF001
         conn._noise_psk = ResolvedPsk(  # noqa: SLF001
@@ -312,9 +312,8 @@ class TestEncryptedActivities:
         )
         conn._transport = _FakeTransport([WSMessage(WSMsgType.TEXT, raw, "")])  # type: ignore[assignment]  # noqa: SLF001
 
-        with caplog.at_level("INFO"):
-            assert await conn._exchange_hellos() is True  # noqa: SLF001
-        assert "visualizer@_draft_r1 wire" in caplog.text
+        assert await conn._exchange_hellos() is True  # noqa: SLF001
+        assert "visualizer@_draft_r1" not in conn._negotiated_roles  # noqa: SLF001
 
     @pytest.mark.asyncio
     async def test_strict_server_rejects_noncompliant_hello(self) -> None:

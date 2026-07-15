@@ -732,7 +732,9 @@ class SendspinClient:
         self._info = client_info
         self._name = client_info.name
         if negotiated_roles is None:
-            self._negotiated_role_ids = negotiate_roles(client_info.supported_roles)
+            self._negotiated_role_ids = negotiate_roles(
+                client_info.supported_roles, strict=self._server.strict_clients
+            )
         else:
             self._negotiated_role_ids = negotiated_roles
 
