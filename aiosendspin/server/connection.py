@@ -858,7 +858,12 @@ class SendspinConnection:
 
     async def _ingest_client_hello(self, text: str) -> bool:
         """Validate and record the client/hello, attaching the client; False if rejected."""
-        message = self._deserialize_client_message(text)
+        try:
+            message = self._deserialize_client_message(text)
+        except (LookupError, TypeError, ValueError) as exc:
+            self._logger.error("Malformed client/hello: %s", exc)
+            await self.disconnect(retry_connection=False)
+            return False
         if not isinstance(message, ClientHelloMessage):
             self._logger.error("Expected client/hello, got %s", type(message).__name__)
             await self.disconnect(retry_connection=False)
