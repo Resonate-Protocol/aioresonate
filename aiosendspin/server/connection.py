@@ -935,6 +935,11 @@ class SendspinConnection:
             self._client = client
             if self._url is not None:
                 self._server.register_client_url(client_id, self._url)
+        else:
+            # Hello re-sent over the same connection after an in-band re-handshake.
+            self._client.refresh_identity_from_hello(
+                client_info, negotiated_roles=self._negotiated_roles
+            )
         return True
 
     async def _admit_legacy_client_id(self, client_id: str) -> bool:

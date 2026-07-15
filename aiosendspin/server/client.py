@@ -550,6 +550,15 @@ class SendspinClient:
 
         self._rebuild_binary_handling_cache()
 
+    def refresh_identity_from_hello(
+        self, client_info: ClientHelloPayload, *, negotiated_roles: list[str]
+    ) -> None:
+        """Apply a hello re-sent over the existing connection (post re-handshake)."""
+        previous_info = self._info
+        self._set_identity_from_hello(client_info, negotiated_roles=negotiated_roles)
+        if previous_info is not None and previous_info != client_info:
+            self._server._signal_client_updated(self._client_id)  # noqa: SLF001
+
     def preload_hello(self, client_info: ClientHelloPayload) -> None:
         """Seed persistent client identity/capabilities without an active connection."""
         self._set_identity_from_hello(client_info)

@@ -491,6 +491,46 @@ async def test_live_pairing_dynamic_pin() -> None:
             await client.disconnect()
 
 
+async def test_live_pairing_updates_connection_security_trust() -> None:
+    """The post-pairing re-hello propagates the client's re-asserted trust_level."""
+    server_store = InMemoryServerPairingStore()
+    server = _make_server(server_store)
+    client_identity = Identity.generate()
+    client_store = InMemoryClientPairingStore()
+
+    shown: asyncio.Future[str] = asyncio.get_running_loop().create_future()
+
+    async def display(pin: str | None) -> None:
+        if pin is not None and not shown.done():
+            shown.set_result(pin)
+
+    async def provide() -> str:
+        return await shown
+
+    async with _serve(server) as url:
+        client = make_sdk_client(
+            identity=client_identity,
+            pairing_store=client_store,
+            client_name="c",
+            roles=[Roles.CONTROLLER],
+            pin_display=display,
+        )
+        try:
+            await client.connect(url)
+            conn = await _find_connection_by_client_id(server, client_identity.peer_id)
+            await conn.initiate_pairing(
+                PairingAttempt(method=PairMethod.DYNAMIC_PIN, pin_provider=provide)
+            )
+            server_client = conn._client  # noqa: SLF001
+            assert server_client is not None
+            security = server_client.connection_security
+            assert security is not None
+            assert security.psk_category is PskCategory.LONG_TERM
+            assert security.trust_level is TrustLevel.USER
+        finally:
+            await client.disconnect()
+
+
 async def test_live_pairing_dynamic_pin_server_floor_raises_length() -> None:
     """The negotiated length is max(client_min, server_min); the server's higher floor wins."""
     server_store = InMemoryServerPairingStore()
