@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import stat
+import sys
 from typing import TYPE_CHECKING
 
 import pytest
@@ -222,6 +224,18 @@ async def test_file_server_store_persists_all_categories(tmp_path: Path) -> None
     assert await reloaded.staged_pairing_psk("client-S") == staged
     assert list(await reloaded.list_staged_pairing_psks()) == [staged]
     assert await reloaded.trusted_unpaired("client-T") == trusted
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX file modes")
+async def test_file_stores_are_owner_readable_only(tmp_path: Path) -> None:
+    """Store files hold PSKs; writes must produce 0600 files."""
+    path = tmp_path / "sub" / "pairings.json"
+    server_store = await FileServerPairingStore.open(path)
+    await server_store.store_record(_server_record())
+    client_path = tmp_path / "sub" / "client.json"
+    await FileClientPairingStore.open(client_path)
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    assert stat.S_IMODE(client_path.stat().st_mode) == 0o600
 
 
 async def test_file_server_store_removal_persists(tmp_path: Path) -> None:
