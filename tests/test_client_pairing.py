@@ -7,9 +7,10 @@ import logging
 from contextlib import suppress
 
 import pytest
+from aiohttp import WSMessage, WSMsgType
 
 from aiosendspin.client.connection import SendspinConnection
-from aiosendspin.models.core import ServerActivatePayload
+from aiosendspin.models.core import ServerActivateMessage, ServerActivatePayload
 from aiosendspin.models.types import (
     Activity,
     MediaCommand,
@@ -115,6 +116,34 @@ async def test_app_and_time_sends_suppressed_during_exchange() -> None:
     connection._exchange_in_progress = False  # noqa: SLF001
     await connection.send_player_state(available=True, volume=7, muted=True)
     assert len(ws.sent) == 1
+
+
+async def test_pairing_window_tolerates_bare_leave_activate() -> None:
+    """A bare leave server/activate during the gesture wait ends pairing, not the connection."""
+
+    async def never() -> None:
+        await asyncio.Event().wait()
+
+    client = make_sdk_client(client_name="C", roles=[Roles.CONTROLLER], pairing_window=never)
+    connection = SendspinConnection(client)
+    ws = _FakeWS()
+    leave = ServerActivateMessage(
+        payload=ServerActivatePayload(activities=[], active_roles=[])
+    ).to_json()
+
+    async def receive() -> WSMessage:
+        return WSMessage(WSMsgType.TEXT, leave, "")
+
+    ws.receive = receive  # type: ignore[attr-defined]
+    connection._ws = ws  # type: ignore[assignment]  # noqa: SLF001
+    connection._server_id = "server-1"  # noqa: SLF001
+    # Static-PIN pairing (the only flow with a gesture wait) runs over the Sentinel PSK.
+    connection._noise_psk = ResolvedPsk("psk-id", b"\x00" * 32, PskCategory.SENTINEL)  # noqa: SLF001
+
+    payload = await connection._await_pairing_window()  # noqa: SLF001
+
+    assert payload is not None
+    assert payload.activities == []
 
 
 async def _cancel_time_task(connection: SendspinConnection) -> None:

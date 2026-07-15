@@ -578,9 +578,16 @@ async def _receive_pairing[T: PairingMessage](ws: EncryptedWebSocket, expected: 
     return message
 
 
-async def receive_pairing_abort(ws: EncryptedWebSocket) -> NoReturn:
-    """Receive the ``pair/abort`` ending an unstarted attempt; every outcome raises."""
-    await _receive_pairing(ws, PairAbortMessage)
+async def receive_pairing_abort(ws: EncryptedWebSocket) -> str:
+    """Await the ``pair/abort`` ending an unstarted attempt.
+
+    A ``pair/abort`` (or close, or another pairing frame) raises. A non-pairing
+    JSON frame, such as the ``server/activate`` leaving pairing, is returned raw
+    for the caller to interpret.
+    """
+    frame = await _receive_pairing_frame(ws, PairAbortMessage)
+    if isinstance(frame, str):
+        return frame
     raise AssertionError("unreachable: receiving pair/abort raises")
 
 

@@ -85,6 +85,7 @@ from aiosendspin.noise.models import (
 )
 from aiosendspin.noise.pairing import (
     PairingAbortError,
+    PairingError,
     abort_pairing,
     receive_pairing_abort,
     run_dynamic_pin_client,
@@ -506,10 +507,11 @@ class SendspinConnection:
         self._resume_time_sync()
         await self._send_full_client_state()
 
-    async def _run_pairing_protocol(self) -> str | None:
+    async def _run_pairing_protocol(self) -> str | ServerActivatePayload | None:
         """Run the server-selected method's exchange.
 
-        Returns ``None`` on finalize, else the raw ``server/activate`` leave frame.
+        Returns ``None`` on finalize, else the raw ``server/activate`` leave frame
+        (already parsed when the pairing window closed before an attempt started).
         """
         assert self._ws is not None
         assert self._server_id is not None
@@ -530,7 +532,8 @@ class SendspinConnection:
         if method is PairMethod.STATIC_PIN:
             static_pin = await store.static_pin()
             assert static_pin is not None  # offered only when configured
-            await self._await_pairing_window()
+            if (leave := await self._await_pairing_window()) is not None:
+                return leave
             with self._attempt_in_progress():
                 return await run_static_pin_client(
                     self._ws,
@@ -563,11 +566,13 @@ class SendspinConnection:
         finally:
             self._pairing_attempt_in_progress = False
 
-    async def _await_pairing_window(self) -> None:
+    async def _await_pairing_window(self) -> ServerActivatePayload | None:
         """Wait for the operator gesture without leaving the socket unread.
 
-        Anything received during the wait - the ``pair/abort`` withdrawing the
-        attempt, an unexpected frame, or a close - raises out of the pending receive.
+        Returns the payload of a ``server/activate`` that leaves pairing before an
+        attempt started, else ``None`` once the gesture arrives. Anything else
+        received during the wait - the ``pair/abort`` withdrawing the attempt, an
+        unexpected frame, or a close - raises out of the pending receive.
         """
         assert self._client.pairing_window is not None  # offered only when set
         assert self._ws is not None
@@ -585,10 +590,23 @@ class SendspinConnection:
         if window in done:
             await window
         if receive in done:
-            await receive
+            frame = await receive
+            message = ServerMessage.from_json(frame)
+            if not isinstance(message, ServerActivateMessage):
+                raise PairingError(
+                    f"unexpected frame awaiting the pairing gesture: {type(message).__name__}"
+                )
+            logger.info("Server %s ended the pairing window before an attempt", self._server_id)
+            return message.payload
+        return None
 
-    async def _resolve_pairing_activate(self, leftover: str | None) -> ServerActivatePayload:
+    async def _resolve_pairing_activate(
+        self, leftover: str | ServerActivatePayload | None
+    ) -> ServerActivatePayload:
         """Resolve the server/activate that ends pairing, re-handshaking first if it finalized."""
+        if isinstance(leftover, ServerActivatePayload):
+            # The window closed before an attempt: the leave activate is already parsed.
+            return leftover
         method = self._selected_pair_method
         assert method is not None
         async with asyncio.timeout(POST_PAIRING_ACTIVATE_TIMEOUT_S):
