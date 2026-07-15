@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal
 
 from mashumaro.config import BaseConfig
@@ -18,17 +18,29 @@ from .types import (
 
 # Server -> Client: server/unpair
 @dataclass
+class ServerUnpairPayload(DataClassORJSONMixin):
+    """Empty ``server/unpair`` payload."""
+
+
+@dataclass
 class ServerUnpairMessage(ServerMessage):
     """Tells the client to drop this server's pairing record and close (no payload fields)."""
 
+    payload: ServerUnpairPayload = field(default_factory=ServerUnpairPayload)
     type: Literal["server/unpair"] = "server/unpair"
 
 
 # Server -> Client: management/list-records
 @dataclass
+class ManagementListRecordsPayload(DataClassORJSONMixin):
+    """Empty ``management/list-records`` payload."""
+
+
+@dataclass
 class ManagementListRecordsMessage(ServerMessage):
     """Requests the client's pairing records (no payload fields)."""
 
+    payload: ManagementListRecordsPayload = field(default_factory=ManagementListRecordsPayload)
     type: Literal["management/list-records"] = "management/list-records"
 
 
@@ -83,9 +95,17 @@ class RecordModeConfig(DataClassORJSONMixin):
 
 # Server -> Client: management/get-pairing-config
 @dataclass
+class ManagementGetPairingConfigPayload(DataClassORJSONMixin):
+    """Empty ``management/get-pairing-config`` payload."""
+
+
+@dataclass
 class ManagementGetPairingConfigMessage(ServerMessage):
     """Requests the client's pairing configuration (no payload fields)."""
 
+    payload: ManagementGetPairingConfigPayload = field(
+        default_factory=ManagementGetPairingConfigPayload
+    )
     type: Literal["management/get-pairing-config"] = "management/get-pairing-config"
 
 

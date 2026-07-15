@@ -20,6 +20,7 @@ from aiosendspin.models.management import (
     PairingMethodConfig,
     RecordModeConfig,
     RecordSummary,
+    ServerUnpairMessage,
     SetDynamicPinConfig,
     SetPairingPskConfig,
     StorageAccounting,
@@ -56,6 +57,19 @@ def test_server_request_round_trips(message: ServerMessage) -> None:
     decoded = ServerMessage.from_json(message.to_json())
     assert type(decoded) is type(message)
     assert decoded == message
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        ServerUnpairMessage(),
+        ManagementListRecordsMessage(),
+        ManagementGetPairingConfigMessage(),
+    ],
+)
+def test_empty_payload_messages_send_payload_key(message: ServerMessage) -> None:
+    """Requests without payload fields still serialize an empty payload object."""
+    assert orjson.loads(message.to_json())["payload"] == {}
 
 
 def test_client_responses_round_trip() -> None:
