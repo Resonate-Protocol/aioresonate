@@ -586,9 +586,8 @@ async def receive_pairing_abort(ws: EncryptedWebSocket) -> str:
     for the caller to interpret.
     """
     frame = await _receive_pairing_frame(ws, PairAbortMessage)
-    if isinstance(frame, str):
-        return frame
-    raise AssertionError("unreachable: receiving pair/abort raises")
+    assert isinstance(frame, str)
+    return frame
 
 
 async def _receive_pair_init(ws: EncryptedWebSocket, pairing_index: int) -> ClientPairInitMessage:
