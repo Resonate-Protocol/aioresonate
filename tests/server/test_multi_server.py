@@ -382,6 +382,26 @@ class TestEncryptedActivities:
         assert conn._closing is True  # noqa: SLF001
 
     @pytest.mark.asyncio
+    async def test_unencrypted_hello_without_version_is_flagged(
+        self, mock_server: _MockServer, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """An unencrypted hello that omits the required version is admitted and flagged."""
+        conn = SendspinConnection(mock_server, wsock_client=AsyncMock())  # no PSK => unencrypted
+        raw = orjson.dumps(
+            {
+                "type": "client/hello",
+                "payload": {
+                    "client_id": "legacy-1",
+                    "name": "legacy-1",
+                    "supported_roles": [],
+                },
+            }
+        ).decode()
+        with caplog.at_level("INFO"):
+            assert await conn._ingest_client_hello(raw) is True  # noqa: SLF001
+        assert "omitted required version" in caplog.text
+
+    @pytest.mark.asyncio
     async def test_dialed_for_playback_declares_playback(self, mock_server: _MockServer) -> None:
         """A connection dialed for playback declares the playback activity up front."""
         url = "ws://192.168.1.100:8927/sendspin"

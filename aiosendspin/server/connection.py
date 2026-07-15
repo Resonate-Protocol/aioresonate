@@ -922,6 +922,10 @@ class SendspinConnection:
             )
             await self.disconnect(retry_connection=False)
             return False
+        # Encrypted clients carry version in client/init, so only an unencrypted
+        # hello is required to include it.
+        if not self.is_encrypted and client_info.version is None:
+            self._flag_noncompliance("unencrypted client/hello omitted required version")
         # The Noise handshake sets client_id (authenticated); a legacy client
         # instead carries it in the hello payload.
         client_id = self._client_id or client_info.client_id
