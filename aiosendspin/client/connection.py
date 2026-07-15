@@ -487,25 +487,28 @@ class SendspinConnection:
     async def _pair(self) -> None:
         """Run one pairing attempt; on a non-closing abort stay in pairing for a retry."""
         await self._pause_time_sync()
-        try:
-            async with self._exchange():
-                leftover = await self._run_pairing_protocol()
-                activate = await self._resolve_pairing_activate(leftover)
-        except PairingAbortError as err:
-            if err.reason in _CLOSING_ABORT_REASONS:
-                await self.disconnect()
-            else:
-                logger.info("Pairing attempt with %s ended: %s", self._server_id, err.reason.value)
+        while True:
+            try:
+                async with self._exchange():
+                    leftover = await self._run_pairing_protocol()
+                    activate = await self._resolve_pairing_activate(leftover)
+            except PairingAbortError as err:
+                if err.reason in _CLOSING_ABORT_REASONS:
+                    await self.disconnect()
+                else:
+                    logger.info(
+                        "Pairing attempt with %s ended: %s", self._server_id, err.reason.value
+                    )
+                return
+            if (reason := await self._apply_activation(activate)) is not None:
+                await self._goodbye_and_disconnect(reason)
+                return
+            if self.is_pairing:
+                # The leave activate redeclared pairing: it admits the next attempt.
+                continue
+            self._resume_time_sync()
+            await self._send_full_client_state()
             return
-        if (reason := await self._apply_activation(activate)) is not None:
-            await self._goodbye_and_disconnect(reason)
-            return
-        if self.is_pairing:
-            # The leave activate redeclared pairing: it admits the next attempt.
-            await self._pair()
-            return
-        self._resume_time_sync()
-        await self._send_full_client_state()
 
     async def _run_pairing_protocol(self) -> str | ServerActivatePayload | None:
         """Run the server-selected method's exchange.
