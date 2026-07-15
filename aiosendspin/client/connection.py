@@ -701,14 +701,16 @@ class SendspinConnection:
         message = ClientGoodbyeMessage(
             payload=ClientGoodbyePayload(reason=reason),
         )
-        await self._send_message(message.to_json())
+        # A goodbye precedes disconnect, so it must reach the wire even mid-exchange.
+        await self._send_message(message.to_json(), force=True)
 
     async def send_pair_abort(self, reason: PairAbortReason) -> None:
         """Send a pair/abort to the server (for a pairing connection lost to arbitration)."""
         if not self.connected:
             return
         message = PairAbortMessage(payload=PairAbortPayload(reason=reason))
-        await self._send_message(message.to_json())
+        # A displaced connection's own exchange flag is still set; send regardless (spec).
+        await self._send_message(message.to_json(), force=True)
 
     @property
     def is_pairing(self) -> bool:
@@ -865,12 +867,13 @@ class SendspinConnection:
         message = ClientTimeMessage(payload=ClientTimePayload(client_transmitted=now_us))
         await self._send_message(message.to_json())
 
-    async def _send_message(self, payload: str) -> None:
+    async def _send_message(self, payload: str, *, force: bool = False) -> None:
+        """Send a JSON frame; ``force`` bypasses the in-band-exchange suppression."""
         async with self._send_lock:
             # Re-check under the lock: disconnect() can null _ws while we await it.
             if self._ws is None:
                 raise RuntimeError("WebSocket is not connected")
-            if self._exchange_in_progress:
+            if self._exchange_in_progress and not force:
                 return
             await self._ws.send_str(payload)
 

@@ -13,6 +13,7 @@ from aiosendspin.client.connection import SendspinConnection
 from aiosendspin.models.core import ServerActivateMessage, ServerActivatePayload
 from aiosendspin.models.types import (
     Activity,
+    GoodbyeReason,
     MediaCommand,
     PairAbortReason,
     PairMethod,
@@ -116,6 +117,20 @@ async def test_app_and_time_sends_suppressed_during_exchange() -> None:
     connection._exchange_in_progress = False  # noqa: SLF001
     await connection.send_player_state(available=True, volume=7, muted=True)
     assert len(ws.sent) == 1
+
+
+async def test_pair_abort_and_goodbye_bypass_exchange_suppression() -> None:
+    """pair/abort and client/goodbye still reach the wire while an exchange owns it."""
+    connection, ws = _client_with(PskCategory.PAIRING)
+    connection._connected = True  # noqa: SLF001
+    connection._exchange_in_progress = True  # noqa: SLF001
+
+    await connection.send_pair_abort(PairAbortReason.CONCURRENT_ATTEMPT)
+    await connection.send_goodbye(GoodbyeReason.ANOTHER_SERVER)
+
+    assert len(ws.sent) == 2
+    abort = PairAbortMessage.from_json(ws.sent[0])
+    assert abort.payload.reason is PairAbortReason.CONCURRENT_ATTEMPT
 
 
 async def test_pairing_window_tolerates_bare_leave_activate() -> None:
