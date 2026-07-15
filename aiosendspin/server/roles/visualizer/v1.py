@@ -655,7 +655,24 @@ class VisualizerV1Role(Role):
     def on_stream_request_format(self, payload: StreamRequestFormatPayload) -> None:
         """Apply mid-stream renegotiation. All v1 fields are optional and merged."""
         request = payload.visualizer
-        if request is None or self._stream_config is None or self._support is None:
+        if request is None:
+            return
+
+        invalid = [
+            name
+            for name, value in (
+                ("rate_max", request.rate_max),
+                ("buffer_capacity", request.buffer_capacity),
+            )
+            if value is not None and value <= 0
+        ]
+        if invalid:
+            self._client.flag_noncompliance(
+                "stream/request-format visualizer fields must be positive: " + ", ".join(invalid)
+            )
+            return
+
+        if self._stream_config is None or self._support is None:
             return
 
         # Build the merged payload as a plain dict so the support

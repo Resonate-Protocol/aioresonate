@@ -124,6 +124,26 @@ def test_role_id_is_v1() -> None:
     assert role.role_family == "visualizer"
 
 
+def test_visualizer_role_flags_nonpositive_request_fields() -> None:
+    """A stream/request-format with a non-positive field is flagged."""
+    client = _make_client_stub()
+    role = VisualizerV1Role(client=client)
+    role.on_stream_request_format(
+        StreamRequestFormatPayload(visualizer=StreamRequestFormatVisualizer(rate_max=0))
+    )
+    client.flag_noncompliance.assert_called_once()
+
+
+def test_visualizer_role_no_flag_for_valid_request_fields() -> None:
+    """A stream/request-format with positive fields is not flagged."""
+    client = _make_client_stub()
+    role = VisualizerV1Role(client=client)
+    role.on_stream_request_format(
+        StreamRequestFormatPayload(visualizer=StreamRequestFormatVisualizer(rate_max=30))
+    )
+    client.flag_noncompliance.assert_not_called()
+
+
 def test_on_connect_subscribes_to_group_role() -> None:
     """On connect subscribes to group role."""
     client = _make_client_stub()
