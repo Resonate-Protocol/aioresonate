@@ -1356,6 +1356,17 @@ class _MockServerWithReclaim:
     def is_external_player(self, client_id: str) -> bool:  # noqa: ARG002
         return False
 
+    def _signal_client_connected(self, client_id: str) -> None:  # noqa: ARG002
+        pass
+
+    def _signal_client_reconnected(self, client_id: str) -> None:  # noqa: ARG002
+        pass
+
+    def _signal_client_disconnected(  # noqa: ARG002
+        self, client_id: str, goodbye_reason: object
+    ) -> None:
+        pass
+
 
 class TestAutomaticReclaim:
     """Tests for automatic client reclaim on playback start and group join."""
