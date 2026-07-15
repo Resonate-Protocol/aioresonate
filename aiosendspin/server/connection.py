@@ -1378,7 +1378,7 @@ class SendspinConnection:
         """Deliver a management reply, draining the waiter slot."""
         waiter = self._management_waiter
         if waiter is None:
-            self._logger.warning("Unsolicited management reply; ignoring")
+            self._flag_noncompliance("sent an unsolicited management/result")
             return
         # Clear even an abandoned waiter, so its late reply can't match the next request.
         self._management_waiter = None
@@ -1565,7 +1565,7 @@ class SendspinConnection:
         """Handle a single client message, dispatching to roles or the connection."""
         if isinstance(message, ClientHelloMessage):
             # client/hello is consumed during the hello exchange; a second one is a protocol error.
-            self._logger.warning("Unexpected client/hello after the hello exchange; ignoring")
+            self._flag_noncompliance("sent a second client/hello after the hello exchange")
             return
 
         if isinstance(message, ClientTimeMessage):
