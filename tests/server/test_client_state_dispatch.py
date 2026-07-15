@@ -16,7 +16,6 @@ from aiosendspin.models.core import (
     ClientStatePayload,
 )
 from aiosendspin.models.management import ManagementResultMessage, ManagementResultPayload
-from aiosendspin.models.player import PlayerStatePayload
 from aiosendspin.models.types import ManagementResult
 from aiosendspin.server.clock import LoopClock
 from aiosendspin.server.connection import SendspinConnection
@@ -85,29 +84,27 @@ async def test_unsolicited_management_result_is_flagged() -> None:
     client.flag_noncompliance.assert_called_once()
 
 
-def _player_role_mock() -> MagicMock:
+def _role_mock(deviations: list[str]) -> MagicMock:
     role = MagicMock()
-    role.role_family = "player"
+    role.initial_state_deviations.return_value = deviations
     return role
 
 
 @pytest.mark.asyncio
-async def test_initial_state_deviations_flags_incomplete_player_state() -> None:
-    """An empty initial client/state for a player is flagged as incomplete."""
+async def test_initial_state_flags_missing_available_and_role_reasons() -> None:
+    """Missing `available` plus each active role's own deviations are each flagged."""
     conn, client = _conn_with_client()
-    client.active_roles = [_player_role_mock()]
-    reasons = conn._initial_state_deviations(ClientStatePayload())  # noqa: SLF001
-    assert any("available" in r for r in reasons)
-    assert any("player" in r for r in reasons)
+    client.active_roles = [_role_mock(["role-specific problem"])]
+    conn._flag_initial_state_deviations(ClientStatePayload())  # noqa: SLF001
+    flagged = [call.args[0] for call in client.flag_noncompliance.call_args_list]
+    assert any("available" in r for r in flagged)
+    assert any("role-specific problem" in r for r in flagged)
 
 
 @pytest.mark.asyncio
-async def test_initial_state_deviations_accepts_complete_player_state() -> None:
-    """A complete initial client/state for a player yields no deviations."""
+async def test_initial_state_complete_state_is_not_flagged() -> None:
+    """A complete initial client/state with compliant roles is not flagged."""
     conn, client = _conn_with_client()
-    client.active_roles = [_player_role_mock()]
-    payload = ClientStatePayload(
-        available=True,
-        player=PlayerStatePayload(static_delay_ms=0, required_lead_time_ms=100, min_buffer_ms=200),
-    )
-    assert conn._initial_state_deviations(payload) == []  # noqa: SLF001
+    client.active_roles = [_role_mock([])]
+    conn._flag_initial_state_deviations(ClientStatePayload(available=True))  # noqa: SLF001
+    client.flag_noncompliance.assert_not_called()

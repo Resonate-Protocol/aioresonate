@@ -83,6 +83,28 @@ async def test_player_role_no_flag_when_available_present() -> None:
     client.flag_noncompliance.assert_not_called()
 
 
+def test_player_role_initial_state_deviations_flags_missing_timing() -> None:
+    """A player initial state without the required timing fields is reported incomplete."""
+    role = PlayerV1Role(client=_make_client_stub())
+    assert role.initial_state_deviations(ClientStatePayload(available=True)) != []
+    assert (
+        role.initial_state_deviations(
+            ClientStatePayload(available=True, player=PlayerStatePayload(volume=50))
+        )
+        != []
+    )
+
+
+def test_player_role_initial_state_deviations_accepts_complete_timing() -> None:
+    """A player initial state with all required timing fields is accepted."""
+    role = PlayerV1Role(client=_make_client_stub())
+    payload = ClientStatePayload(
+        available=True,
+        player=PlayerStatePayload(static_delay_ms=0, required_lead_time_ms=100, min_buffer_ms=200),
+    )
+    assert role.initial_state_deviations(payload) == []
+
+
 def _stub_with_player_support() -> MagicMock:
     client = _make_client_stub()
     client.info.player_support = ClientHelloPlayerSupport(

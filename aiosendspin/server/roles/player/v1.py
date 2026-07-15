@@ -634,6 +634,19 @@ class PlayerV1Role(Role):
 
     # ---- Client message handling ----
 
+    def initial_state_deviations(self, payload: ClientStatePayload) -> list[str]:
+        """Report required player timing fields missing from the initial client/state."""
+        player = payload.player
+        if player is None:
+            return ["has an active player role but no player state"]
+        if (
+            player.static_delay_ms is None
+            or player.required_lead_time_ms is None
+            or player.min_buffer_ms is None
+        ):
+            return ["omitted required player timing fields"]
+        return []
+
     def on_client_state(self, payload: ClientStatePayload) -> None:
         """Handle player-specific fields in client/state."""
         state = payload.player
