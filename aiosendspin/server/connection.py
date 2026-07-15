@@ -894,6 +894,14 @@ class SendspinConnection:
     async def _ingest_client_hello(self, text: str) -> bool:
         """Validate and record the client/hello, attaching the client; False if rejected."""
         try:
+            return await self._ingest_client_hello_checked(text)
+        except ClientComplianceError:
+            await self.disconnect(retry_connection=False)
+            return False
+
+    async def _ingest_client_hello_checked(self, text: str) -> bool:
+        """Body of the hello exchange; raises ClientComplianceError in strict mode."""
+        try:
             message = self._deserialize_client_message(text)
         except (LookupError, TypeError, ValueError) as exc:
             self._logger.error("Malformed client/hello: %s", exc)

@@ -316,6 +316,43 @@ class TestEncryptedActivities:
         assert "visualizer@_draft_r1 wire" in caplog.text
 
     @pytest.mark.asyncio
+    async def test_strict_server_rejects_noncompliant_hello(self) -> None:
+        """With strict_clients, a hello using unversioned support keys is rejected."""
+        loop = asyncio.get_running_loop()
+        strict_server = _MockServer(loop=loop, clock=LoopClock(loop), strict_clients=True)
+        raw = orjson.dumps(
+            {
+                "type": "client/hello",
+                "payload": {
+                    "client_id": "client-1",
+                    "name": "client-1",
+                    "version": 1,
+                    "supported_roles": ["player@v1"],
+                    "player_support": {
+                        "supported_formats": [
+                            {"codec": "pcm", "channels": 2, "sample_rate": 48000, "bit_depth": 16}
+                        ],
+                        "buffer_capacity": 100_000,
+                        "supported_commands": [],
+                    },
+                },
+            }
+        ).decode()
+        conn = SendspinConnection(strict_server, wsock_client=AsyncMock())
+        psk = generate_psk()
+        conn._client_id = "client-1"  # noqa: SLF001
+        conn._noise_psk = ResolvedPsk(  # noqa: SLF001
+            psk_id=psk_id_for(psk),
+            psk=psk,
+            category=PskCategory.LONG_TERM,
+            counterparty_id="client-1",
+        )
+        conn._transport = _FakeTransport([WSMessage(WSMsgType.TEXT, raw, "")])  # type: ignore[assignment]  # noqa: SLF001
+
+        assert await conn._exchange_hellos() is False  # noqa: SLF001
+        assert "client-1" not in strict_server._clients  # noqa: SLF001
+
+    @pytest.mark.asyncio
     async def test_dialed_for_playback_declares_playback(self, mock_server: _MockServer) -> None:
         """A connection dialed for playback declares the playback activity up front."""
         url = "ws://192.168.1.100:8927/sendspin"
