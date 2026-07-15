@@ -499,7 +499,7 @@ class SendspinConnection:
         if (reason := await self._apply_activation(activate)) is not None:
             await self._goodbye_and_disconnect(reason)
             return
-        self._time_task = self._client.loop.create_task(self._time_sync_loop())
+        self._resume_time_sync()
         await self._send_full_client_state()
 
     async def _run_pairing_protocol(self) -> str | None:
@@ -1001,6 +1001,7 @@ class SendspinConnection:
         if self.is_pairing:
             await self._pair()
             return
+        self._resume_time_sync()
         if resync or not was_player_active:
             await self._send_full_client_state()
 
@@ -1010,6 +1011,11 @@ class SendspinConnection:
             with suppress(asyncio.CancelledError):
                 await self._time_task
             self._time_task = None
+
+    def _resume_time_sync(self) -> None:
+        """Restart the time-sync loop if it is not running."""
+        if self._time_task is None or self._time_task.done():
+            self._time_task = self._client.loop.create_task(self._time_sync_loop())
 
     def _handle_server_time(self, payload: ServerTimePayload) -> None:
         now_us = self.now_us()

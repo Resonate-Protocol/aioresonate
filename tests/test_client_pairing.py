@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
+from contextlib import suppress
 
 import pytest
 
 from aiosendspin.client.connection import SendspinConnection
+from aiosendspin.models.core import ServerActivatePayload
 from aiosendspin.models.types import (
     MediaCommand,
     PairAbortReason,
@@ -111,3 +114,27 @@ async def test_app_and_time_sends_suppressed_during_exchange() -> None:
     connection._exchange_in_progress = False  # noqa: SLF001
     await connection.send_player_state(available=True, volume=7, muted=True)
     assert len(ws.sent) == 1
+
+
+async def _cancel_time_task(connection: SendspinConnection) -> None:
+    task = connection._time_task  # noqa: SLF001
+    if task is not None:
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+
+
+async def test_leave_activate_resumes_time_sync() -> None:
+    """A server/activate that returns the connection to normal service restarts time sync."""
+    connection, _ws = _client_with(PskCategory.LONG_TERM)
+    connection._connected = True  # noqa: SLF001
+    assert connection._time_task is None  # noqa: SLF001
+
+    try:
+        await connection._handle_server_activate(  # noqa: SLF001
+            ServerActivatePayload(activities=[], active_roles=[])
+        )
+        assert connection._time_task is not None  # noqa: SLF001
+        assert not connection._time_task.done()  # noqa: SLF001
+    finally:
+        await _cancel_time_task(connection)
