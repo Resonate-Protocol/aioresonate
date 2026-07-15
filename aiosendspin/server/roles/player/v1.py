@@ -642,6 +642,9 @@ class PlayerV1Role(Role):
 
         # DEPRECATED(before-spec-pr-50): fall back to player.state for older clients.
         if payload.available is None and state.state is not None:
+            self._client.flag_noncompliance(
+                "client/state used legacy player.state instead of top-level available"
+            )
             create_task(
                 self._client.handle_availability_change(available=state.state != "external_source")
             )

@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
+
+import pytest
 
 from aiosendspin.models import AudioCodec, unpack_binary_header
 from aiosendspin.models.core import (
@@ -57,6 +59,26 @@ def test_player_role_has_role_id() -> None:
     client = _make_client_stub()
     role = PlayerV1Role(client=client)
     assert role.role_id == "player@v1"
+
+
+@pytest.mark.asyncio
+async def test_player_role_flags_legacy_state_fallback() -> None:
+    """A client/state with no top-level `available` but a legacy player.state is flagged."""
+    client = _make_client_stub()
+    client.handle_availability_change = AsyncMock()
+    role = PlayerV1Role(client=client)
+    role.on_client_state(ClientStatePayload(player=PlayerStatePayload(state="synchronized")))
+    client.flag_noncompliance.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_player_role_no_flag_when_available_present() -> None:
+    """A spec-compliant client/state carrying `available` is not flagged."""
+    client = _make_client_stub()
+    client.handle_availability_change = AsyncMock()
+    role = PlayerV1Role(client=client)
+    role.on_client_state(ClientStatePayload(available=True, player=PlayerStatePayload()))
+    client.flag_noncompliance.assert_not_called()
 
 
 def test_player_role_has_role_family() -> None:
