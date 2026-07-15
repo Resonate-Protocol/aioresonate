@@ -118,6 +118,7 @@ from aiosendspin.noise.wire import EncryptedWebSocket
 from aiosendspin.util import create_task
 
 from .client import SendspinClient
+from .compliance import ClientComplianceError
 from .events import ClientEvent, ClientGroupChangedEvent, GroupEvent, GroupStateChangedEvent
 from .roles.negotiation import negotiate_roles
 from .roles.registry import ROLE_FACTORIES, ROLE_SUPPORT_SPECS
@@ -876,6 +877,19 @@ class SendspinConnection:
         )
         client_hello_text = await receive_text_frame(transport, what="client/hello")
         return await self._ingest_client_hello(client_hello_text)
+
+    def _flag_noncompliance(self, reason: str) -> None:
+        """Log a tolerated spec violation, or reject it when the server is strict.
+
+        Usable during the hello exchange before a persistent client exists; once
+        attached, delegates to the client so its logger carries the client_id.
+        """
+        if self._client is not None:
+            self._client.flag_noncompliance(reason)
+            return
+        self._logger.info("non-compliant client: %s", reason)
+        if self._server.strict_clients:
+            raise ClientComplianceError(reason)
 
     async def _ingest_client_hello(self, text: str) -> bool:
         """Validate and record the client/hello, attaching the client; False if rejected."""

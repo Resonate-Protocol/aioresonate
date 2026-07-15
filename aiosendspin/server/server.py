@@ -124,6 +124,7 @@ class SendspinServer:
         *,
         pairing_store: ServerPairingStore,
         allow_unencrypted: bool = False,
+        strict_clients: bool = False,
         min_pin_length: int = DEFAULT_MIN_PIN_DIGITS,
         clock: Clock | None = None,
     ) -> None:
@@ -137,6 +138,7 @@ class SendspinServer:
         self._name = server_name
         self._pairing_store = pairing_store
         self._allow_unencrypted = allow_unencrypted
+        self._strict_clients = strict_clients
         self._min_pin_length = min_pin_length
         self._clock: Clock = clock or RawMonotonicClock()
 
@@ -216,6 +218,11 @@ class SendspinServer:
     def allow_unencrypted(self) -> bool:
         """Whether transition mode is enabled (accepts legacy unencrypted clients)."""
         return self._allow_unencrypted
+
+    @property
+    def strict_clients(self) -> bool:
+        """Whether non-spec-compliant clients are rejected instead of tolerated."""
+        return self._strict_clients
 
     @property
     def name(self) -> str:

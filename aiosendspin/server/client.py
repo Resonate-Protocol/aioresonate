@@ -31,6 +31,7 @@ from aiosendspin.models.types import (
 from aiosendspin.noise.trust_store import PskCategory
 from aiosendspin.util import create_task
 
+from .compliance import ClientComplianceError
 from .events import ClientEvent, ClientGroupChangedEvent
 from .roles import Role
 from .roles.base import BinaryHandling
@@ -136,6 +137,12 @@ class SendspinClient:
         self._cleanup_handle: asyncio.Handle | None = None
         # True when we intentionally retain a disconnected client after ANOTHER_SERVER goodbye.
         self._cleanup_on_mdns_removal: bool = False
+
+    def flag_noncompliance(self, reason: str) -> None:
+        """Log a tolerated spec violation, or reject it when the server is strict."""
+        self._logger.info("non-compliant client: %s", reason)
+        if self._server.strict_clients:
+            raise ClientComplianceError(reason)
 
     @property
     def client_id(self) -> str:
