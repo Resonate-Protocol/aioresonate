@@ -1184,12 +1184,11 @@ class SendspinConnection:
             case ManagementAddRecordMessage(payload=request):
                 payload, effect = await handle_add_record(store, request)
             case ManagementRemoveRecordMessage(payload=request):
+                assert self._noise_psk is not None
                 payload, effect = await handle_remove_record(
                     store,
                     request,
-                    requester_psk_id=(
-                        self._noise_psk.psk_id if self._noise_psk is not None else None
-                    ),
+                    requester_psk_id=self._noise_psk.psk_id,
                 )
             case ManagementGetPairingConfigMessage():
                 payload, effect = await handle_get_pairing_config(
