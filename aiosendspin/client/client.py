@@ -493,6 +493,10 @@ class SendspinClient:
             self._provisional_connections.discard(connection)
             logger.debug("Incoming connection failed bring-up: %s", exc)
             return
+        except BaseException:
+            # Failures outside the expected set may leave the transport half-open.
+            await connection.disconnect()
+            raise
         finally:
             self._provisional_connections.discard(connection)
 
