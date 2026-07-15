@@ -1151,7 +1151,11 @@ class SendspinConnection:
                 payload, effect = await handle_add_record(store, request)
             case ManagementRemoveRecordMessage(payload=request):
                 payload, effect = await handle_remove_record(
-                    store, request, requester_server_id=self._server_id
+                    store,
+                    request,
+                    requester_psk_id=(
+                        self._noise_psk.psk_id if self._noise_psk is not None else None
+                    ),
                 )
             case ManagementGetPairingConfigMessage():
                 payload, effect = await handle_get_pairing_config(

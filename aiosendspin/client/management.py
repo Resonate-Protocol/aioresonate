@@ -111,7 +111,7 @@ async def handle_remove_record(
     store: ClientPairingStore,
     payload: ManagementRemoveRecordPayload,
     *,
-    requester_server_id: str | None,
+    requester_psk_id: str | None,
 ) -> tuple[ManagementResultPayload, ManagementEffect]:
     """Remove a record; removing one's own record closes the session."""
     record = await store.record_by_psk_id(payload.psk_id)
@@ -121,7 +121,7 @@ async def handle_remove_record(
         return _result(ManagementResult.INVALID), ManagementEffect.NONE
     effect = (
         ManagementEffect.GOODBYE_UNAUTHORIZED
-        if _is_self(record, requester_server_id)
+        if record.psk_id == requester_psk_id
         else ManagementEffect.NONE
     )
     await store.remove_record(payload.psk_id)
@@ -323,8 +323,3 @@ def _merge_enabled(
     if cfg is None or cfg.enabled is None:
         return current
     return cfg.enabled
-
-
-def _is_self(record: ClientPairingRecord, requester_server_id: str | None) -> bool:
-    """Return whether ``record`` is the requesting server's own stored-pubkey record."""
-    return record.server_id is not None and record.server_id == requester_server_id
