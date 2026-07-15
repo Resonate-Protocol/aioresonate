@@ -155,10 +155,10 @@ async def test_pairing_window_tolerates_bare_leave_activate() -> None:
     # Static-PIN pairing (the only flow with a gesture wait) runs over the Sentinel PSK.
     connection._noise_psk = ResolvedPsk("psk-id", b"\x00" * 32, PskCategory.SENTINEL)  # noqa: SLF001
 
-    payload = await connection._await_pairing_window()  # noqa: SLF001
+    frame = await connection._await_pairing_window()  # noqa: SLF001
 
-    assert payload is not None
-    assert payload.activities == []
+    # The bare leave activate is surfaced raw for downstream parsing, not raised.
+    assert frame == leave
 
 
 async def _cancel_time_task(connection: SendspinConnection) -> None:

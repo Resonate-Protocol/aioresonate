@@ -86,7 +86,6 @@ from aiosendspin.noise.models import (
 )
 from aiosendspin.noise.pairing import (
     PairingAbortError,
-    PairingError,
     abort_pairing,
     receive_pairing_abort,
     run_dynamic_pin_client,
@@ -505,11 +504,11 @@ class SendspinConnection:
             await self._send_full_client_state()
             return
 
-    async def _run_pairing_protocol(self) -> str | ServerActivatePayload | None:
+    async def _run_pairing_protocol(self) -> str | None:
         """Run the server-selected method's exchange.
 
         Returns ``None`` on finalize, else the raw ``server/activate`` leave frame
-        (already parsed when the pairing window closed before an attempt started).
+        (from the method run, or from the pairing window closing before an attempt).
         """
         assert self._ws is not None
         assert self._server_id is not None
@@ -564,13 +563,13 @@ class SendspinConnection:
         finally:
             self._pairing_attempt_in_progress = False
 
-    async def _await_pairing_window(self) -> ServerActivatePayload | None:
+    async def _await_pairing_window(self) -> str | None:
         """Wait for the operator gesture without leaving the socket unread.
 
-        Returns the payload of a ``server/activate`` that leaves pairing before an
-        attempt started, else ``None`` once the gesture arrives. Anything else
-        received during the wait - the ``pair/abort`` withdrawing the attempt, an
-        unexpected frame, or a close - raises out of the pending receive.
+        Returns the raw ``server/activate`` frame if the server leaves pairing before
+        an attempt started, else ``None`` once the gesture arrives.
+        Anything else received during the wait - the ``pair/abort`` withdrawing the
+        attempt, an unexpected frame, or a close - raises out of the pending receive.
         """
         assert self._client.pairing_window is not None  # offered only when set
         assert self._ws is not None
@@ -588,23 +587,11 @@ class SendspinConnection:
         if window in done:
             await window
         if receive in done:
-            frame = await receive
-            message = ServerMessage.from_json(frame)
-            if not isinstance(message, ServerActivateMessage):
-                raise PairingError(
-                    f"unexpected frame awaiting the pairing gesture: {type(message).__name__}"
-                )
-            logger.info("Server %s ended the pairing window before an attempt", self._server_id)
-            return message.payload
+            return await receive
         return None
 
-    async def _resolve_pairing_activate(
-        self, leftover: str | ServerActivatePayload | None
-    ) -> ServerActivatePayload:
+    async def _resolve_pairing_activate(self, leftover: str | None) -> ServerActivatePayload:
         """Resolve the server/activate that ends pairing, re-handshaking first if it finalized."""
-        if isinstance(leftover, ServerActivatePayload):
-            # The window closed before an attempt: the leave activate is already parsed.
-            return leftover
         method = self._selected_pair_method
         assert method is not None
         async with asyncio.timeout(POST_PAIRING_ACTIVATE_TIMEOUT_S):
@@ -613,12 +600,12 @@ class SendspinConnection:
                 logger.info("Paired with server %s via %s", self._server_id, method.value)
                 await self._rehandshake()
                 return await self._exchange_hellos()
-            # Server left pairing without finalizing: apply the server/activate it should have sent.
-            logger.info("Verified pairing with server %s via %s", self._server_id, method.value)
+            # Server left pairing without finalizing: apply the leave server/activate.
+            logger.info("Server %s left pairing without finalizing", self._server_id)
             message = ServerMessage.from_json(leftover)
             if not isinstance(message, ServerActivateMessage):
                 raise RuntimeError(  # noqa: TRY004 - protocol violation, not a type error
-                    f"Expected server/activate after pair-finalize, got {type(message).__name__}"
+                    f"Expected server/activate ending pairing, got {type(message).__name__}"
                 )
             return message.payload
 
