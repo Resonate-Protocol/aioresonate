@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from types import SimpleNamespace
 
 import pytest
 
@@ -26,6 +27,8 @@ def _bare_connection() -> SendspinConnection:
     conn = SendspinConnection.__new__(SendspinConnection)
     conn._logger = logging.getLogger("test")  # noqa: SLF001
     conn._management_waiter = None  # noqa: SLF001
+    conn._client = None  # noqa: SLF001
+    conn._server = SimpleNamespace(strict_clients=False)  # type: ignore[assignment]  # noqa: SLF001
     return conn
 
 
