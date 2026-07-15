@@ -182,6 +182,23 @@ class ArtworkV1Role(Role):
             )
             return
 
+        invalid_dims = [
+            name
+            for name, value in (
+                ("media_width", artwork_request.media_width),
+                ("media_height", artwork_request.media_height),
+            )
+            if value is not None and value <= 0
+        ]
+        if invalid_dims:
+            # Skip the update: non-positive dims would otherwise raise out of
+            # ArtworkChannel and tear the connection down.
+            self._client.flag_noncompliance(
+                "stream/request-format artwork dimensions must be positive: "
+                + ", ".join(invalid_dims)
+            )
+            return
+
         self._update_channel_config(artwork_request)
 
     def _update_channel_config(self, request: StreamRequestFormatArtwork) -> None:
