@@ -823,6 +823,13 @@ class SendspinConnection:
                 if self._url is not None
                 else ConnectionReason.DISCOVERY
             )
+            if connection_reason not in (ConnectionReason.DISCOVERY, ConnectionReason.PLAYBACK):
+                # Legacy clients parse the enum strictly and predate the other reasons.
+                self._logger.debug(
+                    "Clamping connection_reason %s to discovery for a legacy client",
+                    connection_reason.value,
+                )
+                connection_reason = ConnectionReason.DISCOVERY
             await transport.send_str(
                 LegacyServerHelloMessage(
                     payload=LegacyServerHelloPayload(

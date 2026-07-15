@@ -338,6 +338,23 @@ class TestLegacyServerHello:
         assert [p["type"] for p in payloads] == ["server/hello"]
         assert payloads[0]["payload"]["connection_reason"] == ConnectionReason.PLAYBACK.value
 
+    @pytest.mark.asyncio
+    async def test_legacy_hello_clamps_post_legacy_reasons(self, mock_server: _MockServer) -> None:
+        """Reasons legacy clients cannot parse are sent as discovery."""
+        url = "ws://192.168.1.100:8927/sendspin"
+        mock_server._connection_reasons[url] = ConnectionReason.MANAGEMENT  # noqa: SLF001
+        conn = SendspinConnection(mock_server, wsock_client=AsyncMock(), url=url)
+
+        fake = _FakeTransport()
+        conn._transport = fake  # type: ignore[assignment]  # noqa: SLF001
+        conn._pending_first_text = ClientHelloMessage(  # noqa: SLF001
+            payload=_player_hello("client-1")
+        ).to_json()
+        await conn._exchange_hellos()  # noqa: SLF001
+
+        reason = fake.sent_payloads()[0]["payload"]["connection_reason"]
+        assert reason == ConnectionReason.DISCOVERY.value
+
 
 class TestHandshakeOrdering:
     """Tests for server/hello ordering relative to role messages."""
