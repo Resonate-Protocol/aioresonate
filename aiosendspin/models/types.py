@@ -255,6 +255,12 @@ class PairAbortReason(Enum):
     USER_CANCELLED = "user_cancelled"
 
 
+# The sender closes the connection after these abort reasons; every other reason keeps it open.
+CLOSING_ABORT_REASONS: frozenset[PairAbortReason] = frozenset(
+    {PairAbortReason.CONCURRENT_ATTEMPT, PairAbortReason.METHOD_NOT_SUPPORTED}
+)
+
+
 class ManagementResult(Enum):
     """Result code carried by management/result."""
 

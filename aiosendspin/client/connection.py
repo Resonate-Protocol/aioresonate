@@ -55,6 +55,7 @@ from aiosendspin.models.management import (
 )
 from aiosendspin.models.player import PlayerStatePayload, StreamStartPlayer
 from aiosendspin.models.types import (
+    CLOSING_ABORT_REASONS,
     Activity,
     AudioCodec,
     GoodbyeReason,
@@ -138,12 +139,6 @@ UNSYNCED_PLAY_LEAD_US: int = 500_000
 
 # PIN-pairing method families, subject to lockout and the locked_out descriptor.
 _PIN_METHODS: list[PairMethod] = [PairMethod.DYNAMIC_PIN, PairMethod.STATIC_PIN]
-
-# Abort reasons that close the connection; every other reason keeps it open.
-_CLOSING_ABORT_REASONS: list[PairAbortReason] = [
-    PairAbortReason.CONCURRENT_ATTEMPT,
-    PairAbortReason.METHOD_NOT_SUPPORTED,
-]
 
 # psk_id of the Sentinel PSK — the client matches it during PIN pairing / discovery.
 _SENTINEL_PSK_ID: str = psk_id_for(SENTINEL_PSK)
@@ -493,7 +488,7 @@ class SendspinConnection:
                     leftover = await self._run_pairing_protocol()
                     activate = await self._resolve_pairing_activate(leftover)
             except PairingAbortError as err:
-                if err.reason in _CLOSING_ABORT_REASONS:
+                if err.reason in CLOSING_ABORT_REASONS:
                     await self.disconnect()
                 else:
                     logger.info(

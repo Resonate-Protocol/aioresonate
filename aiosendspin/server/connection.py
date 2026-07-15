@@ -80,6 +80,7 @@ from aiosendspin.models.management import (
     StorageAccounting,
 )
 from aiosendspin.models.types import (
+    CLOSING_ABORT_REASONS,
     Activity,
     ClientMessage,
     ConnectionReason,
@@ -851,10 +852,7 @@ class SendspinConnection:
                     if not await self._pair(transport):
                         return False
                 except PairingAbortError as exc:
-                    if exc.reason in (
-                        PairAbortReason.CONCURRENT_ATTEMPT,
-                        PairAbortReason.METHOD_NOT_SUPPORTED,
-                    ):
+                    if exc.reason in CLOSING_ABORT_REASONS:
                         raise
                     # Non-closing abort reason: the connection stays open for a retry.
                     self._logger.debug("Initial-connect pairing aborted: %s", exc)
