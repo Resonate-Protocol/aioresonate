@@ -936,6 +936,8 @@ class SendspinConnection:
                 "client/hello used unversioned support keys: "
                 + ", ".join(client_info.legacy_support_keys_used)
             )
+        if "visualizer@_draft_r1" in self._negotiated_roles:
+            self._flag_noncompliance("client negotiated the legacy visualizer@_draft_r1 wire")
         if unimplemented := self._unimplemented_roles(client_info.supported_roles):
             self._logger.info(
                 "Client offered roles/versions this server does not implement: %s", unimplemented

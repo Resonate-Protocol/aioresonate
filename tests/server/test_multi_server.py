@@ -280,6 +280,42 @@ class TestEncryptedActivities:
         assert "unversioned support keys" in caplog.text
 
     @pytest.mark.asyncio
+    async def test_draft_visualizer_wire_logged_on_ingest(
+        self, mock_server: _MockServer, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A hello negotiating the legacy visualizer@_draft_r1 wire is admitted and logged."""
+        raw = orjson.dumps(
+            {
+                "type": "client/hello",
+                "payload": {
+                    "client_id": "client-1",
+                    "name": "client-1",
+                    "version": 1,
+                    "supported_roles": ["visualizer@_draft_r1"],
+                    "visualizer@_draft_r1_support": {
+                        "buffer_capacity": 1024,
+                        "types": ["loudness"],
+                        "batch_max": 8,
+                    },
+                },
+            }
+        ).decode()
+        conn = SendspinConnection(mock_server, wsock_client=AsyncMock())
+        psk = generate_psk()
+        conn._client_id = "client-1"  # noqa: SLF001
+        conn._noise_psk = ResolvedPsk(  # noqa: SLF001
+            psk_id=psk_id_for(psk),
+            psk=psk,
+            category=PskCategory.LONG_TERM,
+            counterparty_id="client-1",
+        )
+        conn._transport = _FakeTransport([WSMessage(WSMsgType.TEXT, raw, "")])  # type: ignore[assignment]  # noqa: SLF001
+
+        with caplog.at_level("INFO"):
+            assert await conn._exchange_hellos() is True  # noqa: SLF001
+        assert "visualizer@_draft_r1 wire" in caplog.text
+
+    @pytest.mark.asyncio
     async def test_dialed_for_playback_declares_playback(self, mock_server: _MockServer) -> None:
         """A connection dialed for playback declares the playback activity up front."""
         url = "ws://192.168.1.100:8927/sendspin"
