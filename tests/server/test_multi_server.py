@@ -42,6 +42,7 @@ from aiosendspin.noise.trust_store import (
 from aiosendspin.noise.wire import EncryptedWebSocket
 from aiosendspin.server.client import SendspinClient
 from aiosendspin.server.clock import LoopClock
+from aiosendspin.server.compliance import ClientComplianceError
 from aiosendspin.server.connection import SendspinConnection
 from aiosendspin.server.group import SendspinGroup
 from aiosendspin.server.roles.negotiation import negotiate_roles
@@ -351,6 +352,34 @@ class TestEncryptedActivities:
 
         assert await conn._exchange_hellos() is False  # noqa: SLF001
         assert "client-1" not in strict_server._clients  # noqa: SLF001
+
+    @pytest.mark.asyncio
+    async def test_message_loop_hard_rejects_on_compliance_error(
+        self, mock_server: _MockServer
+    ) -> None:
+        """A ClientComplianceError during dispatch ends the loop with no warm reconnect."""
+
+        class _AsyncIterTransport:
+            close_code = 1000
+
+            def __init__(self, msgs: list[WSMessage]) -> None:
+                self._msgs = msgs
+
+            def __aiter__(self) -> _AsyncIterTransport:
+                return self
+
+            async def __anext__(self) -> WSMessage:
+                if not self._msgs:
+                    raise StopAsyncIteration
+                return self._msgs.pop(0)
+
+        conn = SendspinConnection(mock_server, wsock_client=AsyncMock())
+        text = orjson.dumps({"type": "client/time", "payload": {"client_transmitted": 1}}).decode()
+        conn._transport = _AsyncIterTransport([WSMessage(WSMsgType.TEXT, text, "")])  # type: ignore[assignment]  # noqa: SLF001
+        conn._handle_message = AsyncMock(side_effect=ClientComplianceError("bad"))  # type: ignore[method-assign]  # noqa: SLF001
+
+        await conn._run_message_loop()  # noqa: SLF001
+        assert conn._closing is True  # noqa: SLF001
 
     @pytest.mark.asyncio
     async def test_dialed_for_playback_declares_playback(self, mock_server: _MockServer) -> None:

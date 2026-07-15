@@ -1547,6 +1547,10 @@ class SendspinConnection:
         except asyncio.CancelledError:
             cancelled = True
             self._logger.debug("Message loop cancelled")
+        except ClientComplianceError as exc:
+            # Strict mode: hard-reject (no warm reconnect). Cleanup reads _closing.
+            self._logger.info("Rejecting non-compliant client: %s", exc)
+            self._closing = True
         except Exception:
             self._logger.exception("Unexpected error inside websocket API")
         finally:
