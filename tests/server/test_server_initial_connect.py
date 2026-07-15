@@ -11,8 +11,9 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from aiohttp import ClientConnectionError, ClientWebSocketResponse
 
-from aiosendspin.models.types import GoodbyeReason
-from aiosendspin.noise.keys import Identity
+from aiosendspin.models.types import GoodbyeReason, PairMethod
+from aiosendspin.noise.keys import Identity, generate_psk
+from aiosendspin.noise.pairing import PairingAttempt
 from aiosendspin.noise.trust_store import InMemoryServerPairingStore
 from aiosendspin.server.connection import SendspinConnection
 from aiosendspin.server.server import SendspinServer
@@ -648,3 +649,53 @@ async def test_mdns_update_reconnect_decision(
         server.connect_to_client.assert_called_once_with(expected_url)
     else:
         server.connect_to_client.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_pairing_attempt_queued_for_existing_dial_task(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A pairing_attempt passed while a dial task exists rides that task's next dial."""
+    session = _PersistentSuccessfulSession()
+    server = _make_server(session)
+    url = "ws://127.0.0.1:9999/sendspin"
+    attempt = PairingAttempt(method=PairMethod.PAIRING_PSK, pairing_psk=generate_psk())
+    received: list[object] = []
+
+    class _FakeConnection:
+        """Connection double recording the pairing_attempt of each dial."""
+
+        closing = False
+        goodbye_reason = None
+
+        def __init__(
+            self,
+            _server: SendspinServer,
+            *,
+            wsock_client: object,  # noqa: ARG002
+            url: str | None = None,  # noqa: ARG002
+            expected_client_id: str | None = None,  # noqa: ARG002
+            pairing_attempt: object | None = None,
+        ) -> None:
+            received.append(pairing_attempt)
+
+        async def handle_client(self) -> None:
+            return
+
+        @property
+        def should_retry_server_initiated_connection(self) -> bool:
+            return len(received) < 2
+
+    monkeypatch.setattr("aiosendspin.server.server.SendspinConnection", _FakeConnection)
+
+    server.connect_to_client(url)
+    for _ in range(50):
+        if received:
+            break
+        await asyncio.sleep(0)
+    assert received == [None]
+
+    server.connect_to_client(url, pairing_attempt=attempt)
+    await _wait_for_connection_task_cleanup(server, url)
+
+    assert received == [None, attempt]

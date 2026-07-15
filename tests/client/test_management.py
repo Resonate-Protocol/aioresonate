@@ -130,7 +130,7 @@ async def test_remove_record_ok() -> None:
     payload, effect = await handle_remove_record(
         store,
         ManagementRemoveRecordPayload(psk_id=record.psk_id),
-        requester_server_id=SERVER_ID,
+        requester_psk_id="other-psk",
     )
     assert payload.result is ManagementResult.OK
     assert effect is ManagementEffect.NONE
@@ -143,7 +143,7 @@ async def test_remove_record_not_found() -> None:
     payload, _ = await handle_remove_record(
         store,
         ManagementRemoveRecordPayload(psk_id="missing"),
-        requester_server_id=SERVER_ID,
+        requester_psk_id="other-psk",
     )
     assert payload.result is ManagementResult.NOT_FOUND
 
@@ -156,7 +156,7 @@ async def test_remove_record_referenced_by_record_mode_is_invalid() -> None:
     payload, _ = await handle_remove_record(
         store,
         ManagementRemoveRecordPayload(psk_id=shared.psk_id),
-        requester_server_id=SERVER_ID,
+        requester_psk_id="other-psk",
     )
     assert payload.result is ManagementResult.INVALID
     assert await store.record_by_psk_id(shared.psk_id) is not None
@@ -169,10 +169,37 @@ async def test_remove_record_self_closes_session() -> None:
     payload, effect = await handle_remove_record(
         store,
         ManagementRemoveRecordPayload(psk_id=record.psk_id),
-        requester_server_id=SERVER_ID,
+        requester_psk_id=record.psk_id,
     )
     assert payload.result is ManagementResult.OK
     assert effect is ManagementEffect.GOODBYE_UNAUTHORIZED
+
+
+async def test_remove_shared_record_backing_session_closes_session() -> None:
+    """Removing the shared-PSK record that admitted the session also closes it."""
+    store = InMemoryClientPairingStore()
+    shared = await _seed_record(store, server_id=None)
+    payload, effect = await handle_remove_record(
+        store,
+        ManagementRemoveRecordPayload(psk_id=shared.psk_id),
+        requester_psk_id=shared.psk_id,
+    )
+    assert payload.result is ManagementResult.OK
+    assert effect is ManagementEffect.GOODBYE_UNAUTHORIZED
+
+
+async def test_remove_other_record_same_server_id_keeps_session() -> None:
+    """Removing a different record naming the requester's server does not close the session."""
+    store = InMemoryClientPairingStore()
+    mine = await _seed_record(store, server_id=SERVER_ID)
+    duplicate = await _seed_record(store, server_id=SERVER_ID)
+    payload, effect = await handle_remove_record(
+        store,
+        ManagementRemoveRecordPayload(psk_id=duplicate.psk_id),
+        requester_psk_id=mine.psk_id,
+    )
+    assert payload.result is ManagementResult.OK
+    assert effect is ManagementEffect.NONE
 
 
 # --- server/unpair ------------------------------------------------------------

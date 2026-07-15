@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Sequence
+from dataclasses import replace
 from datetime import UTC, datetime
 
 import pytest
@@ -169,6 +170,30 @@ async def test_static_pin_server_gesture_wait_times_out(
             store=server_store,
         )
     assert server_raw.sent == []
+
+
+async def test_static_pin_server_rejects_non_8_digit_operator_pin() -> None:
+    """A non-8-digit operator PIN aborts the server before it emits its PAKE share."""
+    client_ews, server_ews, _client_raw, server_raw = _paired_encrypted_ws()
+    server_store = InMemoryServerPairingStore()
+
+    async def bad_pin() -> str:
+        return "12345"
+
+    await client_ews.send_str(
+        ClientPairInitMessage(payload=ClientPairInitPayload(pairing_index=0)).to_json(),
+    )
+    with pytest.raises(PairingError, match="8 decimal digits"):
+        await run_static_pin_server(
+            server_ews,
+            handshake_hash=_HANDSHAKE_HASH,
+            pairing_index=0,
+            pin_provider=bad_pin,
+            client_id="client-X",
+            store=server_store,
+        )
+    assert server_raw.sent == []
+    assert await server_store.record_by_client_id("client-X") is None
 
 
 async def test_dynamic_pin_server_times_out_mid_attempt(
@@ -440,6 +465,46 @@ async def test_dynamic_pin_length_below_client_floor_aborts() -> None:
     assert excinfo.value.reason is PairAbortReason.PIN_LENGTH_UNACCEPTABLE
     assert emitted == []  # no PIN emitted on a length rejection
     assert await client_store.pin_failure_count(PairMethod.DYNAMIC_PIN) == 0
+    assert _added_records(await client_store.list_records()) == []
+    assert await server_store.record_by_client_id("client-A") is None
+
+
+async def test_dynamic_pin_length_below_spec_minimum_aborts() -> None:
+    """A config min under MIN_PIN_DIGITS still aborts cleanly rather than raising ValueError."""
+    client_ews, server_ews, _client_raw, _server_raw = _paired_encrypted_ws()
+    client_store = InMemoryClientPairingStore()
+    cfg = await client_store.get_pairing_config()
+    await client_store.store_pairing_config(replace(cfg, dynamic_pin_min_length=2))
+    server_store = InMemoryServerPairingStore()
+
+    async def emit(pin: str) -> None:
+        pass
+
+    async def provide() -> str:
+        return "00"
+
+    with pytest.raises(PairingAbortError) as excinfo:
+        await asyncio.gather(
+            run_dynamic_pin_client(
+                client_ews,
+                handshake_hash=_HANDSHAKE_HASH,
+                pairing_index=0,
+                pin_emitter=emit,
+                server_id="server-X",
+                store=client_store,
+            ),
+            run_dynamic_pin_server(
+                server_ews,
+                handshake_hash=_HANDSHAKE_HASH,
+                pairing_index=0,
+                pin_length=2,
+                pin_provider=provide,
+                client_id="client-A",
+                store=server_store,
+            ),
+        )
+
+    assert excinfo.value.reason is PairAbortReason.PIN_LENGTH_UNACCEPTABLE
     assert _added_records(await client_store.list_records()) == []
     assert await server_store.record_by_client_id("client-A") is None
 

@@ -162,6 +162,8 @@ class SendspinServer:
         self._initial_connect_succeeded: set[str] = set()
         self._connection_options: dict[str, _ServerInitiatedConnectionOptions] = {}
         self._connection_reasons: dict[str, ConnectionReason] = {}  # url → reason
+        # Pairing intents handed to an already-running dial task, consumed on its next dial.
+        self._pending_pairing_attempts: dict[str, PairingAttempt] = {}
         self._client_urls: dict[str, str] = {}  # client_id → url
         self._external_stream_start_cbs: dict[str, ExternalStreamStartCallback] = {}
         self._external_registration_timeouts: dict[str, asyncio.Handle] = {}
@@ -411,7 +413,8 @@ class SendspinServer:
         from a configured hostname/IP, port, and path, then pass
         retry_initial_connection=True and retry_indefinitely=True.
 
-        ``pairing_attempt`` carries an operator-initiated pairing intent for this dial.
+        ``pairing_attempt`` carries an operator-initiated pairing intent for this dial;
+        when a dial task already exists it is queued for that task's next dial.
         """
         self._set_connection_options(
             url,
@@ -421,6 +424,8 @@ class SendspinServer:
         self._connection_reasons[url] = connection_reason
         prev_task = self._connection_tasks.get(url)
         if prev_task is not None:
+            if pairing_attempt is not None:
+                self._pending_pairing_attempts[url] = pairing_attempt
             if retry_event := self._retry_events.get(url):
                 retry_event.set()
             return
@@ -464,6 +469,8 @@ class SendspinServer:
 
         prev_task = self._connection_tasks.get(url)
         if prev_task is not None:
+            if pairing_attempt is not None:
+                self._pending_pairing_attempts[url] = pairing_attempt
             if retry_event := self._retry_events.get(url):
                 retry_event.set()
         else:
@@ -756,6 +763,8 @@ class SendspinServer:
                             self._initial_connect_succeeded.add(url)
                             self._resolve_initial_connect_waiters(url)
                         connection_started_s = time.monotonic()
+                        if pairing_attempt is None:
+                            pairing_attempt = self._pending_pairing_attempts.pop(url, None)
                         conn = SendspinConnection(
                             self,
                             wsock_client=wsock,
@@ -840,6 +849,7 @@ class SendspinServer:
         finally:
             self._connection_tasks.pop(url, None)
             self._retry_events.pop(url, None)
+            self._pending_pairing_attempts.pop(url, None)
             self._initial_connect_succeeded.discard(url)
             self._connection_options.pop(url, None)
             self._connection_reasons.pop(url, None)

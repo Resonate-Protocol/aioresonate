@@ -190,7 +190,8 @@ async def run_dynamic_pin_client(
             init = await _receive_pairing(ws, ServerPairInitMessage)
             nonce_a = _decode_field(init.payload.nonce_A, "nonce_A", expect_len=pin_mod.NONCE_SIZE)
             pin_length = init.payload.pin_length
-            min_length = (await store.get_pairing_config()).dynamic_pin_min_length
+            configured_min = (await store.get_pairing_config()).dynamic_pin_min_length
+            min_length = max(configured_min, pin_mod.MIN_PIN_DIGITS)
             if not min_length <= pin_length <= pin_mod.MAX_PIN_DIGITS:
                 await abort_pairing(ws, PairAbortReason.PIN_LENGTH_UNACCEPTABLE)
             pin = pin_mod.derive_pin(handshake_hash, nonce_a, nonce_b, pin_length)
@@ -410,6 +411,8 @@ async def run_static_pin_server(
         await _receive_pair_init(ws, pairing_index)
     async with asyncio.timeout(_SERVER_ATTEMPT_TIMEOUT_S):
         pin = await pin_provider()
+        if not pin_mod.is_valid_static_pin(pin):
+            raise PairingError("static PIN must be exactly 8 decimal digits")
         try:
             cpace = CPace.start(
                 role=CPaceRole.INITIATOR, prs=pin.encode("ascii"), sid=sid, ad=_PAKE_AD_SERVER
@@ -575,10 +578,16 @@ async def _receive_pairing[T: PairingMessage](ws: EncryptedWebSocket, expected: 
     return message
 
 
-async def receive_pairing_abort(ws: EncryptedWebSocket) -> NoReturn:
-    """Receive the ``pair/abort`` ending an unstarted attempt; every outcome raises."""
-    await _receive_pairing(ws, PairAbortMessage)
-    raise AssertionError("unreachable: receiving pair/abort raises")
+async def receive_pairing_abort(ws: EncryptedWebSocket) -> str:
+    """Await the ``pair/abort`` ending an unstarted attempt.
+
+    A ``pair/abort`` (or close, or another pairing frame) raises. A non-pairing
+    JSON frame, such as the ``server/activate`` leaving pairing, is returned raw
+    for the caller to interpret.
+    """
+    frame = await _receive_pairing_frame(ws, PairAbortMessage)
+    assert isinstance(frame, str)
+    return frame
 
 
 async def _receive_pair_init(ws: EncryptedWebSocket, pairing_index: int) -> ClientPairInitMessage:

@@ -80,6 +80,7 @@ from aiosendspin.models.management import (
     StorageAccounting,
 )
 from aiosendspin.models.types import (
+    CLOSING_ABORT_REASONS,
     Activity,
     ClientMessage,
     ConnectionReason,
@@ -102,6 +103,7 @@ from aiosendspin.noise.driver import (
 from aiosendspin.noise.keys import b64url_encode, psk_id_for
 from aiosendspin.noise.pairing import (
     LocalPairingAbortError,
+    PairingAbortError,
     PairingAttempt,
     PairingError,
     abort_pairing,
@@ -539,6 +541,11 @@ class SendspinConnection:
             self._initial_state_timeout_handle.cancel()
             self._initial_state_timeout_handle = None
 
+        if self._pairing_task and not self._pairing_task.done():
+            # Ends like end_pairing: the attempt aborts instead of waiting out its timeout.
+            self._pairing_task.cancel()
+            with suppress(PairingError, OSError, asyncio.CancelledError):
+                await self._pairing_task
         if self._writer_task and not self._writer_task.done():
             self._writer_task.cancel()
             with suppress(asyncio.CancelledError):
@@ -818,6 +825,13 @@ class SendspinConnection:
                 if self._url is not None
                 else ConnectionReason.DISCOVERY
             )
+            if connection_reason not in (ConnectionReason.DISCOVERY, ConnectionReason.PLAYBACK):
+                # Legacy clients parse the enum strictly and predate the other reasons.
+                self._logger.debug(
+                    "Clamping connection_reason %s to discovery for a legacy client",
+                    connection_reason.value,
+                )
+                connection_reason = ConnectionReason.DISCOVERY
             await transport.send_str(
                 LegacyServerHelloMessage(
                     payload=LegacyServerHelloPayload(
@@ -834,8 +848,15 @@ class SendspinConnection:
                 return False
             if self._is_pairing():
                 assert isinstance(transport, EncryptedWebSocket)
-                if not await self._pair(transport):
-                    return False
+                try:
+                    if not await self._pair(transport):
+                        return False
+                except PairingAbortError as exc:
+                    if exc.reason in CLOSING_ABORT_REASONS:
+                        raise
+                    # Non-closing abort reason: the connection stays open for a retry.
+                    self._logger.debug("Initial-connect pairing aborted: %s", exc)
+                    self._pairing_attempt = None
             await self._activate()
 
         if self.requires_initial_state():
@@ -858,7 +879,12 @@ class SendspinConnection:
 
     async def _ingest_client_hello(self, text: str) -> bool:
         """Validate and record the client/hello, attaching the client; False if rejected."""
-        message = self._deserialize_client_message(text)
+        try:
+            message = self._deserialize_client_message(text)
+        except (LookupError, TypeError, ValueError) as exc:
+            self._logger.error("Malformed client/hello: %s", exc)
+            await self.disconnect(retry_connection=False)
+            return False
         if not isinstance(message, ClientHelloMessage):
             self._logger.error("Expected client/hello, got %s", type(message).__name__)
             await self.disconnect(retry_connection=False)
@@ -918,6 +944,11 @@ class SendspinConnection:
             self._client = client
             if self._url is not None:
                 self._server.register_client_url(client_id, self._url)
+        else:
+            # Hello re-sent over the same connection after an in-band re-handshake.
+            self._client.refresh_identity_from_hello(
+                client_info, negotiated_roles=self._negotiated_roles
+            )
         return True
 
     async def _admit_legacy_client_id(self, client_id: str) -> bool:

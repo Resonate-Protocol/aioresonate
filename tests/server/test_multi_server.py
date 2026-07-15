@@ -25,11 +25,13 @@ from aiosendspin.models.types import (
     Activity,
     AudioCodec,
     ConnectionReason,
+    PairAbortReason,
     PlaybackStateType,
     PlayerCommand,
     Roles,
 )
 from aiosendspin.noise.keys import generate_psk, psk_id_for
+from aiosendspin.noise.pairing import PairingAbortError, RemotePairingAbortError
 from aiosendspin.noise.trust_store import (
     InMemoryServerPairingStore,
     PskCategory,
@@ -37,6 +39,7 @@ from aiosendspin.noise.trust_store import (
     ServerPairingStore,
     TrustedUnpairedClient,
 )
+from aiosendspin.noise.wire import EncryptedWebSocket
 from aiosendspin.server.client import SendspinClient
 from aiosendspin.server.clock import LoopClock
 from aiosendspin.server.connection import SendspinConnection
@@ -337,6 +340,74 @@ class TestLegacyServerHello:
         payloads = fake.sent_payloads()
         assert [p["type"] for p in payloads] == ["server/hello"]
         assert payloads[0]["payload"]["connection_reason"] == ConnectionReason.PLAYBACK.value
+
+    @pytest.mark.asyncio
+    async def test_legacy_hello_clamps_post_legacy_reasons(self, mock_server: _MockServer) -> None:
+        """Reasons legacy clients cannot parse are sent as discovery."""
+        url = "ws://192.168.1.100:8927/sendspin"
+        mock_server._connection_reasons[url] = ConnectionReason.MANAGEMENT  # noqa: SLF001
+        conn = SendspinConnection(mock_server, wsock_client=AsyncMock(), url=url)
+
+        fake = _FakeTransport()
+        conn._transport = fake  # type: ignore[assignment]  # noqa: SLF001
+        conn._pending_first_text = ClientHelloMessage(  # noqa: SLF001
+            payload=_player_hello("client-1")
+        ).to_json()
+        await conn._exchange_hellos()  # noqa: SLF001
+
+        reason = fake.sent_payloads()[0]["payload"]["connection_reason"]
+        assert reason == ConnectionReason.DISCOVERY.value
+
+
+class _FakePairingTransport(_FakeTransport, EncryptedWebSocket):
+    """A recording transport that satisfies the encrypted-transport check in pairing."""
+
+    # Shadow the EncryptedWebSocket properties so _FakeTransport.__init__ can assign them.
+    closed = False
+    close_code: int | None = None
+
+    def __init__(self, incoming: list[WSMessage] | None = None) -> None:
+        _FakeTransport.__init__(self, incoming)
+
+
+class TestInitialConnectPairingAbort:
+    """Aborted initial-connect pairing follows the spec's closing/non-closing split."""
+
+    @staticmethod
+    def _pairing_connection(
+        mock_server: _MockServer, reason: PairAbortReason
+    ) -> tuple[SendspinConnection, _FakePairingTransport]:
+        conn = SendspinConnection(mock_server, wsock_client=AsyncMock())
+        psk = generate_psk()
+        conn._client_id = "client-1"  # noqa: SLF001
+        conn._noise_psk = ResolvedPsk(  # noqa: SLF001
+            psk_id=psk_id_for(psk), psk=psk, category=PskCategory.PAIRING
+        )
+        fake = _FakePairingTransport([_client_hello_frame("client-1")])
+        conn._transport = fake  # noqa: SLF001
+        conn._pair = AsyncMock(  # type: ignore[method-assign]  # noqa: SLF001
+            side_effect=RemotePairingAbortError(reason)
+        )
+        return conn, fake
+
+    @pytest.mark.asyncio
+    async def test_nonclosing_abort_keeps_connection(self, mock_server: _MockServer) -> None:
+        """A non-closing abort reason ends pairing with a leave activate, not a teardown."""
+        conn, fake = self._pairing_connection(mock_server, PairAbortReason.ATTEMPT_TIMEOUT)
+
+        assert await conn._exchange_hellos() is True  # noqa: SLF001
+
+        payloads = fake.sent_payloads()
+        assert payloads[-1]["type"] == "server/activate"
+        assert Activity.PAIRING.value not in payloads[-1]["payload"]["activities"]
+
+    @pytest.mark.asyncio
+    async def test_closing_abort_propagates(self, mock_server: _MockServer) -> None:
+        """A closing abort reason still tears the connection down."""
+        conn, _ = self._pairing_connection(mock_server, PairAbortReason.CONCURRENT_ATTEMPT)
+
+        with pytest.raises(PairingAbortError):
+            await conn._exchange_hellos()  # noqa: SLF001
 
 
 class TestHandshakeOrdering:

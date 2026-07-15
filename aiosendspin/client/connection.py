@@ -55,6 +55,7 @@ from aiosendspin.models.management import (
 )
 from aiosendspin.models.player import PlayerStatePayload, StreamStartPlayer
 from aiosendspin.models.types import (
+    CLOSING_ABORT_REASONS,
     Activity,
     AudioCodec,
     GoodbyeReason,
@@ -137,12 +138,6 @@ UNSYNCED_PLAY_LEAD_US: int = 500_000
 
 # PIN-pairing method families, subject to lockout and the locked_out descriptor.
 _PIN_METHODS: list[PairMethod] = [PairMethod.DYNAMIC_PIN, PairMethod.STATIC_PIN]
-
-# Abort reasons that close the connection; every other reason keeps it open.
-_CLOSING_ABORT_REASONS: list[PairAbortReason] = [
-    PairAbortReason.CONCURRENT_ATTEMPT,
-    PairAbortReason.METHOD_NOT_SUPPORTED,
-]
 
 # psk_id of the Sentinel PSK — the client matches it during PIN pairing / discovery.
 _SENTINEL_PSK_ID: str = psk_id_for(SENTINEL_PSK)
@@ -486,26 +481,34 @@ class SendspinConnection:
     async def _pair(self) -> None:
         """Run one pairing attempt; on a non-closing abort stay in pairing for a retry."""
         await self._pause_time_sync()
-        try:
-            async with self._exchange():
-                leftover = await self._run_pairing_protocol()
-                activate = await self._resolve_pairing_activate(leftover)
-        except PairingAbortError as err:
-            if err.reason in _CLOSING_ABORT_REASONS:
-                await self.disconnect()
-            else:
-                logger.info("Pairing attempt with %s ended: %s", self._server_id, err.reason.value)
+        while True:
+            try:
+                async with self._exchange():
+                    leftover = await self._run_pairing_protocol()
+                    activate = await self._resolve_pairing_activate(leftover)
+            except PairingAbortError as err:
+                if err.reason in CLOSING_ABORT_REASONS:
+                    await self.disconnect()
+                else:
+                    logger.info(
+                        "Pairing attempt with %s ended: %s", self._server_id, err.reason.value
+                    )
+                return
+            if (reason := await self._apply_activation(activate)) is not None:
+                await self._goodbye_and_disconnect(reason)
+                return
+            if self.is_pairing:
+                # The leave activate redeclared pairing: it admits the next attempt.
+                continue
+            self._resume_time_sync()
+            await self._send_full_client_state()
             return
-        if (reason := await self._apply_activation(activate)) is not None:
-            await self._goodbye_and_disconnect(reason)
-            return
-        self._time_task = self._client.loop.create_task(self._time_sync_loop())
-        await self._send_full_client_state()
 
     async def _run_pairing_protocol(self) -> str | None:
         """Run the server-selected method's exchange.
 
-        Returns ``None`` on finalize, else the raw ``server/activate`` leave frame.
+        Returns ``None`` on finalize, else the raw ``server/activate`` leave frame
+        (from the method run, or from the pairing window closing before an attempt).
         """
         assert self._ws is not None
         assert self._server_id is not None
@@ -526,7 +529,8 @@ class SendspinConnection:
         if method is PairMethod.STATIC_PIN:
             static_pin = await store.static_pin()
             assert static_pin is not None  # offered only when configured
-            await self._await_pairing_window()
+            if (leave := await self._await_pairing_window()) is not None:
+                return leave
             with self._attempt_in_progress():
                 return await run_static_pin_client(
                     self._ws,
@@ -559,10 +563,12 @@ class SendspinConnection:
         finally:
             self._pairing_attempt_in_progress = False
 
-    async def _await_pairing_window(self) -> None:
+    async def _await_pairing_window(self) -> str | None:
         """Wait for the operator gesture without leaving the socket unread.
 
-        Anything received during the wait - the ``pair/abort`` withdrawing the
+        Returns the raw ``server/activate`` frame if the server leaves pairing before
+        an attempt started, else ``None`` once the gesture arrives.
+        Anything else received during the wait - the ``pair/abort`` withdrawing the
         attempt, an unexpected frame, or a close - raises out of the pending receive.
         """
         assert self._client.pairing_window is not None  # offered only when set
@@ -581,7 +587,8 @@ class SendspinConnection:
         if window in done:
             await window
         if receive in done:
-            await receive
+            return await receive
+        return None
 
     async def _resolve_pairing_activate(self, leftover: str | None) -> ServerActivatePayload:
         """Resolve the server/activate that ends pairing, re-handshaking first if it finalized."""
@@ -593,12 +600,12 @@ class SendspinConnection:
                 logger.info("Paired with server %s via %s", self._server_id, method.value)
                 await self._rehandshake()
                 return await self._exchange_hellos()
-            # Server left pairing without finalizing: apply the server/activate it should have sent.
-            logger.info("Verified pairing with server %s via %s", self._server_id, method.value)
+            # Server left pairing without finalizing: apply the leave server/activate.
+            logger.info("Server %s left pairing without finalizing", self._server_id)
             message = ServerMessage.from_json(leftover)
             if not isinstance(message, ServerActivateMessage):
                 raise RuntimeError(  # noqa: TRY004 - protocol violation, not a type error
-                    f"Expected server/activate after pair-finalize, got {type(message).__name__}"
+                    f"Expected server/activate ending pairing, got {type(message).__name__}"
                 )
             return message.payload
 
@@ -679,14 +686,16 @@ class SendspinConnection:
         message = ClientGoodbyeMessage(
             payload=ClientGoodbyePayload(reason=reason),
         )
-        await self._send_message(message.to_json())
+        # A goodbye precedes disconnect, so it must reach the wire even mid-exchange.
+        await self._send_message(message.to_json(), force=True)
 
     async def send_pair_abort(self, reason: PairAbortReason) -> None:
         """Send a pair/abort to the server (for a pairing connection lost to arbitration)."""
         if not self.connected:
             return
         message = PairAbortMessage(payload=PairAbortPayload(reason=reason))
-        await self._send_message(message.to_json())
+        # A displaced connection's own exchange flag is still set; send regardless (spec).
+        await self._send_message(message.to_json(), force=True)
 
     @property
     def is_pairing(self) -> bool:
@@ -843,12 +852,13 @@ class SendspinConnection:
         message = ClientTimeMessage(payload=ClientTimePayload(client_transmitted=now_us))
         await self._send_message(message.to_json())
 
-    async def _send_message(self, payload: str) -> None:
+    async def _send_message(self, payload: str, *, force: bool = False) -> None:
+        """Send a JSON frame; ``force`` bypasses the in-band-exchange suppression."""
         async with self._send_lock:
             # Re-check under the lock: disconnect() can null _ws while we await it.
             if self._ws is None:
                 raise RuntimeError("WebSocket is not connected")
-            if self._exchange_in_progress:
+            if self._exchange_in_progress and not force:
                 return
             await self._ws.send_str(payload)
 
@@ -1001,6 +1011,7 @@ class SendspinConnection:
         if self.is_pairing:
             await self._pair()
             return
+        self._resume_time_sync()
         if resync or not was_player_active:
             await self._send_full_client_state()
 
@@ -1010,6 +1021,11 @@ class SendspinConnection:
             with suppress(asyncio.CancelledError):
                 await self._time_task
             self._time_task = None
+
+    def _resume_time_sync(self) -> None:
+        """Restart the time-sync loop if it is not running."""
+        if self._time_task is None or self._time_task.done():
+            self._time_task = self._client.loop.create_task(self._time_sync_loop())
 
     def _handle_server_time(self, payload: ServerTimePayload) -> None:
         now_us = self.now_us()
@@ -1150,8 +1166,11 @@ class SendspinConnection:
             case ManagementAddRecordMessage(payload=request):
                 payload, effect = await handle_add_record(store, request)
             case ManagementRemoveRecordMessage(payload=request):
+                assert self._noise_psk is not None
                 payload, effect = await handle_remove_record(
-                    store, request, requester_server_id=self._server_id
+                    store,
+                    request,
+                    requester_psk_id=self._noise_psk.psk_id,
                 )
             case ManagementGetPairingConfigMessage():
                 payload, effect = await handle_get_pairing_config(

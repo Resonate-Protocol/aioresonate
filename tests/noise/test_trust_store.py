@@ -338,6 +338,14 @@ async def test_client_static_pin_lifecycle(client_store: ClientPairingStore) -> 
     await client_store.clear_static_pin()
 
 
+@pytest.mark.parametrize("bad_pin", ["1234", "123456789", "abcdefgh", "1234567 "])
+async def test_set_static_pin_rejects_non_8_digit(bad_pin: str) -> None:
+    """The static PIN must be exactly 8 decimal digits (spec definition)."""
+    store = InMemoryClientPairingStore()
+    with pytest.raises(ValueError, match="8 decimal digits"):
+        await store.set_static_pin(bad_pin)
+
+
 async def test_client_store_resolves_by_psk_id_and_finds_by_server_id(
     client_store: ClientPairingStore,
 ) -> None:
