@@ -102,6 +102,7 @@ from aiosendspin.noise.driver import (
 from aiosendspin.noise.keys import b64url_encode, psk_id_for
 from aiosendspin.noise.pairing import (
     LocalPairingAbortError,
+    PairingAbortError,
     PairingAttempt,
     PairingError,
     abort_pairing,
@@ -846,8 +847,18 @@ class SendspinConnection:
                 return False
             if self._is_pairing():
                 assert isinstance(transport, EncryptedWebSocket)
-                if not await self._pair(transport):
-                    return False
+                try:
+                    if not await self._pair(transport):
+                        return False
+                except PairingAbortError as exc:
+                    if exc.reason in (
+                        PairAbortReason.CONCURRENT_ATTEMPT,
+                        PairAbortReason.METHOD_NOT_SUPPORTED,
+                    ):
+                        raise
+                    # Non-closing abort reason: the connection stays open for a retry.
+                    self._logger.debug("Initial-connect pairing aborted: %s", exc)
+                    self._pairing_attempt = None
             await self._activate()
 
         if self.requires_initial_state():
