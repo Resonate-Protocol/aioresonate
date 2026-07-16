@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
@@ -63,36 +64,45 @@ def test_player_role_has_role_id() -> None:
     assert role.role_id == "player@v1"
 
 
+def test_player_client_state_deviations_flags_legacy_player_state() -> None:
+    """A nested legacy player.state is a deviation even when available is present."""
+    role = PlayerV1Role(client=_make_client_stub())
+    reasons = role.client_state_deviations(
+        ClientStatePayload(available=True, player=PlayerStatePayload(state="synchronized"))
+    )
+    assert any("player.state" in r for r in reasons)
+
+
+def test_player_client_state_deviations_accepts_compliant_state() -> None:
+    """A compliant client/state carrying `available` reports no deviations."""
+    role = PlayerV1Role(client=_make_client_stub())
+    deviations = role.client_state_deviations(
+        ClientStatePayload(available=True, player=PlayerStatePayload())
+    )
+    assert deviations == []
+
+
 @pytest.mark.asyncio
-async def test_player_role_flags_legacy_state_fallback() -> None:
-    """A client/state with no top-level `available` but a legacy player.state is flagged."""
+async def test_player_on_client_state_uses_legacy_state_when_available_absent() -> None:
+    """on_client_state derives availability from legacy player.state when available is absent."""
     client = _make_client_stub()
     client.handle_availability_change = AsyncMock()
     role = PlayerV1Role(client=client)
-    role.on_client_state(ClientStatePayload(player=PlayerStatePayload(state="synchronized")))
-    client.flag_noncompliance.assert_called_once()
+    role.on_client_state(ClientStatePayload(player=PlayerStatePayload(state="external_source")))
+    await asyncio.sleep(0)
+    client.handle_availability_change.assert_awaited_once_with(available=False)
 
 
 @pytest.mark.asyncio
-async def test_player_role_no_flag_when_available_present() -> None:
-    """A spec-compliant client/state carrying `available` is not flagged."""
-    client = _make_client_stub()
-    client.handle_availability_change = AsyncMock()
-    role = PlayerV1Role(client=client)
-    role.on_client_state(ClientStatePayload(available=True, player=PlayerStatePayload()))
-    client.flag_noncompliance.assert_not_called()
-
-
-@pytest.mark.asyncio
-async def test_player_role_flags_player_state_even_when_available_present() -> None:
-    """A nested legacy player.state is flagged even when top-level available is present."""
+async def test_player_on_client_state_ignores_legacy_state_when_available_present() -> None:
+    """on_client_state does not derive availability from player.state when available is present."""
     client = _make_client_stub()
     client.handle_availability_change = AsyncMock()
     role = PlayerV1Role(client=client)
     role.on_client_state(
         ClientStatePayload(available=True, player=PlayerStatePayload(state="synchronized"))
     )
-    client.flag_noncompliance.assert_called_once()
+    await asyncio.sleep(0)
     client.handle_availability_change.assert_not_called()
 
 
@@ -182,19 +192,21 @@ def test_player_role_no_flag_for_declared_format_request() -> None:
 
 
 def test_player_role_flags_volume_without_declared_support() -> None:
-    """A volume field sent with no declared volume command is flagged."""
-    client = _make_client_stub()  # player_support is None
-    role = PlayerV1Role(client=client)
-    role.on_client_state(ClientStatePayload(available=True, player=PlayerStatePayload(volume=50)))
-    client.flag_noncompliance.assert_called_once()
+    """A volume field sent with no declared volume command is a deviation."""
+    role = PlayerV1Role(client=_make_client_stub())  # player_support is None
+    reasons = role.client_state_deviations(
+        ClientStatePayload(available=True, player=PlayerStatePayload(volume=50))
+    )
+    assert any("volume" in r for r in reasons)
 
 
 def test_player_role_flags_muted_without_declared_support() -> None:
-    """A muted field sent with no declared mute command is flagged."""
-    client = _make_client_stub()  # player_support is None
-    role = PlayerV1Role(client=client)
-    role.on_client_state(ClientStatePayload(available=True, player=PlayerStatePayload(muted=True)))
-    client.flag_noncompliance.assert_called_once()
+    """A muted field sent with no declared mute command is a deviation."""
+    role = PlayerV1Role(client=_make_client_stub())  # player_support is None
+    reasons = role.client_state_deviations(
+        ClientStatePayload(available=True, player=PlayerStatePayload(muted=True))
+    )
+    assert any("muted" in r for r in reasons)
 
 
 def test_player_role_has_role_family() -> None:

@@ -418,6 +418,10 @@ class Role(ABC):
         """Spec requirements this role's part of the initial client/state does not meet."""
         return []
 
+    def client_state_deviations(self, payload: ClientStatePayload) -> list[str]:  # noqa: ARG002
+        """Spec violations in any client/state for this role, checked before it is applied."""
+        return []
+
     def on_group_changed(self, group: object) -> None:  # noqa: ARG002
         """Handle group changes by re-subscribing to the new GroupRole."""
         self._unsubscribe_from_group_role()

@@ -204,3 +204,20 @@ async def test_strict_rejection_applies_no_side_effects() -> None:
         )
     client.mark_connected.assert_not_called()
     client.handle_availability_change.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_role_client_state_deviation_flagged_before_side_effects() -> None:
+    """A role's client/state deviation is flagged before availability is applied."""
+    conn, client = _conn_with_client()
+    conn._initial_state_received = True  # noqa: SLF001
+    client.flag_noncompliance.side_effect = ClientComplianceError("nope")
+    client.handle_availability_change = AsyncMock()
+    role = _role("player")
+    role.client_state_deviations.return_value = ["used legacy player.state"]
+    client.active_roles = [role]
+    with pytest.raises(ClientComplianceError):
+        await conn._handle_message(  # noqa: SLF001
+            ClientStateMessage(payload=ClientStatePayload(available=False)), timestamp_us=0
+        )
+    client.handle_availability_change.assert_not_called()

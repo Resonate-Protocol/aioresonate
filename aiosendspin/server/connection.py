@@ -1651,6 +1651,9 @@ class SendspinConnection:
             if payload.legacy_state_used:
                 self._flag_noncompliance("client/state used the legacy top-level 'state' field")
             self._flag_inactive_role_payloads("client/state", {"player": payload.player})
+            for role in self._client.active_roles:
+                for reason in role.client_state_deviations(payload):
+                    self._flag_noncompliance(f"client/state {reason}")
 
             if is_initial:
                 self._initial_state_received = True

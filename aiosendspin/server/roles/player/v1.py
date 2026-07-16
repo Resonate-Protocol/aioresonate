@@ -654,45 +654,50 @@ class PlayerV1Role(Role):
             reasons.append("omitted muted despite declaring the mute command")
         return reasons
 
+    def client_state_deviations(self, payload: ClientStatePayload) -> list[str]:
+        """Report player fields in a client/state that violate the spec."""
+        state = payload.player
+        if state is None:
+            return []
+        support = self._client.info.player_support
+        commands = support.supported_commands if support else []
+        reasons: list[str] = []
+        if state.state is not None:
+            reasons.append("used legacy player.state instead of top-level available")
+        if state.volume is not None and PlayerCommand.VOLUME not in commands:
+            reasons.append("sent volume without declaring the volume command")
+        if state.muted is not None and PlayerCommand.MUTE not in commands:
+            reasons.append("sent muted without declaring the mute command")
+        return reasons
+
     def on_client_state(self, payload: ClientStatePayload) -> None:
-        """Handle player-specific fields in client/state."""
+        """Apply player-specific fields from client/state (validation runs earlier)."""
         state = payload.player
         if state is None:
             return
 
-        if state.state is not None:
-            self._client.flag_noncompliance(
-                "client/state used legacy player.state instead of top-level available"
+        # Fall back to legacy player.state for availability only when the compliant
+        # top-level field is absent.
+        if state.state is not None and payload.available is None:
+            create_task(
+                self._client.handle_availability_change(available=state.state != "external_source")
             )
-            # Fall back to player.state for availability only when the compliant
-            # top-level field is absent.
-            if payload.available is None:
-                create_task(
-                    self._client.handle_availability_change(
-                        available=state.state != "external_source"
-                    )
-                )
 
         support = self._client.info.player_support
+        commands = support.supported_commands if support else []
         changed = False
 
-        if state.volume is not None:
-            if not support or PlayerCommand.VOLUME not in support.supported_commands:
-                self._client.flag_noncompliance(
-                    "client/state sent volume without declaring the volume command"
-                )
-            elif self.volume != state.volume:
-                self.volume = state.volume
-                changed = True
+        if (
+            state.volume is not None
+            and PlayerCommand.VOLUME in commands
+            and self.volume != state.volume
+        ):
+            self.volume = state.volume
+            changed = True
 
-        if state.muted is not None:
-            if not support or PlayerCommand.MUTE not in support.supported_commands:
-                self._client.flag_noncompliance(
-                    "client/state sent muted without declaring the mute command"
-                )
-            elif self.muted != state.muted:
-                self.muted = state.muted
-                changed = True
+        if state.muted is not None and PlayerCommand.MUTE in commands and self.muted != state.muted:
+            self.muted = state.muted
+            changed = True
 
         if changed:
             self.emit_client_event(VolumeChangedEvent(volume=self.volume, muted=self.muted))
