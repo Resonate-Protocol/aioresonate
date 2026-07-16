@@ -585,12 +585,13 @@ class SendspinConnection:
         if self._initial_state_received:
             return
         self._initial_state_timeout_handle = None
-        self._logger.warning(
-            "Client %s failed to send required initial state within timeout (spec violation)",
-            self._client_id or "unknown",
-        )
-        # Be lenient: keep the connection and mark the client as connected anyway.
-        # Some clients may not send an initial state update promptly.
+        try:
+            self._flag_noncompliance("did not send the required initial client/state in time")
+        except ClientComplianceError:
+            # A timer callback can't propagate into the message loop, so tear down here.
+            create_task(self.disconnect(retry_connection=False))
+            return
+        # Lenient: keep the connection and mark the client connected anyway.
         if self._client is not None:
             self._initial_state_received = True
             self._client.mark_connected()

@@ -18,6 +18,7 @@ from aiosendspin.models.core import (
 from aiosendspin.models.management import ManagementResultMessage, ManagementResultPayload
 from aiosendspin.models.types import ManagementResult
 from aiosendspin.server.clock import LoopClock
+from aiosendspin.server.compliance import ClientComplianceError
 from aiosendspin.server.connection import SendspinConnection
 
 
@@ -27,6 +28,9 @@ class _DummyServer:
     clock: Any
     id: str = "srv"
     name: str = "server"
+
+    def on_client_first_connect(self, client_id: str) -> None:
+        """No-op: the dispatch tests don't exercise first-connect side effects."""
 
 
 @pytest.mark.asyncio
@@ -108,3 +112,24 @@ async def test_initial_state_complete_state_is_not_flagged() -> None:
     client.active_roles = [_role_mock([])]
     conn._flag_initial_state_deviations(ClientStatePayload(available=True))  # noqa: SLF001
     client.flag_noncompliance.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_missing_initial_state_rejects_when_flagged() -> None:
+    """A never-sent initial state hard-disconnects when the flag raises."""
+    conn, client = _conn_with_client()
+    client.flag_noncompliance.side_effect = ClientComplianceError("nope")
+    conn.disconnect = AsyncMock()  # type: ignore[method-assign]
+    conn._initial_state_timeout_callback()  # noqa: SLF001
+    await asyncio.sleep(0)
+    conn.disconnect.assert_awaited_once_with(retry_connection=False)
+    client.mark_connected.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_missing_initial_state_marks_connected_when_lenient() -> None:
+    """A never-sent initial state is tolerated: the client is marked connected."""
+    conn, client = _conn_with_client()
+    conn._initial_state_timeout_callback()  # noqa: SLF001
+    assert conn._initial_state_received is True  # noqa: SLF001
+    client.mark_connected.assert_called_once()
