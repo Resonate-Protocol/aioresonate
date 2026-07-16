@@ -658,6 +658,12 @@ class VisualizerV1Role(Role):
         if request is None:
             return
 
+        if request.buffer_capacity is not None:
+            # buffer_capacity is not a visualizer stream/request-format field per spec.
+            self._client.flag_noncompliance(
+                "stream/request-format set buffer_capacity, not a visualizer field here"
+            )
+
         invalid = [
             name
             for name, value in (

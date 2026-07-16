@@ -144,6 +144,16 @@ def test_visualizer_role_no_flag_for_valid_request_fields() -> None:
     client.flag_noncompliance.assert_not_called()
 
 
+def test_visualizer_role_flags_request_buffer_capacity() -> None:
+    """buffer_capacity is not a visualizer stream/request-format field and is flagged."""
+    client = _make_client_stub()
+    role = VisualizerV1Role(client=client)
+    role.on_stream_request_format(
+        StreamRequestFormatPayload(visualizer=StreamRequestFormatVisualizer(buffer_capacity=32_768))
+    )
+    client.flag_noncompliance.assert_called_once()
+
+
 def test_on_connect_subscribes_to_group_role() -> None:
     """On connect subscribes to group role."""
     client = _make_client_stub()
