@@ -803,6 +803,37 @@ class TestCustomRoleSupportParsing:
         assert isinstance(msg, ClientHelloMessage)
         assert msg.payload.legacy_support_keys_used is None
 
+    def test_deserialize_client_hello_ignores_spoofed_unlisted_record(self) -> None:
+        """A hello with no unlisted support records nothing, even if it spoofs the field."""
+        raw = orjson.dumps(
+            {
+                "type": "client/hello",
+                "payload": {
+                    "client_id": "c1",
+                    "name": "Client",
+                    "version": 1,
+                    "supported_roles": ["player@v1"],
+                    "unlisted_support_roles": ["artwork@v1"],
+                    "player@v1_support": {
+                        "supported_formats": [
+                            {
+                                "codec": "pcm",
+                                "sample_rate": 48000,
+                                "bit_depth": 16,
+                                "channels": 2,
+                            }
+                        ],
+                        "buffer_capacity": 100_000,
+                        "supported_commands": [],
+                    },
+                },
+            }
+        ).decode()
+
+        msg = SendspinConnection._deserialize_client_message(raw)  # noqa: SLF001
+        assert isinstance(msg, ClientHelloMessage)
+        assert msg.payload.unlisted_support_roles is None
+
     def test_legacy_visualizer_support_key_is_not_normalized_to_v1(self) -> None:
         """Legacy visualizer_support must not be rewritten to visualizer@v1_support."""
         raw = orjson.dumps(
