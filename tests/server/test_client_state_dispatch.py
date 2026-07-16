@@ -143,6 +143,24 @@ def _role(family: str) -> MagicMock:
 
 
 @pytest.mark.asyncio
+async def test_binary_is_held_until_initial_state() -> None:
+    """Binary enqueued before the initial client/state is buffered, then flushed on arrival."""
+    conn, client = _conn_with_client()
+    role = _role("artwork")
+    role.requires_initial_state.return_value = True
+    client.active_roles = [role]
+
+    conn.send_binary(b"snapshot", role="artwork", timestamp_us=0, message_type=30)
+    assert not conn._role_queues.get("artwork")  # nothing on the wire yet  # noqa: SLF001
+    assert len(conn._pending_binary) == 1  # noqa: SLF001
+
+    conn._initial_state_received = True  # noqa: SLF001
+    conn._flush_pending_binary()  # noqa: SLF001
+    assert conn._pending_binary == []  # noqa: SLF001
+    assert conn._role_queues.get("artwork")  # now enqueued  # noqa: SLF001
+
+
+@pytest.mark.asyncio
 async def test_client_state_player_object_for_inactive_role_is_flagged() -> None:
     """A player state object with no active player role is flagged."""
     conn, client = _conn_with_client()

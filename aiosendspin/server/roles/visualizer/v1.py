@@ -244,6 +244,10 @@ class VisualizerV1Role(Role):
         else:
             self._buffer_tracker.capacity_bytes = capacity
 
+    def requires_initial_state(self) -> bool:
+        """Visualizer receives server binary, gated on the client's initial state."""
+        return True
+
     def on_connect(self) -> None:
         """Initialize stream config and subscribe to group role."""
         self._init_stream_config()

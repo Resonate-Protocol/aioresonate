@@ -38,6 +38,7 @@ from collections import defaultdict, deque
 from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import dataclass
+from functools import partial
 from typing import TYPE_CHECKING, Any, cast
 
 import orjson
@@ -300,6 +301,9 @@ class SendspinConnection:
 
         self._initial_state_received = False
         self._initial_state_timeout_handle: asyncio.TimerHandle | None = None
+        # Binary held while a role that receives binary awaits the initial client/state.
+        # The spec forbids sending binary before it; flushed once the state arrives.
+        self._pending_binary: list[Callable[[], None]] = []
 
         self._last_goodbye_reason: GoodbyeReason | None = None
         self._epoch_by_role: defaultdict[str, int] = defaultdict(int)
@@ -360,6 +364,12 @@ class SendspinConnection:
             return False
         return any(role.requires_initial_state() for role in self._client.active_roles)
 
+    def _flush_pending_binary(self) -> None:
+        """Enqueue binary held until the initial client/state arrived."""
+        pending, self._pending_binary = self._pending_binary, []
+        for send in pending:
+            send()
+
     def _flag_initial_state_deviations(self, payload: ClientStatePayload) -> None:
         """Flag spec requirements the initial client/state must satisfy but does not."""
         reasons: list[str] = []
@@ -414,6 +424,22 @@ class SendspinConnection:
             buffer_byte_count: Byte count for buffer tracking.
             duration_us: Duration for buffer tracking.
         """
+        if self.requires_initial_state() and not self._initial_state_received:
+            # No binary before the client's initial state; replay once it arrives.
+            self._pending_binary.append(
+                partial(
+                    self.send_binary,
+                    data,
+                    role=role,
+                    timestamp_us=timestamp_us,
+                    message_type=message_type,
+                    buffer_end_time_us=buffer_end_time_us,
+                    buffer_byte_count=buffer_byte_count,
+                    duration_us=duration_us,
+                )
+            )
+            return
+
         if self._is_role_queue_full(role):
             self._disconnect_due_to_queue_overflow(
                 f"Role queue full for {role} ({len(self._role_queues.get(role, []))}/"
@@ -605,6 +631,7 @@ class SendspinConnection:
             self._initial_state_received = True
             self._client.mark_connected()
             self._server.on_client_first_connect(self._client.client_id)
+            self._flush_pending_binary()
 
     @staticmethod
     def _first_registered_role_id_in_family(
@@ -1632,6 +1659,7 @@ class SendspinConnection:
                     self._initial_state_timeout_handle = None
                 self._client.mark_connected()
                 self._server.on_client_first_connect(self._client.client_id)
+                self._flush_pending_binary()
 
             if payload.available is not None and payload.available != self._client.available:
                 await self._client.handle_availability_change(available=payload.available)

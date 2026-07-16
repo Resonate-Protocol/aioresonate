@@ -64,6 +64,10 @@ class ArtworkV1Role(Role):
         """Role family name for protocol messages."""
         return "artwork"
 
+    def requires_initial_state(self) -> bool:
+        """Artwork receives server binary, gated on the client's initial state."""
+        return True
+
     def on_connect(self) -> None:
         """Initialize channel configs from client hello and subscribe to group."""
         self._init_channel_configs()
