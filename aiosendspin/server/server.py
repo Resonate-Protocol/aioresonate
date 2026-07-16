@@ -86,10 +86,12 @@ class ClientRemovedEvent(SendspinEvent):
 
 @dataclass
 class ClientReconnectedEvent(SendspinEvent):
-    """A previously-disconnected client reconnected.
+    """A previously-connected client reconnected with unchanged hello.
 
-    Fired on every reconnect regardless of hello-payload changes.
-    Server-side only — not emitted by the client.
+    Fired only when a client reconnects with the same ``ClientHelloPayload``
+    as before — i.e. no capabilities, name, or role set changed.
+    Does **not** fire on the first-ever connection of a new client;
+    subscribe to ``ClientConnectedEvent`` for that.
     """
 
     client_id: str
@@ -103,8 +105,11 @@ class ClientConnectedEvent(SendspinEvent):
     brand-new client and subsequent reconnects alike. Complementary to
     ``ClientDisconnectedEvent`` which fires when the transport goes down.
 
-    Consumers that only care about reconnects should subscribe to
-    ``ClientReconnectedEvent`` instead.
+    .. note::
+       This event may fire **before** ``ClientAddedEvent`` for new clients
+       (the client is added to the registry later in the attach flow).
+       Consumers should not assume the client is already in the registry
+       when handling this event.
     """
 
     client_id: str
