@@ -168,6 +168,22 @@ def test_player_role_no_flag_for_declared_format_request() -> None:
     client.flag_noncompliance.assert_not_called()
 
 
+def test_player_role_flags_volume_without_declared_support() -> None:
+    """A volume field sent with no declared volume command is flagged."""
+    client = _make_client_stub()  # player_support is None
+    role = PlayerV1Role(client=client)
+    role.on_client_state(ClientStatePayload(available=True, player=PlayerStatePayload(volume=50)))
+    client.flag_noncompliance.assert_called_once()
+
+
+def test_player_role_flags_muted_without_declared_support() -> None:
+    """A muted field sent with no declared mute command is flagged."""
+    client = _make_client_stub()  # player_support is None
+    role = PlayerV1Role(client=client)
+    role.on_client_state(ClientStatePayload(available=True, player=PlayerStatePayload(muted=True)))
+    client.flag_noncompliance.assert_called_once()
+
+
 def test_player_role_has_role_family() -> None:
     """PlayerV1Role has role_family of 'player'."""
     client = _make_client_stub()

@@ -388,6 +388,34 @@ class TestEncryptedActivities:
         conn.disconnect.assert_awaited_once_with(retry_connection=False)
 
     @pytest.mark.asyncio
+    async def test_client_binary_frame_rejected_when_strict(self) -> None:
+        """A client binary frame ends the loop when noncompliance is disallowed."""
+
+        class _AsyncIterTransport:
+            close_code = 1000
+
+            def __init__(self, msgs: list[WSMessage]) -> None:
+                self._msgs = msgs
+
+            def __aiter__(self) -> _AsyncIterTransport:
+                return self
+
+            async def __anext__(self) -> WSMessage:
+                if not self._msgs:
+                    raise StopAsyncIteration
+                return self._msgs.pop(0)
+
+        loop = asyncio.get_running_loop()
+        strict_server = _MockServer(
+            loop=loop, clock=LoopClock(loop), allow_noncompliant_clients=False
+        )
+        conn = SendspinConnection(strict_server, wsock_client=AsyncMock())
+        conn._transport = _AsyncIterTransport([WSMessage(WSMsgType.BINARY, b"\x00", "")])  # type: ignore[assignment]  # noqa: SLF001
+
+        await conn._run_message_loop()  # noqa: SLF001
+        assert conn._closing is True  # noqa: SLF001
+
+    @pytest.mark.asyncio
     async def test_unencrypted_hello_without_version_is_flagged(
         self, mock_server: _MockServer, caplog: pytest.LogCaptureFixture
     ) -> None:

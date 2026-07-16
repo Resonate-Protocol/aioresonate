@@ -175,10 +175,8 @@ class ArtworkV1Role(Role):
             return
 
         if artwork_request.channel not in self._channel_configs:
-            self._client._logger.warning(  # noqa: SLF001
-                "Client %s requested invalid artwork channel %d",
-                self._client.client_id,
-                artwork_request.channel,
+            self._client.flag_noncompliance(
+                f"stream/request-format targeted unknown artwork channel {artwork_request.channel}"
             )
             return
 

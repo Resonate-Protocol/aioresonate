@@ -673,8 +673,8 @@ class PlayerV1Role(Role):
 
         if state.volume is not None:
             if not support or PlayerCommand.VOLUME not in support.supported_commands:
-                self._client._logger.warning(  # noqa: SLF001
-                    "Client sent volume field without declaring 'volume' in supported_commands"
+                self._client.flag_noncompliance(
+                    "client/state sent volume without declaring the volume command"
                 )
             elif self.volume != state.volume:
                 self.volume = state.volume
@@ -682,8 +682,8 @@ class PlayerV1Role(Role):
 
         if state.muted is not None:
             if not support or PlayerCommand.MUTE not in support.supported_commands:
-                self._client._logger.warning(  # noqa: SLF001
-                    "Client sent muted field without declaring 'mute' in supported_commands"
+                self._client.flag_noncompliance(
+                    "client/state sent muted without declaring the mute command"
                 )
             elif self.muted != state.muted:
                 self.muted = state.muted
