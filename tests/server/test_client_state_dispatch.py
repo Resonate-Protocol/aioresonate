@@ -161,6 +161,23 @@ async def test_binary_is_held_until_initial_state() -> None:
 
 
 @pytest.mark.asyncio
+async def test_pending_binary_dropped_when_stream_boundary_intervenes() -> None:
+    """A stream boundary during the wait bumps the epoch and discards stale buffered binary."""
+    conn, client = _conn_with_client()
+    role = _role("artwork")
+    role.requires_initial_state.return_value = True
+    client.active_roles = [role]
+
+    conn.send_binary(b"snapshot", role="artwork", timestamp_us=0, message_type=30)
+    assert len(conn._pending_binary) == 1  # noqa: SLF001
+
+    conn.drop_pending_binary(["artwork"])  # stream/clear or stream/end bumps the epoch
+    conn._initial_state_received = True  # noqa: SLF001
+    conn._flush_pending_binary()  # noqa: SLF001
+    assert not conn._role_queues.get("artwork")  # stale binary not replayed  # noqa: SLF001
+
+
+@pytest.mark.asyncio
 async def test_client_state_player_object_for_inactive_role_is_flagged() -> None:
     """A player state object with no active player role is flagged."""
     conn, client = _conn_with_client()

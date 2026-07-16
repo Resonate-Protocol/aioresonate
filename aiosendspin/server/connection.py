@@ -303,7 +303,9 @@ class SendspinConnection:
         self._initial_state_timeout_handle: asyncio.TimerHandle | None = None
         # Binary held while a role that receives binary awaits the initial client/state.
         # The spec forbids sending binary before it; flushed once the state arrives.
-        self._pending_binary: list[Callable[[], None]] = []
+        # Each entry carries the role's epoch at buffer time so a stream boundary
+        # in the meantime (which bumps the epoch) discards it instead of replaying.
+        self._pending_binary: list[tuple[str, int, Callable[[], None]]] = []
 
         self._last_goodbye_reason: GoodbyeReason | None = None
         self._epoch_by_role: defaultdict[str, int] = defaultdict(int)
@@ -365,10 +367,12 @@ class SendspinConnection:
         return any(role.requires_initial_state() for role in self._client.active_roles)
 
     def _flush_pending_binary(self) -> None:
-        """Enqueue binary held until the initial client/state arrived."""
+        """Enqueue binary held until the initial client/state arrived, dropping stale entries."""
         pending, self._pending_binary = self._pending_binary, []
-        for send in pending:
-            send()
+        for role, epoch, send in pending:
+            # A stream boundary during the wait bumped the epoch; that data is stale.
+            if epoch == self._epoch_by_role[role]:
+                send()
 
     def _flag_initial_state_deviations(self, payload: ClientStatePayload) -> None:
         """Flag spec requirements the initial client/state must satisfy but does not."""
@@ -425,17 +429,22 @@ class SendspinConnection:
             duration_us: Duration for buffer tracking.
         """
         if self.requires_initial_state() and not self._initial_state_received:
-            # No binary before the client's initial state; replay once it arrives.
+            # No binary before the client's initial state; replay once it arrives,
+            # tagged with the current epoch so a stream boundary can invalidate it.
             self._pending_binary.append(
-                partial(
-                    self.send_binary,
-                    data,
-                    role=role,
-                    timestamp_us=timestamp_us,
-                    message_type=message_type,
-                    buffer_end_time_us=buffer_end_time_us,
-                    buffer_byte_count=buffer_byte_count,
-                    duration_us=duration_us,
+                (
+                    role,
+                    self._epoch_by_role[role],
+                    partial(
+                        self.send_binary,
+                        data,
+                        role=role,
+                        timestamp_us=timestamp_us,
+                        message_type=message_type,
+                        buffer_end_time_us=buffer_end_time_us,
+                        buffer_byte_count=buffer_byte_count,
+                        duration_us=duration_us,
+                    ),
                 )
             )
             return
