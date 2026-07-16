@@ -376,9 +376,12 @@ class TestEncryptedActivities:
         text = orjson.dumps({"type": "client/time", "payload": {"client_transmitted": 1}}).decode()
         conn._transport = _AsyncIterTransport([WSMessage(WSMsgType.TEXT, text, "")])  # type: ignore[assignment]  # noqa: SLF001
         conn._handle_message = AsyncMock(side_effect=ClientComplianceError("bad"))  # type: ignore[method-assign]  # noqa: SLF001
+        conn.disconnect = AsyncMock()  # type: ignore[method-assign]
 
         await conn._run_message_loop()  # noqa: SLF001
-        assert conn._closing is True  # noqa: SLF001
+        # Cleanup must tear the connection down without a warm reconnect.
+        await conn._cleanup_connection()  # noqa: SLF001
+        conn.disconnect.assert_awaited_once_with(retry_connection=False)
 
     @pytest.mark.asyncio
     async def test_unencrypted_hello_without_version_is_flagged(
