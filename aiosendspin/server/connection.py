@@ -1616,8 +1616,14 @@ class SendspinConnection:
             if self._client is None:
                 return
 
-            if self.requires_initial_state() and not self._initial_state_received:
+            # Validate before any side effect, so a strict-mode rejection never leaves
+            # the client marked connected or its availability already changed.
+            is_initial = self.requires_initial_state() and not self._initial_state_received
+            if is_initial:
                 self._flag_initial_state_deviations(payload)
+            self._flag_inactive_role_payloads("client/state", {"player": payload.player})
+
+            if is_initial:
                 self._initial_state_received = True
                 if self._initial_state_timeout_handle is not None:
                     self._initial_state_timeout_handle.cancel()
@@ -1627,7 +1633,6 @@ class SendspinConnection:
 
             if payload.available is not None and payload.available != self._client.available:
                 await self._client.handle_availability_change(available=payload.available)
-            self._flag_inactive_role_payloads("client/state", {"player": payload.player})
             for role in self._client.active_roles:
                 role.on_client_state(payload)
             return

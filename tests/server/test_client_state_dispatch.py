@@ -167,3 +167,22 @@ async def test_client_state_player_object_for_active_role_is_not_flagged() -> No
         ClientStateMessage(payload=ClientStatePayload(player=PlayerStatePayload())), timestamp_us=0
     )
     client.flag_noncompliance.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_strict_rejection_applies_no_side_effects() -> None:
+    """A rejected client/state does not change availability before the rejection."""
+    conn, client = _conn_with_client()
+    conn._initial_state_received = True  # noqa: SLF001
+    client.flag_noncompliance.side_effect = ClientComplianceError("nope")
+    client.handle_availability_change = AsyncMock()
+    client.active_roles = [_role("controller")]  # player object below is for an inactive role
+    with pytest.raises(ClientComplianceError):
+        await conn._handle_message(  # noqa: SLF001
+            ClientStateMessage(
+                payload=ClientStatePayload(available=False, player=PlayerStatePayload())
+            ),
+            timestamp_us=0,
+        )
+    client.mark_connected.assert_not_called()
+    client.handle_availability_change.assert_not_called()
