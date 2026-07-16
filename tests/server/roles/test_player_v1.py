@@ -83,10 +83,15 @@ async def test_player_role_no_flag_when_available_present() -> None:
     client.flag_noncompliance.assert_not_called()
 
 
-def test_player_role_initial_state_deviations_flags_missing_timing() -> None:
-    """A player initial state without the required timing fields is reported incomplete."""
+def test_player_role_initial_state_deviations_flags_missing_player_object() -> None:
+    """An active player whose initial state carries no player object is reported incomplete."""
     role = PlayerV1Role(client=_make_client_stub())
     assert role.initial_state_deviations(ClientStatePayload(available=True)) != []
+
+
+def test_player_role_initial_state_deviations_flags_missing_timing() -> None:
+    """A player object present but missing the required timing fields is reported incomplete."""
+    role = PlayerV1Role(client=_make_client_stub())
     assert (
         role.initial_state_deviations(
             ClientStatePayload(available=True, player=PlayerStatePayload(volume=50))
