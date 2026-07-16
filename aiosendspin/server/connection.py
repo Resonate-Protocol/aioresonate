@@ -1621,6 +1621,8 @@ class SendspinConnection:
             is_initial = self.requires_initial_state() and not self._initial_state_received
             if is_initial:
                 self._flag_initial_state_deviations(payload)
+            if payload.legacy_state_used:
+                self._flag_noncompliance("client/state used the legacy top-level 'state' field")
             self._flag_inactive_role_payloads("client/state", {"player": payload.player})
 
             if is_initial:

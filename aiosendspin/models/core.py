@@ -298,13 +298,19 @@ class ClientStatePayload(DataClassORJSONMixin):
     """
     player: PlayerStatePayload | None = None
     """Player state - only if client has player role."""
+    legacy_state_used: bool | None = None
+    """Set when the parser read a legacy top-level `state` field, recorded for the server
+    to flag. Not part of the wire schema (omitted when None)."""
 
     @classmethod
     def __pre_deserialize__(cls, d: dict[str, Any]) -> dict[str, Any]:
-        """Normalize a legacy `state` enum to `available` (only external_source is unavailable)."""
-        if d.get("available") is None and "state" in d:
-            d = dict(d)
+        """Normalize a legacy `state` enum to `available`, recording that it was used."""
+        d = dict(d)
+        legacy_state = "state" in d
+        if d.get("available") is None and legacy_state:
             d["available"] = d["state"] != "external_source"
+        # Always overwrite so a client cannot spoof the record via the wire.
+        d["legacy_state_used"] = legacy_state or None
         return d
 
     class Config(BaseConfig):

@@ -660,13 +660,18 @@ class PlayerV1Role(Role):
         if state is None:
             return
 
-        if payload.available is None and state.state is not None:
+        if state.state is not None:
             self._client.flag_noncompliance(
                 "client/state used legacy player.state instead of top-level available"
             )
-            create_task(
-                self._client.handle_availability_change(available=state.state != "external_source")
-            )
+            # Fall back to player.state for availability only when the compliant
+            # top-level field is absent.
+            if payload.available is None:
+                create_task(
+                    self._client.handle_availability_change(
+                        available=state.state != "external_source"
+                    )
+                )
 
         support = self._client.info.player_support
         changed = False

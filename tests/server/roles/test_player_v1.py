@@ -83,6 +83,19 @@ async def test_player_role_no_flag_when_available_present() -> None:
     client.flag_noncompliance.assert_not_called()
 
 
+@pytest.mark.asyncio
+async def test_player_role_flags_player_state_even_when_available_present() -> None:
+    """A nested legacy player.state is flagged even when top-level available is present."""
+    client = _make_client_stub()
+    client.handle_availability_change = AsyncMock()
+    role = PlayerV1Role(client=client)
+    role.on_client_state(
+        ClientStatePayload(available=True, player=PlayerStatePayload(state="synchronized"))
+    )
+    client.flag_noncompliance.assert_called_once()
+    client.handle_availability_change.assert_not_called()
+
+
 def test_player_role_initial_state_deviations_flags_missing_player_object() -> None:
     """An active player whose initial state carries no player object is reported incomplete."""
     role = PlayerV1Role(client=_make_client_stub())
