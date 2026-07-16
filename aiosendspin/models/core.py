@@ -188,9 +188,13 @@ class ClientHelloPayload(DataClassORJSONMixin):
         normalized = dict(d)
         legacy_keys: list[str] = []
         for legacy_key, versioned_key in cls._SUPPORT_KEY_ALIASES.items():
-            if legacy_key in normalized and versioned_key not in normalized:
-                legacy_keys.append(legacy_key)
-                normalized[versioned_key] = normalized.pop(legacy_key)
+            if legacy_key not in normalized:
+                continue
+            legacy_keys.append(legacy_key)
+            value = normalized.pop(legacy_key)
+            # Rewrite to the versioned alias only when the client didn't also send it.
+            if versioned_key not in normalized:
+                normalized[versioned_key] = value
         # Always overwrite so a client cannot spoof the record via the wire.
         normalized["legacy_support_keys_used"] = legacy_keys or None
         return normalized

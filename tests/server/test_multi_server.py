@@ -773,6 +773,34 @@ class TestCustomRoleSupportParsing:
         assert msg.payload.player_support is not None
         assert msg.payload.legacy_support_keys_used == ["player_support"]
 
+    def test_deserialize_client_hello_records_legacy_key_alongside_canonical(self) -> None:
+        """A hello sending both the legacy and versioned support keys still records the legacy."""
+        support = {
+            "supported_formats": [
+                {"codec": "pcm", "sample_rate": 48000, "bit_depth": 16, "channels": 2}
+            ],
+            "buffer_capacity": 100_000,
+            "supported_commands": [],
+        }
+        raw = orjson.dumps(
+            {
+                "type": "client/hello",
+                "payload": {
+                    "client_id": "c1",
+                    "name": "Client",
+                    "version": 1,
+                    "supported_roles": ["player@v1"],
+                    "player@v1_support": support,
+                    "player_support": support,
+                },
+            }
+        ).decode()
+
+        msg = SendspinConnection._deserialize_client_message(raw)  # noqa: SLF001
+        assert isinstance(msg, ClientHelloMessage)
+        assert msg.payload.player_support is not None
+        assert msg.payload.legacy_support_keys_used == ["player_support"]
+
     def test_deserialize_client_hello_records_unlisted_support(self) -> None:
         """A support object for a role not in supported_roles is dropped and recorded."""
         raw = orjson.dumps(
