@@ -271,10 +271,12 @@ class SendspinServer:
     def set_visualizer_pitch_enabled(self, *, enabled: bool) -> None:
         """Enable or disable the visualizer `pitch` feature server-wide.
 
-        Enabling is technically non-compliant: `pitch` uses reserved binary type
-        21, which the spec says must not be used. It stays available as an opt-in
-        extension. Pitch (YINFFT) is also the heaviest per-frame visualizer
-        computation, so leaving it off sheds that cost on constrained hardware.
+        This option is ignored while `allow_noncompliant_clients` is False: `pitch`
+        uses reserved binary type 21, which the spec forbids, so a compliance-strict
+        server never emits it regardless of this toggle. It otherwise stays available
+        as an opt-in extension. Pitch (YINFFT) is also the heaviest per-frame
+        visualizer computation, so leaving it off sheds that cost on constrained
+        hardware.
         Toggling drops/adds `pitch` on live roles' negotiated types and re-emits
         `stream/start`; new roles pick the setting up when they connect.
         """

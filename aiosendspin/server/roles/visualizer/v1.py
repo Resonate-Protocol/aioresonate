@@ -786,9 +786,13 @@ class VisualizerV1Role(Role):
         else:
             exposed_types = [t for t in client_types if t != "beat"]
         # Server-wide pitch shed: drop the (heavy) pitch feature unless it is
-        # the only exposed type — `stream/start` must keep at least one, and we
-        # cannot add a type the client did not request.
-        if not self._client._server.visualizer_pitch_enabled:  # noqa: SLF001
+        # the only exposed type. stream/start must keep at least one, and we
+        # cannot add a type the client did not request. The pitch toggle is
+        # ignored when the server rejects non-compliant clients, since pitch
+        # rides spec-reserved binary type 21.
+        server = self._client._server  # noqa: SLF001
+        pitch_enabled = server.visualizer_pitch_enabled and server.allow_noncompliant_clients
+        if not pitch_enabled:
             without_pitch = [t for t in exposed_types if t != "pitch"]
             if without_pitch:
                 exposed_types = without_pitch

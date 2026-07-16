@@ -1114,6 +1114,19 @@ def test_pitch_dropped_when_server_disabled() -> None:
     assert "loudness" in types
 
 
+def test_pitch_dropped_when_clients_must_be_compliant() -> None:
+    """The pitch toggle is ignored (pitch shed) when non-compliant clients are disallowed."""
+    client = _make_pitch_client_stub()
+    client._server.visualizer_pitch_enabled = True  # noqa: SLF001
+    client._server.allow_noncompliant_clients = False  # noqa: SLF001
+    role = VisualizerV1Role(client)
+    role.on_connect()
+    role.on_stream_start()
+    types = _last_stream_start(client).payload.visualizer.types
+    assert "pitch" not in types
+    assert "loudness" in types
+
+
 def test_disabled_pitch_emits_no_pitch_binary() -> None:
     """With pitch disabled, no PITCH binary is produced from an audio chunk."""
     client = _make_pitch_client_stub()
