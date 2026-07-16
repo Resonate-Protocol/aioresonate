@@ -747,6 +747,20 @@ class VisualizerV1Role(Role):
                 self._client.client_id,
                 dropped,
             )
+        # `pitch` rides spec-reserved binary type 21, so a compliance-strict server
+        # drops it up front (not just from stream/start). A client left with no
+        # compliant type has no visualizer capability and gets no stream at all.
+        if not self._client._server.allow_noncompliant_clients:  # noqa: SLF001
+            compliant = [t for t in kept if t != "pitch"]
+            if not compliant:
+                _LOGGER.info(
+                    "client %s supports only the reserved 'pitch' visualizer type; not streaming",
+                    self._client.client_id,
+                )
+                self._support = None
+                self._stream_config = None
+                return
+            kept = compliant
         if not kept:
             _LOGGER.warning(
                 "client %s requested no implemented visualizer types; falling back to ['loudness']",

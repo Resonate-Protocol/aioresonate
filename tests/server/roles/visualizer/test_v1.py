@@ -1155,6 +1155,24 @@ def test_pitch_kept_when_sole_type_even_if_disabled() -> None:
     assert _last_stream_start(client).payload.visualizer.types == ("pitch",)
 
 
+def test_pitch_only_client_is_inert_when_clients_must_be_compliant() -> None:
+    """A pitch-only client has no compliant visualizer capability in strict mode."""
+    client = _make_client_stub()
+    client.info.visualizer_support = {
+        "types": ["pitch"],
+        "buffer_capacity": 65536,
+        "rate_max": 60,
+    }
+    client._server.allow_noncompliant_clients = False  # noqa: SLF001
+    role = VisualizerV1Role(client)
+    role.on_connect()
+    role.on_stream_start()
+    assert role._stream_config is None  # noqa: SLF001
+    client.send_binary.reset_mock()
+    role.on_audio_chunk(_audio_chunk(timestamp_us=1_000_000))
+    client.send_binary.assert_not_called()
+
+
 def test_refresh_pitch_setting_reissues_stream_start_on_change() -> None:
     """Flipping the server flag live re-emits stream/start without pitch."""
     client = _make_pitch_client_stub()
