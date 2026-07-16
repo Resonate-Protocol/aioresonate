@@ -16,6 +16,7 @@ from aiosendspin.models.core import (
     ClientStatePayload,
 )
 from aiosendspin.models.management import ManagementResultMessage, ManagementResultPayload
+from aiosendspin.models.player import PlayerStatePayload
 from aiosendspin.models.types import ManagementResult
 from aiosendspin.server.clock import LoopClock
 from aiosendspin.server.compliance import ClientComplianceError
@@ -133,3 +134,36 @@ async def test_missing_initial_state_marks_connected_when_lenient() -> None:
     conn._initial_state_timeout_callback()  # noqa: SLF001
     assert conn._initial_state_received is True  # noqa: SLF001
     client.mark_connected.assert_called_once()
+
+
+def _role(family: str) -> MagicMock:
+    role = MagicMock()
+    role.role_family = family
+    return role
+
+
+@pytest.mark.asyncio
+async def test_client_state_player_object_for_inactive_role_is_flagged() -> None:
+    """A player state object with no active player role is flagged."""
+    conn, client = _conn_with_client()
+    client.active_roles = [_role("controller")]
+    conn._initial_state_received = True  # noqa: SLF001
+    client.available = None
+    await conn._handle_message(  # noqa: SLF001
+        ClientStateMessage(payload=ClientStatePayload(player=PlayerStatePayload())), timestamp_us=0
+    )
+    flagged = [call.args[0] for call in client.flag_noncompliance.call_args_list]
+    assert any("player" in r and "inactive role" in r for r in flagged)
+
+
+@pytest.mark.asyncio
+async def test_client_state_player_object_for_active_role_is_not_flagged() -> None:
+    """A player state object with an active player role is not flagged."""
+    conn, client = _conn_with_client()
+    client.active_roles = [_role("player")]
+    conn._initial_state_received = True  # noqa: SLF001
+    client.available = None
+    await conn._handle_message(  # noqa: SLF001
+        ClientStateMessage(payload=ClientStatePayload(player=PlayerStatePayload())), timestamp_us=0
+    )
+    client.flag_noncompliance.assert_not_called()

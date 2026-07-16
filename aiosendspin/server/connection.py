@@ -371,6 +371,15 @@ class SendspinConnection:
         for reason in reasons:
             self._flag_noncompliance(f"initial client/state {reason}")
 
+    def _flag_inactive_role_payloads(self, kind: str, present: dict[str, object]) -> None:
+        """Flag role objects sent for a family the client has no active role in."""
+        if self._client is None:
+            return
+        active = {role.role_family for role in self._client.active_roles}
+        for family, obj in present.items():
+            if obj is not None and family not in active:
+                self._flag_noncompliance(f"{kind} carried a {family} object for an inactive role")
+
     def drop_pending_binary(self, roles: list[str] | None) -> None:
         """Drop queued binary payloads for the specified roles.
 
@@ -1618,6 +1627,7 @@ class SendspinConnection:
 
             if payload.available is not None and payload.available != self._client.available:
                 await self._client.handle_availability_change(available=payload.available)
+            self._flag_inactive_role_payloads("client/state", {"player": payload.player})
             for role in self._client.active_roles:
                 role.on_client_state(payload)
             return
@@ -1625,13 +1635,21 @@ class SendspinConnection:
         if isinstance(message, StreamRequestFormatMessage):
             if self._client is None:
                 return
+            fmt = message.payload
+            self._flag_inactive_role_payloads(
+                "stream/request-format",
+                {"player": fmt.player, "artwork": fmt.artwork, "visualizer": fmt.visualizer},
+            )
             for role in self._client.active_roles:
-                role.on_stream_request_format(message.payload)
+                role.on_stream_request_format(fmt)
             return
 
         if isinstance(message, ClientCommandMessage):
             if self._client is None:
                 return
+            self._flag_inactive_role_payloads(
+                "client/command", {"controller": message.payload.controller}
+            )
             for role in self._client.active_roles:
                 role.on_command(message.payload)
             return
