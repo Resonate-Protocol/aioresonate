@@ -110,16 +110,42 @@ def test_player_role_initial_state_deviations_accepts_complete_timing() -> None:
     assert role.initial_state_deviations(payload) == []
 
 
-def _stub_with_player_support() -> MagicMock:
+def _stub_with_player_support(*commands: PlayerCommand) -> MagicMock:
     client = _make_client_stub()
     client.info.player_support = ClientHelloPlayerSupport(
         supported_formats=[
             SupportedAudioFormat(codec=AudioCodec.PCM, channels=2, sample_rate=48000, bit_depth=16)
         ],
         buffer_capacity=100_000,
-        supported_commands=[],
+        supported_commands=list(commands),
     )
     return client
+
+
+def _complete_timing_state(**overrides: object) -> ClientStatePayload:
+    fields = {"static_delay_ms": 0, "required_lead_time_ms": 100, "min_buffer_ms": 200}
+    fields.update(overrides)
+    return ClientStatePayload(available=True, player=PlayerStatePayload(**fields))  # type: ignore[arg-type]
+
+
+def test_player_role_initial_state_deviations_flags_missing_volume() -> None:
+    """A player that declared the volume command but omits volume is reported incomplete."""
+    role = PlayerV1Role(client=_stub_with_player_support(PlayerCommand.VOLUME))
+    reasons = role.initial_state_deviations(_complete_timing_state())
+    assert any("volume" in r for r in reasons)
+
+
+def test_player_role_initial_state_deviations_flags_missing_muted() -> None:
+    """A player that declared the mute command but omits muted is reported incomplete."""
+    role = PlayerV1Role(client=_stub_with_player_support(PlayerCommand.MUTE))
+    reasons = role.initial_state_deviations(_complete_timing_state())
+    assert any("muted" in r for r in reasons)
+
+
+def test_player_role_initial_state_deviations_accepts_declared_commands_reported() -> None:
+    """Declared volume/mute commands with their values present are accepted."""
+    role = PlayerV1Role(client=_stub_with_player_support(PlayerCommand.VOLUME, PlayerCommand.MUTE))
+    assert role.initial_state_deviations(_complete_timing_state(volume=50, muted=False)) == []
 
 
 def test_player_role_flags_undeclared_format_request() -> None:
