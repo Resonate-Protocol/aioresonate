@@ -63,7 +63,7 @@ def mock_server(mock_loop: MagicMock) -> MagicMock:
     server = MagicMock()
     server.loop = mock_loop
     server.clock = LoopClock(mock_loop)
-    server.strict_clients = False
+    server.allow_noncompliant_clients = True
     return server
 
 

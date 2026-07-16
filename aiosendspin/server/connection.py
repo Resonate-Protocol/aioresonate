@@ -900,7 +900,7 @@ class SendspinConnection:
             self._client.flag_noncompliance(reason)
             return
         self._logger.info("non-compliant client: %s", reason)
-        if self._server.strict_clients:
+        if not self._server.allow_noncompliant_clients:
             raise ClientComplianceError(reason)
 
     async def _ingest_client_hello(self, text: str) -> bool:
@@ -953,7 +953,7 @@ class SendspinConnection:
         self._client_info = client_info
         self._client_id = client_id
         self._negotiated_roles = negotiate_roles(
-            client_info.supported_roles, strict=self._server.strict_clients
+            client_info.supported_roles, strict=not self._server.allow_noncompliant_clients
         )
         self._logger = logger.getChild(client_id)
         self._logger.debug("Received client/hello: %s", client_info)

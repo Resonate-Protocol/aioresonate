@@ -24,7 +24,7 @@ _FAMILY_ORDER = {
     )
 }
 
-# Legacy backwards-compat wires excluded from negotiation under strict_clients.
+# Legacy backwards-compat wires excluded from negotiation in strict mode.
 _LEGACY_ROLE_IDS = frozenset({"visualizer@_draft_r1"})
 
 

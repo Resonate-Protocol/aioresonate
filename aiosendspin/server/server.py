@@ -124,7 +124,7 @@ class SendspinServer:
         *,
         pairing_store: ServerPairingStore,
         allow_unencrypted: bool = False,
-        strict_clients: bool = False,
+        allow_noncompliant_clients: bool = True,
         min_pin_length: int = DEFAULT_MIN_PIN_DIGITS,
         clock: Clock | None = None,
     ) -> None:
@@ -138,7 +138,7 @@ class SendspinServer:
         self._name = server_name
         self._pairing_store = pairing_store
         self._allow_unencrypted = allow_unencrypted
-        self._strict_clients = strict_clients
+        self._allow_noncompliant_clients = allow_noncompliant_clients
         self._min_pin_length = min_pin_length
         self._clock: Clock = clock or RawMonotonicClock()
 
@@ -220,9 +220,9 @@ class SendspinServer:
         return self._allow_unencrypted
 
     @property
-    def strict_clients(self) -> bool:
-        """Whether non-spec-compliant clients are rejected instead of tolerated."""
-        return self._strict_clients
+    def allow_noncompliant_clients(self) -> bool:
+        """Whether non-spec-compliant clients are tolerated instead of rejected."""
+        return self._allow_noncompliant_clients
 
     @property
     def name(self) -> str:

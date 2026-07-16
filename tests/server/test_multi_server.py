@@ -60,7 +60,7 @@ class _MockServer:
     clock: LoopClock
     id: str = "srv"
     name: str = "server"
-    strict_clients: bool = False
+    allow_noncompliant_clients: bool = True
     pairing_store: ServerPairingStore = field(default_factory=InMemoryServerPairingStore)
     remove_client: AsyncMock = field(default_factory=AsyncMock)
 
@@ -284,7 +284,9 @@ class TestEncryptedActivities:
     async def test_strict_server_excludes_draft_visualizer_without_rejecting(self) -> None:
         """Strict mode does not activate the legacy draft wire, but admits the client."""
         loop = asyncio.get_running_loop()
-        strict_server = _MockServer(loop=loop, clock=LoopClock(loop), strict_clients=True)
+        strict_server = _MockServer(
+            loop=loop, clock=LoopClock(loop), allow_noncompliant_clients=False
+        )
         raw = orjson.dumps(
             {
                 "type": "client/hello",
@@ -317,9 +319,11 @@ class TestEncryptedActivities:
 
     @pytest.mark.asyncio
     async def test_strict_server_rejects_noncompliant_hello(self) -> None:
-        """With strict_clients, a hello using unversioned support keys is rejected."""
+        """When noncompliance is disallowed, an unversioned-support-key hello is rejected."""
         loop = asyncio.get_running_loop()
-        strict_server = _MockServer(loop=loop, clock=LoopClock(loop), strict_clients=True)
+        strict_server = _MockServer(
+            loop=loop, clock=LoopClock(loop), allow_noncompliant_clients=False
+        )
         raw = orjson.dumps(
             {
                 "type": "client/hello",

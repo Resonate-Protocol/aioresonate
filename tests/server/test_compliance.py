@@ -14,7 +14,7 @@ from aiosendspin.server import SendspinServer
 from aiosendspin.server.compliance import ClientComplianceError
 
 
-def _make_server(*, strict_clients: bool = False) -> SendspinServer:
+def _make_server(*, allow_noncompliant_clients: bool = True) -> SendspinServer:
     loop = asyncio.get_running_loop()
     client_session = MagicMock()
     client_session.closed = True
@@ -25,15 +25,15 @@ def _make_server(*, strict_clients: bool = False) -> SendspinServer:
         server_name="server",
         client_session=client_session,
         pairing_store=InMemoryServerPairingStore(),
-        strict_clients=strict_clients,
+        allow_noncompliant_clients=allow_noncompliant_clients,
     )
 
 
 @pytest.mark.asyncio
-async def test_strict_clients_defaults_to_false() -> None:
-    """strict_clients is opt-in."""
+async def test_allow_noncompliant_clients_defaults_to_true() -> None:
+    """Rejecting non-compliant clients is opt-in."""
     server = _make_server()
-    assert server.strict_clients is False
+    assert server.allow_noncompliant_clients is True
 
 
 @pytest.mark.asyncio
@@ -53,7 +53,7 @@ async def test_flag_noncompliance_lenient_logs_every_time(
 @pytest.mark.asyncio
 async def test_flag_noncompliance_strict_raises() -> None:
     """Strict mode raises ClientComplianceError."""
-    server = _make_server(strict_clients=True)
+    server = _make_server(allow_noncompliant_clients=False)
     client = server.get_or_create_client("dev")
     with pytest.raises(ClientComplianceError, match="legacy thing"):
         client.flag_noncompliance("legacy thing")

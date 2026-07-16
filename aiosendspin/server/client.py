@@ -143,7 +143,7 @@ class SendspinClient:
         # Logged at info while implementers migrate. Bump to warning once they have
         # had time to fix these, then drop the backwards-compat paths altogether.
         self._logger.info("non-compliant client: %s", reason)
-        if self._server.strict_clients:
+        if not self._server.allow_noncompliant_clients:
             raise ClientComplianceError(reason)
 
     @property
@@ -733,7 +733,7 @@ class SendspinClient:
         self._name = client_info.name
         if negotiated_roles is None:
             self._negotiated_role_ids = negotiate_roles(
-                client_info.supported_roles, strict=self._server.strict_clients
+                client_info.supported_roles, strict=not self._server.allow_noncompliant_clients
             )
         else:
             self._negotiated_role_ids = negotiated_roles
