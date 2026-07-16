@@ -128,7 +128,22 @@ class SendspinServer:
         min_pin_length: int = DEFAULT_MIN_PIN_DIGITS,
         clock: Clock | None = None,
     ) -> None:
-        """Initialize a Sendspin server instance."""
+        """Initialize a Sendspin server instance.
+
+        Args:
+            loop: Event loop the server runs on.
+            identity: The server's long-term Noise identity.
+            server_name: Human-readable name advertised to clients.
+            client_session: Shared aiohttp session, or None to create and own one.
+            pairing_store: Persistent store for pairing records and config.
+            allow_unencrypted: Accept legacy unencrypted clients (transition mode).
+            allow_noncompliant_clients: Tolerate and log deviations from clients
+                built against pre-1.0 spec drafts when True, reject the client when
+                False. Tolerance is transitional and will be removed in a future
+                version.
+            min_pin_length: Minimum dynamic-PIN length the server accepts.
+            clock: Clock source, or None for the default monotonic clock.
+        """
         if not MIN_PIN_DIGITS <= min_pin_length <= MAX_PIN_DIGITS:
             msg = f"min_pin_length must be in [{MIN_PIN_DIGITS}, {MAX_PIN_DIGITS}]"
             raise ValueError(msg)
