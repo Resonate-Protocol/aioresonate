@@ -31,6 +31,7 @@ from aiosendspin.models.types import (
 from aiosendspin.noise.trust_store import PskCategory
 from aiosendspin.util import create_task
 
+from .compliance import ClientComplianceError
 from .events import ClientEvent, ClientGroupChangedEvent
 from .roles import Role
 from .roles.base import BinaryHandling
@@ -136,6 +137,14 @@ class SendspinClient:
         self._cleanup_handle: asyncio.Handle | None = None
         # True when we intentionally retain a disconnected client after ANOTHER_SERVER goodbye.
         self._cleanup_on_mdns_removal: bool = False
+
+    def flag_noncompliance(self, reason: str) -> None:
+        """Log a tolerated spec violation, or reject it when the server is strict."""
+        # Logged at info while implementers migrate. Bump to warning once they have
+        # had time to fix these, then drop the backwards-compat paths altogether.
+        self._logger.info("non-compliant client: %s", reason)
+        if not self._server.allow_noncompliant_clients:
+            raise ClientComplianceError(reason)
 
     @property
     def client_id(self) -> str:
@@ -723,7 +732,9 @@ class SendspinClient:
         self._info = client_info
         self._name = client_info.name
         if negotiated_roles is None:
-            self._negotiated_role_ids = negotiate_roles(client_info.supported_roles)
+            self._negotiated_role_ids = negotiate_roles(
+                client_info.supported_roles, strict=not self._server.allow_noncompliant_clients
+            )
         else:
             self._negotiated_role_ids = negotiated_roles
 

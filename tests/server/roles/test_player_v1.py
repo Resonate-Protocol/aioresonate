@@ -2,19 +2,24 @@
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock
+import asyncio
+from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
+
+import pytest
 
 from aiosendspin.models import AudioCodec, unpack_binary_header
 from aiosendspin.models.core import (
     ClientStatePayload,
     StreamClearMessage,
     StreamEndMessage,
+    StreamRequestFormatPayload,
     StreamStartMessage,
 )
 from aiosendspin.models.player import (
     ClientHelloPlayerSupport,
     PlayerStatePayload,
+    StreamRequestFormatPlayer,
     SupportedAudioFormat,
 )
 from aiosendspin.models.types import BinaryMessageType, PlayerCommand
@@ -57,6 +62,151 @@ def test_player_role_has_role_id() -> None:
     client = _make_client_stub()
     role = PlayerV1Role(client=client)
     assert role.role_id == "player@v1"
+
+
+def test_player_client_state_deviations_flags_legacy_player_state() -> None:
+    """A nested legacy player.state is a deviation even when available is present."""
+    role = PlayerV1Role(client=_make_client_stub())
+    reasons = role.client_state_deviations(
+        ClientStatePayload(available=True, player=PlayerStatePayload(state="synchronized"))
+    )
+    assert any("player.state" in r for r in reasons)
+
+
+def test_player_client_state_deviations_accepts_compliant_state() -> None:
+    """A compliant client/state carrying `available` reports no deviations."""
+    role = PlayerV1Role(client=_make_client_stub())
+    deviations = role.client_state_deviations(
+        ClientStatePayload(available=True, player=PlayerStatePayload())
+    )
+    assert deviations == []
+
+
+@pytest.mark.asyncio
+async def test_player_on_client_state_uses_legacy_state_when_available_absent() -> None:
+    """on_client_state derives availability from legacy player.state when available is absent."""
+    client = _make_client_stub()
+    client.handle_availability_change = AsyncMock()
+    role = PlayerV1Role(client=client)
+    role.on_client_state(ClientStatePayload(player=PlayerStatePayload(state="external_source")))
+    await asyncio.sleep(0)
+    client.handle_availability_change.assert_awaited_once_with(available=False)
+
+
+@pytest.mark.asyncio
+async def test_player_on_client_state_ignores_legacy_state_when_available_present() -> None:
+    """on_client_state does not derive availability from player.state when available is present."""
+    client = _make_client_stub()
+    client.handle_availability_change = AsyncMock()
+    role = PlayerV1Role(client=client)
+    role.on_client_state(
+        ClientStatePayload(available=True, player=PlayerStatePayload(state="synchronized"))
+    )
+    await asyncio.sleep(0)
+    client.handle_availability_change.assert_not_called()
+
+
+def test_player_role_initial_state_deviations_flags_missing_player_object() -> None:
+    """An active player whose initial state carries no player object is reported incomplete."""
+    role = PlayerV1Role(client=_make_client_stub())
+    assert role.initial_state_deviations(ClientStatePayload(available=True)) != []
+
+
+def test_player_role_initial_state_deviations_flags_missing_timing() -> None:
+    """A player object present but missing the required timing fields is reported incomplete."""
+    role = PlayerV1Role(client=_make_client_stub())
+    assert (
+        role.initial_state_deviations(
+            ClientStatePayload(available=True, player=PlayerStatePayload(volume=50))
+        )
+        != []
+    )
+
+
+def test_player_role_initial_state_deviations_accepts_complete_timing() -> None:
+    """A player initial state with all required timing fields is accepted."""
+    role = PlayerV1Role(client=_make_client_stub())
+    payload = ClientStatePayload(
+        available=True,
+        player=PlayerStatePayload(static_delay_ms=0, required_lead_time_ms=100, min_buffer_ms=200),
+    )
+    assert role.initial_state_deviations(payload) == []
+
+
+def _stub_with_player_support(*commands: PlayerCommand) -> MagicMock:
+    client = _make_client_stub()
+    client.info.player_support = ClientHelloPlayerSupport(
+        supported_formats=[
+            SupportedAudioFormat(codec=AudioCodec.PCM, channels=2, sample_rate=48000, bit_depth=16)
+        ],
+        buffer_capacity=100_000,
+        supported_commands=list(commands),
+    )
+    return client
+
+
+def _complete_timing_state(**overrides: object) -> ClientStatePayload:
+    fields = {"static_delay_ms": 0, "required_lead_time_ms": 100, "min_buffer_ms": 200}
+    fields.update(overrides)
+    return ClientStatePayload(available=True, player=PlayerStatePayload(**fields))  # type: ignore[arg-type]
+
+
+def test_player_role_initial_state_deviations_flags_missing_volume() -> None:
+    """A player that declared the volume command but omits volume is reported incomplete."""
+    role = PlayerV1Role(client=_stub_with_player_support(PlayerCommand.VOLUME))
+    reasons = role.initial_state_deviations(_complete_timing_state())
+    assert any("volume" in r for r in reasons)
+
+
+def test_player_role_initial_state_deviations_flags_missing_muted() -> None:
+    """A player that declared the mute command but omits muted is reported incomplete."""
+    role = PlayerV1Role(client=_stub_with_player_support(PlayerCommand.MUTE))
+    reasons = role.initial_state_deviations(_complete_timing_state())
+    assert any("muted" in r for r in reasons)
+
+
+def test_player_role_initial_state_deviations_accepts_declared_commands_reported() -> None:
+    """Declared volume/mute commands with their values present are accepted."""
+    role = PlayerV1Role(client=_stub_with_player_support(PlayerCommand.VOLUME, PlayerCommand.MUTE))
+    assert role.initial_state_deviations(_complete_timing_state(volume=50, muted=False)) == []
+
+
+def test_player_role_flags_undeclared_format_request() -> None:
+    """A request for a format not in the client's declared supported_formats is flagged."""
+    client = _stub_with_player_support()
+    role = PlayerV1Role(client=client)
+    role.on_stream_request_format(
+        StreamRequestFormatPayload(player=StreamRequestFormatPlayer(sample_rate=96000))
+    )
+    client.flag_noncompliance.assert_called_once()
+
+
+def test_player_role_no_flag_for_declared_format_request() -> None:
+    """A request matching a declared supported_format is not flagged."""
+    client = _stub_with_player_support()
+    role = PlayerV1Role(client=client)
+    role.on_stream_request_format(
+        StreamRequestFormatPayload(player=StreamRequestFormatPlayer(sample_rate=48000))
+    )
+    client.flag_noncompliance.assert_not_called()
+
+
+def test_player_role_flags_volume_without_declared_support() -> None:
+    """A volume field sent with no declared volume command is a deviation."""
+    role = PlayerV1Role(client=_make_client_stub())  # player_support is None
+    reasons = role.client_state_deviations(
+        ClientStatePayload(available=True, player=PlayerStatePayload(volume=50))
+    )
+    assert any("volume" in r for r in reasons)
+
+
+def test_player_role_flags_muted_without_declared_support() -> None:
+    """A muted field sent with no declared mute command is a deviation."""
+    role = PlayerV1Role(client=_make_client_stub())  # player_support is None
+    reasons = role.client_state_deviations(
+        ClientStatePayload(available=True, player=PlayerStatePayload(muted=True))
+    )
+    assert any("muted" in r for r in reasons)
 
 
 def test_player_role_has_role_family() -> None:

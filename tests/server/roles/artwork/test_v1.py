@@ -53,6 +53,41 @@ def test_artwork_role_has_role_id() -> None:
     assert role.role_id == "artwork@v1"
 
 
+def test_artwork_role_flags_nonpositive_request_dimensions() -> None:
+    """A stream/request-format with non-positive dimensions is flagged, not applied."""
+    client = _make_client_stub_with_channel()
+    role = ArtworkV1Role(client=client)
+    role.on_connect()
+    role.on_stream_request_format(
+        StreamRequestFormatPayload(artwork=StreamRequestFormatArtwork(channel=0, media_width=-10))
+    )
+    client.flag_noncompliance.assert_called_once()
+
+
+def test_artwork_role_no_flag_for_valid_request_dimensions() -> None:
+    """A stream/request-format with positive dimensions is not flagged."""
+    client = _make_client_stub_with_channel()
+    role = ArtworkV1Role(client=client)
+    role.on_connect()
+    role.on_stream_request_format(
+        StreamRequestFormatPayload(
+            artwork=StreamRequestFormatArtwork(channel=0, media_width=100, media_height=100)
+        )
+    )
+    client.flag_noncompliance.assert_not_called()
+
+
+def test_artwork_role_flags_unknown_request_channel() -> None:
+    """A stream/request-format for a channel with no config is flagged."""
+    client = _make_client_stub_with_channel()
+    role = ArtworkV1Role(client=client)
+    role.on_connect()
+    role.on_stream_request_format(
+        StreamRequestFormatPayload(artwork=StreamRequestFormatArtwork(channel=1))
+    )
+    client.flag_noncompliance.assert_called_once()
+
+
 def test_artwork_role_has_role_family() -> None:
     """ArtworkV1Role has role_family of 'artwork'."""
     client = _make_client_stub()

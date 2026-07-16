@@ -124,10 +124,26 @@ class SendspinServer:
         *,
         pairing_store: ServerPairingStore,
         allow_unencrypted: bool = False,
+        allow_noncompliant_clients: bool = True,
         min_pin_length: int = DEFAULT_MIN_PIN_DIGITS,
         clock: Clock | None = None,
     ) -> None:
-        """Initialize a Sendspin server instance."""
+        """Initialize a Sendspin server instance.
+
+        Args:
+            loop: Event loop the server runs on.
+            identity: The server's long-term Noise identity.
+            server_name: Human-readable name advertised to clients.
+            client_session: Shared aiohttp session, or None to create and own one.
+            pairing_store: Persistent store for pairing records and config.
+            allow_unencrypted: Accept legacy unencrypted clients (transition mode).
+            allow_noncompliant_clients: Tolerate and log deviations from clients
+                built against pre-1.0 spec drafts when True, reject the client when
+                False. Tolerance is transitional and will be removed in a future
+                version.
+            min_pin_length: Minimum dynamic-PIN length the server accepts.
+            clock: Clock source, or None for the default monotonic clock.
+        """
         if not MIN_PIN_DIGITS <= min_pin_length <= MAX_PIN_DIGITS:
             msg = f"min_pin_length must be in [{MIN_PIN_DIGITS}, {MAX_PIN_DIGITS}]"
             raise ValueError(msg)
@@ -137,6 +153,7 @@ class SendspinServer:
         self._name = server_name
         self._pairing_store = pairing_store
         self._allow_unencrypted = allow_unencrypted
+        self._allow_noncompliant_clients = allow_noncompliant_clients
         self._min_pin_length = min_pin_length
         self._clock: Clock = clock or RawMonotonicClock()
 
@@ -218,6 +235,11 @@ class SendspinServer:
         return self._allow_unencrypted
 
     @property
+    def allow_noncompliant_clients(self) -> bool:
+        """Whether non-spec-compliant clients are tolerated instead of rejected."""
+        return self._allow_noncompliant_clients
+
+    @property
     def name(self) -> str:
         """Return the human-readable server name."""
         return self._name
@@ -249,10 +271,12 @@ class SendspinServer:
     def set_visualizer_pitch_enabled(self, *, enabled: bool) -> None:
         """Enable or disable the visualizer `pitch` feature server-wide.
 
-        Enabling is technically non-compliant: `pitch` uses reserved binary type
-        21, which the spec says must not be used. It stays available as an opt-in
-        extension. Pitch (YINFFT) is also the heaviest per-frame visualizer
-        computation, so leaving it off sheds that cost on constrained hardware.
+        This option is ignored while `allow_noncompliant_clients` is False: `pitch`
+        uses reserved binary type 21, which the spec forbids, so a compliance-strict
+        server never emits it regardless of this toggle. It otherwise stays available
+        as an opt-in extension. Pitch (YINFFT) is also the heaviest per-frame
+        visualizer computation, so leaving it off sheds that cost on constrained
+        hardware.
         Toggling drops/adds `pitch` on live roles' negotiated types and re-emits
         `stream/start`; new roles pick the setting up when they connect.
         """

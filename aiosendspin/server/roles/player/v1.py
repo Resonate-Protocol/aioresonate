@@ -634,38 +634,70 @@ class PlayerV1Role(Role):
 
     # ---- Client message handling ----
 
+    def initial_state_deviations(self, payload: ClientStatePayload) -> list[str]:
+        """Report required player fields missing from the initial client/state."""
+        player = payload.player
+        if player is None:
+            return ["has an active player role but no player state"]
+        reasons: list[str] = []
+        if (
+            player.static_delay_ms is None
+            or player.required_lead_time_ms is None
+            or player.min_buffer_ms is None
+        ):
+            reasons.append("omitted required player timing fields")
+        support = self._client.info.player_support
+        commands = support.supported_commands if support else []
+        if PlayerCommand.VOLUME in commands and player.volume is None:
+            reasons.append("omitted volume despite declaring the volume command")
+        if PlayerCommand.MUTE in commands and player.muted is None:
+            reasons.append("omitted muted despite declaring the mute command")
+        return reasons
+
+    def client_state_deviations(self, payload: ClientStatePayload) -> list[str]:
+        """Report player fields in a client/state that violate the spec."""
+        state = payload.player
+        if state is None:
+            return []
+        support = self._client.info.player_support
+        commands = support.supported_commands if support else []
+        reasons: list[str] = []
+        if state.state is not None:
+            reasons.append("used legacy player.state instead of top-level available")
+        if state.volume is not None and PlayerCommand.VOLUME not in commands:
+            reasons.append("sent volume without declaring the volume command")
+        if state.muted is not None and PlayerCommand.MUTE not in commands:
+            reasons.append("sent muted without declaring the mute command")
+        return reasons
+
     def on_client_state(self, payload: ClientStatePayload) -> None:
-        """Handle player-specific fields in client/state."""
+        """Apply player-specific fields from client/state (validation runs earlier)."""
         state = payload.player
         if state is None:
             return
 
-        # DEPRECATED(before-spec-pr-50): fall back to player.state for older clients.
-        if payload.available is None and state.state is not None:
+        # Fall back to legacy player.state for availability only when the compliant
+        # top-level field is absent.
+        if state.state is not None and payload.available is None:
             create_task(
                 self._client.handle_availability_change(available=state.state != "external_source")
             )
 
         support = self._client.info.player_support
+        commands = support.supported_commands if support else []
         changed = False
 
-        if state.volume is not None:
-            if not support or PlayerCommand.VOLUME not in support.supported_commands:
-                self._client._logger.warning(  # noqa: SLF001
-                    "Client sent volume field without declaring 'volume' in supported_commands"
-                )
-            elif self.volume != state.volume:
-                self.volume = state.volume
-                changed = True
+        if (
+            state.volume is not None
+            and PlayerCommand.VOLUME in commands
+            and self.volume != state.volume
+        ):
+            self.volume = state.volume
+            changed = True
 
-        if state.muted is not None:
-            if not support or PlayerCommand.MUTE not in support.supported_commands:
-                self._client._logger.warning(  # noqa: SLF001
-                    "Client sent muted field without declaring 'mute' in supported_commands"
-                )
-            elif self.muted != state.muted:
-                self.muted = state.muted
-                changed = True
+        if state.muted is not None and PlayerCommand.MUTE in commands and self.muted != state.muted:
+            self.muted = state.muted
+            changed = True
 
         if changed:
             self.emit_client_event(VolumeChangedEvent(volume=self.volume, muted=self.muted))
@@ -701,6 +733,20 @@ class PlayerV1Role(Role):
             raise ValueError(
                 f"Client {self._client.client_id} sent player format request "
                 "but has no player support"
+            )
+
+        # A requested format must be one the client declared in its hello
+        # supported_formats; only the fields the request actually carries are compared.
+        if not any(
+            (player_req.codec is None or fmt.codec == player_req.codec)
+            and (player_req.sample_rate is None or fmt.sample_rate == player_req.sample_rate)
+            and (player_req.bit_depth is None or fmt.bit_depth == player_req.bit_depth)
+            and (player_req.channels is None or fmt.channels == player_req.channels)
+            for fmt in support.supported_formats
+        ):
+            self._client.flag_noncompliance(
+                "stream/request-format requested a format not in the client's "
+                "declared supported_formats"
             )
 
         supported = filter_encodable_formats(support.supported_formats)

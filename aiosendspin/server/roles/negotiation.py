@@ -24,22 +24,28 @@ _FAMILY_ORDER = {
     )
 }
 
+# Legacy backwards-compat wires excluded from negotiation in strict mode.
+_LEGACY_ROLE_IDS = frozenset({"visualizer@_draft_r1"})
+
 
 def sort_role_ids(role_ids: Iterable[str]) -> list[str]:
     """Order role IDs by server-defined family order; unlisted families keep input order."""
     return sorted(role_ids, key=lambda rid: _FAMILY_ORDER.get(role_family(rid), len(_FAMILY_ORDER)))
 
 
-def negotiate_roles(client_supported_roles: list[str]) -> list[str]:
+def negotiate_roles(client_supported_roles: list[str], *, strict: bool = False) -> list[str]:
     """Negotiate the mutually-supported role set from the client-supported role list.
 
-    For each role family, pick the first role in client order that is
-    registered in ROLE_FACTORIES. The result is sorted by the server-defined
-    family activation order.
+    For each role family, pick the first role in client order that is registered
+    in ROLE_FACTORIES. The result is sorted by the server-defined family
+    activation order. When ``strict``, legacy backwards-compat wires are skipped
+    so a later spec role in the same family can win instead.
     """
     active: dict[str, str] = {}
 
     for client_role_id in client_supported_roles:
+        if strict and client_role_id in _LEGACY_ROLE_IDS:
+            continue
         family = role_family(client_role_id)
         if family in active:
             continue

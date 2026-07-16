@@ -64,6 +64,10 @@ class ArtworkV1Role(Role):
         """Role family name for protocol messages."""
         return "artwork"
 
+    def requires_initial_state(self) -> bool:
+        """Artwork receives server binary, gated on the client's initial state."""
+        return True
+
     def on_connect(self) -> None:
         """Initialize channel configs from client hello and subscribe to group."""
         self._init_channel_configs()
@@ -175,10 +179,25 @@ class ArtworkV1Role(Role):
             return
 
         if artwork_request.channel not in self._channel_configs:
-            self._client._logger.warning(  # noqa: SLF001
-                "Client %s requested invalid artwork channel %d",
-                self._client.client_id,
-                artwork_request.channel,
+            self._client.flag_noncompliance(
+                f"stream/request-format targeted unknown artwork channel {artwork_request.channel}"
+            )
+            return
+
+        invalid_dims = [
+            name
+            for name, value in (
+                ("media_width", artwork_request.media_width),
+                ("media_height", artwork_request.media_height),
+            )
+            if value is not None and value <= 0
+        ]
+        if invalid_dims:
+            # Skip the update: non-positive dims would otherwise raise out of
+            # ArtworkChannel and tear the connection down.
+            self._client.flag_noncompliance(
+                "stream/request-format artwork dimensions must be positive: "
+                + ", ".join(invalid_dims)
             )
             return
 

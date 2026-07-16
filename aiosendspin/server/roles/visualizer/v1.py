@@ -244,6 +244,10 @@ class VisualizerV1Role(Role):
         else:
             self._buffer_tracker.capacity_bytes = capacity
 
+    def requires_initial_state(self) -> bool:
+        """Visualizer receives server binary, gated on the client's initial state."""
+        return True
+
     def on_connect(self) -> None:
         """Initialize stream config and subscribe to group role."""
         self._init_stream_config()
@@ -655,7 +659,30 @@ class VisualizerV1Role(Role):
     def on_stream_request_format(self, payload: StreamRequestFormatPayload) -> None:
         """Apply mid-stream renegotiation. All v1 fields are optional and merged."""
         request = payload.visualizer
-        if request is None or self._stream_config is None or self._support is None:
+        if request is None:
+            return
+
+        if request.buffer_capacity is not None:
+            # buffer_capacity is not a visualizer stream/request-format field per spec.
+            self._client.flag_noncompliance(
+                "stream/request-format set buffer_capacity, not a visualizer field here"
+            )
+
+        invalid = [
+            name
+            for name, value in (
+                ("rate_max", request.rate_max),
+                ("buffer_capacity", request.buffer_capacity),
+            )
+            if value is not None and value <= 0
+        ]
+        if invalid:
+            self._client.flag_noncompliance(
+                "stream/request-format visualizer fields must be positive: " + ", ".join(invalid)
+            )
+            return
+
+        if self._stream_config is None or self._support is None:
             return
 
         # Build the merged payload as a plain dict so the support
@@ -720,6 +747,20 @@ class VisualizerV1Role(Role):
                 self._client.client_id,
                 dropped,
             )
+        # `pitch` rides spec-reserved binary type 21, so a compliance-strict server
+        # drops it up front (not just from stream/start). A client left with no
+        # compliant type has no visualizer capability and gets no stream at all.
+        if not self._client._server.allow_noncompliant_clients:  # noqa: SLF001
+            compliant = [t for t in kept if t != "pitch"]
+            if not compliant:
+                _LOGGER.info(
+                    "client %s supports only the reserved 'pitch' visualizer type; not streaming",
+                    self._client.client_id,
+                )
+                self._support = None
+                self._stream_config = None
+                return
+            kept = compliant
         if not kept:
             _LOGGER.warning(
                 "client %s requested no implemented visualizer types; falling back to ['loudness']",
@@ -759,9 +800,13 @@ class VisualizerV1Role(Role):
         else:
             exposed_types = [t for t in client_types if t != "beat"]
         # Server-wide pitch shed: drop the (heavy) pitch feature unless it is
-        # the only exposed type — `stream/start` must keep at least one, and we
-        # cannot add a type the client did not request.
-        if not self._client._server.visualizer_pitch_enabled:  # noqa: SLF001
+        # the only exposed type. stream/start must keep at least one, and we
+        # cannot add a type the client did not request. The pitch toggle is
+        # ignored when the server rejects non-compliant clients, since pitch
+        # rides spec-reserved binary type 21.
+        server = self._client._server  # noqa: SLF001
+        pitch_enabled = server.visualizer_pitch_enabled and server.allow_noncompliant_clients
+        if not pitch_enabled:
             without_pitch = [t for t in exposed_types if t != "pitch"]
             if without_pitch:
                 exposed_types = without_pitch

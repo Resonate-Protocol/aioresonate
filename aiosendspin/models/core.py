@@ -8,7 +8,6 @@ synchronization, stream lifecycle management, and role-based state updates and c
 
 from __future__ import annotations
 
-import logging
 from dataclasses import dataclass, field, fields, is_dataclass
 from typing import Annotated, Any, ClassVar, Literal
 
@@ -55,8 +54,6 @@ from .visualizer_draft_r1 import (
 from .visualizer_draft_r1 import (
     StreamStartVisualizer as StreamStartVisualizerDraftR1,
 )
-
-logger = logging.getLogger(__name__)
 
 
 def _has_merge_value(value: Any) -> bool:
@@ -169,6 +166,13 @@ class ClientHelloPayload(DataClassORJSONMixin):
     """Pairing methods this client offers."""
     unpaired_access: UnpairedAccess = field(default_factory=UnpairedAccess)
     """Whether this client currently admits unpaired access."""
+    legacy_support_keys_used: list[str] | None = None
+    """Unversioned support keys the parser rewrote to versioned aliases, recorded for
+    the server to flag. Not part of the wire schema (omitted when None)."""
+    unlisted_support_roles: list[str] | None = None
+    """Roles whose support object was provided without listing the role in
+    ``supported_roles`` (dropped during parse), recorded for the server to flag.
+    Not part of the wire schema (omitted when None)."""
 
     # Static mapping: unversioned support key -> actual alias key.
     _SUPPORT_KEY_ALIASES: ClassVar[dict[str, str]] = {
@@ -180,22 +184,19 @@ class ClientHelloPayload(DataClassORJSONMixin):
 
     @classmethod
     def __pre_deserialize__(cls, d: dict[str, Any]) -> dict[str, Any]:
-        """Normalize legacy role support keys to versioned names."""
-        legacy_fields_used: list[tuple[str, str]] = []
+        """Rewrite legacy unversioned support keys to versioned aliases, recording which."""
         normalized = dict(d)
+        legacy_keys: list[str] = []
         for legacy_key, versioned_key in cls._SUPPORT_KEY_ALIASES.items():
-            if legacy_key in normalized and versioned_key not in normalized:
-                legacy_fields_used.append((legacy_key, versioned_key))
-                normalized[versioned_key] = normalized.pop(legacy_key)
-        if legacy_fields_used:
-            old_names = ", ".join(old for old, _ in legacy_fields_used)
-            new_names = ", ".join(new for _, new in legacy_fields_used)
-            logger.warning(
-                "client/hello message used deprecated field names (%s), "
-                "please update client to use (%s) instead",
-                old_names,
-                new_names,
-            )
+            if legacy_key not in normalized:
+                continue
+            legacy_keys.append(legacy_key)
+            value = normalized.pop(legacy_key)
+            # Rewrite to the versioned alias only when the client didn't also send it.
+            if versioned_key not in normalized:
+                normalized[versioned_key] = value
+        # Always overwrite so a client cannot spoof the record via the wire.
+        normalized["legacy_support_keys_used"] = legacy_keys or None
         return normalized
 
     def __post_init__(self) -> None:
@@ -204,6 +205,7 @@ class ClientHelloPayload(DataClassORJSONMixin):
         # Require support objects only for the exact role version we parse (e.g. "player@v1").
         # Clients may advertise newer versions (e.g. "player@v2") which this server may not
         # implement. Those must not trigger v1 support requirements.
+        unlisted: list[str] = []
         player_role_supported = Roles.PLAYER.value in self.supported_roles
         if player_role_supported and self.player_support is None:
             raise ValueError(
@@ -211,6 +213,8 @@ class ClientHelloPayload(DataClassORJSONMixin):
                 "'player@v1' is in supported_roles"
             )
         if not player_role_supported:
+            if self.player_support is not None:
+                unlisted.append(Roles.PLAYER.value)
             self.player_support = None
 
         # Validate artwork role and support configuration
@@ -221,6 +225,8 @@ class ClientHelloPayload(DataClassORJSONMixin):
                 "'artwork@v1' is in supported_roles"
             )
         if not artwork_role_supported:
+            if self.artwork_support is not None:
+                unlisted.append(Roles.ARTWORK.value)
             self.artwork_support = None
 
         # Validate visualizer role and support configuration.
@@ -231,6 +237,8 @@ class ClientHelloPayload(DataClassORJSONMixin):
                 "provided when 'visualizer@v1' is in supported_roles"
             )
         if not visualizer_role_supported:
+            if self.visualizer_support is not None:
+                unlisted.append(Roles.VISUALIZER.value)
             self.visualizer_support = None
 
         # Validate legacy `visualizer@_draft_r1` support configuration.
@@ -241,7 +249,12 @@ class ClientHelloPayload(DataClassORJSONMixin):
                 "'visualizer@_draft_r1' is in supported_roles"
             )
         if not visualizer_draft_supported:
+            if self.visualizer_draft_r1_support is not None:
+                unlisted.append("visualizer@_draft_r1")
             self.visualizer_draft_r1_support = None
+
+        # Overwrite so a client cannot spoof the record via the wire.
+        self.unlisted_support_roles = unlisted or None
 
     class Config(BaseConfig):
         """Config for parsing json messages."""
@@ -289,13 +302,19 @@ class ClientStatePayload(DataClassORJSONMixin):
     """
     player: PlayerStatePayload | None = None
     """Player state - only if client has player role."""
+    legacy_state_used: bool | None = None
+    """Set when the parser read a legacy top-level `state` field, recorded for the server
+    to flag. Not part of the wire schema (omitted when None)."""
 
     @classmethod
     def __pre_deserialize__(cls, d: dict[str, Any]) -> dict[str, Any]:
-        """Normalize a legacy `state` enum to `available` (only external_source is unavailable)."""
-        if d.get("available") is None and "state" in d:
-            d = dict(d)
+        """Normalize a legacy `state` enum to `available`, recording that it was used."""
+        d = dict(d)
+        legacy_state = "state" in d
+        if d.get("available") is None and legacy_state:
             d["available"] = d["state"] != "external_source"
+        # Always overwrite so a client cannot spoof the record via the wire.
+        d["legacy_state_used"] = legacy_state or None
         return d
 
     class Config(BaseConfig):
