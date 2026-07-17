@@ -613,17 +613,20 @@ async def test_live_pairing_method_enabled_after_hello() -> None:
 
 
 async def test_live_pairing_method_disabled_after_hello_aborts() -> None:
-    """A method disabled after the hello is refused by the client, not silently by the server."""
+    """A method disabled after the hello is refused without closing; a retry can succeed."""
     server_store = InMemoryServerPairingStore()
     server = _make_server(server_store)
     client_identity = Identity.generate()
     client_store = InMemoryClientPairingStore()
 
-    async def display(_pin: str | None) -> None:
-        return
+    shown: asyncio.Future[str] = asyncio.get_running_loop().create_future()
+
+    async def display(pin: str | None) -> None:
+        if pin is not None and not shown.done():
+            shown.set_result(pin)
 
     async def provide() -> str:
-        return "000000"
+        return await shown
 
     async with _serve(server) as url:
         client = make_sdk_client(
@@ -643,6 +646,11 @@ async def test_live_pairing_method_disabled_after_hello_aborts() -> None:
                     PairingAttempt(method=PairMethod.DYNAMIC_PIN, pin_provider=provide)
                 )
             assert exc_info.value.reason is PairAbortReason.METHOD_NOT_SUPPORTED
+            await client_store.store_pairing_config(replace(config, dynamic_pin_enabled=True))
+            await conn.initiate_pairing(
+                PairingAttempt(method=PairMethod.DYNAMIC_PIN, pin_provider=provide)
+            )
+            await _await_long_term_record(client_store, server.id)
         finally:
             await client.disconnect()
 
