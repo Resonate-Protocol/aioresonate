@@ -567,6 +567,86 @@ async def test_live_pairing_dynamic_pin_server_floor_raises_length() -> None:
             await client.disconnect()
 
 
+async def test_live_pairing_method_enabled_after_hello() -> None:
+    """A method enabled after the hello (e.g. via management) pairs; no advertised PIN floor."""
+    server_store = InMemoryServerPairingStore()
+    server = _make_server(server_store)
+    client_identity = Identity.generate()
+    client_store = InMemoryClientPairingStore()
+    config = await client_store.get_pairing_config()
+    await client_store.store_pairing_config(replace(config, dynamic_pin_enabled=False))
+
+    shown: asyncio.Future[str] = asyncio.get_running_loop().create_future()
+
+    async def display(pin: str | None) -> None:
+        if pin is not None and not shown.done():
+            shown.set_result(pin)
+
+    async def provide() -> str:
+        return await shown
+
+    async with _serve(server) as url:
+        client = make_sdk_client(
+            identity=client_identity,
+            pairing_store=client_store,
+            client_name="c",
+            roles=[Roles.CONTROLLER],
+            pin_display=display,
+        )
+        try:
+            await client.connect(url)
+            conn = await _find_connection_by_client_id(server, client_identity.peer_id)
+            assert conn._client_info is not None  # noqa: SLF001
+            offered = {d.method for d in (conn._client_info.supported_pair_methods or [])}  # noqa: SLF001
+            assert PairMethod.DYNAMIC_PIN not in offered
+
+            config = await client_store.get_pairing_config()
+            await client_store.store_pairing_config(replace(config, dynamic_pin_enabled=True))
+            await conn.initiate_pairing(
+                PairingAttempt(method=PairMethod.DYNAMIC_PIN, pin_provider=provide)
+            )
+            await _await_long_term_record(client_store, server.id)
+            # No advertised client floor, so the server's own floor (6) sets the length.
+            assert len(shown.result()) == 6
+        finally:
+            await client.disconnect()
+
+
+async def test_live_pairing_method_disabled_after_hello_aborts() -> None:
+    """A method disabled after the hello is refused by the client, not silently by the server."""
+    server_store = InMemoryServerPairingStore()
+    server = _make_server(server_store)
+    client_identity = Identity.generate()
+    client_store = InMemoryClientPairingStore()
+
+    async def display(_pin: str | None) -> None:
+        return
+
+    async def provide() -> str:
+        return "000000"
+
+    async with _serve(server) as url:
+        client = make_sdk_client(
+            identity=client_identity,
+            pairing_store=client_store,
+            client_name="c",
+            roles=[Roles.CONTROLLER],
+            pin_display=display,
+        )
+        try:
+            await client.connect(url)
+            conn = await _find_connection_by_client_id(server, client_identity.peer_id)
+            config = await client_store.get_pairing_config()
+            await client_store.store_pairing_config(replace(config, dynamic_pin_enabled=False))
+            with pytest.raises(PairingAbortError) as exc_info:
+                await conn.initiate_pairing(
+                    PairingAttempt(method=PairMethod.DYNAMIC_PIN, pin_provider=provide)
+                )
+            assert exc_info.value.reason is PairAbortReason.METHOD_NOT_SUPPORTED
+        finally:
+            await client.disconnect()
+
+
 async def _await_left_pairing(client: SdkClient) -> None:
     async with asyncio.timeout(2):
         while Activity.PAIRING in client.activities:  # noqa: ASYNC110

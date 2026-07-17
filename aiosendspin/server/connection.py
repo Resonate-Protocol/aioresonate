@@ -1147,17 +1147,14 @@ class SendspinConnection:
         try:
             if not await self._rehandshake_for_pairing_if_needed(transport):
                 return False
-            assert self._client_info is not None
-            offered = {d.method for d in (self._client_info.supported_pair_methods or [])}
-            chosen = (
+            method = (
                 self._pairing_attempt.method
                 if self._pairing_attempt is not None
                 else PairMethod.PAIRING_PSK
             )
-            method = chosen if chosen in offered else None
-            if method is None:
-                # Client doesn't offer the requested method — close silently per spec.
-                return False
+            # No gate on the hello-advertised methods: the advertisement may lag the client's
+            # live pairing config (management can change it mid-connection). The client
+            # arbitrates, aborting an unsupported method with ``method_not_supported``.
             await transport.send_str(
                 ServerActivateMessage(
                     payload=ServerActivatePayload(
@@ -1240,7 +1237,11 @@ class SendspinConnection:
             ),
             None,
         )
-        client_min = descriptor.min_pin_length if descriptor is not None else None
+        if descriptor is None:
+            # Method enabled after hello (management): no advertised floor, so use our own and
+            # let the client arbitrate via ``pin_length_unacceptable``.
+            return self._server.min_pin_length
+        client_min = descriptor.min_pin_length
         if client_min is None or not MIN_PIN_DIGITS <= client_min <= MAX_PIN_DIGITS:
             raise PairingError("client does not (correctly) offer dynamic PIN pairing")
         # Both floors are validated to [MIN_PIN_DIGITS, MAX_PIN_DIGITS], so the max stays in range.
