@@ -1,15 +1,14 @@
-"""Tests for connection lifecycle events (ClientConnected, ClientDisconnected, ClientReconnected)."""
+"""Tests for lifecycle events (ClientConnected, ClientDisconnected, ClientReconnected)."""
 
 from __future__ import annotations
 
 import asyncio
 import dataclasses
 from dataclasses import dataclass
-from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from aiosendspin.models.core import ClientHelloPayload, DeviceInfo, ServerStateMessage
+from aiosendspin.models.core import ClientHelloPayload
 from aiosendspin.models.player import ClientHelloPlayerSupport, SupportedAudioFormat
 from aiosendspin.models.types import (
     AudioCodec,
@@ -17,19 +16,10 @@ from aiosendspin.models.types import (
     PlayerCommand,
     Roles,
 )
-from aiosendspin.server import (
-    ClientConnectedEvent,
-    ClientDisconnectedEvent,
-    ClientReconnectedEvent,
-    ClientRemovedEvent,
-)
 from aiosendspin.server.client import (
-    CLIENT_CLEANUP_DELAY,
     SendspinClient,
 )
 from aiosendspin.server.clock import LoopClock
-from aiosendspin.server.connection import SendspinConnection
-from aiosendspin.server.events import GroupDeletedEvent
 from aiosendspin.server.group import SendspinGroup
 
 
@@ -146,7 +136,12 @@ async def test_connected_event_fires_on_reconnect() -> None:
     hello = _player_hello("player-1")
 
     # First connect
-    client.attach_connection(_DummyConnection(), client_info=hello, negotiated_roles=[Roles.PLAYER.value], active_roles=[Roles.PLAYER.value])
+    client.attach_connection(
+        _DummyConnection(),
+        client_info=hello,
+        negotiated_roles=[Roles.PLAYER.value],
+        active_roles=[Roles.PLAYER.value],
+    )
     client.mark_connected()
     server.events.clear()
 
@@ -155,7 +150,12 @@ async def test_connected_event_fires_on_reconnect() -> None:
     server.events.clear()
 
     # Reconnect with same hello
-    client.attach_connection(_DummyConnection(), client_info=hello, negotiated_roles=[Roles.PLAYER.value], active_roles=[Roles.PLAYER.value])
+    client.attach_connection(
+        _DummyConnection(),
+        client_info=hello,
+        negotiated_roles=[Roles.PLAYER.value],
+        active_roles=[Roles.PLAYER.value],
+    )
 
     connected_events = [e for e in server.events if e[0] == "connected"]
     assert len(connected_events) == 1, (
@@ -228,7 +228,12 @@ async def test_reconnected_event_fires_on_reconnect_with_unchanged_hello() -> No
     hello = _player_hello("player-1")
 
     # First connect
-    client.attach_connection(_DummyConnection(), client_info=hello, negotiated_roles=[Roles.PLAYER.value], active_roles=[Roles.PLAYER.value])
+    client.attach_connection(
+        _DummyConnection(),
+        client_info=hello,
+        negotiated_roles=[Roles.PLAYER.value],
+        active_roles=[Roles.PLAYER.value],
+    )
     client.mark_connected()
     server.events.clear()
 
@@ -237,7 +242,12 @@ async def test_reconnected_event_fires_on_reconnect_with_unchanged_hello() -> No
     server.events.clear()
 
     # Reconnect with same hello
-    client.attach_connection(_DummyConnection(), client_info=hello, negotiated_roles=[Roles.PLAYER.value], active_roles=[Roles.PLAYER.value])
+    client.attach_connection(
+        _DummyConnection(),
+        client_info=hello,
+        negotiated_roles=[Roles.PLAYER.value],
+        active_roles=[Roles.PLAYER.value],
+    )
 
     reconnected_events = [e for e in server.events if e[0] == "reconnected"]
     assert len(reconnected_events) == 1, (
@@ -269,7 +279,7 @@ async def test_reconnected_event_does_not_fire_on_first_connect() -> None:
 
 @pytest.mark.asyncio
 async def test_reconnected_event_not_fired_on_changed_hello() -> None:
-    """ClientReconnectedEvent does NOT fire when the hello payload changed (ClientConnectedEvent only)."""
+    """ClientReconnectedEvent does NOT fire on changed hello (ClientConnectedEvent only)."""
     loop = asyncio.get_running_loop()
     server = _DummyServer(loop=loop, clock=LoopClock(loop))
     client = SendspinClient(server, client_id="player-1")
@@ -281,7 +291,12 @@ async def test_reconnected_event_not_fired_on_changed_hello() -> None:
     hello_v2 = dataclasses.replace(hello_v2, name="player-1-renamed")
 
     # First connect with v1
-    client.attach_connection(_DummyConnection(), client_info=hello_v1, negotiated_roles=[Roles.PLAYER.value], active_roles=[Roles.PLAYER.value])
+    client.attach_connection(
+        _DummyConnection(),
+        client_info=hello_v1,
+        negotiated_roles=[Roles.PLAYER.value],
+        active_roles=[Roles.PLAYER.value],
+    )
     client.mark_connected()
     server.events.clear()
 
@@ -290,7 +305,12 @@ async def test_reconnected_event_not_fired_on_changed_hello() -> None:
     server.events.clear()
 
     # Reconnect with v2 (changed hello)
-    client.attach_connection(_DummyConnection(), client_info=hello_v2, negotiated_roles=[Roles.PLAYER.value], active_roles=[Roles.PLAYER.value])
+    client.attach_connection(
+        _DummyConnection(),
+        client_info=hello_v2,
+        negotiated_roles=[Roles.PLAYER.value],
+        active_roles=[Roles.PLAYER.value],
+    )
 
     connected_events = [e for e in server.events if e[0] == "connected"]
     reconnected_events = [e for e in server.events if e[0] == "reconnected"]
