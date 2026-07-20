@@ -256,9 +256,7 @@ class PairAbortReason(Enum):
 
 
 # The sender closes the connection after these abort reasons; every other reason keeps it open.
-CLOSING_ABORT_REASONS: frozenset[PairAbortReason] = frozenset(
-    {PairAbortReason.CONCURRENT_ATTEMPT, PairAbortReason.METHOD_NOT_SUPPORTED}
-)
+CLOSING_ABORT_REASONS: frozenset[PairAbortReason] = frozenset({PairAbortReason.CONCURRENT_ATTEMPT})
 
 
 class ManagementResult(Enum):
