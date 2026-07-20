@@ -36,9 +36,6 @@ class _MockServer:
     def _signal_client_disconnected(self, client_id: str, goodbye_reason: object = None) -> None:
         pass
 
-    def _signal_client_reconnected(self, client_id: str) -> None:
-        pass
-
 
 class _DummyConnection:
     async def disconnect(self, *, retry_connection: bool = True) -> None:  # noqa: ARG002

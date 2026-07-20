@@ -85,19 +85,6 @@ class ClientRemovedEvent(SendspinEvent):
 
 
 @dataclass
-class ClientReconnectedEvent(SendspinEvent):
-    """A previously-connected client reconnected with unchanged hello.
-
-    Fired only when a client reconnects with the same ``ClientHelloPayload``
-    as before — i.e. no capabilities, name, or role set changed.
-    Does **not** fire on the first-ever connection of a new client;
-    subscribe to ``ClientConnectedEvent`` for that.
-    """
-
-    client_id: str
-
-
-@dataclass
 class ClientConnectedEvent(SendspinEvent):
     """A client established a transport connection (first or reconnect).
 
@@ -448,10 +435,6 @@ class SendspinServer:
     def _signal_client_updated(self, client_id: str) -> None:
         """Emit a ClientUpdatedEvent (called from SendspinClient)."""
         self._signal_event(ClientUpdatedEvent(client_id))
-
-    def _signal_client_reconnected(self, client_id: str) -> None:
-        """Emit a ClientReconnectedEvent (called from SendspinClient)."""
-        self._signal_event(ClientReconnectedEvent(client_id))
 
     def _signal_client_connected(self, client_id: str) -> None:
         """Emit a ClientConnectedEvent (called from SendspinClient)."""

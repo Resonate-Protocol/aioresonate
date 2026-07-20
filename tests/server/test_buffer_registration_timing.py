@@ -39,9 +39,6 @@ class _DummyServer:
     def _signal_client_disconnected(self, client_id: str, goodbye_reason: object = None) -> None:
         pass
 
-    def _signal_client_reconnected(self, client_id: str) -> None:
-        pass
-
 
 class _DummyGroup:
     def __init__(self, clients: list[Any], group_id: str = "g1") -> None:
