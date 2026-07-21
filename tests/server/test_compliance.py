@@ -37,14 +37,33 @@ async def test_allow_noncompliant_clients_defaults_to_true() -> None:
 
 
 @pytest.mark.asyncio
-async def test_flag_noncompliance_lenient_logs_every_time(
+async def test_flag_noncompliance_lenient_dedups_per_reason(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """Lenient mode logs each occurrence (no dedup)."""
+    """Lenient mode logs each distinct reason once, not on every occurrence."""
     server = _make_server()
     client = server.get_or_create_client("dev")
     with caplog.at_level(logging.INFO):
         client.flag_noncompliance("legacy thing")
+        client.flag_noncompliance("legacy thing")
+        client.flag_noncompliance("other thing")
+    messages = [r.message for r in caplog.records if "non-compliant client" in r.message]
+    assert messages == [
+        "non-compliant client: legacy thing",
+        "non-compliant client: other thing",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_flag_noncompliance_relogs_after_reconnect(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A new connection re-logs a reason already seen on the previous one."""
+    server = _make_server()
+    client = server.get_or_create_client("dev")
+    with caplog.at_level(logging.INFO):
+        client.flag_noncompliance("legacy thing")
+        client._noncompliance_logged.clear()  # attach_connection resets this  # noqa: SLF001
         client.flag_noncompliance("legacy thing")
     hits = [r for r in caplog.records if "non-compliant client: legacy thing" in r.message]
     assert len(hits) == 2

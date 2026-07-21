@@ -133,18 +133,26 @@ class SendspinClient:
         # Built when roles are attached for cached lookup in _send_binary_frame().
         self._binary_handling_cache: dict[int, tuple[BinaryHandling, Role]] = {}
 
+        # Reasons already logged for the current connection (reset on each attach).
+        self._noncompliance_logged: set[str] = set()
+
         # Pending cleanup handle (scheduled via loop.call_soon/call_later on disconnect)
         self._cleanup_handle: asyncio.Handle | None = None
         # True when we intentionally retain a disconnected client after ANOTHER_SERVER goodbye.
         self._cleanup_on_mdns_removal: bool = False
 
     def flag_noncompliance(self, reason: str) -> None:
-        """Log a tolerated spec violation, or reject it when the server is strict."""
+        """Log a tolerated spec violation once per connection, or reject when strict."""
+        if not self._server.allow_noncompliant_clients:
+            raise ClientComplianceError(reason)
+        # Recurring deviations (e.g. per client/state) would otherwise log every
+        # message, so log each distinct reason once until the client reconnects.
+        if reason in self._noncompliance_logged:
+            return
+        self._noncompliance_logged.add(reason)
         # Logged at info while implementers migrate. Bump to warning once they have
         # had time to fix these, then drop the backwards-compat paths altogether.
         self._logger.info("non-compliant client: %s", reason)
-        if not self._server.allow_noncompliant_clients:
-            raise ClientComplianceError(reason)
 
     @property
     def client_id(self) -> str:
@@ -456,6 +464,9 @@ class SendspinClient:
         """Attach a new WebSocket connection to this client."""
         # Cancel pending cleanup if client reconnected before cleanup fired
         self._cancel_cleanup()
+
+        # Fresh connection: re-log each tolerated deviation once for this session.
+        self._noncompliance_logged.clear()
 
         if self._connection is not None and self._connection is not connection:
             # Replace an existing connection for the same device.
