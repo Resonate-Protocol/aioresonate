@@ -133,7 +133,7 @@ class SendspinClient:
         # Built when roles are attached for cached lookup in _send_binary_frame().
         self._binary_handling_cache: dict[int, tuple[BinaryHandling, Role]] = {}
 
-        # Reasons already logged for the current connection (reset on each attach).
+        # Reasons already logged, deduped for the client's lifetime.
         self._noncompliance_logged: set[str] = set()
 
         # Pending cleanup handle (scheduled via loop.call_soon/call_later on disconnect)
@@ -142,12 +142,12 @@ class SendspinClient:
         self._cleanup_on_mdns_removal: bool = False
 
     def flag_noncompliance(self, reason: str) -> None:
-        """Log a tolerated spec violation once per connection, or reject when strict."""
+        """Log a tolerated spec violation once, or reject it when the server is strict."""
         if not self._server.allow_noncompliant_clients:
             self._logger.error("rejecting non-compliant client: %s", reason)
             raise ClientComplianceError(reason)
         # Recurring deviations (e.g. per client/state) would otherwise log every
-        # message, so log each distinct reason once until the client reconnects.
+        # message, so log each distinct reason only once.
         if reason in self._noncompliance_logged:
             return
         self._noncompliance_logged.add(reason)
@@ -463,9 +463,6 @@ class SendspinClient:
         """Attach a new WebSocket connection to this client."""
         # Cancel pending cleanup if client reconnected before cleanup fired
         self._cancel_cleanup()
-
-        # Fresh connection: re-log each tolerated deviation once for this session.
-        self._noncompliance_logged.clear()
 
         if self._connection is not None and self._connection is not connection:
             # Replace an existing connection for the same device.

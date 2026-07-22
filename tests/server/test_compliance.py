@@ -55,21 +55,6 @@ async def test_flag_noncompliance_lenient_dedups_per_reason(
 
 
 @pytest.mark.asyncio
-async def test_flag_noncompliance_relogs_after_reconnect(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """A new connection re-logs a reason already seen on the previous one."""
-    server = _make_server()
-    client = server.get_or_create_client("dev")
-    with caplog.at_level(logging.INFO):
-        client.flag_noncompliance("legacy thing")
-        client._noncompliance_logged.clear()  # attach_connection resets this  # noqa: SLF001
-        client.flag_noncompliance("legacy thing")
-    hits = [r for r in caplog.records if "non-compliant client: legacy thing" in r.message]
-    assert len(hits) == 2
-
-
-@pytest.mark.asyncio
 async def test_flag_noncompliance_strict_raises() -> None:
     """Strict mode raises ClientComplianceError."""
     server = _make_server(allow_noncompliant_clients=False)
