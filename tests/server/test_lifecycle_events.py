@@ -1,4 +1,4 @@
-"""Tests for lifecycle events (ClientConnected, ClientDisconnected, ClientReconnected)."""
+"""Tests for lifecycle events (ClientConnected, ClientDisconnected)."""
 
 from __future__ import annotations
 
