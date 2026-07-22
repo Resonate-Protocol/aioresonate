@@ -38,7 +38,7 @@ server = [
 
 [dependency-groups]
 dev = [
-  "codespell==2.4.2",
+  "codespell==2.4.3",
   "isort==8.0.1",
   "mypy==2.3.0",
   "pre-commit==4.6.0",
