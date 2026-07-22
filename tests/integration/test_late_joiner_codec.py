@@ -28,6 +28,12 @@ class _DummyServer:
     id: str = "srv"
     name: str = "server"
 
+    def _signal_client_connected(self, client_id: str) -> None:
+        pass
+
+    def _signal_client_disconnected(self, client_id: str, goodbye_reason: object = None) -> None:
+        pass
+
 
 class _DummyGroup:
     def __init__(self, clients: list[SendspinClient]) -> None:

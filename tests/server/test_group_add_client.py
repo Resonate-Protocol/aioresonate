@@ -41,6 +41,12 @@ class _DummyServer:
     def _signal_client_updated(self, client_id: str) -> None:
         pass
 
+    def _signal_client_connected(self, client_id: str) -> None:
+        pass
+
+    def _signal_client_disconnected(self, client_id: str, goodbye_reason: object) -> None:
+        pass
+
     def register(self, client: SendspinClient) -> None:
         self._clients[client.client_id] = client
 

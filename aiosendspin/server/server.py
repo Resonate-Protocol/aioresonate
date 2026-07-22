@@ -30,7 +30,7 @@ from zeroconf.asyncio import AsyncServiceBrowser, AsyncServiceInfo, AsyncZerocon
 
 from aiosendspin.clock import Clock, RawMonotonicClock
 from aiosendspin.models.core import ClientHelloPayload
-from aiosendspin.models.types import ConnectionReason
+from aiosendspin.models.types import ConnectionReason, GoodbyeReason
 from aiosendspin.noise.keys import Identity
 from aiosendspin.noise.pairing import PairingAbortError, PairingAttempt
 from aiosendspin.noise.pin import DEFAULT_MIN_PIN_DIGITS, MAX_PIN_DIGITS, MIN_PIN_DIGITS
@@ -82,6 +82,37 @@ class ClientRemovedEvent(SendspinEvent):
     """A persistent client/device was removed from the server."""
 
     client_id: str
+
+
+@dataclass
+class ClientConnectedEvent(SendspinEvent):
+    """A client established a transport connection (first or reconnect).
+
+    Fired on every ``attach_connection()`` — the first connection of a
+    brand-new client and subsequent reconnects alike. Complementary to
+    ``ClientDisconnectedEvent`` which fires when the transport goes down.
+
+    .. note::
+       This event may fire **before** ``ClientAddedEvent`` for new clients
+       (the client is added to the registry later in the attach flow).
+       Consumers should not assume the client is already in the registry
+       when handling this event.
+    """
+
+    client_id: str
+
+
+@dataclass
+class ClientDisconnectedEvent(SendspinEvent):
+    """A client's transport connection was lost.
+
+    Fired on every ``detach_connection()`` regardless of goodbye reason.
+    The ``goodbye_reason`` is ``None`` for an unexpected disconnect
+    (e.g. WebSocket close without protocol goodbye).
+    """
+
+    client_id: str
+    goodbye_reason: GoodbyeReason | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -404,6 +435,16 @@ class SendspinServer:
     def _signal_client_updated(self, client_id: str) -> None:
         """Emit a ClientUpdatedEvent (called from SendspinClient)."""
         self._signal_event(ClientUpdatedEvent(client_id))
+
+    def _signal_client_connected(self, client_id: str) -> None:
+        """Emit a ClientConnectedEvent (called from SendspinClient)."""
+        self._signal_event(ClientConnectedEvent(client_id))
+
+    def _signal_client_disconnected(
+        self, client_id: str, goodbye_reason: GoodbyeReason | None
+    ) -> None:
+        """Emit a ClientDisconnectedEvent (called from SendspinClient)."""
+        self._signal_event(ClientDisconnectedEvent(client_id, goodbye_reason))
 
     async def on_client_connect(self, request: web.Request) -> web.StreamResponse:
         """Handle an incoming WebSocket connection from a Sendspin client."""

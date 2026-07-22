@@ -51,7 +51,7 @@ logger = logging.getLogger(__name__)
 _T = TypeVar("_T")
 
 # Cleanup delay for reconnect-friendly disconnect reasons (seconds)
-CLIENT_CLEANUP_DELAY = 30.0
+CLIENT_CLEANUP_DELAY = 180.0
 
 # Reasons that trigger immediate client cleanup from the registry.
 # Note: ANOTHER_SERVER is intentionally excluded and never auto-cleaned up.
@@ -486,6 +486,7 @@ class SendspinClient:
 
         previous_info = self._info
         self._set_identity_from_hello(client_info, negotiated_roles=negotiated_roles)
+        self._server._signal_client_connected(self._client_id)  # noqa: SLF001
         if previous_info is not None and previous_info != client_info:
             self._server._signal_client_updated(self._client_id)  # noqa: SLF001
         self._logger = logger.getChild(self._client_id)
@@ -643,6 +644,10 @@ class SendspinClient:
             self._roles_warm_disconnected = False
 
         self._connection = None
+
+        self._server._signal_client_disconnected(  # noqa: SLF001
+            self._client_id, goodbye_reason
+        )
 
         if goodbye_reason == GoodbyeReason.ANOTHER_SERVER:
             create_task(self._handle_takeover_disconnect())

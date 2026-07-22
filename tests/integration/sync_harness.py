@@ -26,6 +26,12 @@ class DummyServer:
     id: str = "srv"
     name: str = "server"
 
+    def _signal_client_connected(self, client_id: str) -> None:
+        pass
+
+    def _signal_client_disconnected(self, client_id: str, goodbye_reason: object = None) -> None:
+        pass
+
 
 EventKind = Literal["json", "bin"]
 

@@ -10,6 +10,8 @@ __all__ = [
     "AudioCodec",
     "AudioFormat",
     "ClientAddedEvent",
+    "ClientConnectedEvent",
+    "ClientDisconnectedEvent",
     "ClientEvent",
     "ClientGroupChangedEvent",
     "ClientRemovedEvent",
@@ -61,6 +63,8 @@ from .roles.player.events import (
 )
 from .server import (
     ClientAddedEvent,
+    ClientConnectedEvent,
+    ClientDisconnectedEvent,
     ClientRemovedEvent,
     ClientUpdatedEvent,
     ExternalStreamStartCallback,

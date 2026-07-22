@@ -92,6 +92,12 @@ class _MockServer:
             SendspinGroup(self, client)
         return client
 
+    def _signal_client_connected(self, client_id: str) -> None:
+        pass
+
+    def _signal_client_disconnected(self, client_id: str, goodbye_reason: object = None) -> None:
+        pass
+
 
 class _DummyConnection:
     def __init__(self) -> None:
@@ -1345,6 +1351,12 @@ class _MockServerWithReclaim:
 
     def is_external_player(self, client_id: str) -> bool:  # noqa: ARG002
         return False
+
+    def _signal_client_connected(self, client_id: str) -> None:
+        pass
+
+    def _signal_client_disconnected(self, client_id: str, goodbye_reason: object) -> None:
+        pass
 
 
 class TestAutomaticReclaim:
