@@ -144,15 +144,14 @@ class SendspinClient:
     def flag_noncompliance(self, reason: str) -> None:
         """Log a tolerated spec violation once per connection, or reject when strict."""
         if not self._server.allow_noncompliant_clients:
+            self._logger.error("rejecting non-compliant client: %s", reason)
             raise ClientComplianceError(reason)
         # Recurring deviations (e.g. per client/state) would otherwise log every
         # message, so log each distinct reason once until the client reconnects.
         if reason in self._noncompliance_logged:
             return
         self._noncompliance_logged.add(reason)
-        # Logged at info while implementers migrate. Bump to warning once they have
-        # had time to fix these, then drop the backwards-compat paths altogether.
-        self._logger.info("non-compliant client: %s", reason)
+        self._logger.warning("non-compliant client: %s", reason)
 
     @property
     def client_id(self) -> str:
