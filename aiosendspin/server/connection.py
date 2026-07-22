@@ -945,9 +945,10 @@ class SendspinConnection:
         if self._client is not None:
             self._client.flag_noncompliance(reason)
             return
-        self._logger.info("non-compliant client: %s", reason)
         if not self._server.allow_noncompliant_clients:
+            self._logger.error("rejecting non-compliant client: %s", reason)
             raise ClientComplianceError(reason)
+        self._logger.warning("non-compliant client: %s", reason)
 
     async def _ingest_client_hello(self, text: str) -> bool:
         """Validate and record the client/hello, attaching the client; False if rejected."""
