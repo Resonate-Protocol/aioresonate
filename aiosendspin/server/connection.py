@@ -945,9 +945,10 @@ class SendspinConnection:
         if self._client is not None:
             self._client.flag_noncompliance(reason)
             return
-        self._logger.info("non-compliant client: %s", reason)
         if not self._server.allow_noncompliant_clients:
+            self._logger.error("rejecting non-compliant client: %s", reason)
             raise ClientComplianceError(reason)
+        self._logger.warning("non-compliant client: %s", reason)
 
     async def _ingest_client_hello(self, text: str) -> bool:
         """Validate and record the client/hello, attaching the client; False if rejected."""
@@ -1615,9 +1616,9 @@ class SendspinConnection:
         except asyncio.CancelledError:
             cancelled = True
             self._logger.debug("Message loop cancelled")
-        except ClientComplianceError as exc:
+        except ClientComplianceError:
             # Strict mode: hard-reject (no warm reconnect). Cleanup reads _closing.
-            self._logger.info("Rejecting non-compliant client: %s", exc)
+            # flag_noncompliance already logged the reason at error before raising.
             self._closing = True
         except Exception:
             self._logger.exception("Unexpected error inside websocket API")

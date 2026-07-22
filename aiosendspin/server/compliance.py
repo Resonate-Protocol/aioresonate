@@ -3,7 +3,7 @@
 The server tolerates a range of non-spec-compliant client behavior for
 backwards compatibility. Every such tolerance is funnelled through
 ``SendspinClient.flag_noncompliance`` / ``SendspinConnection._flag_noncompliance``,
-which log the deviation and, when the server runs with
+which log the deviation (once per reason in lenient mode) and, when the server runs with
 ``allow_noncompliant_clients=False``, raise ``ClientComplianceError`` to reject
 the client. Grep for those helpers to enumerate the workarounds.
 """

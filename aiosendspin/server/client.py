@@ -133,18 +133,25 @@ class SendspinClient:
         # Built when roles are attached for cached lookup in _send_binary_frame().
         self._binary_handling_cache: dict[int, tuple[BinaryHandling, Role]] = {}
 
+        # Reasons already logged, deduped for the client's lifetime.
+        self._noncompliance_logged: set[str] = set()
+
         # Pending cleanup handle (scheduled via loop.call_soon/call_later on disconnect)
         self._cleanup_handle: asyncio.Handle | None = None
         # True when we intentionally retain a disconnected client after ANOTHER_SERVER goodbye.
         self._cleanup_on_mdns_removal: bool = False
 
     def flag_noncompliance(self, reason: str) -> None:
-        """Log a tolerated spec violation, or reject it when the server is strict."""
-        # Logged at info while implementers migrate. Bump to warning once they have
-        # had time to fix these, then drop the backwards-compat paths altogether.
-        self._logger.info("non-compliant client: %s", reason)
+        """Log a tolerated spec violation once, or reject it when the server is strict."""
         if not self._server.allow_noncompliant_clients:
+            self._logger.error("rejecting non-compliant client: %s", reason)
             raise ClientComplianceError(reason)
+        # Recurring deviations (e.g. per client/state) would otherwise log every
+        # message, so log each distinct reason only once.
+        if reason in self._noncompliance_logged:
+            return
+        self._noncompliance_logged.add(reason)
+        self._logger.warning("non-compliant client: %s", reason)
 
     @property
     def client_id(self) -> str:
