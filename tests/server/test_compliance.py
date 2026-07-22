@@ -40,24 +40,30 @@ async def test_allow_noncompliant_clients_defaults_to_true() -> None:
 async def test_flag_noncompliance_lenient_dedups_per_reason(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """Lenient mode logs each distinct reason once, not on every occurrence."""
+    """Lenient mode logs each distinct reason once at warning, not on every occurrence."""
     server = _make_server()
     client = server.get_or_create_client("dev")
     with caplog.at_level(logging.INFO):
         client.flag_noncompliance("legacy thing")
         client.flag_noncompliance("legacy thing")
         client.flag_noncompliance("other thing")
-    messages = [r.message for r in caplog.records if "non-compliant client" in r.message]
-    assert messages == [
+    hits = [r for r in caplog.records if "non-compliant client" in r.message]
+    assert [r.message for r in hits] == [
         "non-compliant client: legacy thing",
         "non-compliant client: other thing",
     ]
+    assert all(r.levelno == logging.WARNING for r in hits)
 
 
 @pytest.mark.asyncio
-async def test_flag_noncompliance_strict_raises() -> None:
-    """Strict mode raises ClientComplianceError."""
+async def test_flag_noncompliance_strict_raises_and_logs_error(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Strict mode logs the reason at error and raises ClientComplianceError."""
     server = _make_server(allow_noncompliant_clients=False)
     client = server.get_or_create_client("dev")
-    with pytest.raises(ClientComplianceError, match="legacy thing"):
+    with caplog.at_level(logging.INFO), pytest.raises(ClientComplianceError, match="legacy thing"):
         client.flag_noncompliance("legacy thing")
+    hits = [r for r in caplog.records if "non-compliant client" in r.message]
+    assert len(hits) == 1
+    assert hits[0].levelno == logging.ERROR
