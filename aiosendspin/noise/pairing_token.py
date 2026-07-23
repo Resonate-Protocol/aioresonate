@@ -14,7 +14,7 @@ from .keys import (
 )
 
 _TOKEN_PREFIX: Final[str] = "SP:"  # noqa: S105 - format marker, not a credential
-_PSK_TOKEN_VERSION: Final[str] = "1"  # noqa: S105 - format version, not a credential
+_PSK_TOKEN_VERSION: Final[str] = "0"  # noqa: S105 - format version, not a credential
 _PSK_TOKEN_SIZE: Final[int] = X25519_KEY_SIZE + PSK_SIZE
 
 
