@@ -8,7 +8,7 @@ from aiosendspin.noise.pairing_token import PSKPairingToken, decode_token, encod
 # Reference vector for client_id=b64url(bytes(range(32))), pairing_psk=bytes(range(32, 64))
 # — guards the wire format against accidental changes.
 REFERENCE_TOKEN = (
-    "SP:1AAAQEAYEAUDAOCAJBIFQYDIOB4IBCEQTCQKRMFYYDENBWHA5DYPSAIJCEMSCKJRHFAUSUKZ"  # noqa: S105 - fixed test vector, not a credential
+    "SP:0AAAQEAYEAUDAOCAJBIFQYDIOB4IBCEQTCQKRMFYYDENBWHA5DYPSAIJCEMSCKJRHFAUSUKZ"  # noqa: S105 - fixed test vector, not a credential
     "MFUXC6MBRGIZTINJWG44DSOR3HQ6T4PY"
 )
 REFERENCE_PAIRING_TOKEN = PSKPairingToken(
@@ -56,8 +56,8 @@ def test_decode_leniency(value: str) -> None:
         ("", "malformed"),
         ("SP:", "malformed"),
         ("SP:2" + REFERENCE_TOKEN[4:], "unsupported"),
-        ("SP:1NOT!VALID", "malformed"),
-        ("SP:1" + REFERENCE_TOKEN[4:40], "malformed"),  # truncated payload
+        ("SP:0NOT!VALID", "malformed"),
+        ("SP:0" + REFERENCE_TOKEN[4:40], "malformed"),  # truncated payload
     ],
 )
 def test_decode_rejects_malformed(value: str, match: str) -> None:
