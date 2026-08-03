@@ -26,17 +26,28 @@ def int_to_wire(value: Any) -> int:
     """
     Coerce a value annotated as `int` into a real `int` for the wire.
 
-    Exact integers pass through by value, including `bool`, `IntEnum`, and anything else
+    Exact integers pass through by value, including `IntEnum` and anything else
     implementing `__index__` (NumPy integer scalars, for instance). Floats are rounded to
     the nearest integer: every integer field in the protocol carries a quantized unit
     (milliseconds, microseconds, hertz, counts), so a fractional part is finer than the
     wire can represent. Rounding rather than truncating keeps float-arithmetic artifacts
     such as `2.9 * 1000 == 2899.9999999999995` from losing a whole unit.
 
+    `bool` is rejected even though it is a subclass of `int`, so a mistyped field fails
+    here rather than reaching the wire as a plausible `1` or `0` that no client will
+    question. Rounding a float preserves the caller's numeric intent; turning `True` into
+    a one-millisecond duration invents it. Type checkers accept a `bool` wherever an `int`
+    is annotated, so this is the only place the mistake can be caught.
+
     Raises:
-        TypeError: If the value is not a number at all.
+        TypeError: If the value is a `bool`, or is not a number at all.
         ValueError: If the value is a NaN or an infinity, which have no integer form.
     """
+    # Must precede operator.index(), which accepts bools and would make this unreachable.
+    if isinstance(value, bool):
+        msg = f"expected an integer, got bool: {value!r}"
+        raise TypeError(msg)
+
     try:
         return operator.index(value)
     except TypeError:

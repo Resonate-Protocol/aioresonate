@@ -49,8 +49,6 @@ def _json_types(value: Any) -> list[type]:
         (217000, 217000),
         (0, 0),
         (-5, -5),
-        (True, 1),
-        (False, 0),
         (_Level.LOUD, 11),
         (_Indexable(), 7),
         (217000.0, 217000),
@@ -73,6 +71,24 @@ def test_int_to_wire_rejects_non_numbers(value: Any) -> None:
     """A value that is not a number has no defensible integer form."""
     with pytest.raises(TypeError, match="expected an integer"):
         int_to_wire(value)
+
+
+@pytest.mark.parametrize("value", [True, False])
+def test_int_to_wire_rejects_bool(value: bool) -> None:  # noqa: FBT001
+    """A bool must not become a plausible 1/0 on the wire.
+
+    `bool` subclasses `int`, so type checkers accept it wherever an `int` is annotated
+    and `operator.index` would happily convert it. Coercing it would turn a caller bug
+    into a wire-valid value no client would reject.
+    """
+    with pytest.raises(TypeError, match="got bool"):
+        int_to_wire(value)
+
+
+def test_bool_typed_fields_are_unaffected() -> None:
+    """Rejecting bool for int fields must not disturb genuinely bool-typed fields."""
+    payload = json.loads(SessionUpdateMetadata(timestamp=0, shuffle=True).to_json())
+    assert payload["shuffle"] is True
 
 
 @pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
