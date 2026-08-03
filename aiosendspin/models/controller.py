@@ -10,15 +10,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from mashumaro.config import BaseConfig
-from mashumaro.mixins.orjson import DataClassORJSONMixin
-
+from .base import SendspinConfig, SendspinModel
 from .types import MediaCommand, RepeatMode
 
 
 # Client -> Server: client/command controller object
 @dataclass
-class ControllerCommandPayload(DataClassORJSONMixin):
+class ControllerCommandPayload(SendspinModel):
     """Control the group that's playing."""
 
     command: MediaCommand
@@ -73,7 +71,7 @@ class ControllerCommandPayload(DataClassORJSONMixin):
                     f"offset_ms should not be provided for command '{self.command.value}'"
                 )
 
-    class Config(BaseConfig):
+    class Config(SendspinConfig):
         """Config for parsing json messages."""
 
         omit_none = True
@@ -81,7 +79,7 @@ class ControllerCommandPayload(DataClassORJSONMixin):
 
 # Server -> Client: server/state controller object
 @dataclass
-class ControllerStatePayload(DataClassORJSONMixin):
+class ControllerStatePayload(SendspinModel):
     """Controller state object in server/state message."""
 
     supported_commands: list[MediaCommand]
@@ -114,7 +112,7 @@ class ControllerStatePayload(DataClassORJSONMixin):
         data.setdefault("shuffle", False)
         return data
 
-    class Config(BaseConfig):
+    class Config(SendspinConfig):
         """Config for serializing state messages."""
 
         omit_none = True

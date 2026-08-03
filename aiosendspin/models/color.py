@@ -10,9 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import ClassVar
 
-from mashumaro.config import BaseConfig
-from mashumaro.mixins.orjson import DataClassORJSONMixin
-
+from .base import SendspinConfig, SendspinModel
 from .types import UndefinedField, undefined_field
 
 _RGB = tuple[int, int, int]
@@ -29,7 +27,7 @@ def _validate_rgb(name: str, value: _RGB) -> None:
 
 # Server -> Client: server/state color object
 @dataclass
-class SessionUpdateColor(DataClassORJSONMixin):
+class SessionUpdateColor(SendspinModel):
     """Color object in server/state message."""
 
     _RGB_FIELDS: ClassVar[tuple[str, ...]] = (
@@ -68,7 +66,7 @@ class SessionUpdateColor(DataClassORJSONMixin):
         """Build a SessionUpdateColor that explicitly clears all color fields."""
         return cls(timestamp=timestamp, **dict.fromkeys(cls._RGB_FIELDS))
 
-    class Config(BaseConfig):
+    class Config(SendspinConfig):
         """Config for parsing json messages."""
 
         omit_default = True

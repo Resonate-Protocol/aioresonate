@@ -5,8 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Literal, cast
 
-from mashumaro.config import BaseConfig
-from mashumaro.mixins.orjson import DataClassORJSONMixin
+from .base import SendspinConfig, SendspinModel
 
 VisualizerType = Literal["loudness", "f_peak", "spectrum", "beat"]
 SupportedVisualizerType = Literal["loudness", "f_peak", "spectrum"]
@@ -18,7 +17,7 @@ _SUPPORTED_TYPES: tuple[SupportedVisualizerType, ...] = ("loudness", "f_peak", "
 
 # Client -> Server: client/hello visualizer support object
 @dataclass(frozen=True)
-class ClientHelloVisualizerSpectrum(DataClassORJSONMixin):
+class ClientHelloVisualizerSpectrum(SendspinModel):
     """Spectrum configuration from client/hello visualizer support."""
 
     n_disp_bins: int
@@ -42,14 +41,14 @@ class ClientHelloVisualizerSpectrum(DataClassORJSONMixin):
         """Serialize to stream/start visualizer.spectrum payload."""
         return self.to_dict()
 
-    class Config(BaseConfig):
+    class Config(SendspinConfig):
         """Config for json serialization."""
 
         omit_none = True
 
 
 @dataclass
-class ClientHelloVisualizerSupport(DataClassORJSONMixin):
+class ClientHelloVisualizerSupport(SendspinModel):
     """Visualizer support payload for client/hello draft-r1 negotiation."""
 
     buffer_capacity: int
@@ -84,7 +83,7 @@ class ClientHelloVisualizerSupport(DataClassORJSONMixin):
         if self.types is not None and "spectrum" in self.types and self.spectrum is None:
             raise ValueError("visualizer support must include 'spectrum' object")
 
-    class Config(BaseConfig):
+    class Config(SendspinConfig):
         """Config for json serialization."""
 
         omit_none = True
@@ -92,7 +91,7 @@ class ClientHelloVisualizerSupport(DataClassORJSONMixin):
 
 # Server -> Client: stream/start visualizer object
 @dataclass(frozen=True)
-class StreamStartVisualizer(DataClassORJSONMixin):
+class StreamStartVisualizer(SendspinModel):
     """Negotiated draft visualizer stream config returned in stream/start."""
 
     types: tuple[SupportedVisualizerType, ...]
@@ -122,7 +121,7 @@ class StreamStartVisualizer(DataClassORJSONMixin):
         """Serialize to stream/start payload format."""
         return self.to_dict()
 
-    class Config(BaseConfig):
+    class Config(SendspinConfig):
         """Config for json serialization."""
 
         omit_none = True
@@ -130,14 +129,14 @@ class StreamStartVisualizer(DataClassORJSONMixin):
 
 # Client -> Server: stream/request-format visualizer object
 @dataclass
-class StreamRequestFormatVisualizer(DataClassORJSONMixin):
+class StreamRequestFormatVisualizer(SendspinModel):
     """Draft visualizer format request payload."""
 
     types: list[VisualizerType] | None = None
     batch_max: int | None = None
     spectrum: ClientHelloVisualizerSpectrum | None = None
 
-    class Config(BaseConfig):
+    class Config(SendspinConfig):
         """Config for json serialization."""
 
         omit_none = True

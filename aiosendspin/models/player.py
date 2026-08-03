@@ -11,15 +11,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from mashumaro.config import BaseConfig
-from mashumaro.mixins.orjson import DataClassORJSONMixin
-
+from .base import SendspinConfig, SendspinModel
 from .types import AudioCodec, PlayerCommand
 
 
 # Client -> Server client/hello player support object
 @dataclass
-class SupportedAudioFormat(DataClassORJSONMixin):
+class SupportedAudioFormat(SendspinModel):
     """Supported audio format configuration."""
 
     codec: AudioCodec
@@ -42,7 +40,7 @@ class SupportedAudioFormat(DataClassORJSONMixin):
 
 
 @dataclass
-class ClientHelloPlayerSupport(DataClassORJSONMixin):
+class ClientHelloPlayerSupport(SendspinModel):
     """Player support configuration - only if player role is set."""
 
     supported_formats: list[SupportedAudioFormat]
@@ -69,7 +67,7 @@ class ClientHelloPlayerSupport(DataClassORJSONMixin):
 
 # Client -> Server: client/state player object
 @dataclass
-class PlayerStatePayload(DataClassORJSONMixin):
+class PlayerStatePayload(SendspinModel):
     """Player object in client/state message."""
 
     # DEPRECATED(before-spec-pr-50): Remove once all clients send state at client level.
@@ -125,7 +123,7 @@ class PlayerStatePayload(DataClassORJSONMixin):
             if invalid:
                 raise ValueError(f"Invalid state-level supported_commands: {invalid}")
 
-    class Config(BaseConfig):
+    class Config(SendspinConfig):
         """Config for parsing json messages."""
 
         omit_none = True
@@ -133,7 +131,7 @@ class PlayerStatePayload(DataClassORJSONMixin):
 
 # Server -> Client: server/command player object
 @dataclass
-class PlayerCommandPayload(DataClassORJSONMixin):
+class PlayerCommandPayload(SendspinModel):
     """Player object in server/command message."""
 
     command: PlayerCommand
@@ -178,7 +176,7 @@ class PlayerCommandPayload(DataClassORJSONMixin):
                 f"static_delay_ms should not be provided for command '{self.command.value}'"
             )
 
-    class Config(BaseConfig):
+    class Config(SendspinConfig):
         """Config for parsing json messages."""
 
         omit_none = True
@@ -186,7 +184,7 @@ class PlayerCommandPayload(DataClassORJSONMixin):
 
 # Client -> Server stream/request-format player object
 @dataclass
-class StreamRequestFormatPlayer(DataClassORJSONMixin):
+class StreamRequestFormatPlayer(SendspinModel):
     """Request different player stream format (upgrade or downgrade)."""
 
     codec: AudioCodec | None = None
@@ -198,7 +196,7 @@ class StreamRequestFormatPlayer(DataClassORJSONMixin):
     bit_depth: int | None = None
     """Requested bit depth."""
 
-    class Config(BaseConfig):
+    class Config(SendspinConfig):
         """Config for parsing json messages."""
 
         omit_none = True
@@ -206,7 +204,7 @@ class StreamRequestFormatPlayer(DataClassORJSONMixin):
 
 # Server -> Client stream/start player object
 @dataclass
-class StreamStartPlayer(DataClassORJSONMixin):
+class StreamStartPlayer(SendspinModel):
     """Player object in stream/start message."""
 
     codec: AudioCodec
@@ -220,7 +218,7 @@ class StreamStartPlayer(DataClassORJSONMixin):
     codec_header: str | None = None
     """Base64 encoded codec header (if necessary; e.g., FLAC)."""
 
-    class Config(BaseConfig):
+    class Config(SendspinConfig):
         """Config for parsing json messages."""
 
         omit_none = True
