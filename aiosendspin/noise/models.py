@@ -5,15 +5,14 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Literal
 
-from mashumaro.config import BaseConfig
-from mashumaro.mixins.orjson import DataClassORJSONMixin
 from mashumaro.types import Discriminator
 
+from aiosendspin.models.base import SendspinConfig, SendspinModel
 from aiosendspin.models.types import PairAbortReason, ServerMessage
 
 
 @dataclass
-class ClientInitPayload(DataClassORJSONMixin):
+class ClientInitPayload(SendspinModel):
     """Cleartext ``client/init`` payload — the client opens the conversation."""
 
     client_id: str
@@ -25,7 +24,7 @@ class ClientInitPayload(DataClassORJSONMixin):
 
 
 @dataclass
-class ClientInitMessage(DataClassORJSONMixin):
+class ClientInitMessage(SendspinModel):
     """Envelope for ``ClientInitPayload``."""
 
     payload: ClientInitPayload
@@ -33,7 +32,7 @@ class ClientInitMessage(DataClassORJSONMixin):
 
 
 @dataclass
-class ServerInitPayload(DataClassORJSONMixin):
+class ServerInitPayload(SendspinModel):
     """Cleartext ``server/init`` payload — server's response with its identity."""
 
     server_id: str
@@ -43,7 +42,7 @@ class ServerInitPayload(DataClassORJSONMixin):
 
 
 @dataclass
-class ServerInitMessage(DataClassORJSONMixin):
+class ServerInitMessage(SendspinModel):
     """Envelope for ``ServerInitPayload``."""
 
     payload: ServerInitPayload
@@ -51,7 +50,7 @@ class ServerInitMessage(DataClassORJSONMixin):
 
 
 @dataclass
-class NoiseHandshakePayload(DataClassORJSONMixin):
+class NoiseHandshakePayload(SendspinModel):
     """Carries one Noise handshake message (base64url-encoded ciphertext)."""
 
     data: str
@@ -67,7 +66,7 @@ class NoiseHandshakeMessage(ServerMessage):
 
 
 @dataclass
-class NoiseMsg1Payload(DataClassORJSONMixin):
+class NoiseMsg1Payload(SendspinModel):
     """Plaintext payload encrypted *inside* Noise handshake message 1 (server → client)."""
 
     psk_id: str
@@ -75,22 +74,22 @@ class NoiseMsg1Payload(DataClassORJSONMixin):
 
 
 @dataclass
-class NoiseMsg2Payload(DataClassORJSONMixin):
+class NoiseMsg2Payload(SendspinModel):
     """Plaintext payload encrypted *inside* Noise handshake message 2 (client → server)."""
 
 
 @dataclass
-class PairingMessage(DataClassORJSONMixin):
+class PairingMessage(SendspinModel):
     """Discriminated base for pairing envelopes, keyed on the ``type`` field."""
 
-    class Config(BaseConfig):
+    class Config(SendspinConfig):
         """Config for parsing json messages."""
 
         discriminator = Discriminator(field="type", include_subtypes=True)
 
 
 @dataclass
-class ClientPairFinalizePayload(DataClassORJSONMixin):
+class ClientPairFinalizePayload(SendspinModel):
     """Encrypted ``client/pair-finalize`` payload — the client delivers the long-term PSK."""
 
     long_term_psk: str | None = None
@@ -98,7 +97,7 @@ class ClientPairFinalizePayload(DataClassORJSONMixin):
     wrapped_psk: str | None = None
     """The PSK sealed under the CPace-derived wrap key (64-char base64url). PIN flows only."""
 
-    class Config(BaseConfig):
+    class Config(SendspinConfig):
         """Omit the field the flow doesn't use."""
 
         omit_none = True
@@ -113,7 +112,7 @@ class ClientPairFinalizeMessage(PairingMessage):
 
 
 @dataclass
-class ServerPairFinalizePayload(DataClassORJSONMixin):
+class ServerPairFinalizePayload(SendspinModel):
     """Encrypted ``server/pair-finalize`` payload — empty ack that the server persisted."""
 
 
@@ -126,7 +125,7 @@ class ServerPairFinalizeMessage(PairingMessage):
 
 
 @dataclass
-class PairAbortPayload(DataClassORJSONMixin):
+class PairAbortPayload(SendspinModel):
     """``pair/abort`` payload — aborts a pairing attempt; sender closes after sending."""
 
     reason: PairAbortReason
@@ -142,7 +141,7 @@ class PairAbortMessage(PairingMessage):
 
 
 @dataclass
-class ClientPairInitPayload(DataClassORJSONMixin):
+class ClientPairInitPayload(SendspinModel):
     """``client/pair-init`` payload — signals readiness for the PIN-pairing flow."""
 
     pairing_index: int
@@ -150,7 +149,7 @@ class ClientPairInitPayload(DataClassORJSONMixin):
     commit_B: str | None = None  # noqa: N815 - spec wire field name
     """``SHA-256(nonce_B)`` (43-char base64url). Present in dynamic PIN; absent in static."""
 
-    class Config(BaseConfig):
+    class Config(SendspinConfig):
         """Omit the optional commitment when absent (static PIN)."""
 
         omit_none = True
@@ -165,7 +164,7 @@ class ClientPairInitMessage(PairingMessage):
 
 
 @dataclass
-class ServerPairInitPayload(DataClassORJSONMixin):
+class ServerPairInitPayload(SendspinModel):
     """``server/pair-init`` payload — the server's nonce contribution (dynamic PIN)."""
 
     nonce_A: str  # noqa: N815 - spec wire field name
@@ -183,7 +182,7 @@ class ServerPairInitMessage(PairingMessage):
 
 
 @dataclass
-class ServerPairAuthPayload(DataClassORJSONMixin):
+class ServerPairAuthPayload(SendspinModel):
     """``server/pair-auth`` payload — the server's CPace public share."""
 
     pake_msg_1: str
@@ -199,7 +198,7 @@ class ServerPairAuthMessage(PairingMessage):
 
 
 @dataclass
-class ClientPairAuthPayload(DataClassORJSONMixin):
+class ClientPairAuthPayload(SendspinModel):
     """``client/pair-auth`` payload — the client's CPace public share."""
 
     pake_msg_2: str
@@ -215,7 +214,7 @@ class ClientPairAuthMessage(PairingMessage):
 
 
 @dataclass
-class ServerPairConfirmPayload(DataClassORJSONMixin):
+class ServerPairConfirmPayload(SendspinModel):
     """``server/pair-confirm`` payload — the server's MCF confirmation tag."""
 
     server_kc: str
@@ -231,7 +230,7 @@ class ServerPairConfirmMessage(PairingMessage):
 
 
 @dataclass
-class ClientPairConfirmPayload(DataClassORJSONMixin):
+class ClientPairConfirmPayload(SendspinModel):
     """``client/pair-confirm`` payload — the client's MCF tag and commitment opening."""
 
     client_kc: str
@@ -239,7 +238,7 @@ class ClientPairConfirmPayload(DataClassORJSONMixin):
     nonce_B: str | None = None  # noqa: N815 - spec wire field name
     """Preimage of ``commit_B`` (43-char base64url). Present in dynamic PIN only."""
 
-    class Config(BaseConfig):
+    class Config(SendspinConfig):
         """Omit the optional nonce opening when absent (static PIN)."""
 
         omit_none = True

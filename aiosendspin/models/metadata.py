@@ -10,14 +10,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from mashumaro.config import BaseConfig
-from mashumaro.mixins.orjson import DataClassORJSONMixin
-
+from .base import SendspinConfig, SendspinModel
 from .types import RepeatMode, UndefinedField, undefined_field
 
 
 @dataclass
-class Progress(DataClassORJSONMixin):
+class Progress(SendspinModel):
     """Playback progress information."""
 
     track_progress: int
@@ -41,7 +39,7 @@ class Progress(DataClassORJSONMixin):
         if self.playback_speed < 0:
             raise ValueError(f"playback_speed must be non-negative, got {self.playback_speed}")
 
-    class Config(BaseConfig):
+    class Config(SendspinConfig):
         """Config for parsing json messages."""
 
         omit_default = True
@@ -49,7 +47,7 @@ class Progress(DataClassORJSONMixin):
 
 # Server -> Client: server/state metadata object
 @dataclass
-class SessionUpdateMetadata(DataClassORJSONMixin):
+class SessionUpdateMetadata(SendspinModel):
     """Metadata object in server/state message."""
 
     timestamp: int
@@ -88,7 +86,7 @@ class SessionUpdateMetadata(DataClassORJSONMixin):
         ):
             raise ValueError(f"track must be positive, got {self.track}")
 
-    class Config(BaseConfig):
+    class Config(SendspinConfig):
         """Config for parsing json messages."""
 
         omit_default = True

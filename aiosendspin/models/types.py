@@ -5,31 +5,31 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 
-from mashumaro.config import BaseConfig
-from mashumaro.mixins.orjson import DataClassORJSONMixin
 from mashumaro.types import Discriminator
+
+from .base import SendspinConfig, SendspinModel
 
 
 # Base message classes
 @dataclass
-class ClientMessage(DataClassORJSONMixin):
+class ClientMessage(SendspinModel):
     """Base class for client messages."""
 
-    class Config(BaseConfig):
+    class Config(SendspinConfig):
         """Config for parsing json messages."""
 
         discriminator = Discriminator(field="type", include_subtypes=True)
 
 
 @dataclass
-class ServerMessage(DataClassORJSONMixin):
+class ServerMessage(SendspinModel):
     """Base class for server messages."""
 
     def merge(self, _other: ServerMessage) -> ServerMessage | None:
         """Merge two messages of the same type when safe, else return None."""
         return None
 
-    class Config(BaseConfig):
+    class Config(SendspinConfig):
         """Config for parsing json messages."""
 
         discriminator = Discriminator(field="type", include_subtypes=True)
@@ -37,7 +37,7 @@ class ServerMessage(DataClassORJSONMixin):
 
 # Helpers for discerning between null and undefined fields in messages
 @dataclass
-class UndefinedField(DataClassORJSONMixin):
+class UndefinedField(SendspinModel):
     """Marker type to indicate undefined fields in messages."""
 
 

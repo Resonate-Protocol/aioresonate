@@ -10,14 +10,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from mashumaro.config import BaseConfig
-from mashumaro.mixins.orjson import DataClassORJSONMixin
-
+from .base import SendspinConfig, SendspinModel
 from .types import ArtworkSource, PictureFormat
 
 
 @dataclass
-class ArtworkChannel(DataClassORJSONMixin):
+class ArtworkChannel(SendspinModel):
     """Configuration for a single artwork channel."""
 
     source: ArtworkSource
@@ -39,7 +37,7 @@ class ArtworkChannel(DataClassORJSONMixin):
 
 # Client -> Server: client/hello artwork support object
 @dataclass
-class ClientHelloArtworkSupport(DataClassORJSONMixin):
+class ClientHelloArtworkSupport(SendspinModel):
     """Artwork support configuration - only if artwork role is set."""
 
     channels: list[ArtworkChannel]
@@ -52,7 +50,7 @@ class ClientHelloArtworkSupport(DataClassORJSONMixin):
 
 
 @dataclass
-class StreamArtworkChannelConfig(DataClassORJSONMixin):
+class StreamArtworkChannelConfig(SendspinModel):
     """Configuration for an artwork channel in stream/start."""
 
     source: ArtworkSource
@@ -67,7 +65,7 @@ class StreamArtworkChannelConfig(DataClassORJSONMixin):
 
 # Server -> Client: stream/start artwork object
 @dataclass
-class StreamStartArtwork(DataClassORJSONMixin):
+class StreamStartArtwork(SendspinModel):
     """
     Artwork object in stream/start message.
 
@@ -80,7 +78,7 @@ class StreamStartArtwork(DataClassORJSONMixin):
 
 # Client -> Server: stream/request-format artwork object
 @dataclass
-class StreamRequestFormatArtwork(DataClassORJSONMixin):
+class StreamRequestFormatArtwork(SendspinModel):
     """Request the server to change artwork format for a specific channel."""
 
     channel: int
@@ -99,7 +97,7 @@ class StreamRequestFormatArtwork(DataClassORJSONMixin):
         if not 0 <= self.channel <= 3:
             raise ValueError(f"channel must be 0-3, got {self.channel}")
 
-    class Config(BaseConfig):
+    class Config(SendspinConfig):
         """Config for parsing json messages."""
 
         omit_none = True

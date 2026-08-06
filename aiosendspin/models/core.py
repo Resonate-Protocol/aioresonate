@@ -11,8 +11,6 @@ from __future__ import annotations
 from dataclasses import dataclass, field, fields, is_dataclass
 from typing import Annotated, Any, ClassVar, Literal
 
-from mashumaro.config import BaseConfig
-from mashumaro.mixins.orjson import DataClassORJSONMixin
 from mashumaro.types import Alias
 
 from .artwork import (
@@ -20,6 +18,7 @@ from .artwork import (
     StreamRequestFormatArtwork,
     StreamStartArtwork,
 )
+from .base import SendspinConfig, SendspinModel
 from .color import SessionUpdateColor
 from .controller import ControllerCommandPayload, ControllerStatePayload
 from .metadata import SessionUpdateMetadata
@@ -88,7 +87,7 @@ def _merge_optional_dataclass_fields(existing: Any, incoming: Any) -> Any:
 
 
 @dataclass
-class DeviceInfo(DataClassORJSONMixin):
+class DeviceInfo(SendspinModel):
     """Optional information about the device."""
 
     product_name: str | None = None
@@ -100,14 +99,14 @@ class DeviceInfo(DataClassORJSONMixin):
     mac_address: str | None = None
     """MAC address of the connection's network interface, lowercase colon-separated."""
 
-    class Config(BaseConfig):
+    class Config(SendspinConfig):
         """Config for parsing json messages."""
 
         omit_none = True
 
 
 @dataclass
-class PairMethodDescriptor(DataClassORJSONMixin):
+class PairMethodDescriptor(SendspinModel):
     """A pairing method a client offers in client/hello."""
 
     method: PairMethod
@@ -119,14 +118,14 @@ class PairMethodDescriptor(DataClassORJSONMixin):
     min_pin_length: int | None = None
     """For dynamic_pin only: shortest PIN length in digits the client will accept (4-12)."""
 
-    class Config(BaseConfig):
+    class Config(SendspinConfig):
         """Omit method-specific fields where they do not apply."""
 
         omit_none = True
 
 
 @dataclass
-class UnpairedAccess(DataClassORJSONMixin):
+class UnpairedAccess(SendspinModel):
     """Whether the client currently admits unpaired access."""
 
     enabled: bool = False
@@ -134,7 +133,7 @@ class UnpairedAccess(DataClassORJSONMixin):
 
 # Client -> Server: client/hello
 @dataclass
-class ClientHelloPayload(DataClassORJSONMixin):
+class ClientHelloPayload(SendspinModel):
     """Information about a connected client."""
 
     name: str
@@ -256,7 +255,7 @@ class ClientHelloPayload(DataClassORJSONMixin):
         # Overwrite so a client cannot spoof the record via the wire.
         self.unlisted_support_roles = unlisted or None
 
-    class Config(BaseConfig):
+    class Config(SendspinConfig):
         """Config for parsing json messages."""
 
         omit_none = True
@@ -273,7 +272,7 @@ class ClientHelloMessage(ClientMessage):
 
 # Client -> Server: client/time
 @dataclass
-class ClientTimePayload(DataClassORJSONMixin):
+class ClientTimePayload(SendspinModel):
     """Timing information from the client."""
 
     client_transmitted: int
@@ -290,7 +289,7 @@ class ClientTimeMessage(ClientMessage):
 
 # Client -> Server: client/state
 @dataclass
-class ClientStatePayload(DataClassORJSONMixin):
+class ClientStatePayload(SendspinModel):
     """Client sends state updates to the server."""
 
     available: bool | None = None
@@ -317,7 +316,7 @@ class ClientStatePayload(DataClassORJSONMixin):
         d["legacy_state_used"] = legacy_state or None
         return d
 
-    class Config(BaseConfig):
+    class Config(SendspinConfig):
         """Config for parsing json messages."""
 
         omit_none = True
@@ -333,13 +332,13 @@ class ClientStateMessage(ClientMessage):
 
 # Client -> Server: client/command
 @dataclass
-class ClientCommandPayload(DataClassORJSONMixin):
+class ClientCommandPayload(SendspinModel):
     """Client sends commands to the server."""
 
     controller: ControllerCommandPayload | None = None
     """Controller commands - only if client has controller role."""
 
-    class Config(BaseConfig):
+    class Config(SendspinConfig):
         """Config for parsing json messages."""
 
         omit_none = True
@@ -355,7 +354,7 @@ class ClientCommandMessage(ClientMessage):
 
 # Client -> Server: client/goodbye
 @dataclass
-class ClientGoodbyePayload(DataClassORJSONMixin):
+class ClientGoodbyePayload(SendspinModel):
     """Payload for client goodbye message."""
 
     reason: GoodbyeReason
@@ -372,7 +371,7 @@ class ClientGoodbyeMessage(ClientMessage):
 
 # Server -> Client: server/hello
 @dataclass
-class ServerHelloPayload(DataClassORJSONMixin):
+class ServerHelloPayload(SendspinModel):
     """Information about the server."""
 
     name: str
@@ -394,7 +393,7 @@ class ServerHelloMessage(ServerMessage):
 # serializes and sends it; our own client always speaks the encrypted path and so
 # never deserializes it.
 @dataclass
-class LegacyServerHelloPayload(DataClassORJSONMixin):
+class LegacyServerHelloPayload(SendspinModel):
     """Server identity for a legacy unencrypted connection (no server/activate)."""
 
     server_id: str
@@ -410,14 +409,14 @@ class LegacyServerHelloPayload(DataClassORJSONMixin):
     selected_pair_method: PairMethod | None = None
     """Pairing method the server picked; present when connection_reason is 'pairing'."""
 
-    class Config(BaseConfig):
+    class Config(SendspinConfig):
         """Config for parsing json messages."""
 
         omit_none = True
 
 
 @dataclass
-class LegacyServerHelloMessage(DataClassORJSONMixin):
+class LegacyServerHelloMessage(SendspinModel):
     """Legacy server/hello for transition-mode (unencrypted) clients."""
 
     payload: LegacyServerHelloPayload
@@ -426,7 +425,7 @@ class LegacyServerHelloMessage(DataClassORJSONMixin):
 
 # Server -> Client: server/activate
 @dataclass
-class ServerActivatePayload(DataClassORJSONMixin):
+class ServerActivatePayload(SendspinModel):
     """Declares the server's current purpose on this connection."""
 
     activities: list[Activity]
@@ -438,7 +437,7 @@ class ServerActivatePayload(DataClassORJSONMixin):
     selected_pair_method: PairMethod | None = None
     """Pairing method the server picked. Required when 'pairing' is in activities."""
 
-    class Config(BaseConfig):
+    class Config(SendspinConfig):
         """Config for parsing json messages."""
 
         omit_none = True
@@ -454,7 +453,7 @@ class ServerActivateMessage(ServerMessage):
 
 # Server -> Client: server/time
 @dataclass
-class ServerTimePayload(DataClassORJSONMixin):
+class ServerTimePayload(SendspinModel):
     """Timing information from the server."""
 
     client_transmitted: int
@@ -475,7 +474,7 @@ class ServerTimeMessage(ServerMessage):
 
 # Server -> Client: server/state
 @dataclass
-class ServerStatePayload(DataClassORJSONMixin):
+class ServerStatePayload(SendspinModel):
     """Server sends state updates to the client."""
 
     metadata: SessionUpdateMetadata | None | UndefinedField = field(default_factory=undefined_field)
@@ -487,7 +486,7 @@ class ServerStatePayload(DataClassORJSONMixin):
     color: SessionUpdateColor | None | UndefinedField = field(default_factory=undefined_field)
     """Color state - only sent to clients with color role."""
 
-    class Config(BaseConfig):
+    class Config(SendspinConfig):
         """Config for parsing json messages."""
 
         omit_default = True
@@ -510,7 +509,7 @@ class ServerStateMessage(ServerMessage):
 
 # Server -> Client: group/update
 @dataclass
-class GroupUpdateServerPayload(DataClassORJSONMixin):
+class GroupUpdateServerPayload(SendspinModel):
     """State update of the group this client is part of."""
 
     playback_state: PlaybackStateType | None = None
@@ -520,7 +519,7 @@ class GroupUpdateServerPayload(DataClassORJSONMixin):
     group_name: str | None = None
     """Friendly name of the group."""
 
-    class Config(BaseConfig):
+    class Config(SendspinConfig):
         """Config for parsing json messages."""
 
         omit_none = True
@@ -544,13 +543,13 @@ class GroupUpdateServerMessage(ServerMessage):
 
 # Server -> Client: server/command
 @dataclass
-class ServerCommandPayload(DataClassORJSONMixin):
+class ServerCommandPayload(SendspinModel):
     """Server sends commands to the client."""
 
     player: PlayerCommandPayload | None = None
     """Player commands - only sent to clients with player role."""
 
-    class Config(BaseConfig):
+    class Config(SendspinConfig):
         """Config for parsing json messages."""
 
         omit_none = True
@@ -602,7 +601,7 @@ def _deserialize_stream_start_visualizer(
 
 # Server -> Client: stream/start
 @dataclass
-class StreamStartPayload(DataClassORJSONMixin):
+class StreamStartPayload(SendspinModel):
     """Information about an active streaming session."""
 
     server_transmitted: int = 0
@@ -628,7 +627,7 @@ class StreamStartPayload(DataClassORJSONMixin):
     get the draft schema. Roles emit whichever matches their negotiated wire.
     """
 
-    class Config(BaseConfig):
+    class Config(SendspinConfig):
         """Config for parsing json messages."""
 
         omit_none = True
@@ -651,7 +650,7 @@ STREAM_END_ROLE_FAMILIES = frozenset({"player", "artwork", "visualizer"})
 
 # Server -> Client: stream/clear
 @dataclass
-class StreamClearPayload(DataClassORJSONMixin):
+class StreamClearPayload(SendspinModel):
     """Instructs clients to clear buffers without ending the stream."""
 
     server_transmitted: int = 0
@@ -675,7 +674,7 @@ class StreamClearPayload(DataClassORJSONMixin):
                     f"application roles, got invalid roles: {invalid}"
                 )
 
-    class Config(BaseConfig):
+    class Config(SendspinConfig):
         """Config for parsing json messages."""
 
         omit_none = True
@@ -691,7 +690,7 @@ class StreamClearMessage(ServerMessage):
 
 # Client -> Server: stream/request-format
 @dataclass
-class StreamRequestFormatPayload(DataClassORJSONMixin):
+class StreamRequestFormatPayload(SendspinModel):
     """Request different stream format (upgrade or downgrade)."""
 
     player: StreamRequestFormatPlayer | None = None
@@ -701,7 +700,7 @@ class StreamRequestFormatPayload(DataClassORJSONMixin):
     visualizer: StreamRequestFormatVisualizer | None = None
     """Visualizer format request (only for clients with visualizer role)."""
 
-    class Config(BaseConfig):
+    class Config(SendspinConfig):
         """Config for parsing json messages."""
 
         omit_none = True
@@ -717,7 +716,7 @@ class StreamRequestFormatMessage(ClientMessage):
 
 # Server -> Client: stream/end
 @dataclass
-class StreamEndPayload(DataClassORJSONMixin):
+class StreamEndPayload(SendspinModel):
     """Payload for stream/end message."""
 
     server_transmitted: int = 0
@@ -741,7 +740,7 @@ class StreamEndPayload(DataClassORJSONMixin):
                     f"application roles, got invalid roles: {invalid}"
                 )
 
-    class Config(BaseConfig):
+    class Config(SendspinConfig):
         """Config for parsing json messages."""
 
         omit_none = True
