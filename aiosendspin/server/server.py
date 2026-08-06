@@ -167,7 +167,9 @@ class SendspinServer:
             server_name: Human-readable name advertised to clients.
             client_session: Shared aiohttp session, or None to create and own one.
             pairing_store: Persistent store for pairing records and config.
-            allow_unencrypted: Accept legacy unencrypted clients (transition mode).
+            allow_unencrypted: Accept legacy unencrypted clients over the non-spec
+                transition-mode hello, off by default. Enable it only to bridge
+                pre-encryption clients during migration.
             allow_noncompliant_clients: Tolerate and log deviations from clients
                 built against pre-1.0 spec drafts when True, reject the client when
                 False. Tolerance is transitional and will be removed in a future
