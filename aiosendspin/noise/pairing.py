@@ -477,7 +477,7 @@ async def _finalize_client(
     if isinstance(reply, str):
         return reply  # server left pairing without finalizing; nothing stored
     if record is not None:
-        await store.store_record(record)
+        await store.replace_record_for_server_id(record)
     return None
 
 
