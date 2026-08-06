@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+import struct
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -29,6 +31,14 @@ def make_sdk_client(
         pairing_store=pairing_store or InMemoryClientPairingStore(),
         **kwargs,
     )
+
+
+def sine_pcm_16bit(samples: int, *, rate: int = 48000, channels: int = 2, freq: int = 440) -> bytes:
+    """Generate interleaved 16-bit sine PCM for tests."""
+    out = bytearray()
+    for n in range(samples):
+        out += struct.pack("<h", int(30000 * math.sin(2 * math.pi * freq * n / rate))) * channels
+    return bytes(out)
 
 
 @pytest.fixture
