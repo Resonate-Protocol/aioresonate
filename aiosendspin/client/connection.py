@@ -831,7 +831,8 @@ class SendspinConnection:
         min_pin_length = None
         out_channels = None
         if method is PairMethod.DYNAMIC_PIN:
-            out_channels = ["display"]
+            # Advertise the display channel only when a handler can actually surface the PIN.
+            out_channels = ["display"] if self._client.pin_display is not None else []
             config = await self._client.pairing_store.get_pairing_config()
             min_pin_length = config.dynamic_pin_min_length
         return PairMethodDescriptor(
