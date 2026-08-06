@@ -197,3 +197,26 @@ class TestClientRoles:
         client = SendspinClient(server, client_id="test")
 
         assert client.active_roles == ()
+
+    def test_roles_torn_down_in_reverse_attach_order(self, mock_loop: Any) -> None:
+        """Deactivating drops the controller before the player it reads from."""
+        server = _DummyServer(loop=mock_loop, clock=LoopClock(mock_loop))
+        client = SendspinClient(server, client_id="test")
+        client._group = MagicMock()  # noqa: SLF001
+        order: list[str] = []
+
+        def _fake_role(role_id: str) -> MagicMock:
+            role = MagicMock()
+            role.role_id = role_id
+            role.on_deactivate.side_effect = lambda: order.append(role_id)
+            return role
+
+        # Attach order is player then controller, so teardown must mirror it in reverse.
+        client._roles = {  # noqa: SLF001
+            "player@v1": _fake_role("player@v1"),
+            "controller@v1": _fake_role("controller@v1"),
+        }
+
+        client.set_active_roles([])
+
+        assert order == ["controller@v1", "player@v1"]
