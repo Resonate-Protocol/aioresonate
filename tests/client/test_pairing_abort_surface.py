@@ -16,9 +16,9 @@ async def test_non_closing_pairing_abort_notifies_listener() -> None:
     connection = SendspinConnection(sdk)
 
     async def _abort() -> str | None:
-        raise RemotePairingAbortError(PairAbortReason.LOCKED_OUT)
+        raise RemotePairingAbortError(PairAbortReason.USER_CANCELLED)
 
     connection._run_pairing_protocol = _abort  # type: ignore[method-assign]  # noqa: SLF001
     await connection._pair()  # noqa: SLF001
 
-    assert reasons == [PairAbortReason.LOCKED_OUT]
+    assert reasons == [PairAbortReason.USER_CANCELLED]
