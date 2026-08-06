@@ -441,7 +441,6 @@ async def test_client_store_replace_record_keeps_shared_records(
     assert await client_store.record_by_psk_id(existing.psk_id) == existing
 
 
-
 async def test_client_store_reports_no_storage_accounting_by_default(
     client_store: ClientPairingStore,
 ) -> None:
