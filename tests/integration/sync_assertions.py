@@ -518,7 +518,7 @@ def assert_audible_sync(
     if compare_to == "reference":
         chosen_reference = reference_player_id
         if chosen_reference is None:
-            chosen_reference = sorted(segments_by_player.keys())[0]
+            chosen_reference = min(segments_by_player)
         if chosen_reference not in segments_by_player:
             raise AssertionError(f"unknown reference player_id: {chosen_reference}")
         reference_samples = window_samples_by_player[chosen_reference]
