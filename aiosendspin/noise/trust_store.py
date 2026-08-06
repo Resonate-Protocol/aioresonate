@@ -626,8 +626,13 @@ class _ClientPairingStoreBase(ClientPairingStore):
         """Persist the last-playback server id."""
         if server_id == self._last_playback_server_id:
             return
+        previous_server_id = self._last_playback_server_id
         self._last_playback_server_id = server_id
-        await self._save()
+        try:
+            await self._save()
+        except BaseException:
+            self._last_playback_server_id = previous_server_id
+            raise
 
     async def resolve_by_psk_id(self, psk_id: str) -> ResolvedPsk | None:
         """Resolve a ``psk_id`` (long-term record first, then the accepted Pairing PSK)."""

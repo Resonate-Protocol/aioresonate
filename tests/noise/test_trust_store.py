@@ -320,6 +320,31 @@ async def test_file_client_store_persists_last_playback_server(tmp_path: Path) -
     assert await reloaded.get_last_playback_server_id() == "server-X"
 
 
+async def test_last_playback_server_write_retries_after_save_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed save leaves the prior value intact so the same write can retry."""
+    store = InMemoryClientPairingStore()
+    save_attempts = 0
+
+    async def fail_once() -> None:
+        nonlocal save_attempts
+        save_attempts += 1
+        if save_attempts == 1:
+            raise OSError("store unavailable")
+
+    monkeypatch.setattr(store, "_save", fail_once)
+
+    with pytest.raises(OSError, match="store unavailable"):
+        await store.set_last_playback_server_id("server-X")
+    assert await store.get_last_playback_server_id() is None
+
+    await store.set_last_playback_server_id("server-X")
+
+    assert save_attempts == 2
+    assert await store.get_last_playback_server_id() == "server-X"
+
+
 async def test_file_client_store_pairing_outcome_generates_per_server_record(
     tmp_path: Path,
 ) -> None:
