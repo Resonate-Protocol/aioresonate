@@ -32,6 +32,7 @@ from aiosendspin.models.visualizer import ClientHelloVisualizerSupport, Visualiz
 from aiosendspin.noise.driver import HandshakeAbortedError
 from aiosendspin.noise.keys import Identity
 from aiosendspin.noise.pairing import PairingError
+from aiosendspin.noise.session import NoiseCipherSuite
 from aiosendspin.noise.trust_store import ClientPairingStore, ResolvedPsk
 
 from .connection import DECODABLE_CODECS, UNSYNCED_PLAY_LEAD_US, SendspinConnection
@@ -202,6 +203,7 @@ class SendspinClient:
         pin_display: Callable[[str | None], Awaitable[None]] | None = None,
         pairing_window: Callable[[], Awaitable[None]] | None = None,
         clock: Clock | None = None,
+        cipher_suite: NoiseCipherSuite = NoiseCipherSuite.CHACHAPOLY,
     ) -> None:
         """Create a new Sendspin client instance."""
         self._identity = identity
@@ -213,6 +215,7 @@ class SendspinClient:
         self._pin_display = pin_display
         self._pairing_window = pairing_window
         self._clock: Clock = clock or RawMonotonicClock()
+        self._cipher_suite = cipher_suite
 
         # Validate and store player support
         if Roles.PLAYER in self._roles:
@@ -273,6 +276,11 @@ class SendspinClient:
     def identity(self) -> Identity:
         """This client's static public X25519 identity."""
         return self._identity
+
+    @property
+    def cipher_suite(self) -> NoiseCipherSuite:
+        """Noise cipher suite this client picks for its handshakes."""
+        return self._cipher_suite
 
     @property
     def client_name(self) -> str:
