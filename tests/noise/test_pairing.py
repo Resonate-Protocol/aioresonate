@@ -196,6 +196,32 @@ async def test_static_pin_server_rejects_non_8_digit_operator_pin() -> None:
     assert await server_store.record_by_client_id("client-X") is None
 
 
+async def test_static_pin_server_rejects_dynamic_only_commit_b() -> None:
+    """A static-PIN pair-init carrying commit_B is a protocol error."""
+    client_ews, server_ews, _client_raw, server_raw = _paired_encrypted_ws()
+    server_store = InMemoryServerPairingStore()
+
+    await client_ews.send_str(
+        ClientPairInitMessage(
+            payload=ClientPairInitPayload(
+                pairing_index=0,
+                commit_B=b64url_encode(pin_mod.commit(pin_mod.generate_nonce())),
+            )
+        ).to_json(),
+    )
+    with pytest.raises(PairingError, match="commit_B for static PIN"):
+        await run_static_pin_server(
+            server_ews,
+            handshake_hash=_HANDSHAKE_HASH,
+            pairing_index=0,
+            pin_provider=_pin,
+            client_id="client-X",
+            store=server_store,
+        )
+    assert server_raw.sent == []
+    assert await server_store.record_by_client_id("client-X") is None
+
+
 async def test_dynamic_pin_server_times_out_mid_attempt(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -715,7 +741,9 @@ async def test_static_pin_malformed_client_share_raises() -> None:
     assert await server_store.record_by_client_id("client-A") is None
 
 
-async def _honest_pake_to_finalize(client_ews: EncryptedWebSocket) -> None:
+async def _honest_pake_to_finalize(
+    client_ews: EncryptedWebSocket, *, nonce_b: str | None = None
+) -> None:
     """Drive an honest static-PIN PAKE round, stopping just before ``client/pair-finalize``."""
     sid = b"sendspin-pair-pake-v1" + _HANDSHAKE_HASH + (0).to_bytes(4, "big")
     await client_ews.send_str(
@@ -734,9 +762,33 @@ async def _honest_pake_to_finalize(client_ews: EncryptedWebSocket) -> None:
     await client_ews.receive()  # server/pair-confirm
     await client_ews.send_str(
         ClientPairConfirmMessage(
-            payload=ClientPairConfirmPayload(client_kc=b64url_encode(cpace.tag())),
+            payload=ClientPairConfirmPayload(client_kc=b64url_encode(cpace.tag()), nonce_B=nonce_b),
         ).to_json(),
     )
+
+
+async def test_static_pin_server_rejects_dynamic_only_nonce_b() -> None:
+    """A static-PIN pair-confirm carrying nonce_B is a protocol error."""
+    client_ews, server_ews, _client_raw, _server_raw = _paired_encrypted_ws()
+    server_store = InMemoryServerPairingStore()
+
+    async def provide() -> str:
+        return _STATIC_PIN
+
+    with pytest.raises(PairingError, match="nonce_B for static PIN"):
+        await asyncio.gather(
+            run_static_pin_server(
+                server_ews,
+                handshake_hash=_HANDSHAKE_HASH,
+                pairing_index=0,
+                pin_provider=provide,
+                client_id="client-A",
+                store=server_store,
+            ),
+            _honest_pake_to_finalize(client_ews, nonce_b=b64url_encode(pin_mod.generate_nonce())),
+        )
+
+    assert await server_store.record_by_client_id("client-A") is None
 
 
 @pytest.mark.parametrize(
