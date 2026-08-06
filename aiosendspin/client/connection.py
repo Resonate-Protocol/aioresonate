@@ -92,7 +92,6 @@ from aiosendspin.noise.pairing import (
     run_pairing_psk_client,
     run_static_pin_client,
 )
-from aiosendspin.noise.session import NoiseCipherSuite
 from aiosendspin.noise.trust_store import PskCategory, ResolvedPsk
 from aiosendspin.noise.wire import EncryptedWebSocket
 
@@ -343,7 +342,7 @@ class SendspinConnection:
             result = await run_handshake_client(
                 raw_ws,
                 local_identity=self._client.identity,
-                suite=NoiseCipherSuite.CHACHAPOLY,
+                suite=self._client.cipher_suite,
                 psk_resolver=self._resolve_psk,
                 expected_server_id=expected_server_id,
             )
