@@ -479,6 +479,22 @@ class ClientPairingStore(ABC):
         """Return whether the record at ``psk_id`` may be removed (not record_mode-referenced)."""
         return not await self._record_mode_references(psk_id)
 
+    async def replace_record_for_server_id(self, record: ClientPairingRecord) -> None:
+        """Persist ``record``, dropping any prior removable record bound to the same server."""
+        stale = (
+            [
+                existing.psk_id
+                for existing in await self.list_records()
+                if existing.server_id == record.server_id and existing.psk_id != record.psk_id
+            ]
+            if record.server_id is not None
+            else []
+        )
+        await self.store_record(record)
+        for psk_id in stale:
+            if await self.can_remove_record(psk_id):
+                await self.remove_record(psk_id)
+
 
 class _ServerPairingStoreBase(ServerPairingStore):
     """Shared query/mutation logic for server pairing stores; subclasses add persistence."""
