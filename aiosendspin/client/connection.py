@@ -449,7 +449,7 @@ class SendspinConnection:
         if payload.active_roles is not None:
             self._active_roles = payload.active_roles
         self._selected_pair_method = payload.selected_pair_method
-        self._client.note_playback_activity(self)
+        await self._client.note_playback_activity(self)
         return None
 
     async def start(self) -> None:

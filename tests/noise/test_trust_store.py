@@ -310,6 +310,16 @@ async def test_file_client_store_persists_state(tmp_path: Path) -> None:
     assert await reloaded.pin_failure_count(PairMethod.DYNAMIC_PIN) == 1
 
 
+async def test_file_client_store_persists_last_playback_server(tmp_path: Path) -> None:
+    """The last-playback server id survives a reload."""
+    path = tmp_path / "client.json"
+    store = await FileClientPairingStore.open(path)
+    await store.set_last_playback_server_id("server-X")
+
+    reloaded = await FileClientPairingStore.open(path)
+    assert await reloaded.get_last_playback_server_id() == "server-X"
+
+
 async def test_file_client_store_pairing_outcome_generates_per_server_record(
     tmp_path: Path,
 ) -> None:
@@ -439,7 +449,6 @@ async def test_client_store_replace_record_keeps_shared_records(
     await client_store.replace_record_for_server_id(_shared_record())
 
     assert await client_store.record_by_psk_id(existing.psk_id) == existing
-
 
 
 async def test_client_store_reports_no_storage_accounting_by_default(
