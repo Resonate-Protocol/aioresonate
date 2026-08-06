@@ -566,9 +566,9 @@ class SendspinClient:
         """Load the persisted last-playback server once, seeding the discovery tiebreak."""
         if self._last_playback_loaded:
             return
-        self._last_playback_loaded = True
         if self.last_playback_server_id is None:
             self.last_playback_server_id = await self._pairing_store.get_last_playback_server_id()
+        self._last_playback_loaded = True
 
     async def _admit_connection(self, connection: SendspinConnection) -> None:
         """Make ``connection`` the admitted one, displacing any prior holder."""
