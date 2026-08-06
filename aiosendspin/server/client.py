@@ -532,7 +532,7 @@ class SendspinClient:
                 role.on_connect()
             roles[role.role_id] = role
         if self._roles_attached:
-            for dropped_role in self._roles.values():
+            for dropped_role in reversed(self._roles.values()):
                 dropped_role.on_disconnect()
         self._roles = roles
 
@@ -547,7 +547,8 @@ class SendspinClient:
                 self._rebuild_binary_handling_cache()
             return
 
-        for role_id in list(self._roles):
+        # Tear down in reverse attach order: the controller unwinds before the player it reads.
+        for role_id in reversed(list(self._roles)):
             if role_id not in desired_set:
                 deactivated_role = self._roles.pop(role_id)
                 deactivated_role.on_deactivate()
@@ -657,7 +658,7 @@ class SendspinClient:
 
     def _retire_roles_warm(self) -> None:
         """Run role disconnect hooks but keep instances alive for warm reuse on reconnect."""
-        for role in self._roles.values():
+        for role in reversed(self._roles.values()):
             role.on_disconnect()
         self._binary_handling_cache.clear()
         self._roles_warm_disconnected = True
@@ -726,7 +727,7 @@ class SendspinClient:
     def _hard_detach_roles(self, *, call_disconnect_hooks: bool = True) -> None:
         """Run role disconnect hooks and clear role-related caches."""
         if call_disconnect_hooks:
-            for role in self._roles.values():
+            for role in reversed(self._roles.values()):
                 role.on_disconnect()
         self._roles.clear()
         self._active_roles = None
