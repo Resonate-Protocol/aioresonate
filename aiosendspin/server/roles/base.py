@@ -13,7 +13,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from dataclasses import dataclass
 from functools import cached_property
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, ClassVar
 from uuid import UUID
 
 from aiosendspin.models import BinaryMessageType, pack_binary_header_raw
@@ -27,6 +27,7 @@ if TYPE_CHECKING:
         ClientStatePayload,
         StreamRequestFormatPayload,
     )
+    from aiosendspin.models.source import ClientStreamStartPayload
     from aiosendspin.models.types import ServerMessage
     from aiosendspin.server.audio import AudioFormat, BufferTracker
     from aiosendspin.server.audio_transformers import AudioTransformer
@@ -224,6 +225,13 @@ class Role(ABC):
     _late_skips_since_log: int = 0
     """Count of skipped late messages since last log."""
 
+    handled_binary_types: ClassVar[frozenset[int]] = frozenset()
+    """Inbound binary message types this role consumes (e.g. SOURCE_AUDIO_CHUNK).
+
+    The connection routes each inbound binary message to the first active role that
+    declares its type here. Default declares none, so a role never receives one.
+    """
+
     @property
     @abstractmethod
     def role_id(self) -> str:
@@ -372,6 +380,12 @@ class Role(ABC):
     def on_stream_end(self) -> None:  # noqa: B027
         """Handle stream stop."""
 
+    def on_binary_chunk(self, message_type: int, timestamp_us: int, data: bytes) -> None:  # noqa: B027
+        """Handle an inbound binary chunk of a type declared in ``handled_binary_types``.
+
+        Only called for message types this role declares, so no return is needed.
+        """
+
     # --- Lifecycle hooks ---
 
     @abstractmethod
@@ -458,3 +472,9 @@ class Role(ABC):
 
         Handlers must be synchronous. For async operations, launch eager tasks.
         """
+
+    def on_client_stream_start(self, payload: ClientStreamStartPayload) -> None:  # noqa: B027
+        """Handle an client_stream/start message from a source client."""
+
+    def on_client_stream_end(self) -> None:  # noqa: B027
+        """Handle an client_stream/end message from a source client."""

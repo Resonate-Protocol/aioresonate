@@ -33,6 +33,10 @@ __all__ = [
     "SendspinEvent",
     "SendspinGroup",
     "SendspinServer",
+    "SourceSignalChangedEvent",
+    "SourceStream",
+    "SourceStreamEndedEvent",
+    "SourceStreamStartedEvent",
     "StaticDelayChangedEvent",
     "VolumeChangedEvent",
 ]
@@ -60,6 +64,12 @@ from .roles.player.events import (
     RequiredLeadTimeChangedEvent,
     StaticDelayChangedEvent,
     VolumeChangedEvent,
+)
+from .roles.source import (
+    SourceSignalChangedEvent,
+    SourceStream,
+    SourceStreamEndedEvent,
+    SourceStreamStartedEvent,
 )
 from .server import (
     ClientAddedEvent,

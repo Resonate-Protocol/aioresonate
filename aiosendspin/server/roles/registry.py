@@ -19,6 +19,7 @@ SupportParser = Callable[[dict[str, Any]], object]
 
 ROLE_FACTORIES: dict[str, RoleFactory] = {}
 GROUP_ROLE_FACTORIES: dict[str, GroupRoleFactory] = {}
+PAIRING_REQUIRED_ROLE_IDS: set[str] = set()
 
 
 @dataclass(frozen=True, slots=True)
@@ -31,9 +32,22 @@ class RoleSupportSpec:
 ROLE_SUPPORT_SPECS: dict[str, RoleSupportSpec] = {}
 
 
-def register_role(role_id: str, factory: RoleFactory) -> None:
-    """Register or replace a role factory for a versioned role ID."""
+def register_role(role_id: str, factory: RoleFactory, *, requires_pairing: bool = False) -> None:
+    """Register or replace a role factory for a versioned role ID.
+
+    ``requires_pairing`` restricts activation to long-term paired connections. Set
+    it for roles with elevated security requirements, such as capturing audio.
+    """
     ROLE_FACTORIES[role_id] = factory
+    if requires_pairing:
+        PAIRING_REQUIRED_ROLE_IDS.add(role_id)
+    else:
+        PAIRING_REQUIRED_ROLE_IDS.discard(role_id)
+
+
+def role_requires_pairing(role_id: str) -> bool:
+    """Whether the role with this versioned ID may only run on a paired connection."""
+    return role_id in PAIRING_REQUIRED_ROLE_IDS
 
 
 def create_role(role_id: str, client: SendspinClient) -> Role | None:
