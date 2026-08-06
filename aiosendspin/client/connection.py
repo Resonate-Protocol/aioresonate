@@ -493,6 +493,7 @@ class SendspinConnection:
                     logger.info(
                         "Pairing attempt with %s ended: %s", self._server_id, err.reason.value
                     )
+                    self._client.notify_pairing_abort_callback(err.reason)
                 return
             if (reason := await self._apply_activation(activate)) is not None:
                 await self._goodbye_and_disconnect(reason)
