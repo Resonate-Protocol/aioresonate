@@ -1,15 +1,7 @@
-"""
-Shared serialization base for Sendspin protocol models.
+"""Shared serialization behavior for Sendspin protocol models.
 
-The spec types most numeric wire fields as `integer`, and a strict client rejects a field
-whose JSON type does not match: sendspin-cpp logs `Ignoring field 'track_duration':
-expected integer in [0, 4294967295]` and drops the field entirely. Python does not enforce
-`int` annotations at runtime and mashumaro passes primitives through unchanged, so a float
-handed to a model by a caller would otherwise reach the wire verbatim as `217000.0`.
-
-`SendspinConfig` closes that gap for every model that uses it, by coercing `int`-typed
-fields as they are serialized. Deserialization already coerces through mashumaro's built-in
-`int()` handling, so only the outbound direction needs this.
+The protocol types `int`-annotated wire fields as integers, but Python does not enforce
+annotations at runtime. This module keeps those fields integer-typed during serialization.
 """
 
 from __future__ import annotations
@@ -23,27 +15,16 @@ from mashumaro.mixins.orjson import DataClassORJSONMixin
 
 
 def int_to_wire(value: Any) -> int:
-    """
-    Coerce a value annotated as `int` into a real `int` for the wire.
+    """Coerce numeric values to wire integers.
 
-    Exact integers pass through by value, including `IntEnum` and anything else
-    implementing `__index__` (NumPy integer scalars, for instance). Floats are rounded to
-    the nearest integer: every integer field in the protocol carries a quantized unit
-    (milliseconds, microseconds, hertz, counts), so a fractional part is finer than the
-    wire can represent. Rounding rather than truncating keeps float-arithmetic artifacts
-    such as `2.9 * 1000 == 2899.9999999999995` from losing a whole unit.
-
-    `bool` is rejected even though it is a subclass of `int`, so a mistyped field fails
-    here rather than reaching the wire as a plausible `1` or `0` that no client will
-    question. Rounding a float preserves the caller's numeric intent; turning `True` into
-    a one-millisecond duration invents it. Type checkers accept a `bool` wherever an `int`
-    is annotated, so this is the only place the mistake can be caught.
+    Indexable values preserve their integer value. Finite floats are rounded so arithmetic
+    artifacts do not lose a unit, while booleans are rejected rather than becoming plausible
+    1 or 0 values on the wire.
 
     Raises:
-        TypeError: If the value is a `bool`, or is not a number at all.
-        ValueError: If the value is a NaN or an infinity, which have no integer form.
+        TypeError: If the value is a boolean or is not numeric.
+        ValueError: If the value is not finite.
     """
-    # Must precede operator.index(), which accepts bools and would make this unreachable.
     if isinstance(value, bool):
         msg = f"expected an integer, got bool: {value!r}"
         raise TypeError(msg)
@@ -65,14 +46,9 @@ def int_to_wire(value: Any) -> int:
 
 
 class SendspinConfig(BaseConfig):
-    """
-    Base mashumaro config for every Sendspin model.
+    """Base mashumaro config for Sendspin models.
 
-    A model's `Config` must derive from this rather than from `BaseConfig` directly:
-    mashumaro resolves `Config` by lookup, so a `Config(BaseConfig)` on a subclass
-    replaces this one outright and silently drops the integer coercion. The
-    `test_every_json_model_uses_sendspin_config` test in
-    `tests/models/test_wire_int_coercion.py` checks every model for this.
+    Model configs must derive from this class to retain integer coercion.
     """
 
     serialization_strategy = {int: {"serialize": int_to_wire}}  # noqa: RUF012
