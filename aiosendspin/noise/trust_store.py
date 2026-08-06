@@ -429,6 +429,14 @@ class ClientPairingStore(ABC):
     async def is_pin_locked_out(self, method: PairMethod) -> bool:
         """Return whether ``method`` is in terminal lockout (count past the threshold)."""
 
+    @abstractmethod
+    async def get_last_playback_server_id(self) -> str | None:
+        """Return the persisted last-playback server id, if one is stored."""
+
+    @abstractmethod
+    async def set_last_playback_server_id(self, server_id: str | None) -> None:
+        """Persist the last-playback server id."""
+
     async def can_store_record(self) -> bool:
         """Return whether the store can persist another record (default: unlimited)."""
         return True
@@ -605,9 +613,26 @@ class _ClientPairingStoreBase(ClientPairingStore):
         self._static_pin: str | None = None
         self._pin_failures: dict[PairMethod, int] = {}
         self._pairing_config: ClientPairingConfig | None = None
+        self._last_playback_server_id: str | None = None
 
     async def _save(self) -> None:
         """Flush mutated state to durable storage; a no-op for non-persistent stores."""
+
+    async def get_last_playback_server_id(self) -> str | None:
+        """Return the persisted last-playback server id, if any."""
+        return self._last_playback_server_id
+
+    async def set_last_playback_server_id(self, server_id: str | None) -> None:
+        """Persist the last-playback server id."""
+        if server_id == self._last_playback_server_id:
+            return
+        previous_server_id = self._last_playback_server_id
+        self._last_playback_server_id = server_id
+        try:
+            await self._save()
+        except BaseException:
+            self._last_playback_server_id = previous_server_id
+            raise
 
     async def resolve_by_psk_id(self, psk_id: str) -> ResolvedPsk | None:
         """Resolve a ``psk_id`` (long-term record first, then the accepted Pairing PSK)."""
@@ -767,6 +792,7 @@ class FileClientPairingStore(_ClientPairingStoreBase):
                     raise TypeError(msg)
                 failures[PairMethod(str(method_value))] = count
         self._pin_failures = failures
+        self._last_playback_server_id = _opt_str(data, "last_playback_server_id")
 
     async def _seed(self) -> None:
         """Provision the default pre-provisioned shared-PSK fallback record (spec §Record mode)."""
@@ -786,6 +812,7 @@ class FileClientPairingStore(_ClientPairingStoreBase):
                 "pairing_psk": self._pairing_psk.to_dict() if self._pairing_psk else None,
                 "static_pin": self._static_pin,
                 "pin_failures": {m.value: c for m, c in self._pin_failures.items()},
+                "last_playback_server_id": self._last_playback_server_id,
             }
             await asyncio.to_thread(_atomic_write_json, self._path, payload)
 

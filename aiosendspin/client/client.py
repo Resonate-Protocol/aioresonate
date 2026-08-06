@@ -245,6 +245,7 @@ class SendspinClient:
 
         self._provisional_connections = set()
         self._admission_lock = asyncio.Lock()
+        self._last_playback_loaded = False
 
         # Initialize callback lists
         self._metadata_callbacks = []
@@ -465,8 +466,13 @@ class SendspinClient:
             self._provisional_connections.discard(connection)
 
         # Hold the lock only for the admit decision, not for start()/pairing.
-        async with self._admission_lock:
-            await self._admit_connection(connection)
+        try:
+            async with self._admission_lock:
+                await self._admit_connection(connection)
+        except BaseException:
+            # Bring-up already dropped it from _provisional_connections, so nothing else owns it.
+            await connection.disconnect()
+            raise
         await connection.start()
 
     async def attach_websocket(
@@ -501,11 +507,17 @@ class SendspinClient:
             self._provisional_connections.discard(connection)
 
         # Hold the lock only for the admit/reject decision, not for start()/pairing.
-        async with self._admission_lock:
-            if not self._should_admit_connection(connection):
-                await self._reject_connection(connection)
-                return
-            await self._admit_connection(connection)
+        try:
+            async with self._admission_lock:
+                await self._ensure_last_playback_loaded()
+                if not self._should_admit_connection(connection):
+                    await self._reject_connection(connection)
+                    return
+                await self._admit_connection(connection)
+        except BaseException:
+            # Bring-up already dropped it from _provisional_connections, so nothing else owns it.
+            await connection.disconnect()
+            raise
         try:
             await connection.start()
         except (PairingError, OSError, RuntimeError, TimeoutError) as exc:
@@ -560,24 +572,38 @@ class SendspinClient:
             )
         return True
 
+    async def _ensure_last_playback_loaded(self) -> None:
+        """Load the persisted last-playback server once, seeding the discovery tiebreak."""
+        if self._last_playback_loaded:
+            return
+        if self.last_playback_server_id is None:
+            self.last_playback_server_id = await self._pairing_store.get_last_playback_server_id()
+        self._last_playback_loaded = True
+
     async def _admit_connection(self, connection: SendspinConnection) -> None:
         """Make ``connection`` the admitted one, displacing any prior holder."""
         previous = self._admitted_connection
         if previous is connection:
             return
+        await self._record_last_playback(connection)
         self._admitted_connection = connection
-        self.note_playback_activity(connection)
         if previous is not None:
             await self._dismiss_connection(previous, GoodbyeReason.ANOTHER_SERVER)
             await previous.disconnect()
 
-    def note_playback_activity(self, connection: SendspinConnection) -> None:
+    async def note_playback_activity(self, connection: SendspinConnection) -> None:
         """Record the admitted server as last-playback when it carries the playback activity."""
+        if connection is self._admitted_connection:
+            await self._record_last_playback(connection)
+
+    async def _record_last_playback(self, connection: SendspinConnection) -> None:
+        """Persist the last-playback server before caching it, so a failed write retries."""
         if (
-            connection is self._admitted_connection
-            and Activity.PLAYBACK in connection.activities
+            Activity.PLAYBACK in connection.activities
             and connection.server_id is not None
+            and connection.server_id != self.last_playback_server_id
         ):
+            await self._pairing_store.set_last_playback_server_id(connection.server_id)
             self.last_playback_server_id = connection.server_id
 
     async def _reject_connection(self, connection: SendspinConnection) -> None:

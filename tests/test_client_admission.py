@@ -10,6 +10,7 @@ import pytest
 from aiosendspin.client.client import SendspinClient
 from aiosendspin.client.connection import SendspinConnection
 from aiosendspin.models.types import Activity, GoodbyeReason, PairAbortReason, Roles
+from aiosendspin.noise.trust_store import InMemoryClientPairingStore
 
 from .conftest import make_sdk_client
 
@@ -299,9 +300,97 @@ async def test_note_playback_activity_ignores_non_admitted() -> None:
     client._admitted_connection = admitted  # type: ignore[assignment]
     other = _FakeConnection(server_id="server-B", activities=[Activity.PLAYBACK], client=client)
 
-    client.note_playback_activity(other)  # type: ignore[arg-type]
+    await client.note_playback_activity(other)  # type: ignore[arg-type]
 
     assert client.last_playback_server_id is None
+
+
+async def test_note_playback_activity_persists_later_activation() -> None:
+    """A server/activate that adds playback after admission is persisted, not just cached."""
+    store = InMemoryClientPairingStore()
+    client = make_sdk_client(client_name="c", roles=[Roles.CONTROLLER], pairing_store=store)
+    admitted = _FakeConnection(server_id="server-A", activities=[], client=client)
+    client._admitted_connection = admitted  # type: ignore[assignment]
+    admitted.activities = [Activity.PLAYBACK]  # a later activate declares playback
+
+    await client.note_playback_activity(admitted)  # type: ignore[arg-type]
+
+    assert await store.get_last_playback_server_id() == "server-A"
+
+
+async def test_failed_last_playback_write_retries_on_next_activation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed store write leaves the cached pointer stale so a later activation retries."""
+    store = InMemoryClientPairingStore()
+    client = make_sdk_client(client_name="c", roles=[Roles.CONTROLLER], pairing_store=store)
+    admitted = _FakeConnection(server_id="server-A", activities=[Activity.PLAYBACK], client=client)
+    client._admitted_connection = admitted  # type: ignore[assignment]
+    written: list[str | None] = []
+
+    async def flaky(server_id: str | None) -> None:
+        written.append(server_id)
+        if len(written) == 1:
+            raise OSError("store unavailable")
+
+    monkeypatch.setattr(store, "set_last_playback_server_id", flaky)
+
+    with pytest.raises(OSError, match="store unavailable"):
+        await client.note_playback_activity(admitted)  # type: ignore[arg-type]
+    assert client.last_playback_server_id is None
+
+    await client.note_playback_activity(admitted)  # type: ignore[arg-type]
+
+    assert written == ["server-A", "server-A"]
+
+
+async def test_failed_last_playback_write_leaves_admission_unpublished(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed store write during admission keeps the previous connection admitted."""
+    store = InMemoryClientPairingStore()
+    client = make_sdk_client(client_name="c", roles=[Roles.CONTROLLER], pairing_store=store)
+    previous = _FakeConnection(server_id="server-A", activities=[], client=client)
+    client._admitted_connection = previous  # type: ignore[assignment]
+    incoming = _FakeConnection(server_id="server-B", activities=[Activity.PLAYBACK], client=client)
+
+    async def boom(_server_id: str | None) -> None:
+        raise OSError("store unavailable")
+
+    monkeypatch.setattr(store, "set_last_playback_server_id", boom)
+
+    with pytest.raises(OSError, match="store unavailable"):
+        await client._admit_connection(incoming)  # type: ignore[arg-type]
+
+    assert client._admitted_connection is previous
+    assert not previous.disconnected
+
+
+async def test_failed_last_playback_read_retries_on_next_admission(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed store read leaves the loader armed so a later admission retries it."""
+    store = InMemoryClientPairingStore()
+    await store.set_last_playback_server_id("server-Z")
+    client = make_sdk_client(client_name="c", roles=[Roles.CONTROLLER], pairing_store=store)
+    original = store.get_last_playback_server_id
+    reads: list[None] = []
+
+    async def flaky() -> str | None:
+        reads.append(None)
+        if len(reads) == 1:
+            raise OSError("store unavailable")
+        return await original()
+
+    monkeypatch.setattr(store, "get_last_playback_server_id", flaky)
+
+    with pytest.raises(OSError, match="store unavailable"):
+        await client._ensure_last_playback_loaded()
+    assert client.last_playback_server_id is None
+
+    await client._ensure_last_playback_loaded()
+
+    assert client.last_playback_server_id == "server-Z"
 
 
 # --- on_connection_closed ---
@@ -404,3 +493,14 @@ async def test_client_initiated_connection_has_no_bringup_deadline(
         )
     # The deadline came from wait_for, not an internal timeout: still live.
     assert not connection._closed.is_set()
+
+
+async def test_client_seeds_last_playback_server_from_store() -> None:
+    """The client seeds its last-playback tiebreak from the persisted store value."""
+    store = InMemoryClientPairingStore()
+    await store.set_last_playback_server_id("server-Z")
+    sdk = make_sdk_client(client_name="c", roles=[Roles.CONTROLLER], pairing_store=store)
+
+    await sdk._ensure_last_playback_loaded()
+
+    assert sdk.last_playback_server_id == "server-Z"
