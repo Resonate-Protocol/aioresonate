@@ -80,6 +80,9 @@ AudioChunkCallback = Callable[[int, bytes, AudioFormat], None]
 # Callback invoked when the client disconnects from the server.
 DisconnectCallback = Callable[[], None]
 
+# Callback invoked with the abort reason when a non-closing pairing attempt ends.
+PairingAbortCallback = Callable[[PairAbortReason], None]
+
 # Callback invoked when server sends player commands (volume, mute).
 ServerCommandCallback = Callable[[ServerCommandPayload], None]
 
@@ -162,6 +165,8 @@ class SendspinClient:
     """Callbacks invoked when audio chunks are received."""
     _disconnect_callbacks: list[DisconnectCallback]
     """Callbacks invoked when the client disconnects."""
+    _pairing_abort_callbacks: list[PairingAbortCallback]
+    """Callbacks invoked when a non-closing pairing attempt ends with an abort reason."""
     _server_command_callbacks: list[ServerCommandCallback]
     """Callbacks invoked when server sends player commands."""
     _visualizer_callbacks: list[VisualizerCallback]
@@ -256,6 +261,7 @@ class SendspinClient:
         self._stream_clear_callbacks = []
         self._audio_chunk_callbacks = []
         self._disconnect_callbacks = []
+        self._pairing_abort_callbacks = []
         self._server_command_callbacks = []
         self._visualizer_callbacks = []
         self._artwork_callbacks = []
@@ -788,6 +794,19 @@ class SendspinClient:
             else None
         )
 
+    def add_pairing_abort_listener(self, callback: PairingAbortCallback) -> Callable[[], None]:
+        """Add a listener for non-closing pairing aborts.
+
+        Returns:
+            A function that removes this listener when called.
+        """
+        self._pairing_abort_callbacks.append(callback)
+        return lambda: (
+            self._pairing_abort_callbacks.remove(callback)
+            if callback in self._pairing_abort_callbacks
+            else None
+        )
+
     def add_server_command_listener(self, callback: ServerCommandCallback) -> Callable[[], None]:
         """Add a listener for server command events.
 
@@ -891,6 +910,14 @@ class SendspinClient:
                 callback()
             except Exception:
                 logger.exception("Error in disconnect callback %s", callback)
+
+    def notify_pairing_abort_callback(self, reason: PairAbortReason) -> None:
+        """Dispatch a non-closing pairing abort to the registered listeners."""
+        for callback in list(self._pairing_abort_callbacks):
+            try:
+                callback(reason)
+            except Exception:
+                logger.exception("Error in pairing abort callback %s", callback)
 
     def notify_server_command_callback(self, payload: ServerCommandPayload) -> None:
         """Dispatch a server/command to the registered listeners."""
