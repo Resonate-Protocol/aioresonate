@@ -245,6 +245,7 @@ class SendspinClient:
 
         self._provisional_connections = set()
         self._admission_lock = asyncio.Lock()
+        self._last_playback_loaded = False
 
         # Initialize callback lists
         self._metadata_callbacks = []
@@ -502,6 +503,7 @@ class SendspinClient:
 
         # Hold the lock only for the admit/reject decision, not for start()/pairing.
         async with self._admission_lock:
+            await self._ensure_last_playback_loaded()
             if not self._should_admit_connection(connection):
                 await self._reject_connection(connection)
                 return
@@ -560,25 +562,35 @@ class SendspinClient:
             )
         return True
 
+    async def _ensure_last_playback_loaded(self) -> None:
+        """Load the persisted last-playback server once, seeding the discovery tiebreak."""
+        if self._last_playback_loaded:
+            return
+        self._last_playback_loaded = True
+        if self.last_playback_server_id is None:
+            self.last_playback_server_id = await self._pairing_store.get_last_playback_server_id()
+
     async def _admit_connection(self, connection: SendspinConnection) -> None:
         """Make ``connection`` the admitted one, displacing any prior holder."""
         previous = self._admitted_connection
         if previous is connection:
             return
         self._admitted_connection = connection
-        self.note_playback_activity(connection)
+        await self.note_playback_activity(connection)
         if previous is not None:
             await self._dismiss_connection(previous, GoodbyeReason.ANOTHER_SERVER)
             await previous.disconnect()
 
-    def note_playback_activity(self, connection: SendspinConnection) -> None:
+    async def note_playback_activity(self, connection: SendspinConnection) -> None:
         """Record the admitted server as last-playback when it carries the playback activity."""
         if (
             connection is self._admitted_connection
             and Activity.PLAYBACK in connection.activities
             and connection.server_id is not None
+            and connection.server_id != self.last_playback_server_id
         ):
             self.last_playback_server_id = connection.server_id
+            await self._pairing_store.set_last_playback_server_id(connection.server_id)
 
     async def _reject_connection(self, connection: SendspinConnection) -> None:
         """Refuse an incoming connection that lost arbitration."""

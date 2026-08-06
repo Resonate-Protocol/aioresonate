@@ -479,6 +479,13 @@ class ClientPairingStore(ABC):
         """Return whether the record at ``psk_id`` may be removed (not record_mode-referenced)."""
         return not await self._record_mode_references(psk_id)
 
+    async def get_last_playback_server_id(self) -> str | None:
+        """Return the persisted last-playback server id, if the store tracks one."""
+        return None
+
+    async def set_last_playback_server_id(self, server_id: str | None) -> None:  # noqa: B027
+        """Persist the last-playback server id for stores that track one."""
+
 
 class _ServerPairingStoreBase(ServerPairingStore):
     """Shared query/mutation logic for server pairing stores; subclasses add persistence."""
@@ -605,9 +612,21 @@ class _ClientPairingStoreBase(ClientPairingStore):
         self._static_pin: str | None = None
         self._pin_failures: dict[PairMethod, int] = {}
         self._pairing_config: ClientPairingConfig | None = None
+        self._last_playback_server_id: str | None = None
 
     async def _save(self) -> None:
         """Flush mutated state to durable storage; a no-op for non-persistent stores."""
+
+    async def get_last_playback_server_id(self) -> str | None:
+        """Return the persisted last-playback server id, if any."""
+        return self._last_playback_server_id
+
+    async def set_last_playback_server_id(self, server_id: str | None) -> None:
+        """Persist the last-playback server id."""
+        if server_id == self._last_playback_server_id:
+            return
+        self._last_playback_server_id = server_id
+        await self._save()
 
     async def resolve_by_psk_id(self, psk_id: str) -> ResolvedPsk | None:
         """Resolve a ``psk_id`` (long-term record first, then the accepted Pairing PSK)."""
@@ -767,6 +786,7 @@ class FileClientPairingStore(_ClientPairingStoreBase):
                     raise TypeError(msg)
                 failures[PairMethod(str(method_value))] = count
         self._pin_failures = failures
+        self._last_playback_server_id = _opt_str(data, "last_playback_server_id")
 
     async def _seed(self) -> None:
         """Provision the default pre-provisioned shared-PSK fallback record (spec §Record mode)."""
@@ -786,6 +806,7 @@ class FileClientPairingStore(_ClientPairingStoreBase):
                 "pairing_psk": self._pairing_psk.to_dict() if self._pairing_psk else None,
                 "static_pin": self._static_pin,
                 "pin_failures": {m.value: c for m, c in self._pin_failures.items()},
+                "last_playback_server_id": self._last_playback_server_id,
             }
             await asyncio.to_thread(_atomic_write_json, self._path, payload)
 
