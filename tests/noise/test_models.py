@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 from aiosendspin.noise.models import (
     ClientInitMessage,
     ClientInitPayload,
@@ -41,6 +43,20 @@ def test_server_init_has_no_suite_field() -> None:
     raw = msg.to_json()
     assert "suite" not in raw
     assert '"type":"server/init"' in raw
+
+
+def test_noise_integer_fields_serialize_as_integers() -> None:
+    """Noise messages emit integer-typed wire fields."""
+    msg = ClientInitMessage(
+        payload=ClientInitPayload(
+            client_id="GFsV9tLaSQm9HcFWpKsgYQOr7wFTvNUtkmFwuVz3zoo",
+            version=1.0,
+            suite="25519_ChaChaPoly_SHA256",
+        ),
+    )
+    version = json.loads(msg.to_json())["payload"]["version"]
+    assert version == 1
+    assert type(version) is int
 
 
 def test_noise_handshake_message_round_trip() -> None:

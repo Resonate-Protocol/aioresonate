@@ -14,6 +14,7 @@ import pytest
 from mashumaro.mixins.orjson import DataClassORJSONMixin
 
 import aiosendspin.models as models_package
+import aiosendspin.noise.models as noise_models
 from aiosendspin.models.base import SendspinConfig, int_to_wire
 from aiosendspin.models.metadata import Progress, SessionUpdateMetadata
 from aiosendspin.models.player import StreamStartPlayer
@@ -162,14 +163,18 @@ def test_plain_int_fields_are_coerced() -> None:
 def _json_model_classes() -> list[type]:
     """Every model dataclass that is serialized to JSON."""
     found: dict[str, type] = {}
-    for module_info in pkgutil.iter_modules(models_package.__path__):
-        module = importlib.import_module(f"aiosendspin.models.{module_info.name}")
+    modules = [noise_models]
+    modules.extend(
+        importlib.import_module(f"aiosendspin.models.{module_info.name}")
+        for module_info in pkgutil.iter_modules(models_package.__path__)
+    )
+    for module in modules:
         for obj in vars(module).values():
             if (
                 inspect.isclass(obj)
                 and dataclasses.is_dataclass(obj)
                 and issubclass(obj, DataClassORJSONMixin)
-                and obj.__module__.startswith("aiosendspin.models")
+                and obj.__module__.startswith(("aiosendspin.models", "aiosendspin.noise.models"))
             ):
                 found[f"{obj.__module__}.{obj.__qualname__}"] = obj
     return list(found.values())
