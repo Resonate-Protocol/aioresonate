@@ -366,6 +366,33 @@ async def test_failed_last_playback_write_leaves_admission_unpublished(
     assert not previous.disconnected
 
 
+async def test_failed_last_playback_read_retries_on_next_admission(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed store read leaves the loader armed so a later admission retries it."""
+    store = InMemoryClientPairingStore()
+    await store.set_last_playback_server_id("server-Z")
+    client = make_sdk_client(client_name="c", roles=[Roles.CONTROLLER], pairing_store=store)
+    original = store.get_last_playback_server_id
+    reads: list[None] = []
+
+    async def flaky() -> str | None:
+        reads.append(None)
+        if len(reads) == 1:
+            raise OSError("store unavailable")
+        return await original()
+
+    monkeypatch.setattr(store, "get_last_playback_server_id", flaky)
+
+    with pytest.raises(OSError, match="store unavailable"):
+        await client._ensure_last_playback_loaded()
+    assert client.last_playback_server_id is None
+
+    await client._ensure_last_playback_loaded()
+
+    assert client.last_playback_server_id == "server-Z"
+
+
 # --- on_connection_closed ---
 
 
