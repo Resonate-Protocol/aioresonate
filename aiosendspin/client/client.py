@@ -480,8 +480,13 @@ class SendspinClient:
             self._provisional_connections.discard(connection)
 
         # Hold the lock only for the admit decision, not for start()/pairing.
-        async with self._admission_lock:
-            await self._admit_connection(connection)
+        try:
+            async with self._admission_lock:
+                await self._admit_connection(connection)
+        except BaseException:
+            # Bring-up already dropped it from _provisional_connections, so nothing else owns it.
+            await connection.disconnect()
+            raise
         await connection.start()
 
     async def attach_websocket(
@@ -516,12 +521,17 @@ class SendspinClient:
             self._provisional_connections.discard(connection)
 
         # Hold the lock only for the admit/reject decision, not for start()/pairing.
-        async with self._admission_lock:
-            await self._ensure_last_playback_loaded()
-            if not self._should_admit_connection(connection):
-                await self._reject_connection(connection)
-                return
-            await self._admit_connection(connection)
+        try:
+            async with self._admission_lock:
+                await self._ensure_last_playback_loaded()
+                if not self._should_admit_connection(connection):
+                    await self._reject_connection(connection)
+                    return
+                await self._admit_connection(connection)
+        except BaseException:
+            # Bring-up already dropped it from _provisional_connections, so nothing else owns it.
+            await connection.disconnect()
+            raise
         try:
             await connection.start()
         except (PairingError, OSError, RuntimeError, TimeoutError) as exc:
