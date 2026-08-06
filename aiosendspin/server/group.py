@@ -130,7 +130,13 @@ class SendspinGroup:
         # Replace any existing active stream so stale handles cannot continue
         # committing audio after a new stream is started.
         if self._push_stream is not None and not self._push_stream.is_stopped:
-            self._push_stream.stop()
+            if self._server.allow_noncompliant_clients:
+                self._push_stream.stop()
+            else:
+                # Clear buffered audio while preserving the protocol stream across replacement.
+                # Gate the spec-compliant path while legacy clients still mishandle stream/clear.
+                self._push_stream.clear()
+                self._push_stream.stop(keep_stream=True)
 
         self._push_stream = PushStream(
             loop=self._server.loop,

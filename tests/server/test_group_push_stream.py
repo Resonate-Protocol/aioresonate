@@ -34,6 +34,7 @@ class TestGroupStartStream:
         server = MagicMock()
         server.loop = mock_loop
         server.clock = LoopClock(mock_loop)
+        server.allow_noncompliant_clients = True
         return server
 
     @pytest.fixture
@@ -176,21 +177,46 @@ class TestGroupStartStream:
 
         assert stream1 is not stream2
 
-    def test_start_stream_replaces_and_stops_previous_stream(
+    def test_start_stream_ends_previous_stream_for_noncompliant_clients(
         self,
         mock_server: MagicMock,
         mock_client: MagicMock,
     ) -> None:
-        """Starting a new stream should stop the previous active stream."""
+        """Compatibility mode should end the previous active stream."""
         group = SendspinGroup(mock_server, mock_client)
         stream1 = group.start_stream()
 
         assert not stream1.is_stopped
 
-        stream2 = group.start_stream()
+        with (
+            patch.object(stream1, "clear", wraps=stream1.clear) as clear,
+            patch.object(stream1, "stop", wraps=stream1.stop) as stop,
+        ):
+            stream2 = group.start_stream()
 
         assert stream2 is not stream1
         assert stream1.is_stopped
+        clear.assert_not_called()
+        stop.assert_called_once_with()
+
+    def test_start_stream_keeps_protocol_stream_in_strict_mode(
+        self,
+        mock_server: MagicMock,
+        mock_client: MagicMock,
+    ) -> None:
+        """Strict mode should clear buffered audio without ending the protocol stream."""
+        mock_server.allow_noncompliant_clients = False
+        group = SendspinGroup(mock_server, mock_client)
+        stream1 = group.start_stream()
+
+        with (
+            patch.object(stream1, "clear", wraps=stream1.clear) as clear,
+            patch.object(stream1, "stop", wraps=stream1.stop) as stop,
+        ):
+            group.start_stream()
+
+        clear.assert_called_once_with()
+        stop.assert_called_once_with(keep_stream=True)
 
     @pytest.mark.asyncio
     async def test_replaced_stream_cannot_commit_audio(
