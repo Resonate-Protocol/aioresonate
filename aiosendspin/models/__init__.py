@@ -19,8 +19,10 @@ __all__ = [
     "ServerMessage",
     "UndefinedField",
     "artwork",
+    "color",
     "controller",
     "core",
+    "management",
     "metadata",
     "pack_binary_header",
     "pack_binary_header_raw",
@@ -29,11 +31,23 @@ __all__ = [
     "undefined_field",
     "unpack_binary_header",
     "visualizer",
+    "visualizer_draft_r1",
 ]
 import struct
 from typing import NamedTuple
 
-from . import artwork, controller, core, metadata, player, types, visualizer
+from . import (
+    artwork,
+    color,
+    controller,
+    core,
+    management,
+    metadata,
+    player,
+    types,
+    visualizer,
+    visualizer_draft_r1,
+)
 from .core import DeviceInfo
 from .types import (
     AudioCodec,
