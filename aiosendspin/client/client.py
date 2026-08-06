@@ -18,7 +18,8 @@ from aiosendspin.models.core import (
     ServerStatePayload,
     StreamStartMessage,
 )
-from aiosendspin.models.player import ClientHelloPlayerSupport
+from aiosendspin.models.player import ClientHelloPlayerSupport, SupportedAudioFormat
+from aiosendspin.models.source import ClientHelloSourceSupport
 from aiosendspin.models.types import (
     Activity,
     GoodbyeReason,
@@ -37,6 +38,7 @@ from aiosendspin.noise.trust_store import ClientPairingStore, ResolvedPsk
 
 from .connection import DECODABLE_CODECS, UNSYNCED_PLAY_LEAD_US, SendspinConnection
 from .models import AudioFormat, ServerInfo
+from .source import SourceCapture
 
 logger = logging.getLogger(__name__)
 
@@ -121,6 +123,8 @@ class SendspinClient:
     """Artwork capabilities (only set if ARTWORK role is supported)."""
     _visualizer_support: ClientHelloVisualizerSupport | None
     """Visualizer capabilities (only set if VISUALIZER role is supported)."""
+    _source_support: ClientHelloSourceSupport | None
+    """Source capabilities (only set if SOURCE role is supported)."""
     _session: ClientSession | None
     """Optional aiohttp ClientSession for WebSocket connection."""
 
@@ -193,6 +197,7 @@ class SendspinClient:
         player_support: ClientHelloPlayerSupport | None = None,
         artwork_support: ClientHelloArtworkSupport | None = None,
         visualizer_support: ClientHelloVisualizerSupport | None = None,
+        source_support: ClientHelloSourceSupport | None = None,
         session: ClientSession | None = None,
         static_delay_ms: float = 0.0,
         required_lead_time_ms: float = 250.0,
@@ -241,6 +246,9 @@ class SendspinClient:
             self._visualizer_support = visualizer_support
         else:
             self._visualizer_support = None
+
+        # Source support is optional feature hints, but meaningless without the role.
+        self._source_support = source_support if Roles.SOURCE in self._roles else None
         self._session = session
         self._owns_session = session is None
         self._loop = asyncio.get_running_loop()
@@ -311,6 +319,26 @@ class SendspinClient:
     def visualizer_support(self) -> ClientHelloVisualizerSupport | None:
         """Visualizer capabilities (only set if VISUALIZER role is supported)."""
         return self._visualizer_support
+
+    @property
+    def source_support(self) -> ClientHelloSourceSupport | None:
+        """Source capabilities (only set if SOURCE role is supported)."""
+        return self._source_support
+
+    def create_source_capture(self, audio_format: SupportedAudioFormat) -> SourceCapture:
+        """Create a helper for streaming locally captured audio to the server.
+
+        Drive it with ``start()``, ``feed()`` and ``stop()``, feeding PCM that
+        matches ``SourceCapture.audio_format``. ``audio_format`` is the codec and
+        PCM shape to stream; the server supports all codecs. The host calls these
+        in response to ``server/command`` start/stop requests delivered through
+        the normal server-command listener.
+        """
+        if Roles.SOURCE not in self._roles:
+            raise RuntimeError("Client does not have the source role")
+        if self._admitted_connection is None:
+            raise RuntimeError("Client is not connected")
+        return SourceCapture(self, self._admitted_connection, audio_format)
 
     @property
     def pairing_store(self) -> ClientPairingStore:

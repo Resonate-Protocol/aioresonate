@@ -12,6 +12,7 @@ from .client import (
 )
 from .listener import ClientListener
 from .models import AudioFormat, PCMFormat, ServerInfo
+from .source import SourceCapture
 from .time_sync import SendspinTimeFilter
 
 __all__ = [
@@ -25,6 +26,7 @@ __all__ = [
     "SendspinClient",
     "SendspinTimeFilter",
     "ServerInfo",
+    "SourceCapture",
     "StreamEndCallback",
     "StreamStartCallback",
     "VisualizerCallback",
