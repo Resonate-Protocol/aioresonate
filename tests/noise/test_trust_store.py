@@ -451,6 +451,31 @@ async def test_client_store_remove_and_list(client_store: ClientPairingStore) ->
     await client_store.remove_record("absent")
 
 
+async def test_client_store_replace_record_drops_prior_for_server(
+    client_store: ClientPairingStore,
+) -> None:
+    """Re-pairing a server leaves a single record, keyed by the newest psk_id."""
+    old = _client_record(server_id="server-X")
+    await client_store.store_record(old)
+    new = _client_record(server_id="server-X")
+    await client_store.replace_record_for_server_id(new)
+    for_server = [r for r in await client_store.list_records() if r.server_id == "server-X"]
+    assert for_server == [new]
+    assert await client_store.record_by_psk_id(old.psk_id) is None
+
+
+async def test_client_store_replace_record_keeps_shared_records(
+    client_store: ClientPairingStore,
+) -> None:
+    """A shared record binds to no server, so replacing one leaves the others alone."""
+    existing = _shared_record()
+    await client_store.store_record(existing)
+
+    await client_store.replace_record_for_server_id(_shared_record())
+
+    assert await client_store.record_by_psk_id(existing.psk_id) == existing
+
+
 async def test_client_store_reports_no_storage_accounting_by_default(
     client_store: ClientPairingStore,
 ) -> None:

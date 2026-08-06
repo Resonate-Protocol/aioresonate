@@ -408,7 +408,9 @@ async def run_static_pin_server(
     """
     sid = _pake_sid(handshake_hash, pairing_index)
     async with asyncio.timeout(_SERVER_GESTURE_TIMEOUT_S):
-        await _receive_pair_init(ws, pairing_index)
+        init = await _receive_pair_init(ws, pairing_index)
+    if init.payload.commit_B is not None:
+        raise PairingError("client/pair-init carries commit_B for static PIN")
     async with asyncio.timeout(_SERVER_ATTEMPT_TIMEOUT_S):
         pin = await pin_provider()
         if not pin_mod.is_valid_static_pin(pin):
@@ -440,6 +442,8 @@ async def run_static_pin_server(
         )
 
         confirm = await _receive_pairing(ws, ClientPairConfirmMessage)
+        if confirm.payload.nonce_B is not None:
+            raise PairingError("client/pair-confirm carries nonce_B for static PIN")
         if not cpace.verify(
             _decode_field(confirm.payload.client_kc, "client_kc", expect_len=_KC_TAG_SIZE)
         ):
@@ -477,7 +481,7 @@ async def _finalize_client(
     if isinstance(reply, str):
         return reply  # server left pairing without finalizing; nothing stored
     if record is not None:
-        await store.store_record(record)
+        await store.replace_record_for_server_id(record)
     return None
 
 
