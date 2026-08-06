@@ -29,6 +29,11 @@ from .player import (
     StreamRequestFormatPlayer,
     StreamStartPlayer,
 )
+from .source import (
+    ClientHelloSourceSupport,
+    SourceCommandServerPayload,
+    SourceStatePayload,
+)
 from .types import (
     Activity,
     ClientMessage,
@@ -161,6 +166,8 @@ class ClientHelloPayload(SendspinModel):
         ClientHelloVisualizerSupportDraftR1 | None, Alias("visualizer@_draft_r1_support")
     ] = None
     """Visualizer support for clients on the legacy `visualizer@_draft_r1` wire."""
+    source_support: Annotated[ClientHelloSourceSupport | None, Alias("source@v1_support")] = None
+    """Source support configuration - only if source role is in supported_roles."""
     supported_pair_methods: list[PairMethodDescriptor] | None = None
     """Pairing methods this client offers."""
     unpaired_access: UnpairedAccess = field(default_factory=UnpairedAccess)
@@ -252,6 +259,13 @@ class ClientHelloPayload(SendspinModel):
                 unlisted.append("visualizer@_draft_r1")
             self.visualizer_draft_r1_support = None
 
+        # source@v1_support is optional (it carries only feature hints), but never
+        # meaningful without the role.
+        if Roles.SOURCE.value not in self.supported_roles:
+            if self.source_support is not None:
+                unlisted.append(Roles.SOURCE.value)
+            self.source_support = None
+
         # Overwrite so a client cannot spoof the record via the wire.
         self.unlisted_support_roles = unlisted or None
 
@@ -301,6 +315,8 @@ class ClientStatePayload(SendspinModel):
     """
     player: PlayerStatePayload | None = None
     """Player state - only if client has player role."""
+    source: SourceStatePayload | None = None
+    """Source state - only if client has source role."""
     legacy_state_used: bool | None = None
     """Set when the parser read a legacy top-level `state` field, recorded for the server
     to flag. Not part of the wire schema (omitted when None)."""
@@ -548,6 +564,8 @@ class ServerCommandPayload(SendspinModel):
 
     player: PlayerCommandPayload | None = None
     """Player commands - only sent to clients with player role."""
+    source: SourceCommandServerPayload | None = None
+    """Source command - only sent to clients with source role."""
 
     class Config(SendspinConfig):
         """Config for parsing json messages."""
