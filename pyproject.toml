@@ -134,6 +134,7 @@ ignore = [
   "PLR2004", # Just annoying, not really useful
   "PGH004",  # Just annoying, not really useful
   "PD011",   # Just annoying, not really useful
+  "RUF036",  # Union order can affect deserialization
   "S101",    # assert is often used to satisfy type checking
   "TC001",   # Just annoying, not really useful
   "TC003",   # Just annoying, not really useful
@@ -143,6 +144,7 @@ ignore = [
   "TRY003",  # Just annoying, not really useful
   "TRY400",  # Just annoying, not really useful
   "COM812",  # Conflicts with the Ruff formatter
+  "CPY001",  # Per-file copyright notices are not required
   "S104",    # Allow "0.0.0.0" address
 ]
 
