@@ -9,8 +9,9 @@ scripts/cpp_reference_sha.txt.
 Pipeline:
 
 1. Clone https://github.com/Sendspin-Protocol/time-filter into /tmp/time-filter-ref
-   (or pass --cpp-ref-dir). The SHA pinned in scripts/cpp_reference_sha.txt is
-   what the Python port was last reconciled against.
+   (or pass --cpp-ref-dir) and check out the SHA recorded in
+   scripts/cpp_reference_sha.txt, the commit the port was last reconciled against.
+   The harness compiles whatever is checked out and does not read or enforce that SHA.
 2. Compile a tiny C++ harness around sendspin_time_filter.cpp that reads
    ``measurement,max_error,time_added`` lines on stdin and prints
    ``offset,drift,offset_covariance,drift_covariance,server_time(sample_t)``

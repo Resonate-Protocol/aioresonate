@@ -874,6 +874,7 @@ class SendspinConnection:
         assert transport is not None
 
         if not self.is_encrypted:
+            # Non-spec transition path: the legacy hello replaces server/hello plus activate.
             assert self._pending_first_text is not None
             client_hello_text = self._pending_first_text
             self._pending_first_text = None
