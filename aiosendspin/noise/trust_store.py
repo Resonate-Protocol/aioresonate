@@ -429,6 +429,14 @@ class ClientPairingStore(ABC):
     async def is_pin_locked_out(self, method: PairMethod) -> bool:
         """Return whether ``method`` is in terminal lockout (count past the threshold)."""
 
+    @abstractmethod
+    async def get_last_playback_server_id(self) -> str | None:
+        """Return the persisted last-playback server id, if one is stored."""
+
+    @abstractmethod
+    async def set_last_playback_server_id(self, server_id: str | None) -> None:
+        """Persist the last-playback server id."""
+
     async def can_store_record(self) -> bool:
         """Return whether the store can persist another record (default: unlimited)."""
         return True
@@ -478,13 +486,6 @@ class ClientPairingStore(ABC):
     async def can_remove_record(self, psk_id: str) -> bool:
         """Return whether the record at ``psk_id`` may be removed (not record_mode-referenced)."""
         return not await self._record_mode_references(psk_id)
-
-    async def get_last_playback_server_id(self) -> str | None:
-        """Return the persisted last-playback server id, if the store tracks one."""
-        return None
-
-    async def set_last_playback_server_id(self, server_id: str | None) -> None:  # noqa: B027
-        """Persist the last-playback server id for stores that track one."""
 
 
 class _ServerPairingStoreBase(ServerPairingStore):
