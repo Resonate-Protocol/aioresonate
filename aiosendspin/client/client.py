@@ -575,22 +575,26 @@ class SendspinClient:
         previous = self._admitted_connection
         if previous is connection:
             return
+        await self._record_last_playback(connection)
         self._admitted_connection = connection
-        await self.note_playback_activity(connection)
         if previous is not None:
             await self._dismiss_connection(previous, GoodbyeReason.ANOTHER_SERVER)
             await previous.disconnect()
 
     async def note_playback_activity(self, connection: SendspinConnection) -> None:
         """Record the admitted server as last-playback when it carries the playback activity."""
+        if connection is self._admitted_connection:
+            await self._record_last_playback(connection)
+
+    async def _record_last_playback(self, connection: SendspinConnection) -> None:
+        """Persist the last-playback server before caching it, so a failed write retries."""
         if (
-            connection is self._admitted_connection
-            and Activity.PLAYBACK in connection.activities
+            Activity.PLAYBACK in connection.activities
             and connection.server_id is not None
             and connection.server_id != self.last_playback_server_id
         ):
-            self.last_playback_server_id = connection.server_id
             await self._pairing_store.set_last_playback_server_id(connection.server_id)
+            self.last_playback_server_id = connection.server_id
 
     async def _reject_connection(self, connection: SendspinConnection) -> None:
         """Refuse an incoming connection that lost arbitration."""
