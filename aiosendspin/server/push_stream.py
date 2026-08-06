@@ -702,9 +702,10 @@ class PushStream:
         self._clock = clock
         self._group = group
         self._is_stopped = False
-        # Whether the audio source is realtime (live) vs buffered. Live sources
-        # honor min_buffer_ms at startup since the queue cannot grow after
-        # playback begins. Buffered sources skip the min_buffer startup wait.
+        # Whether the audio source is realtime (live) vs buffered. Both honor
+        # min_buffer_ms at startup; buffered sources may raise that floor to
+        # required_lead_time_ms, since only a buffered queue can keep growing
+        # after playback begins and absorb the extra lead.
         # Default to buffered; callers opt into live via set_live_source(True).
         self._is_live: bool = False
         # Monotonic lifecycle token used to invalidate in-flight commit work on stop().
@@ -848,10 +849,11 @@ class PushStream:
     def set_live_source(self, is_live: bool) -> None:  # noqa: FBT001
         """Configure whether subsequent stream startups treat audio as live or buffered.
 
-        Buffered (default): startup uses only required_lead_time_ms since the
-        queue can grow naturally after playback begins. Live: startup waits for
-        min_buffer_ms so the jitter buffer is filled before playback, since a
-        realtime source cannot grow the queue after start.
+        Both wait for min_buffer_ms at startup so the jitter buffer is filled
+        before playback. Buffered (default) raises that floor to
+        required_lead_time_ms when it is larger, which costs no lasting latency
+        because the queue keeps growing after playback begins; a live source
+        cannot grow its queue, so the extra lead would be permanent.
 
         Call before the first commit_audio of a new stream session so the startup
         anchor uses the right floor.
