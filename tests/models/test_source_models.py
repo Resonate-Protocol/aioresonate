@@ -20,7 +20,6 @@ from aiosendspin.models.source import (
     SourceCommandPayload,
     SourceFeatures,
     SourceStatePayload,
-    SourceSupportedFormat,
 )
 from aiosendspin.models.types import (
     AudioCodec,
@@ -40,11 +39,6 @@ def _source_hello(**overrides: object) -> ClientHelloPayload:
         "version": 1,
         "supported_roles": [Roles.SOURCE.value],
         "source_support": ClientHelloSourceSupport(
-            supported_formats=[
-                SourceSupportedFormat(
-                    codec=AudioCodec.PCM, channels=2, sample_rate=48000, bit_depth=16
-                )
-            ],
             features=SourceFeatures(line_sense=True),
         ),
     }
@@ -58,23 +52,12 @@ def test_source_role_and_binary_type_constants() -> None:
     assert BinaryMessageType.SOURCE_AUDIO_CHUNK.value == 12
 
 
-def test_supported_format_rejects_non_positive_values() -> None:
-    """SourceSupportedFormat validates positive dimensions."""
-    for bad in (
-        {"channels": 0},
-        {"sample_rate": 0},
-        {"bit_depth": 0},
-    ):
-        kwargs = {"codec": AudioCodec.PCM, "channels": 2, "sample_rate": 48000, "bit_depth": 16}
-        kwargs.update(bad)
-        with pytest.raises(ValueError, match="must be positive"):
-            SourceSupportedFormat(**kwargs)  # type: ignore[arg-type]
-
-
-def test_source_support_requires_non_empty_formats() -> None:
-    """ClientHelloSourceSupport requires at least one format."""
-    with pytest.raises(ValueError, match="supported_formats cannot be empty"):
-        ClientHelloSourceSupport(supported_formats=[])
+def test_source_support_carries_no_format_negotiation() -> None:
+    """A source announces its format per stream, not in client/hello."""
+    support = ClientHelloSourceSupport()
+    assert support.features is None
+    assert not hasattr(support, "supported_formats")
+    assert "supported_formats" not in support.to_json()
 
 
 def test_client_hello_source_support_round_trips_via_alias() -> None:
@@ -86,10 +69,16 @@ def test_client_hello_source_support_round_trips_via_alias() -> None:
 
     restored = ClientHelloPayload.from_json(json_str)
     assert restored.source_support is not None
-    fmt = restored.source_support.supported_formats[0]
-    assert fmt.codec == AudioCodec.PCM
     assert restored.source_support.features is not None
     assert restored.source_support.features.line_sense is True
+
+
+def test_client_hello_source_support_parses_without_features() -> None:
+    """A minimal source@v1_support object (no feature hints) is accepted."""
+    hello = _source_hello(source_support=ClientHelloSourceSupport())
+    restored = ClientHelloPayload.from_json(hello.to_json())
+    assert restored.source_support is not None
+    assert restored.source_support.features is None
 
 
 def test_client_hello_requires_source_support_when_role_present() -> None:

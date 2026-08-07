@@ -22,29 +22,6 @@ from .types import AudioCodec, SourceCommand, SourceSignal
 
 # Client -> Server client/hello source support object
 @dataclass
-class SourceSupportedFormat(DataClassORJSONMixin):
-    """Supported capture/encode format for a source client."""
-
-    codec: AudioCodec
-    """Codec identifier."""
-    channels: int
-    """Number of channels (e.g., 1 = mono, 2 = stereo)."""
-    sample_rate: int
-    """Sample rate in Hz (e.g., 44100, 48000)."""
-    bit_depth: int
-    """Bit depth (e.g., 16, 24)."""
-
-    def __post_init__(self) -> None:
-        """Validate field values."""
-        if self.channels <= 0:
-            raise ValueError(f"channels must be positive, got {self.channels}")
-        if self.sample_rate <= 0:
-            raise ValueError(f"sample_rate must be positive, got {self.sample_rate}")
-        if self.bit_depth <= 0:
-            raise ValueError(f"bit_depth must be positive, got {self.bit_depth}")
-
-
-@dataclass
 class SourceFeatures(DataClassORJSONMixin):
     """Optional source feature hints."""
 
@@ -59,17 +36,15 @@ class SourceFeatures(DataClassORJSONMixin):
 
 @dataclass
 class ClientHelloSourceSupport(DataClassORJSONMixin):
-    """Source support configuration - only if source role is set."""
+    """Source support configuration - only if source role is set.
 
-    supported_formats: list[SourceSupportedFormat]
-    """List of supported capture/encode formats in priority order (first is preferred)."""
+    A source announces its input format per stream in `client_stream/start`;
+    there is no format pre-negotiation in `client/hello`. Servers must support
+    every codec ('opus', 'flac', 'pcm'), so there is nothing to negotiate.
+    """
+
     features: SourceFeatures | None = None
     """Optional feature hints."""
-
-    def __post_init__(self) -> None:
-        """Validate field values."""
-        if not self.supported_formats:
-            raise ValueError("supported_formats cannot be empty")
 
     class Config(BaseConfig):
         """Config for parsing json messages."""

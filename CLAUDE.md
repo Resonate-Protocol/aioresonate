@@ -54,7 +54,9 @@ Two-level architecture: **`Role`** (per-connection) and **`GroupRole`** (per-gro
 - Hooks: `on_member_join()`, `on_member_leave()`, `on_client_added()`, `on_client_removed()`
 - Emits events via `emit_group_event()`
 
-**Built-in role families** (each under `server/roles/{family}/`): `player`, `controller`, `metadata`, `artwork`, `visualizer`. Each has a `v1.py` (Role impl) and `group.py` (GroupRole impl); `player`, `controller`, `metadata`, and `artwork` also have `types.py` and `events.py`.
+**Built-in role families** (each under `server/roles/{family}/`): `player`, `controller`, `metadata`, `artwork`, `visualizer`, `source`. Each has a `v1.py` (Role impl) and `group.py` (GroupRole impl); `player`, `controller`, `metadata`, `artwork`, and `source` also have `types.py` and/or `events.py`.
+
+`source` is the one inbound family: the client sends audio to the server. `SourceGroupRole` decodes the capture and publishes it with `SourceStreamStartedEvent`, whose `stream` is an async iterator of `SourceAudioChunk`. The library does not route that audio anywhere — where it goes, and whether a source is asked to stream at all (`send_start_command()` / `send_stop_command()`), is host policy.
 
 **Registration**: Roles auto-register via `ROLE_FACTORIES` / `GROUP_ROLE_FACTORIES` in `server/roles/registry.py`. Negotiation (`server/roles/negotiation.py`) picks the first mutually supported role per family from the client's `client/hello`.
 
@@ -76,7 +78,7 @@ Mashumaro `DataClassORJSONMixin` dataclasses with discriminator-based polymorphi
 
 - `models/core.py`: Protocol messages (`ClientHelloPayload`, `StreamStartPayload`, `ServerTimePayload`, etc.)
 - `models/types.py`: Enums (`AudioCodec`, `BinaryMessageType`, `ClientStateType`, `PlaybackStateType`, etc.)
-- `models/{player,controller,metadata,artwork,visualizer}.py`: Per-role model extensions
+- `models/{player,controller,metadata,artwork,visualizer,source}.py`: Per-role model extensions
 
 ### Client Library
 

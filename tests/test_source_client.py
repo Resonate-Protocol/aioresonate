@@ -14,17 +14,12 @@ from aiosendspin.models.source import (
     ClientHelloSourceSupport,
     ClientStreamStartSource,
     SourceCommandPayload,
-    SourceSupportedFormat,
 )
 from aiosendspin.models.types import AudioCodec, Roles, SourceCommand, SourceSignal
 
 
 def _source_support() -> ClientHelloSourceSupport:
-    return ClientHelloSourceSupport(
-        supported_formats=[
-            SourceSupportedFormat(codec=AudioCodec.PCM, channels=2, sample_rate=48000, bit_depth=16)
-        ]
-    )
+    return ClientHelloSourceSupport()
 
 
 def _make_source_client() -> SendspinClient:

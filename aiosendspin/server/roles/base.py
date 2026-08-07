@@ -136,6 +136,14 @@ class GroupRole(ABC):
     def on_client_removed(self, client: SendspinClient) -> None:  # noqa: B027
         """Handle a client being removed from this group."""
 
+    def close(self) -> None:  # noqa: B027
+        """Release resources when the owning group is torn down.
+
+        Called once, after the last client leaves. Override to cancel tasks,
+        close streams, or drop references that would otherwise keep the group
+        alive for the lifetime of the process.
+        """
+
     def emit_group_event(self, event: GroupRoleEvent) -> None:
         """Emit a GroupRole event on the owning group's event stream."""
         self._group._signal_event(event)  # noqa: SLF001

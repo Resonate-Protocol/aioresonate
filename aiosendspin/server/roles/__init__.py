@@ -73,7 +73,13 @@ from aiosendspin.server.roles.player import (
 )
 from aiosendspin.server.roles.registry import register_role
 from aiosendspin.server.roles.source import (
+    SourceAudioChunk,
+    SourceAudioStream,
+    SourceEvent,
     SourceGroupRole,
+    SourceSignalChangedEvent,
+    SourceStreamEndedEvent,
+    SourceStreamStartedEvent,
     SourceV1Role,
 )
 from aiosendspin.server.roles.visualizer import (
@@ -122,7 +128,13 @@ __all__ = [
     "PlayerGroupVolumeChangedEvent",
     "PlayerV1Role",
     "Role",
+    "SourceAudioChunk",
+    "SourceAudioStream",
+    "SourceEvent",
     "SourceGroupRole",
+    "SourceSignalChangedEvent",
+    "SourceStreamEndedEvent",
+    "SourceStreamStartedEvent",
     "SourceV1Role",
     "StreamRequirements",
     "VisualizerDraftR1Role",
