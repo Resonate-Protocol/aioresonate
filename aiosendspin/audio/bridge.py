@@ -352,6 +352,24 @@ class SourceBridge:
         """Extra heartbeat detail; overridden by tiers with continuous correction."""
         return ""
 
+    def _drain_av_tail(self) -> bytes:
+        """Return raw AV-stride bytes flushed from the PyAV resampler."""
+        out = bytearray()
+        for resampled in self._resampler.resample(None):
+            out += bytes(resampled.planes[0])[: resampled.samples * self._out_av_stride]
+        return bytes(out)
+
+    def flush(self) -> None:
+        """Append buffered resampler output to the bridge."""
+        raw = self._drain_av_tail()
+        if not raw:
+            return
+        data = _convert_s32_to_s24(raw) if self._out.bit_depth == 24 else raw
+        self._buffer += data
+        overflow_us = self.occupancy_us - self._max_us
+        if overflow_us > 0:
+            del self._buffer[: self._us_to_bytes(overflow_us)]
+
     def _reset(self) -> None:
         self._buffer.clear()
         self._primed = False
@@ -489,6 +507,21 @@ class AsrcSourceBridge(SourceBridge):
         resampled = self._soxr_stream.resample_chunk(arr)
         data = self._np.ascontiguousarray(resampled).tobytes()
         return _convert_s32_to_s24(data) if self._out.bit_depth == 24 else data
+
+    def flush(self) -> None:
+        """Append buffered resampler output to the bridge."""
+        raw = self._drain_av_tail()
+        arr = self._np.frombuffer(raw, dtype=self._dtype).reshape(-1, self._out.channels)
+        resampled = self._soxr_stream.resample_chunk(arr, last=True)
+        data = self._np.ascontiguousarray(resampled).tobytes()
+        if not data:
+            return
+        if self._out.bit_depth == 24:
+            data = _convert_s32_to_s24(data)
+        self._buffer += data
+        overflow_us = self.occupancy_us - self._max_us
+        if overflow_us > 0:
+            del self._buffer[: self._us_to_bytes(overflow_us)]
 
     def _reset(self) -> None:
         # The rate estimate survives resets: the hardware's clock skew does too.

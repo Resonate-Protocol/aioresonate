@@ -54,6 +54,7 @@ async def relay_source_to_group(
                 if bridge.occupancy_us >= target_latency_ms * 1_000:
                     primed.set()
         finally:
+            bridge.flush()
             input_done.set()
             primed.set()
 

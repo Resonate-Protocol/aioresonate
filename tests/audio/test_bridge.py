@@ -345,3 +345,28 @@ def test_asrc_heartbeat_reports_resample_ratio(caplog: pytest.LogCaptureFixture)
             bridge.read(480)
             ts += 10_000
     assert any("ppm" in r.message for r in caplog.records if "occupancy" in r.message)
+
+
+def test_flush_preserves_resampler_tail() -> None:
+    """A rate-converting bridge gains occupancy when its PyAV tail is flushed."""
+    fmt_in = AudioFormat(sample_rate=44100, bit_depth=16, channels=2)
+    bridge = SourceBridge(
+        input_format=fmt_in, output_format=FMT, target_latency_ms=5, max_latency_ms=20_000
+    )
+    bridge.feed(b"\x01\x02\x03\x04" * 44100, 0)
+    before = bridge.occupancy_us
+    bridge.flush()
+    assert bridge.occupancy_us > before
+
+
+def test_asrc_flush_preserves_soxr_tail() -> None:
+    """An ASRC bridge gains occupancy when its PyAV and soxr tails are flushed."""
+    pytest.importorskip("soxr")
+    fmt_in = AudioFormat(sample_rate=44100, bit_depth=16, channels=2)
+    bridge = AsrcSourceBridge(
+        input_format=fmt_in, output_format=FMT, target_latency_ms=5, max_latency_ms=20_000
+    )
+    bridge.feed(b"\x01\x02\x03\x04" * 44100, 0)
+    before = bridge.occupancy_us
+    bridge.flush()
+    assert bridge.occupancy_us > before
