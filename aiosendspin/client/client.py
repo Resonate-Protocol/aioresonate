@@ -675,7 +675,11 @@ class SendspinClient:
         volume: int,
         muted: bool,
     ) -> None:
-        """Send player state and availability. Use ``send_available()`` for availability only."""
+        """Send player state, including client availability.
+
+        Player clients can report availability here. Use ``send_available()`` when no
+        player fields changed.
+        """
         if self._admitted_connection is None:
             raise RuntimeError("Client is not connected")
         await self._admitted_connection.send_player_state(
@@ -685,6 +689,7 @@ class SendspinClient:
     async def send_available(self, *, available: bool) -> None:
         """Report whether this client can participate in Sendspin.
 
+        Use this for non-player clients or when no player fields changed.
         An active source stream ends before the client reports unavailable.
 
         Args:
