@@ -87,6 +87,9 @@ class _LoopbackConnection:
     def is_time_synchronized(self) -> bool:
         return True
 
+    def is_source_stream_active(self) -> bool:
+        return self._role.stream_active
+
 
 class _ClientSideClient:
     def now_us(self) -> int:
