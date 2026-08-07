@@ -259,8 +259,13 @@ class ClientHelloPayload(SendspinModel):
                 unlisted.append("visualizer@_draft_r1")
             self.visualizer_draft_r1_support = None
 
-        # Ignore source hints unless the source role is listed.
-        if Roles.SOURCE.value not in self.supported_roles:
+        source_role_supported = Roles.SOURCE.value in self.supported_roles
+        if source_role_supported and self.source_support is None:
+            raise ValueError(
+                "source@v1_support (source_support alias) must be provided when "
+                "'source@v1' is in supported_roles"
+            )
+        if not source_role_supported:
             if self.source_support is not None:
                 unlisted.append(Roles.SOURCE.value)
             self.source_support = None

@@ -792,10 +792,7 @@ class SendspinConnection:
         """Send the current player state to the server."""
         if not self.connected:
             raise RuntimeError("Client is not connected")
-        # End source capture before reporting unavailable.
-        if not available and self._source_stream_active:
-            await self.send_client_stream_end()
-        self._reported_available = available
+        await self._update_reported_available(available=available)
         self._reported_volume = volume
         self._reported_muted = muted
         message = ClientStateMessage(
@@ -812,6 +809,24 @@ class SendspinConnection:
             )
         )
         await self._send_message(message.to_json())
+
+    async def send_available(self, *, available: bool) -> None:
+        """Send the current client-level availability."""
+        if not self.connected:
+            raise RuntimeError("Client is not connected")
+        await self._update_reported_available(available=available)
+        if self._is_role_active("source"):
+            if not self.is_time_synchronized():
+                return
+            await self._send_source_state()
+            return
+        message = ClientStateMessage(payload=ClientStatePayload(available=available))
+        await self._send_message(message.to_json())
+
+    async def _update_reported_available(self, *, available: bool) -> None:
+        if not available and self._source_stream_active:
+            await self.send_client_stream_end()
+        self._reported_available = available
 
     async def send_group_command(
         self,
@@ -846,9 +861,6 @@ class SendspinConnection:
         codec_header: str | None,
     ) -> None:
         """Start a source stream."""
-        self._ensure_source_authorized()
-        if not self.is_time_synchronized():
-            raise RuntimeError("Source capture requires a synchronized clock")
         message = ClientStreamStartMessage(
             payload=ClientStreamStartPayload(
                 source=ClientStreamStartSource(
@@ -860,24 +872,29 @@ class SendspinConnection:
                 )
             )
         )
-        await self._send_message(message.to_json())
-        self._source_stream_active = True
+        async with self._send_lock:
+            self._ensure_source_authorized()
+            if not self.is_time_synchronized():
+                raise RuntimeError("Source capture requires a synchronized clock")
+            await self._send_message_locked(message.to_json())
+            self._source_stream_active = True
 
     async def send_client_stream_end(self) -> None:
         """End the source stream."""
-        if not self.connected:
-            raise RuntimeError("Client is not connected")
-        if not self._source_stream_active:
-            return
-        # Clear the flag only after the send so a failed end can be retried.
-        await self._send_message(ClientStreamEndMessage().to_json())
-        self._source_stream_active = False
+        async with self._send_lock:
+            if not self.connected:
+                raise RuntimeError("Client is not connected")
+            if not self._source_stream_active:
+                return
+            await self._send_message_locked(ClientStreamEndMessage().to_json())
+            self._source_stream_active = False
 
     async def send_source_chunk(self, frame: bytes, *, timestamp_us: int) -> None:
         """Send an encoded source audio frame."""
-        self._ensure_source_authorized(require_stream=True)
         header = pack_binary_header_raw(BinaryMessageType.SOURCE_AUDIO_CHUNK.value, timestamp_us)
-        await self._send_bytes(header + frame)
+        async with self._send_lock:
+            self._ensure_source_authorized(require_stream=True)
+            await self._send_bytes_locked(header + frame)
 
     async def send_source_signal(self, signal: SignalState) -> None:
         """Report source signal presence."""
@@ -966,20 +983,25 @@ class SendspinConnection:
     async def _send_message(self, payload: str, *, force: bool = False) -> None:
         """Send a JSON frame; ``force`` bypasses the in-band-exchange suppression."""
         async with self._send_lock:
-            # Re-check under the lock: disconnect() can null _ws while we await it.
-            if self._ws is None:
-                raise RuntimeError("WebSocket is not connected")
-            if self._exchange_in_progress and not force:
-                return
-            await self._ws.send_str(payload)
+            await self._send_message_locked(payload, force=force)
+
+    async def _send_message_locked(self, payload: str, *, force: bool = False) -> None:
+        if self._ws is None:
+            raise RuntimeError("WebSocket is not connected")
+        if self._exchange_in_progress and not force:
+            return
+        await self._ws.send_str(payload)
 
     async def _send_bytes(self, payload: bytes) -> None:
         async with self._send_lock:
-            if self._ws is None:
-                raise RuntimeError("WebSocket is not connected")
-            if self._exchange_in_progress:
-                return
-            await self._ws.send_bytes(payload)
+            await self._send_bytes_locked(payload)
+
+    async def _send_bytes_locked(self, payload: bytes) -> None:
+        if self._ws is None:
+            raise RuntimeError("WebSocket is not connected")
+        if self._exchange_in_progress:
+            return
+        await self._ws.send_bytes(payload)
 
     def is_source_stream_active(self) -> bool:
         """Return whether this connection has an open source stream."""

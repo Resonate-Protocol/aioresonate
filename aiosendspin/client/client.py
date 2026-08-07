@@ -86,7 +86,7 @@ DisconnectCallback = Callable[[], None]
 # Callback invoked with the abort reason when a non-closing pairing attempt ends.
 PairingAbortCallback = Callable[[PairAbortReason], None]
 
-# Callback invoked when server sends player commands (volume, mute).
+# Callback invoked when the server sends a command.
 ServerCommandCallback = Callable[[ServerCommandPayload], None]
 
 # Callback invoked when visualizer frames are received. Beat events are
@@ -247,7 +247,12 @@ class SendspinClient:
         else:
             self._visualizer_support = None
 
-        self._source_support = source_support if Roles.SOURCE in self._roles else None
+        if Roles.SOURCE in self._roles:
+            if source_support is None:
+                raise ValueError("source_support is required when SOURCE role is specified")
+            self._source_support = source_support
+        else:
+            self._source_support = None
         self._session = session
         self._owns_session = session is None
         self._loop = asyncio.get_running_loop()
@@ -325,7 +330,7 @@ class SendspinClient:
         return self._source_support
 
     def create_source_capture(self, audio_format: SupportedAudioFormat) -> SourceCapture:
-        """Create a source capture helper."""
+        """Create a capture for PCM matching ``audio_format`` on the source connection."""
         if Roles.SOURCE not in self._roles:
             raise RuntimeError("Client does not have the source role")
         if self._admitted_connection is None:
@@ -676,6 +681,12 @@ class SendspinClient:
         await self._admitted_connection.send_player_state(
             available=available, volume=volume, muted=muted
         )
+
+    async def send_available(self, *, available: bool) -> None:
+        """Report whether this client is available to participate."""
+        if self._admitted_connection is None:
+            raise RuntimeError("Client is not connected")
+        await self._admitted_connection.send_available(available=available)
 
     async def send_group_command(
         self,

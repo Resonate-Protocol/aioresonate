@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import asyncio
 
+import orjson
 import pytest
 
 from aiosendspin.client.connection import SendspinConnection
-from aiosendspin.models.core import ServerActivatePayload
+from aiosendspin.models.core import ServerActivatePayload, ServerTimePayload
 from aiosendspin.models.types import Activity, GoodbyeReason, Roles
 from aiosendspin.noise.trust_store import PskCategory, ResolvedPsk
 
@@ -27,8 +28,23 @@ class _FakeWs:
 
 
 class _FakeClient:
+    class _Clock:
+        @staticmethod
+        def now_us() -> int:
+            return 1_000_000
+
+    clock = _Clock()
+
     def note_playback_activity(self, _conn: object) -> None:
         pass
+
+
+class _FakeTimeFilter:
+    def __init__(self, *, synchronized: bool) -> None:
+        self.is_synchronized = synchronized
+
+    def update(self, _offset: int, _delay: int, _now_us: int) -> None:
+        self.is_synchronized = True
 
 
 def _connection(
@@ -38,6 +54,7 @@ def _connection(
     stream_active: bool,
     category: PskCategory = PskCategory.LONG_TERM,
     unpaired_access: bool = False,
+    synchronized: bool = True,
 ) -> SendspinConnection:
     conn = SendspinConnection.__new__(SendspinConnection)
     conn._client = _FakeClient()  # type: ignore[assignment]  # noqa: SLF001
@@ -48,6 +65,9 @@ def _connection(
     conn._noise_psk = ResolvedPsk("id", b"\x00" * 32, category)  # noqa: SLF001
     conn._active_roles = active_roles  # noqa: SLF001
     conn._source_stream_active = stream_active  # noqa: SLF001
+    conn._reported_available = True  # noqa: SLF001
+    conn._reported_source_signal = None  # noqa: SLF001
+    conn._time_filter = _FakeTimeFilter(synchronized=synchronized)  # type: ignore[assignment]  # noqa: SLF001
     conn._selected_pair_method = None  # noqa: SLF001
 
     async def _unpaired_access_enabled() -> bool:
@@ -133,3 +153,68 @@ async def test_send_source_chunk_rechecks_connection_under_lock() -> None:
 
     with pytest.raises(RuntimeError, match="not connected"):
         await send_task
+
+
+async def test_source_unavailable_ends_stream_before_state() -> None:
+    """Reporting unavailable ends capture before sending source state without player fields."""
+    ws = _FakeWs()
+    conn = _connection(ws, active_roles=[Roles.SOURCE.value], stream_active=True)
+
+    await conn.send_available(available=False)
+
+    messages = [orjson.loads(message) for message in ws.sent]
+    assert [message["type"] for message in messages] == [
+        "client_stream/end",
+        "client/state",
+    ]
+    assert messages[-1]["payload"] == {"available": False, "source": {}}
+
+
+async def test_source_chunk_cannot_pass_queued_stream_end() -> None:
+    """A chunk queued after stream end begins is rejected before reaching the wire."""
+    ws = _FakeWs()
+    conn = _connection(ws, active_roles=[Roles.SOURCE.value], stream_active=True)
+    await conn._send_lock.acquire()  # noqa: SLF001
+    available_task = asyncio.create_task(conn.send_available(available=False))
+    await asyncio.sleep(0)
+    chunk_task = asyncio.create_task(conn.send_source_chunk(b"audio", timestamp_us=1))
+    await asyncio.sleep(0)
+    conn._send_lock.release()  # noqa: SLF001
+
+    await available_task
+    with pytest.raises(RuntimeError, match="not active"):
+        await chunk_task
+
+    assert ws.sent_bytes == []
+
+
+async def test_source_available_sends_retained_source_state() -> None:
+    """Reporting available sends source state without adding a player payload."""
+    ws = _FakeWs()
+    conn = _connection(ws, active_roles=[Roles.SOURCE.value], stream_active=False)
+    conn._reported_available = False  # noqa: SLF001
+
+    await conn.send_available(available=True)
+
+    assert orjson.loads(ws.sent[-1])["payload"] == {"available": True, "source": {}}
+
+
+async def test_source_state_sent_when_clock_first_synchronizes() -> None:
+    """Clock convergence sends the retained availability and source state."""
+    ws = _FakeWs()
+    conn = _connection(
+        ws,
+        active_roles=[Roles.SOURCE.value],
+        stream_active=False,
+        synchronized=False,
+    )
+
+    await conn._handle_server_time(  # noqa: SLF001
+        ServerTimePayload(
+            client_transmitted=900_000,
+            server_received=950_000,
+            server_transmitted=960_000,
+        )
+    )
+
+    assert orjson.loads(ws.sent[-1])["payload"] == {"available": True, "source": {}}
