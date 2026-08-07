@@ -35,7 +35,7 @@ class _FakeClient:
 
     clock = _Clock()
 
-    def note_playback_activity(self, _conn: object) -> None:
+    async def note_playback_activity(self, _conn: object) -> None:
         pass
 
 
