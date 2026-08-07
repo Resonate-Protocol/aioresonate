@@ -1,10 +1,4 @@
-"""
-Source messages for the Sendspin protocol.
-
-This module contains messages specific to clients with the source role, which
-capture audio from a local input and stream encoded, timestamped frames up to
-the server. Unlike other roles, a source sends audio to the server.
-"""
+"""Source role protocol messages."""
 
 from __future__ import annotations
 
@@ -31,11 +25,7 @@ class ClientHelloSourceFeatures(SendspinModel):
 
 @dataclass
 class ClientHelloSourceSupport(SendspinModel):
-    """Source support configuration - only if source role is set.
-
-    The stream format is not negotiated here: the source announces it in
-    client_stream/start and the server must support all codecs.
-    """
+    """Source support configuration."""
 
     features: ClientHelloSourceFeatures | None = None
     """Optional feature hints."""
@@ -49,11 +39,7 @@ class ClientHelloSourceSupport(SendspinModel):
 # Client -> Server: client/state source object
 @dataclass
 class SourceStatePayload(SendspinModel):
-    """Source object in client/state message.
-
-    The capture lifecycle is tracked from the input-stream framing
-    (client_stream/start..client_stream/end), so this carries only signal presence.
-    """
+    """Source state reported in client/state."""
 
     signal: SignalState | None = None
     """Signal/line-sense presence, only if 'line_sense' is supported."""
@@ -89,7 +75,7 @@ class ClientStreamStartSource(SendspinModel):
     sample_rate: int
     bit_depth: int
     codec_header: str | None = None
-    """Base64 encoded codec header (if necessary; e.g., FLAC)."""
+    """Standard Base64 codec header when required."""
 
     class Config(SendspinConfig):
         """Config for parsing json messages."""

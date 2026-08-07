@@ -124,7 +124,7 @@ class SendspinClient:
     _visualizer_support: ClientHelloVisualizerSupport | None
     """Visualizer capabilities (only set if VISUALIZER role is supported)."""
     _source_support: ClientHelloSourceSupport | None
-    """Source capabilities (only set if SOURCE role is supported)."""
+    """Source capabilities."""
     _session: ClientSession | None
     """Optional aiohttp ClientSession for WebSocket connection."""
 
@@ -247,7 +247,6 @@ class SendspinClient:
         else:
             self._visualizer_support = None
 
-        # Source support is optional feature hints, but meaningless without the role.
         self._source_support = source_support if Roles.SOURCE in self._roles else None
         self._session = session
         self._owns_session = session is None
@@ -322,18 +321,11 @@ class SendspinClient:
 
     @property
     def source_support(self) -> ClientHelloSourceSupport | None:
-        """Source capabilities (only set if SOURCE role is supported)."""
+        """Source capabilities."""
         return self._source_support
 
     def create_source_capture(self, audio_format: SupportedAudioFormat) -> SourceCapture:
-        """Create a helper for streaming locally captured audio to the server.
-
-        Drive it with ``start()``, ``feed()`` and ``stop()``, feeding PCM that
-        matches ``SourceCapture.audio_format``. ``audio_format`` is the codec and
-        PCM shape to stream; the server supports all codecs. The host calls these
-        in response to ``server/command`` start/stop requests delivered through
-        the normal server-command listener.
-        """
+        """Create a source capture helper."""
         if Roles.SOURCE not in self._roles:
             raise RuntimeError("Client does not have the source role")
         if self._admitted_connection is None:

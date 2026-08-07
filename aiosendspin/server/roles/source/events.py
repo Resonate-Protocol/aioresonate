@@ -16,11 +16,7 @@ if TYPE_CHECKING:
 
 @dataclass
 class SourceStreamStartedEvent(ClientRoleEvent):
-    """A source client began an input stream.
-
-    ``handle`` is a single-consumer async iterator yielding ``(pcm, timestamp_us)``
-    pairs of decoded native PCM. It ends when the source sends ``client_stream/end``.
-    """
+    """A source client began an input stream."""
 
     audio_format: AudioFormat
     """Native PCM format of the decoded audio yielded by ``handle``."""
@@ -30,12 +26,12 @@ class SourceStreamStartedEvent(ClientRoleEvent):
 
 @dataclass
 class SourceStreamEndedEvent(ClientRoleEvent):
-    """A source client ended its input stream; the matching handle is exhausted."""
+    """A source client ended its input stream."""
 
 
 @dataclass
 class SourceSignalChangedEvent(ClientRoleEvent):
-    """A source client reported signal/line-sense presence via client/state."""
+    """A source client reported signal presence."""
 
     signal: SignalState
-    """Signal presence; only emitted when the source advertised the 'line_sense' feature."""
+    """Reported signal presence."""

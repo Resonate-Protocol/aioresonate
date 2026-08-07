@@ -1,10 +1,4 @@
-"""Client-side source capture: encode local PCM and stream it to the server.
-
-High-level helper for the source role. The caller feeds raw PCM matching
-:attr:`SourceCapture.audio_format`; the SDK encodes to the chosen codec, builds
-the codec header, stamps each frame in the server time domain, and streams
-type-12 binary chunks.
-"""
+"""Encode and stream source PCM from a client."""
 
 from __future__ import annotations
 
@@ -36,8 +30,7 @@ class SourceCapture:
         self._client = client
         self._connection = connection
         self._codec = audio_format.codec
-        # The Opus encoder consumes s16 regardless of the declared depth, so any other
-        # depth would be fed at the wrong stride and stream garbage.
+        # Opus capture accepts only s16 PCM.
         if audio_format.codec is AudioCodec.OPUS and audio_format.bit_depth != 16:
             msg = f"Opus capture requires 16-bit PCM, got {audio_format.bit_depth}-bit"
             raise ValueError(msg)
@@ -89,11 +82,7 @@ class SourceCapture:
         self._started = True
 
     async def feed(self, pcm: bytes, capture_timestamp_us: int | None = None) -> None:
-        """Encode and stream PCM continuously.
-
-        ``capture_timestamp_us`` is the client-clock time of the first sample in
-        ``pcm``. Each emitted frame is converted independently to server time.
-        """
+        """Encode and stream PCM captured at ``capture_timestamp_us``."""
         if not self._started:
             raise RuntimeError("SourceCapture.start() must be called before feed()")
         if not pcm:

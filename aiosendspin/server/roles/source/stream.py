@@ -14,17 +14,12 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Bounded so a slow or absent consumer cannot grow memory without limit. Live capture
-# never fills it when the host keeps up. On overflow the oldest chunk is dropped.
+# Bound memory when a consumer falls behind.
 DEFAULT_QUEUE_MAXLEN = 512
 
 
 class SourceStream:
-    """Async iterator yielding decoded ``(pcm, timestamp_us)`` chunks for one input stream.
-
-    Backed by a drop-oldest bounded deque for a single consumer. The iterator
-    ends once the producer closes the stream and the buffer is drained.
-    """
+    """Iterate decoded chunks from one source stream."""
 
     def __init__(self, audio_format: AudioFormat, *, maxlen: int = DEFAULT_QUEUE_MAXLEN) -> None:
         """Create a stream carrying decoded audio at ``audio_format``."""
@@ -52,7 +47,7 @@ class SourceStream:
         self._event.set()
 
     def _end(self) -> None:
-        """Mark the stream finished so the iterator stops after draining buffered chunks."""
+        """End iteration after buffered chunks drain."""
         self._ended = True
         self._event.set()
 

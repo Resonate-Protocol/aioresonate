@@ -1,4 +1,4 @@
-"""Server audio buffer tracking, plus PCM-format helper re-exports from aiosendspin.audio."""
+"""Server audio buffers and shared PCM helpers."""
 
 from __future__ import annotations
 

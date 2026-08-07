@@ -1743,8 +1743,7 @@ class SendspinConnection:
         if self._client is None:
             return
 
-        # Validate before any side effect, so a strict-mode rejection never leaves
-        # the client marked connected or its availability already changed.
+        # Validate before applying initial state.
         is_initial = self.requires_initial_state() and not self._initial_state_received
         if is_initial:
             self._flag_initial_state_deviations(payload)

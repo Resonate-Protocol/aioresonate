@@ -33,11 +33,7 @@ ROLE_SUPPORT_SPECS: dict[str, RoleSupportSpec] = {}
 
 
 def register_role(role_id: str, factory: RoleFactory, *, requires_pairing: bool = False) -> None:
-    """Register or replace a role factory for a versioned role ID.
-
-    ``requires_pairing`` restricts activation to long-term paired connections. Set
-    it for roles with elevated security requirements, such as capturing audio.
-    """
+    """Register a role factory with optional pairing enforcement."""
     ROLE_FACTORIES[role_id] = factory
     if requires_pairing:
         PAIRING_REQUIRED_ROLE_IDS.add(role_id)

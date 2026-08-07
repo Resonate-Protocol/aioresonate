@@ -1,12 +1,4 @@
-"""Clock-domain bridge from a source capture stream to a pull-based consumer.
-
-A source's capture clock and a consumer's playback clock always drift, and capture
-timestamps may contain gaps. ``SourceBridge`` buffers source PCM at a target
-latency and serves it as a steady, format-converted stream to whatever pulls from
-it (a Sendspin group's commit loop, an AirPlay sink, a sound card callback).
-``AsrcSourceBridge`` upgrades drift handling to phase-continuous variable-rate
-resampling via python-soxr.
-"""
+"""Bridge captured audio into a steady pull-based stream."""
 
 from __future__ import annotations
 
@@ -37,14 +29,11 @@ _WATERMARK_US = 50_000
 # Fed-audio duration over which occupancy extremes are observed before correcting.
 _CORRECTION_WINDOW_US = 10_000_000
 
-# Sub-watermark surplus is still trimmed once it persists this many windows, so the
-# simple tier converges to target instead of parking anywhere inside the deadband.
+# Convergence threshold for persistent sub-watermark surplus.
 _CONVERGENCE_EPSILON_US = 15_000
 _CONVERGENCE_WINDOWS = 3
 
-# Default cap on the total resample ratio. A sustained ratio is legitimate rate
-# matching for an off-nominal source clock (it restores the source's true pitch),
-# so the cap exists to bound implausible corrections, not to keep them small.
+# Cap implausible clock-rate corrections.
 _MAX_RATIO_ADJUST = 0.05
 
 # Scales occupancy error to the ratio trim that regulates buffer level.
@@ -78,17 +67,7 @@ def _require_soxr() -> types.ModuleType:
 
 
 class SourceBridge:
-    """Bridge a drifting, possibly gappy capture stream to a steady consumer.
-
-    ``feed()`` ingests source-native PCM with capture timestamps (e.g. chunks from
-    the server's ``SourceStream`` handle). ``read()`` returns steady PCM in
-    ``output_format``. Buffer occupancy against the target latency is the only
-    control signal, so the bridge works with any consumer that pulls at its real
-    playback rate and needs no coupling to the Sendspin commit path.
-
-    Drift is corrected by dropping or inserting audio when occupancy deviates
-    persistently. ``AsrcSourceBridge`` replaces that with variable-rate resampling.
-    """
+    """Bridge timestamped capture PCM to a steady consumer."""
 
     def __init__(
         self,
@@ -98,18 +77,7 @@ class SourceBridge:
         target_latency_ms: int = 1000,
         max_latency_ms: int | None = None,
     ) -> None:
-        """Create a bridge holding ``target_latency_ms`` of buffered audio.
-
-        ``target_latency_ms`` is the source-jitter budget the bridge defends. The
-        caller must floor it by its chain constraints (player min_buffer, required
-        lead time, source processing delay). ``max_latency_ms`` (default 2x target)
-        is the drop-oldest cap and thus the consumer-stall headroom.
-
-        Playback starts at exactly the target (any startup surplus is trimmed while
-        only silence has been served), and persistent deviation converges back to
-        within the convergence epsilon of it, so achieved latency tracks the target
-        closely rather than parking anywhere inside the correction deadband.
-        """
+        """Create a bridge with target latency and a drop-oldest maximum."""
         if max_latency_ms is None:
             max_latency_ms = 2 * target_latency_ms
         if max_latency_ms <= target_latency_ms:
@@ -124,7 +92,6 @@ class SourceBridge:
         self._out_av_stride = out_av_bps * output_format.channels
         self._target_us = target_latency_ms * 1000
         self._max_us = max_latency_ms * 1000
-        # Buffered audio in output wire format; occupancy is derived from its length.
         self._buffer = bytearray()
         self._primed = False
         self._next_ts: int | None = None
@@ -132,7 +99,6 @@ class SourceBridge:
         self._window_fed_us = 0
         self._window_min_us: int | None = None
         self._window_max_us: int | None = None
-        # Supply vs consumption over the window measures the source's true rate skew.
         self._window_supplied_us = 0
         self._window_consumed_us = 0
         self._window_underruns = 0
@@ -147,12 +113,7 @@ class SourceBridge:
         return frames * 1_000_000 // self._out.sample_rate
 
     def feed(self, pcm: bytes, capture_timestamp_us: int) -> None:
-        """Ingest a source chunk captured at ``capture_timestamp_us``.
-
-        A forward timestamp gap beyond the jitter tolerance becomes silence so
-        end-to-end latency holds. Backward or duplicate chunks beyond the tolerance
-        are dropped. A jump beyond the max latency resets and re-primes the buffer.
-        """
+        """Ingest PCM captured at ``capture_timestamp_us``."""
         if not pcm:
             return
         if len(pcm) % self._in_stride:
@@ -166,7 +127,6 @@ class SourceBridge:
             elif delta > _GAP_TOLERANCE_US:
                 logger.debug("Capture gap of %d us, inserting silence to hold latency", delta)
                 self._append_silence(delta)
-                # Gap silence supplies buffer too, keeping the rate estimate unbiased.
                 self._window_supplied_us += delta
             elif delta < -_GAP_TOLERANCE_US:
                 logger.debug("Dropping out-of-order chunk %d us behind expected", -delta)
@@ -175,7 +135,6 @@ class SourceBridge:
         self._buffer += self._convert(pcm)
         overflow_us = self.occupancy_us - self._max_us
         if overflow_us > 0:
-            # First occurrence per window logs; the rest aggregate into the heartbeat.
             if self._window_overflow_us == 0:
                 logger.debug("Occupancy over max by %d us, dropping oldest audio", overflow_us)
             self._window_overflow_us += overflow_us
@@ -196,58 +155,37 @@ class SourceBridge:
             self._window_overflow_us = 0
 
     def read(self, frames: int) -> bytes:
-        """Return exactly ``frames`` output frames without ever blocking.
-
-        The consumer's pull cadence is the master clock the bridge slaves to, so
-        this must not block: a blocking read would pace output by the source
-        instead, hiding the drift signal and pushing underruns downstream into the
-        sink's own buffer where the bridge cannot fill them with silence. Returns
-        silence until the buffer first reaches the target latency, and pads with
-        silence on underrun.
-        """
+        """Return exactly ``frames``, padding with silence when needed."""
         wanted = frames * self._out_stride
         if not self._primed:
             if self.occupancy_us < self._target_us:
                 return bytes(wanted)
             self._primed = True
-            # Only silence has been served so far, so dropping the oldest surplus here
-            # is inaudible and starts playback at exactly the target latency.
+            # Trim inaudible startup surplus before playback begins.
             surplus_us = self.occupancy_us - self._target_us
             if surplus_us > 0:
                 del self._buffer[: self._us_to_bytes(surplus_us)]
             logger.debug(
                 "Bridge primed, trimmed %d us startup surplus to start at target", surplus_us
             )
-        # Count what the consumer pulled (padding included); its cadence is the clock.
+        # Count every consumer pull, including silence padding.
         self._window_consumed_us += frames * 1_000_000 // self._out.sample_rate
         take = min(wanted, len(self._buffer))
         out = bytes(self._buffer[:take])
         del self._buffer[:take]
         if take < wanted:
             out += bytes(wanted - take)
-            # First occurrence per window logs; the rest aggregate into the heartbeat.
             self._window_underruns += 1
             if self._window_underruns == 1:
                 logger.debug("Underrun: buffer emptied, padding output with silence")
         self._sample_occupancy()
         return out
 
-    # --- Drift correction (overridden by AsrcSourceBridge) ---
-
     def _correct_drift(self) -> None:
-        """Per-feed correction hook. The simple tier corrects only per window."""
+        """Apply per-feed drift correction."""
 
     def _apply_window_correction(self) -> None:
-        """Drop or insert the persistent occupancy deviation observed over a window.
-
-        Correcting by the window extremes, not the instantaneous error, leaves
-        transient consumer-stall bulges untouched so catch-up reads return real
-        audio instead of finding it trimmed away. A surplus past the watermark is
-        dropped after one window; a smaller surplus past the convergence epsilon is
-        dropped only once it persists, so occupancy converges to target without
-        deadband chatter. Deficits stay on the watermark rule alone: correcting a
-        small deficit inserts an audible gap and only buys back headroom.
-        """
+        """Correct persistent occupancy deviation over a window."""
         if self._window_min_us is None or self._window_max_us is None:
             return
         surplus_us = self._window_min_us - self._target_us
@@ -286,8 +224,6 @@ class SourceBridge:
                 self._surplus_windows = 0
         else:
             self._surplus_windows = 0
-
-    # --- Internals ---
 
     def _build_resampler(self, *, rate: int) -> av.AudioResampler:
         av_mod = _require_av()
@@ -349,7 +285,7 @@ class SourceBridge:
         )
 
     def _drift_detail(self) -> str:
-        """Extra heartbeat detail; overridden by tiers with continuous correction."""
+        """Return continuous-correction heartbeat detail."""
         return ""
 
     def _drain_av_tail(self) -> bytes:
@@ -386,14 +322,7 @@ class SourceBridge:
 
 
 class AsrcSourceBridge(SourceBridge):
-    """SourceBridge that corrects drift by variable-rate resampling.
-
-    Format conversion and drift correction fold into one phase-continuous soxr
-    pass. The ratio combines two terms: the measured supply/consumption rate of
-    each correction window (which holds any in-cap clock skew at zero occupancy
-    error and restores the source's true pitch) and a slow occupancy trim for
-    what rate measurement cannot see. Requires python-soxr (the ``asrc`` extra).
-    """
+    """Correct source drift with variable-rate resampling."""
 
     def __init__(
         self,
@@ -405,12 +334,7 @@ class AsrcSourceBridge(SourceBridge):
         quality: str = "HQ",
         max_ratio_adjust: float = _MAX_RATIO_ADJUST,
     ) -> None:
-        """Create an ASRC bridge. ``quality`` is a soxr quality preset (QQ..VHQ).
-
-        ``max_ratio_adjust`` caps the total resample ratio and thus the largest
-        source clock skew the bridge can fully absorb; beyond it, the buffer
-        degrades to drop-oldest or silence padding.
-        """
+        """Create an ASRC bridge with bounded ratio adjustment."""
         super().__init__(
             input_format=input_format,
             output_format=output_format,
@@ -428,7 +352,7 @@ class AsrcSourceBridge(SourceBridge):
                 "Install the 'source' extra: pip install aiosendspin[source]"
             )
         self._np = np
-        # The av stage converts sample format and layout only; soxr owns the rate.
+        # PyAV converts format and layout while soxr owns the rate.
         self._resampler_rate = input_format.sample_rate
         self._resampler = self._build_resampler(rate=self._resampler_rate)
         if output_format.sample_type == "float":
@@ -437,7 +361,7 @@ class AsrcSourceBridge(SourceBridge):
             self._dtype = "int16"
         else:
             self._dtype = "int32"
-        # In vr mode the creation rate caps the io ratio, so include the excursion headroom.
+        # Leave headroom for variable ratios.
         self._soxr_stream = soxr.ResampleStream(
             input_format.sample_rate * (1.0 + max_ratio_adjust),
             output_format.sample_rate,
@@ -475,17 +399,7 @@ class AsrcSourceBridge(SourceBridge):
         )
 
     def _apply_window_correction(self) -> None:
-        """Update the measured rate skew instead of dropping/inserting audio.
-
-        Supplied versus consumed duration over the window is the source's true
-        clock skew relative to the consumer, measured from the audio itself, so
-        it needs no standing occupancy error to sustain a correction. Windows
-        with implausible ratios (consumer stalls, catch-up bursts) are skipped;
-        the step bound keeps a bad window from bending pitch audibly. When the
-        window railed the buffer in the direction the measurement points, the
-        measurement is corroborated and adopted outright, so a badly wrong
-        estimate recovers in one window instead of crawling under the bound.
-        """
+        """Update measured rate skew from the latest window."""
         if self._window_consumed_us <= 0:
             return
         skew = self._window_supplied_us / self._window_consumed_us - 1.0

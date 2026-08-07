@@ -12,8 +12,7 @@ from .events import (
 from .stream import SourceStream
 from .v1 import SourceV1Role
 
-# Source captures local audio (potentially a microphone), so it may only be
-# activated on a long-term paired connection.
+# Source capture requires a paired connection.
 register_role(
     "source@v1",
     lambda client: SourceV1Role(client=client),

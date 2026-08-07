@@ -472,7 +472,6 @@ class SendspinConnection:
                 and Roles.SOURCE.value not in payload.active_roles
             )
             self._active_roles = payload.active_roles
-            # Source is no longer active on this connection, stop the input stream.
             if source_dropped and self._source_stream_active and self.connected:
                 await self.send_client_stream_end()
         self._selected_pair_method = payload.selected_pair_method
@@ -793,8 +792,7 @@ class SendspinConnection:
         """Send the current player state to the server."""
         if not self.connected:
             raise RuntimeError("Client is not connected")
-        # An open input stream ends before the client reports itself unavailable, so
-        # the server never holds a stream for a client that has stopped capturing.
+        # End source capture before reporting unavailable.
         if not available and self._source_stream_active:
             await self.send_client_stream_end()
         self._reported_available = available
@@ -847,7 +845,7 @@ class SendspinConnection:
         bit_depth: int,
         codec_header: str | None,
     ) -> None:
-        """Announce the active input stream format to the server (source role)."""
+        """Start a source stream."""
         self._ensure_source_authorized()
         if not self.is_time_synchronized():
             raise RuntimeError("Source capture requires a synchronized clock")
@@ -866,7 +864,7 @@ class SendspinConnection:
         self._source_stream_active = True
 
     async def send_client_stream_end(self) -> None:
-        """End the current input stream (source role)."""
+        """End the source stream."""
         if not self.connected:
             raise RuntimeError("Client is not connected")
         if not self._source_stream_active:
@@ -876,13 +874,13 @@ class SendspinConnection:
         self._source_stream_active = False
 
     async def send_source_chunk(self, frame: bytes, *, timestamp_us: int) -> None:
-        """Send one encoded source audio frame stamped in the server time domain."""
+        """Send an encoded source audio frame."""
         self._ensure_source_authorized(require_stream=True)
         header = pack_binary_header_raw(BinaryMessageType.SOURCE_AUDIO_CHUNK.value, timestamp_us)
         await self._send_bytes(header + frame)
 
     async def send_source_signal(self, signal: SignalState) -> None:
-        """Report source signal/line-sense presence via client/state (line_sense feature)."""
+        """Report source signal presence."""
         self._ensure_source_authorized()
         self._reported_source_signal = signal
         if not self.is_time_synchronized():
@@ -890,7 +888,7 @@ class SendspinConnection:
         await self._send_source_state()
 
     async def _send_source_state(self) -> None:
-        """Report synchronized source state and the latest signal presence."""
+        """Send current source state."""
         message = ClientStateMessage(
             payload=ClientStatePayload(
                 available=self._reported_available,
@@ -1430,11 +1428,7 @@ class SendspinConnection:
         return self._time_filter.compute_server_time(adjusted_client_time)
 
     def compute_source_timestamp(self, capture_timestamp_us: int) -> int:
-        """Convert a capture timestamp to server time.
-
-        The playback static delay does not apply: it offsets this player's output
-        pipeline, not when a sample was captured.
-        """
+        """Convert a capture timestamp to server time without playback delay."""
         return self._time_filter.compute_server_time(capture_timestamp_us)
 
     async def _time_sync_loop(self) -> None:

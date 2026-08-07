@@ -46,10 +46,9 @@ class SourceV1Role(Role):
         self._stream: SourceStream | None = None
         self._stream_active = False
         self._initial_state_received = False
-        # Whether this connection has been asked to stream. Per-connection state: a
-        # start does not survive a reconnect, so the server must ask again.
+        # Require a fresh start request after reconnecting.
         self._start_requested = False
-        # Timestamp of the most recent chunk, used to stamp the decoder flush tail.
+        # Stamp decoder output produced during flush.
         self._last_timestamp_us = 0
 
     @property
@@ -68,7 +67,7 @@ class SourceV1Role(Role):
         return "source"
 
     def on_connect(self) -> None:
-        """Source has no group role; nothing to subscribe."""
+        """Connect without a group role."""
 
     def on_disconnect(self) -> None:
         """End any active stream so a waiting consumer is released."""
@@ -86,8 +85,6 @@ class SourceV1Role(Role):
     def requires_initial_state(self) -> bool:
         """Require synchronized client state before accepting captured audio."""
         return True
-
-    # --- Server-initiated streaming control ---
 
     def request_start(self) -> None:
         """Ask the source client to begin streaming (server/command: start)."""
@@ -107,20 +104,15 @@ class SourceV1Role(Role):
             )
         )
 
-    # --- Inbound stream handling ---
-
     def on_client_stream_start(self, payload: ClientStreamStartPayload) -> None:
         """Build a decoder and a fresh stream handle, then announce it."""
         if not self._start_requested:
-            # The server never asked this connection to stream, so no stream is opened.
-            # Flagging (rather than disconnecting here) lets strict servers reject the
-            # client while tolerant ones survive a start crossing an in-flight stop.
+            # Let server compliance policy decide whether to disconnect.
             self._client.flag_noncompliance(
                 "client_stream/start sent without a preceding source start command"
             )
             return
         source = payload.source
-        # Restart on a second start with no update path: end the prior stream first.
         if self._stream_active:
             self._end_stream()
 
@@ -150,8 +142,7 @@ class SourceV1Role(Role):
             )
             return
         try:
-            # Validate the declared shape here: a PCM decoder accepts anything, so an
-            # impossible format would otherwise only fail inside the consumer.
+            # Validate formats before exposing a stream handle.
             if source.sample_rate <= 0:
                 msg = f"Unsupported sample rate: {source.sample_rate}"
                 raise ValueError(msg)  # noqa: TRY301
@@ -175,11 +166,7 @@ class SourceV1Role(Role):
         )
 
     def on_binary_chunk(self, message_type: int, timestamp_us: int, data: bytes) -> None:  # noqa: ARG002
-        """Decode an inbound source audio chunk into the active stream, if one is open.
-
-        Chunks are dropped unless a stream is open and the client reports being
-        available, since only then are its capture timestamps trustworthy.
-        """
+        """Decode a source audio chunk into the active stream."""
         if (
             not self._initial_state_received
             or not self._stream_active
@@ -203,11 +190,7 @@ class SourceV1Role(Role):
         self._end_stream()
 
     def _end_stream(self) -> None:
-        """Drain decoder tail into the stream, close it, and announce the end.
-
-        Every teardown path routes through here (client end, stream replacement,
-        deactivation, disconnect) so a consumer always learns its handle died.
-        """
+        """Drain and close the active stream."""
         was_active = self._stream_active
         if self._stream is not None and self._decoder is not None:
             try:
@@ -215,7 +198,6 @@ class SourceV1Role(Role):
             except Exception:
                 logger.exception("Failed to flush source decoder")
                 tail = b""
-            # Tail continues just after the last chunk, so carry its timestamp.
             self._stream._push(tail, self._last_timestamp_us)  # noqa: SLF001
             self._stream._end()  # noqa: SLF001
         self._stream = None
@@ -224,8 +206,6 @@ class SourceV1Role(Role):
         self._last_timestamp_us = 0
         if was_active:
             self._client._signal_event(SourceStreamEndedEvent())  # noqa: SLF001
-
-    # --- State hooks ---
 
     def on_client_state(self, payload: ClientStatePayload) -> None:
         """Surface a source's signal presence, only when it advertised line_sense."""

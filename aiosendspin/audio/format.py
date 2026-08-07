@@ -1,8 +1,4 @@
-"""PCM audio format descriptor and low-level sample helpers.
-
-Kept free of any server/transport imports so the client SDK and codecs can use
-it without pulling in the server stack. PyAV and numpy are imported lazily.
-"""
+"""PCM formats and sample conversion helpers."""
 
 from __future__ import annotations
 
@@ -50,11 +46,7 @@ _CHANNEL_LAYOUTS = {
 
 @dataclass(frozen=True)
 class AudioFormat:
-    """PCM audio format descriptor.
-
-    This describes the raw PCM audio parameters without specifying an encoding codec.
-    The codec is determined by the transformer (e.g., FlacEncoder, PcmPassthrough).
-    """
+    """Describe raw PCM audio."""
 
     sample_rate: int
     """Sample rate in Hz (e.g., 44100, 48000)."""
@@ -66,18 +58,7 @@ class AudioFormat:
     """PCM sample type. Use ``float`` to represent 32-bit floating-point PCM input."""
 
     def resolve_av_format(self) -> tuple[int, str, str, int]:
-        """Resolve helper data for this audio format.
-
-        Returns:
-            A tuple of (wire_bytes_per_sample, av_format, layout, av_bytes_per_sample) where:
-            - wire_bytes_per_sample: Number of bytes per audio sample on the wire
-            - av_format: PyAV sample format string ("s16", "s32", or "flt")
-            - layout: Channel layout string ("mono" or "stereo")
-            - av_bytes_per_sample: Number of bytes per sample produced/consumed by PyAV
-
-        Raises:
-            ValueError: If bit_depth/channels/sample_type combination is unsupported.
-        """
+        """Return wire width, PyAV format, channel layout, and PyAV width."""
         if self.sample_type not in ("int", "float"):
             raise ValueError("sample_type must be 'int' or 'float'")
 
@@ -92,7 +73,7 @@ class AudioFormat:
             av_format = "s16"
             av_bytes_per_sample = 2
         elif self.bit_depth == 24:
-            # PyAV does not support packed s24 sample format; use s32 and convert if needed.
+            # Convert packed s24 through PyAV's s32 format.
             wire_bytes_per_sample = 3
             av_format = "s32"
             av_bytes_per_sample = 4
@@ -148,7 +129,7 @@ def _convert_s32_to_s24(data: bytes) -> bytes:
 
 
 def _validate_pcm_buffer_length(data: bytes, *, expected: int, context: str) -> None:
-    """Fail fast when PCM byte counts do not match the expected frame shape."""
+    """Validate a PCM buffer's byte length."""
     if len(data) != expected:
         msg = f"{context} PCM buffer length {len(data)} does not match expected {expected} bytes"
         raise ValueError(msg)

@@ -226,11 +226,7 @@ class Role(ABC):
     """Count of skipped late messages since last log."""
 
     handled_binary_types: ClassVar[frozenset[int]] = frozenset()
-    """Inbound binary message types this role consumes (e.g. SOURCE_AUDIO_CHUNK).
-
-    The connection routes each inbound binary message to the first active role that
-    declares its type here. Default declares none, so a role never receives one.
-    """
+    """Inbound binary message types consumed by this role."""
 
     @property
     @abstractmethod
@@ -381,10 +377,7 @@ class Role(ABC):
         """Handle stream stop."""
 
     def on_binary_chunk(self, message_type: int, timestamp_us: int, data: bytes) -> None:  # noqa: B027
-        """Handle an inbound binary chunk of a type declared in ``handled_binary_types``.
-
-        Only called for message types this role declares, so no return is needed.
-        """
+        """Handle a declared inbound binary message."""
 
     # --- Lifecycle hooks ---
 
@@ -474,7 +467,7 @@ class Role(ABC):
         """
 
     def on_client_stream_start(self, payload: ClientStreamStartPayload) -> None:  # noqa: B027
-        """Handle an client_stream/start message from a source client."""
+        """Handle client_stream/start."""
 
     def on_client_stream_end(self) -> None:  # noqa: B027
-        """Handle an client_stream/end message from a source client."""
+        """Handle client_stream/end."""

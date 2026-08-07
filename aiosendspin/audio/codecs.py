@@ -1,10 +1,4 @@
-"""Audio codec encoders and decoders.
-
-Encoders turn resampled PCM into role-specific output frames (player streaming,
-source capture). Decoders turn encoded source frames back into native PCM on the
-server. PyAV is imported lazily so importing this module stays cheap; a friendly
-ImportError is raised only when a codec that needs PyAV is actually used.
-"""
+"""Audio codec encoders and decoders."""
 
 from __future__ import annotations
 
@@ -39,10 +33,7 @@ def _require_av() -> types.ModuleType:
 
 
 class PcmPassthrough:
-    """Passthrough transformer that chunks PCM into fixed-size frames.
-
-    Use when a role wants raw PCM audio in consistent frame sizes.
-    """
+    """Chunk PCM into fixed-size frames."""
 
     def __init__(
         self,
@@ -58,15 +49,12 @@ class PcmPassthrough:
         self._frame_stride = (bit_depth // 8) * channels
         self._options = options
         self._chunk_samples = int(sample_rate * chunk_duration_us / 1_000_000)
-        # Derive duration from the integer sample count so the wire label matches
-        # the real audio per frame at non-divisible rates (e.g. 44.1k/25ms).
+        # Derive duration from the integer sample count.
         self._chunk_duration_us = self._chunk_samples * 1_000_000 // sample_rate
         self._frame_size = self._chunk_samples * self._frame_stride
         self._buffer = bytearray()
         self._pending_timestamp_us: int | None = None
-        # Drift-free timestamp accumulator. Each emitted frame represents exactly
-        # `chunk_samples / sample_rate` seconds of audio. The residue tracks the
-        # unconsumed numerator so cumulative pending matches sample-derived time.
+        # Carry fractional sample time to prevent timestamp drift.
         self._ts_residue: int = 0
         self._last_input_timestamp_us: int | None = None
 
@@ -92,7 +80,7 @@ class PcmPassthrough:
 
     def process(self, pcm: bytes, timestamp_us: int, duration_us: int) -> list[tuple[bytes, int]]:  # noqa: ARG002
         """Chunk PCM into fixed-size frames."""
-        # Detect production gaps: if input timestamp jumped by >1.5s, reset timeline.
+        # Reset the timeline after a large input gap.
         if self._last_input_timestamp_us is not None:
             input_gap = timestamp_us - self._last_input_timestamp_us
             if input_gap > 1_500_000:
@@ -230,7 +218,7 @@ class FlacEncoder:
         with av.logging.Capture():
             self._encoder.open()
 
-        # FLAC determines its own block size (e.g., 4608 samples), regardless of input frame size.
+        # FLAC selects its own block size.
         if self._encoder.frame_size:
             self._chunk_samples = self._encoder.frame_size
             self._chunk_duration_us = self._chunk_samples * 1_000_000 // self._sample_rate
@@ -297,8 +285,7 @@ class FlacEncoder:
                 if self._stream_start_timestamp_us is None:
                     assert self._first_input_timestamp_us is not None
                     encoder_delay_chunks = max(self._chunks_encoded_total - 1, 0)
-                    # Exact rational arithmetic: total samples consumed before the
-                    # encoder produced its first packet.
+                    # Derive delay from samples consumed before the first packet.
                     delay_samples = encoder_delay_chunks * self._chunk_samples
                     self._stream_start_timestamp_us = self._first_input_timestamp_us + (
                         delay_samples * 1_000_000 // self._sample_rate
@@ -357,7 +344,6 @@ class FlacEncoder:
 class OpusEncoder:
     """Opus audio encoder transformer."""
 
-    # Opus only supports these sample rates.
     VALID_SAMPLE_RATES = frozenset({8000, 12000, 16000, 24000, 48000})
 
     def __init__(
@@ -379,7 +365,6 @@ class OpusEncoder:
         self._channels = channels
         self._chunk_duration_us = chunk_duration_us
         self._encoder: av.AudioCodecContext | None = None
-        # Opus uses s16 input format.
         self._frame_stride: int = 2 * channels
         self._chunk_samples = int(sample_rate * chunk_duration_us / 1_000_000)
         self._buffer = bytearray()
@@ -389,7 +374,7 @@ class OpusEncoder:
         self._first_input_timestamp_us: int | None = None
         self._chunks_encoded_total: int = 0
         self._last_input_timestamp_us: int | None = None
-        # libopus codec lookahead, populated from the OpusHead pre_skip after open().
+        # Read encoder lookahead from OpusHead after opening.
         self._lookahead_us: int = 0
         self._dur_residue: int = 0
 
@@ -428,20 +413,16 @@ class OpusEncoder:
         self._encoder = av.AudioCodecContext.create("libopus", "w")
         self._encoder.sample_rate = self._sample_rate
         self._encoder.layout = "stereo" if self._channels == 2 else "mono"
-        self._encoder.format = "s16"  # Opus uses s16 input
+        self._encoder.format = "s16"
 
         with av.logging.Capture():
             self._encoder.open()
 
-        # Opus typically uses 960 samples = 20ms at 48kHz.
         if self._encoder.frame_size:
             self._chunk_samples = self._encoder.frame_size
             self._chunk_duration_us = self._chunk_samples * 1_000_000 // self._sample_rate
 
-        # Extract libopus's encoder lookahead from the OpusHead pre_skip field so the
-        # stream anchor can be shifted earlier to keep decoded audio aligned with input.
-        # RFC 7845 §5.1 places pre_skip (LE u16, samples @ 48 kHz) at bytes 10-11 of
-        # the OpusHead, exposed via ctx.extradata.
+        # Shift the stream anchor by the OpusHead pre-skip.
         extradata = self._encoder.extradata
         if extradata and len(extradata) >= 12 and extradata[:8] == b"OpusHead":
             pre_skip_samples = struct.unpack_from("<H", extradata, 10)[0]
@@ -548,10 +529,7 @@ class OpusEncoder:
         return None
 
     def get_codec_header(self) -> bytes | None:
-        """No codec header for Opus: the decoder is configured from the declared format.
-
-        The OpusHead extradata stays internal for lookahead compensation.
-        """
+        """Return no source-wire header for raw Opus packets."""
         return None
 
     def reset(self) -> None:
@@ -574,7 +552,7 @@ class PcmDecoder:
     def __init__(
         self, *, sample_rate: int, bit_depth: int, channels: int, codec_header: bytes | None = None
     ) -> None:
-        """Accept the declared format for interface symmetry; PCM needs no setup."""
+        """Accept the declared format without setup."""
         del sample_rate, bit_depth, channels, codec_header
 
     def decode(self, data: bytes) -> bytes:
@@ -587,11 +565,7 @@ class PcmDecoder:
 
 
 class _AvDecoder:
-    """PyAV-backed decoder that yields native packed PCM at the declared format.
-
-    Decoded frames are normalized to the declared sample format and layout at the
-    SAME sample rate (no rate resampling — the server resamples downstream).
-    """
+    """Decode audio to packed PCM at the declared format."""
 
     def __init__(
         self,
@@ -616,7 +590,7 @@ class _AvDecoder:
         if codec_header:
             self._ctx.extradata = self._normalize_header(codec_name, codec_header)
 
-        # Same-rate format/layout normalization. Output s32 for 24-bit, then pack.
+        # Normalize format and layout without changing sample rate.
         self._resampler = av.AudioResampler(
             format="s32" if bit_depth == 24 else self._av_format,
             layout=self._av_layout,
@@ -640,7 +614,6 @@ class _AvDecoder:
         return bytes(out)
 
     def _stride(self) -> int:
-        # Resampler output stride: s32 (4 bytes) for 24-bit path, else native.
         bytes_per_sample = 4 if self._bit_depth in (24, 32) else 2
         return bytes_per_sample * self._channels
 

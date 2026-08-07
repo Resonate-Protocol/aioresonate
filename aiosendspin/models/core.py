@@ -178,7 +178,7 @@ class ClientHelloPayload(SendspinModel):
     ``supported_roles`` (dropped during parse), recorded for the server to flag.
     Not part of the wire schema (omitted when None)."""
     source_support: Annotated[ClientHelloSourceSupport | None, Alias("source@v1_support")] = None
-    """Source support configuration - only if source role is in supported_roles."""
+    """Source support configuration."""
 
     # Static mapping: unversioned support key -> actual alias key.
     _SUPPORT_KEY_ALIASES: ClassVar[dict[str, str]] = {
@@ -259,8 +259,7 @@ class ClientHelloPayload(SendspinModel):
                 unlisted.append("visualizer@_draft_r1")
             self.visualizer_draft_r1_support = None
 
-        # source@v1_support is optional (it carries only feature hints), but never
-        # meaningful without the role.
+        # Ignore source hints unless the source role is listed.
         if Roles.SOURCE.value not in self.supported_roles:
             if self.source_support is not None:
                 unlisted.append(Roles.SOURCE.value)
@@ -319,7 +318,7 @@ class ClientStatePayload(SendspinModel):
     """Set when the parser read a legacy top-level `state` field, recorded for the server
     to flag. Not part of the wire schema (omitted when None)."""
     source: SourceStatePayload | None = None
-    """Source state - only if client has source role."""
+    """Source state."""
 
     @classmethod
     def __pre_deserialize__(cls, d: dict[str, Any]) -> dict[str, Any]:
