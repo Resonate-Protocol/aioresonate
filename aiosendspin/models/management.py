@@ -129,8 +129,6 @@ class SetStaticPinConfig(SendspinModel):
     enabled: bool | None = None
     pin: str | None = None
     """8 decimal digits; replaces the configured static PIN."""
-    locked_out: bool | None = None
-    """Only ``false`` is accepted; clears terminal lockout."""
 
     class Config(SendspinConfig):
         """Absent (omitted) fields mean 'leave unchanged'."""
@@ -143,8 +141,6 @@ class SetDynamicPinConfig(SendspinModel):
     """Patch for the dynamic-PIN method; absent fields are left unchanged."""
 
     enabled: bool | None = None
-    locked_out: bool | None = None
-    """Only ``false`` is accepted; clears terminal lockout."""
     min_pin_length: int | None = None
     """Shortest PIN length in digits the client will accept; must be in 4-12."""
 
@@ -190,6 +186,22 @@ class ManagementSetPairingConfigMessage(ServerMessage):
     type: Literal["management/set-pairing-config"] = "management/set-pairing-config"
 
 
+# Server -> Client: management/open-pairing-window
+@dataclass
+class ManagementOpenPairingWindowPayload(SendspinModel):
+    """Empty ``management/open-pairing-window`` payload."""
+
+
+@dataclass
+class ManagementOpenPairingWindowMessage(ServerMessage):
+    """Opens a pairing window on the client in place of the operator gesture."""
+
+    payload: ManagementOpenPairingWindowPayload = field(
+        default_factory=ManagementOpenPairingWindowPayload
+    )
+    type: Literal["management/open-pairing-window"] = "management/open-pairing-window"
+
+
 # Client -> Server: management/result
 @dataclass(kw_only=True)
 class RecordSummary(SendspinModel):
@@ -212,10 +224,10 @@ class PairingMethodConfig(SendspinModel):
     """A method's config in a get-pairing-config result."""
 
     enabled: bool
-    locked_out: bool | None = None
-    """Only present for PIN methods; ``true`` if locked out."""
     min_pin_length: int | None = None
     """For dynamic_pin only: shortest PIN length in digits the client will accept (4-12)."""
+    escalated: bool | None = None
+    """For dynamic_pin only: ``true`` when the failure counter escalated it to gesture-gating."""
 
     class Config(SendspinConfig):
         """Omit method-specific fields where they do not apply."""

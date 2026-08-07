@@ -20,6 +20,7 @@ from aiosendspin.models import (
 )
 from aiosendspin.models.controller import ControllerCommandPayload
 from aiosendspin.models.core import (
+    ActivatePairing,
     ClientCommandMessage,
     ClientCommandPayload,
     ClientGoodbyeMessage,
@@ -52,6 +53,7 @@ from aiosendspin.models.management import (
     ManagementAddRecordMessage,
     ManagementGetPairingConfigMessage,
     ManagementListRecordsMessage,
+    ManagementOpenPairingWindowMessage,
     ManagementRemoveRecordMessage,
     ManagementResultMessage,
     ManagementResultPayload,
@@ -92,6 +94,8 @@ from aiosendspin.noise.driver import (
 )
 from aiosendspin.noise.keys import psk_id_for
 from aiosendspin.noise.models import (
+    ClientPairPendingMessage,
+    ClientPairPendingPayload,
     NoiseHandshakeMessage,
     PairAbortMessage,
     PairAbortPayload,
@@ -105,6 +109,7 @@ from aiosendspin.noise.pairing import (
     run_pairing_psk_client,
     run_static_pin_client,
 )
+from aiosendspin.noise.pin import MAX_PIN_DIGITS, MIN_PIN_DIGITS, SHORT_PIN_DIGITS
 from aiosendspin.noise.trust_store import PskCategory, ResolvedPsk
 from aiosendspin.noise.wire import EncryptedWebSocket
 
@@ -113,6 +118,7 @@ from .management import (
     handle_add_record,
     handle_get_pairing_config,
     handle_list_records,
+    handle_open_pairing_window,
     handle_remove_record,
     handle_set_pairing_config,
     handle_unpair,
@@ -135,6 +141,7 @@ _ManagementRequest = (
     | ManagementRemoveRecordMessage
     | ManagementGetPairingConfigMessage
     | ManagementSetPairingConfigMessage
+    | ManagementOpenPairingWindowMessage
 )
 
 # A provisional connection must complete bring-up through its first server/activate
@@ -147,9 +154,6 @@ POST_PAIRING_ACTIVATE_TIMEOUT_S: float = 60.0
 
 # Lead time applied to play-time estimates before clock sync converges.
 UNSYNCED_PLAY_LEAD_US: int = 500_000
-
-# PIN-pairing method families, subject to lockout and the locked_out descriptor.
-_PIN_METHODS: list[PairMethod] = [PairMethod.DYNAMIC_PIN, PairMethod.STATIC_PIN]
 
 # psk_id of the Sentinel PSK — the client matches it during PIN pairing / discovery.
 _SENTINEL_PSK_ID: str = psk_id_for(SENTINEL_PSK)
@@ -259,7 +263,7 @@ class SendspinConnection:
         self._reported_volume = client.initial_volume
         self._reported_muted = client.initial_muted
         self._reported_source_signal: SignalState | None = None
-        self._selected_pair_method: PairMethod | None = None
+        self._selected_pairing: ActivatePairing | None = None
         self._pairing_index = 0
         self._pairing_attempt_in_progress = False
         self._exchange_in_progress = False
@@ -474,7 +478,7 @@ class SendspinConnection:
             self._active_roles = payload.active_roles
             if source_dropped and self._source_stream_active and self.connected:
                 await self.send_client_stream_end()
-        self._selected_pair_method = payload.selected_pair_method
+        self._selected_pairing = payload.pairing
         await self._client.note_playback_activity(self)
         return None
 
@@ -549,9 +553,8 @@ class SendspinConnection:
         assert self._server_id is not None
         self._pairing_index += 1
         pairing_index = self._pairing_index
-        method = self._selected_pair_method
-        await self._validate_pair_method(method)
-        assert method is not None  # _validate_pair_method rejects None
+        pairing = await self._validate_pairing(self._selected_pairing)
+        method = pairing.method
         store = self._client.pairing_store
         if method is PairMethod.PAIRING_PSK:
             with self._attempt_in_progress():
@@ -559,13 +562,13 @@ class SendspinConnection:
                     self._ws, server_id=self._server_id, store=store
                 )
         assert self._handshake_hash is not None
-        if await store.is_pin_locked_out(method):
-            await self._abort_pairing(PairAbortReason.LOCKED_OUT)
         if method is PairMethod.STATIC_PIN:
             static_pin = await store.static_pin()
             assert static_pin is not None  # offered only when configured
-            if (leave := await self._await_pairing_window()) is not None:
+            # Every static-PIN attempt is gesture-gated.
+            if (leave := await self._gate_on_pairing_window(pairing_index)) is not None:
                 return leave
+            self._client.consume_pairing_window()
             with self._attempt_in_progress():
                 return await run_static_pin_client(
                     self._ws,
@@ -575,12 +578,20 @@ class SendspinConnection:
                     server_id=self._server_id,
                     store=store,
                 )
-        try:  # PairMethod.DYNAMIC_PIN
+        # PairMethod.DYNAMIC_PIN: gesture-gated only when escalated or the PIN is short.
+        pin_length = await self._validate_pin_length(pairing.pin_length)
+        if (await store.is_pin_escalated() or pin_length < SHORT_PIN_DIGITS) and (
+            leave := await self._gate_on_pairing_window(pairing_index)
+        ) is not None:
+            return leave
+        self._client.consume_pairing_window()
+        try:
             with self._attempt_in_progress():
                 return await run_dynamic_pin_client(
                     self._ws,
                     handshake_hash=self._handshake_hash,
                     pairing_index=pairing_index,
+                    pin_length=pin_length,
                     pin_emitter=self._emit_pin,
                     server_id=self._server_id,
                     store=store,
@@ -598,23 +609,31 @@ class SendspinConnection:
         finally:
             self._pairing_attempt_in_progress = False
 
-    async def _await_pairing_window(self) -> str | None:
-        """Wait for the operator gesture without leaving the socket unread.
+    async def _gate_on_pairing_window(self, pairing_index: int) -> str | None:
+        """Hold a gesture-gated attempt until a pairing window is open.
 
-        Returns the raw ``server/activate`` frame if the server leaves pairing before
-        an attempt started, else ``None`` once the gesture arrives.
-        Anything else received during the wait - the ``pair/abort`` withdrawing the
-        attempt, an unexpected frame, or a close - raises out of the pending receive.
+        With no window open, signals ``client/pair-pending`` first and waits without
+        leaving the socket unread. Returns the raw ``server/activate`` frame if the
+        server leaves pairing first, else ``None``.
         """
-        assert self._client.pairing_window is not None  # offered only when set
         assert self._ws is not None
-        window = asyncio.ensure_future(self._client.pairing_window())
+        if self._client.pairing_window_open:
+            return None
+        await self._ws.send_str(
+            ClientPairPendingMessage(
+                payload=ClientPairPendingPayload(pairing_index=pairing_index),
+            ).to_json(),
+        )
+        window = asyncio.ensure_future(self._client.await_pairing_window())
         receive = asyncio.create_task(receive_pairing_abort(self._ws))
         try:
             done, _ = await asyncio.wait((window, receive), return_when=asyncio.FIRST_COMPLETED)
         finally:
             window.cancel()
             receive.cancel()
+        if window not in done:
+            # Let the window wait finish unwinding (its cleanup clears the gesture prompt).
+            await asyncio.wait((window,))
         if receive not in done:
             # The cancelled receive must exit ws.receive() before anyone else may read.
             await asyncio.wait((receive,))
@@ -627,12 +646,12 @@ class SendspinConnection:
 
     async def _resolve_pairing_activate(self, leftover: str | None) -> ServerActivatePayload:
         """Resolve the server/activate that ends pairing, re-handshaking first if it finalized."""
-        method = self._selected_pair_method
-        assert method is not None
+        pairing = self._selected_pairing
+        assert pairing is not None
         async with asyncio.timeout(POST_PAIRING_ACTIVATE_TIMEOUT_S):
             if leftover is None:
                 # Server finalized and re-handshakes onto the new long-term PSK.
-                logger.info("Paired with server %s via %s", self._server_id, method.value)
+                logger.info("Paired with server %s via %s", self._server_id, pairing.method.value)
                 await self._rehandshake()
                 return await self._exchange_hellos()
             # Server left pairing without finalizing: apply the leave server/activate.
@@ -668,16 +687,26 @@ class SendspinConnection:
         """Whether the client currently admits unpaired access (from pairing config)."""
         return (await self._client.pairing_store.get_pairing_config()).unpaired_access_enabled
 
-    async def _validate_pair_method(self, method: PairMethod | None) -> None:
-        """Reject a pairing method the matched PSK disallows or the client did not offer."""
+    async def _validate_pairing(self, pairing: ActivatePairing | None) -> ActivatePairing:
+        """Reject a pairing whose method the matched PSK disallows or the client did not offer."""
         assert self._noise_psk is not None
+        method = pairing.method if pairing is not None else None
         # pairing_psk iff the matched PSK is the Pairing PSK; a PIN method otherwise.
         method_fits_psk = (method is PairMethod.PAIRING_PSK) == (
             self._noise_psk.category is PskCategory.PAIRING
         )
         supported = await self._supported_pair_methods()
-        if method is None or not method_fits_psk or method not in supported:
+        if pairing is None or not method_fits_psk or method not in supported:
             await self._abort_pairing(PairAbortReason.METHOD_NOT_SUPPORTED)
+        return pairing
+
+    async def _validate_pin_length(self, pin_length: int | None) -> int:
+        """Validate the activation's dynamic ``pin_length``, aborting when unacceptable."""
+        config = await self._client.pairing_store.get_pairing_config()
+        min_length = max(config.dynamic_pin_min_length, MIN_PIN_DIGITS)
+        if pin_length is None or not min_length <= pin_length <= MAX_PIN_DIGITS:
+            await self._abort_pairing(PairAbortReason.PIN_LENGTH_UNACCEPTABLE)
+        return pin_length
 
     async def _abort_pairing(self, reason: PairAbortReason) -> NoReturn:
         """Send ``pair/abort``; never returns (the abort raises)."""
@@ -950,20 +979,14 @@ class SendspinConnection:
         return ClientHelloMessage(payload=payload)
 
     async def _pair_method_descriptor(self, method: PairMethod) -> PairMethodDescriptor:
-        """Build the ``client/hello`` descriptor for ``method`` (lockout + out-channels)."""
-        if method not in _PIN_METHODS:
+        """Build the ``client/hello`` descriptor for ``method``."""
+        if method is not PairMethod.DYNAMIC_PIN:
             return PairMethodDescriptor(method=method)
-        min_pin_length = None
-        out_channels = None
-        if method is PairMethod.DYNAMIC_PIN:
-            out_channels = ["display"]
-            config = await self._client.pairing_store.get_pairing_config()
-            min_pin_length = config.dynamic_pin_min_length
+        config = await self._client.pairing_store.get_pairing_config()
         return PairMethodDescriptor(
             method=method,
-            out_channels=out_channels,
-            locked_out=await self._client.pairing_store.is_pin_locked_out(method),
-            min_pin_length=min_pin_length,
+            out_channels=["display"],
+            min_pin_length=config.dynamic_pin_min_length,
         )
 
     def _compute_trust(self) -> TrustLevel:
@@ -1089,6 +1112,7 @@ class SendspinConnection:
                 | ManagementRemoveRecordMessage()
                 | ManagementGetPairingConfigMessage()
                 | ManagementSetPairingConfigMessage()
+                | ManagementOpenPairingWindowMessage()
             ):
                 await self._handle_management_request(message)
             case _:
@@ -1338,6 +1362,12 @@ class SendspinConnection:
             case ManagementSetPairingConfigMessage(payload=request):
                 payload, effect = await handle_set_pairing_config(
                     store, request, implemented_pair_methods=self._client.implemented_pair_methods
+                )
+            case ManagementOpenPairingWindowMessage():
+                payload, effect = await handle_open_pairing_window(
+                    store,
+                    implemented_pair_methods=self._client.implemented_pair_methods,
+                    open_window=self._client.open_pairing_window,
                 )
             case _:
                 assert_never(message)

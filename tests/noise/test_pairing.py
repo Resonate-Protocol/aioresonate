@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Sequence
-from dataclasses import replace
 from datetime import UTC, datetime
 
 import pytest
@@ -23,6 +22,8 @@ from aiosendspin.noise.models import (
     ClientPairFinalizePayload,
     ClientPairInitMessage,
     ClientPairInitPayload,
+    ClientPairPendingMessage,
+    ClientPairPendingPayload,
     ServerPairAuthMessage,
     ServerPairAuthPayload,
     ServerPairInitMessage,
@@ -31,6 +32,7 @@ from aiosendspin.noise.pairing import (
     PairingAbortError,
     PairingAttempt,
     PairingError,
+    PairingTimeoutError,
     run_dynamic_pin_client,
     run_dynamic_pin_server,
     run_pairing_psk_client,
@@ -67,13 +69,19 @@ def test_pairing_attempt_verify_is_pin_only() -> None:
 
 
 def test_pairing_attempt_pairing_psk_requires_material() -> None:
-    """PAIRING_PSK must carry a 32-byte pairing_psk and no PIN provider."""
+    """PAIRING_PSK must carry a 32-byte pairing_psk and no PIN-flow hooks."""
     with pytest.raises(ValueError, match="requires pairing_psk"):
         PairingAttempt(method=PairMethod.PAIRING_PSK)
     with pytest.raises(ValueError, match="must be 32 bytes"):
         PairingAttempt(method=PairMethod.PAIRING_PSK, pairing_psk=b"\x01" * 16)
     with pytest.raises(ValueError, match="does not use pin_provider"):
         PairingAttempt(method=PairMethod.PAIRING_PSK, pairing_psk=generate_psk(), pin_provider=_pin)
+    with pytest.raises(ValueError, match="does not use on_pair_pending"):
+        PairingAttempt(
+            method=PairMethod.PAIRING_PSK,
+            pairing_psk=generate_psk(),
+            on_pair_pending=lambda: None,
+        )
 
 
 @pytest.mark.parametrize("method", [PairMethod.DYNAMIC_PIN, PairMethod.STATIC_PIN])
@@ -142,25 +150,25 @@ async def test_pairing_psk_server_times_out_without_finalize(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The Pairing PSK server times out locally, sending nothing, if the client never finalizes."""
-    monkeypatch.setattr("aiosendspin.noise.pairing._SERVER_FIRST_MESSAGE_TIMEOUT_S", 0.05)
+    monkeypatch.setattr("aiosendspin.noise.pairing.SERVER_FIRST_MESSAGE_TIMEOUT_S", 0.05)
     _client_ews, server_ews, _client_raw, server_raw = _paired_encrypted_ws()
     server_store = InMemoryServerPairingStore()
 
-    with pytest.raises(TimeoutError):
+    with pytest.raises(PairingTimeoutError):
         await run_pairing_psk_server(server_ews, client_id="client-X", store=server_store)
     assert server_raw.sent == []
     assert await server_store.record_by_client_id("client-X") is None
 
 
-async def test_static_pin_server_gesture_wait_times_out(
+async def test_static_pin_server_first_message_wait_times_out(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The static-PIN server times out locally awaiting the gesture-gated pair-init."""
-    monkeypatch.setattr("aiosendspin.noise.pairing._SERVER_GESTURE_TIMEOUT_S", 0.05)
+    """The static-PIN server times out locally awaiting the client's first pairing message."""
+    monkeypatch.setattr("aiosendspin.noise.pairing.SERVER_FIRST_MESSAGE_TIMEOUT_S", 0.05)
     _client_ews, server_ews, _client_raw, server_raw = _paired_encrypted_ws()
     server_store = InMemoryServerPairingStore()
 
-    with pytest.raises(TimeoutError):
+    with pytest.raises(PairingTimeoutError):
         await run_static_pin_server(
             server_ews,
             handshake_hash=_HANDSHAKE_HASH,
@@ -170,6 +178,174 @@ async def test_static_pin_server_gesture_wait_times_out(
             store=server_store,
         )
     assert server_raw.sent == []
+
+
+async def test_pair_pending_extends_the_first_message_wait() -> None:
+    """A matching pair-pending switches the server to the gesture timeout; pairing completes."""
+    client_ews, server_ews, _client_raw, _server_raw = _paired_encrypted_ws()
+    client_store = InMemoryClientPairingStore()
+    server_store = InMemoryServerPairingStore()
+    pending_signals = 0
+
+    def on_pending() -> None:
+        nonlocal pending_signals
+        pending_signals += 1
+
+    async def gated_client() -> None:
+        await client_ews.send_str(
+            ClientPairPendingMessage(payload=ClientPairPendingPayload(pairing_index=0)).to_json()
+        )
+        await run_static_pin_client(
+            client_ews,
+            handshake_hash=_HANDSHAKE_HASH,
+            pairing_index=0,
+            static_pin=_STATIC_PIN,
+            server_id="server-X",
+            store=client_store,
+        )
+
+    async def provide() -> str:
+        return _STATIC_PIN
+
+    _client_ret, server_record = await asyncio.gather(
+        gated_client(),
+        run_static_pin_server(
+            server_ews,
+            handshake_hash=_HANDSHAKE_HASH,
+            pairing_index=0,
+            pin_provider=provide,
+            client_id="client-A",
+            store=server_store,
+            on_pair_pending=on_pending,
+        ),
+    )
+    assert server_record is not None
+    assert await server_store.record_by_client_id("client-A") == server_record
+    assert pending_signals == 1
+
+
+async def test_gesture_wait_times_out_after_pair_pending(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """After pair-pending the gesture bound applies; its expiry raises locally."""
+    monkeypatch.setattr("aiosendspin.noise.pairing.SERVER_GESTURE_TIMEOUT_S", 0.05)
+    client_ews, server_ews, _client_raw, _server_raw = _paired_encrypted_ws()
+    server_store = InMemoryServerPairingStore()
+
+    await client_ews.send_str(
+        ClientPairPendingMessage(payload=ClientPairPendingPayload(pairing_index=0)).to_json()
+    )
+    with pytest.raises(PairingTimeoutError):
+        await run_static_pin_server(
+            server_ews,
+            handshake_hash=_HANDSHAKE_HASH,
+            pairing_index=0,
+            pin_provider=_pin,
+            client_id="client-X",
+            store=server_store,
+        )
+
+
+async def test_stale_pair_pending_is_discarded() -> None:
+    """A pair-pending left over from a superseded activate is ignored; the fresh init pairs."""
+    client_ews, server_ews, _client_raw, _server_raw = _paired_encrypted_ws()
+    client_store = InMemoryClientPairingStore()
+    server_store = InMemoryServerPairingStore()
+    pending_signals = 0
+
+    def on_pending() -> None:
+        nonlocal pending_signals
+        pending_signals += 1
+
+    await client_ews.send_str(
+        ClientPairPendingMessage(payload=ClientPairPendingPayload(pairing_index=0)).to_json()
+    )
+
+    async def provide() -> str:
+        return _STATIC_PIN
+
+    _client_ret, server_record = await asyncio.gather(
+        run_static_pin_client(
+            client_ews,
+            handshake_hash=_HANDSHAKE_HASH,
+            pairing_index=1,
+            static_pin=_STATIC_PIN,
+            server_id="server-X",
+            store=client_store,
+        ),
+        run_static_pin_server(
+            server_ews,
+            handshake_hash=_HANDSHAKE_HASH,
+            pairing_index=1,
+            pin_provider=provide,
+            client_id="client-A",
+            store=server_store,
+            on_pair_pending=on_pending,
+        ),
+    )
+    assert server_record is not None
+    assert pending_signals == 0  # the stale pending is not surfaced
+
+
+async def test_repeated_pair_pending_is_protocol_error() -> None:
+    """A second matching pair-pending within one attempt is a protocol error."""
+    client_ews, server_ews, _client_raw, _server_raw = _paired_encrypted_ws()
+    server_store = InMemoryServerPairingStore()
+
+    for _ in range(2):
+        await client_ews.send_str(
+            ClientPairPendingMessage(payload=ClientPairPendingPayload(pairing_index=0)).to_json()
+        )
+    with pytest.raises(PairingError, match="expected ClientPairInitMessage"):
+        await run_static_pin_server(
+            server_ews,
+            handshake_hash=_HANDSHAKE_HASH,
+            pairing_index=0,
+            pin_provider=_pin,
+            client_id="client-A",
+            store=server_store,
+        )
+
+
+async def test_pair_init_index_mismatch_after_pending_is_protocol_error() -> None:
+    """After the matching pair-pending, an init for a different attempt is a protocol error."""
+    client_ews, server_ews, _client_raw, _server_raw = _paired_encrypted_ws()
+    server_store = InMemoryServerPairingStore()
+
+    await client_ews.send_str(
+        ClientPairPendingMessage(payload=ClientPairPendingPayload(pairing_index=0)).to_json()
+    )
+    await client_ews.send_str(
+        ClientPairInitMessage(payload=ClientPairInitPayload(pairing_index=1)).to_json()
+    )
+    with pytest.raises(PairingError, match="does not match the attempt"):
+        await run_static_pin_server(
+            server_ews,
+            handshake_hash=_HANDSHAKE_HASH,
+            pairing_index=0,
+            pin_provider=_pin,
+            client_id="client-A",
+            store=server_store,
+        )
+
+
+async def test_pair_pending_ahead_of_server_count_is_protocol_error() -> None:
+    """A pair-pending with a pairing_index the server has not reached yet is a protocol error."""
+    client_ews, server_ews, _client_raw, _server_raw = _paired_encrypted_ws()
+    server_store = InMemoryServerPairingStore()
+
+    await client_ews.send_str(
+        ClientPairPendingMessage(payload=ClientPairPendingPayload(pairing_index=1)).to_json()
+    )
+    with pytest.raises(PairingError, match="ahead of the server's count"):
+        await run_static_pin_server(
+            server_ews,
+            handshake_hash=_HANDSHAKE_HASH,
+            pairing_index=0,
+            pin_provider=_pin,
+            client_id="client-A",
+            store=server_store,
+        )
 
 
 async def test_static_pin_server_rejects_non_8_digit_operator_pin() -> None:
@@ -226,7 +402,7 @@ async def test_dynamic_pin_server_times_out_mid_attempt(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The dynamic-PIN server times out locally, with no abort on the wire, if the client stalls."""
-    monkeypatch.setattr("aiosendspin.noise.pairing._SERVER_ATTEMPT_TIMEOUT_S", 0.05)
+    monkeypatch.setattr("aiosendspin.noise.pairing.SERVER_ATTEMPT_TIMEOUT_S", 0.05)
     client_ews, server_ews, client_raw, _server_raw = _paired_encrypted_ws()
     server_store = InMemoryServerPairingStore()
 
@@ -237,7 +413,7 @@ async def test_dynamic_pin_server_times_out_mid_attempt(
             ),
         ).to_json(),
     )
-    with pytest.raises(TimeoutError):
+    with pytest.raises(PairingTimeoutError):
         await run_dynamic_pin_server(
             server_ews,
             handshake_hash=_HANDSHAKE_HASH,
@@ -325,6 +501,7 @@ async def test_dynamic_pin_round_trip() -> None:
             client_ews,
             handshake_hash=_HANDSHAKE_HASH,
             pairing_index=0,
+            pin_length=8,
             pin_emitter=emit,
             server_id="server-X",
             store=client_store,
@@ -375,6 +552,7 @@ async def test_dynamic_pin_server_discards_stale_pair_init() -> None:
             client_ews,
             handshake_hash=_HANDSHAKE_HASH,
             pairing_index=1,
+            pin_length=8,
             pin_emitter=emit,
             server_id="server-X",
             store=client_store,
@@ -433,6 +611,7 @@ async def test_dynamic_pin_wrong_pin_aborts_and_persists_nothing() -> None:
                 client_ews,
                 handshake_hash=_HANDSHAKE_HASH,
                 pairing_index=0,
+                pin_length=8,
                 pin_emitter=emit,
                 server_id="server-X",
                 store=client_store,
@@ -449,88 +628,7 @@ async def test_dynamic_pin_wrong_pin_aborts_and_persists_nothing() -> None:
         )
 
     assert excinfo.value.reason is PairAbortReason.PIN_MISMATCH
-    assert await client_store.pin_failure_count(PairMethod.DYNAMIC_PIN) == 1
-    assert _added_records(await client_store.list_records()) == []
-    assert await server_store.record_by_client_id("client-A") is None
-
-
-async def test_dynamic_pin_length_below_client_floor_aborts() -> None:
-    """A pin_length under the client's min is rejected pre-PAKE; the counter is untouched."""
-    client_ews, server_ews, _client_raw, _server_raw = _paired_encrypted_ws()
-    client_store = InMemoryClientPairingStore()  # default min_pin_length = 6
-    server_store = InMemoryServerPairingStore()
-    emitted: list[str] = []
-
-    async def emit(pin: str) -> None:
-        emitted.append(pin)
-
-    async def provide() -> str:
-        return "0000"
-
-    with pytest.raises(PairingAbortError) as excinfo:
-        await asyncio.gather(
-            run_dynamic_pin_client(
-                client_ews,
-                handshake_hash=_HANDSHAKE_HASH,
-                pairing_index=0,
-                pin_emitter=emit,
-                server_id="server-X",
-                store=client_store,
-            ),
-            run_dynamic_pin_server(
-                server_ews,
-                handshake_hash=_HANDSHAKE_HASH,
-                pairing_index=0,
-                pin_length=4,  # below the client's floor of 6
-                pin_provider=provide,
-                client_id="client-A",
-                store=server_store,
-            ),
-        )
-
-    assert excinfo.value.reason is PairAbortReason.PIN_LENGTH_UNACCEPTABLE
-    assert emitted == []  # no PIN emitted on a length rejection
-    assert await client_store.pin_failure_count(PairMethod.DYNAMIC_PIN) == 0
-    assert _added_records(await client_store.list_records()) == []
-    assert await server_store.record_by_client_id("client-A") is None
-
-
-async def test_dynamic_pin_length_below_spec_minimum_aborts() -> None:
-    """A config min under MIN_PIN_DIGITS still aborts cleanly rather than raising ValueError."""
-    client_ews, server_ews, _client_raw, _server_raw = _paired_encrypted_ws()
-    client_store = InMemoryClientPairingStore()
-    cfg = await client_store.get_pairing_config()
-    await client_store.store_pairing_config(replace(cfg, dynamic_pin_min_length=2))
-    server_store = InMemoryServerPairingStore()
-
-    async def emit(pin: str) -> None:
-        pass
-
-    async def provide() -> str:
-        return "00"
-
-    with pytest.raises(PairingAbortError) as excinfo:
-        await asyncio.gather(
-            run_dynamic_pin_client(
-                client_ews,
-                handshake_hash=_HANDSHAKE_HASH,
-                pairing_index=0,
-                pin_emitter=emit,
-                server_id="server-X",
-                store=client_store,
-            ),
-            run_dynamic_pin_server(
-                server_ews,
-                handshake_hash=_HANDSHAKE_HASH,
-                pairing_index=0,
-                pin_length=2,
-                pin_provider=provide,
-                client_id="client-A",
-                store=server_store,
-            ),
-        )
-
-    assert excinfo.value.reason is PairAbortReason.PIN_LENGTH_UNACCEPTABLE
+    assert await client_store.pin_failure_count() == 1
     assert _added_records(await client_store.list_records()) == []
     assert await server_store.record_by_client_id("client-A") is None
 
@@ -540,7 +638,7 @@ async def test_client_relays_leave_pairing_without_storing() -> None:
     client_ews, server_ews, _client_raw, _server_raw = _paired_encrypted_ws()
     client_store = InMemoryClientPairingStore()
     server_store = InMemoryServerPairingStore()
-    await client_store.record_pin_failure(PairMethod.DYNAMIC_PIN)  # a prior failure to be reset
+    await client_store.record_pin_failure()  # a prior failure to be reset
     shown: asyncio.Future[str] = asyncio.get_running_loop().create_future()
 
     async def emit(pin: str) -> None:
@@ -573,6 +671,7 @@ async def test_client_relays_leave_pairing_without_storing() -> None:
             client_ews,
             handshake_hash=_HANDSHAKE_HASH,
             pairing_index=0,
+            pin_length=8,
             pin_emitter=emit,
             server_id="server-X",
             store=client_store,
@@ -586,18 +685,18 @@ async def test_client_relays_leave_pairing_without_storing() -> None:
     assert _added_records(await client_store.list_records()) == []
     assert await server_store.record_by_client_id("client-A") is None
     # Inner authentication succeeded, so the failure counter resets like any other attempt.
-    assert await client_store.pin_failure_count(PairMethod.DYNAMIC_PIN) == 0
+    assert await client_store.pin_failure_count() == 0
 
 
 _STATIC_PIN = "12345678"
 
 
 async def test_static_pin_round_trip() -> None:
-    """A matching static PIN authenticates the PAKE; both sides persist and the counter resets."""
+    """A matching static PIN authenticates the PAKE and both sides persist the record."""
     client_ews, server_ews, _client_raw, _server_raw = _paired_encrypted_ws()
     client_store = InMemoryClientPairingStore()
     server_store = InMemoryServerPairingStore()
-    await client_store.record_pin_failure(PairMethod.STATIC_PIN)  # a prior failure to be reset
+    await client_store.record_pin_failure()  # a dynamic-PIN failure static pairing ignores
 
     async def provide() -> str:
         return _STATIC_PIN
@@ -627,12 +726,12 @@ async def test_static_pin_round_trip() -> None:
     assert client_record.psk_id == server_record.psk_id
     assert server_record.client_id == "client-A"
     assert await server_store.record_by_client_id("client-A") == server_record
-    # A successful pairing resets the failure counter.
-    assert await client_store.pin_failure_count(PairMethod.STATIC_PIN) == 0
+    # The static flow leaves the dynamic-PIN failure counter alone.
+    assert await client_store.pin_failure_count() == 1
 
 
-async def test_static_pin_wrong_pin_aborts_and_increments_counter() -> None:
-    """A static-PIN mismatch aborts, increments the client counter, and stores nothing."""
+async def test_static_pin_wrong_pin_aborts_and_persists_nothing() -> None:
+    """A static-PIN mismatch aborts and stores nothing; the counter stays untouched."""
     client_ews, server_ews, _client_raw, _server_raw = _paired_encrypted_ws()
     client_store = InMemoryClientPairingStore()
     server_store = InMemoryServerPairingStore()
@@ -661,7 +760,7 @@ async def test_static_pin_wrong_pin_aborts_and_increments_counter() -> None:
         )
 
     assert excinfo.value.reason is PairAbortReason.PIN_MISMATCH
-    assert await client_store.pin_failure_count(PairMethod.STATIC_PIN) == 1
+    assert await client_store.pin_failure_count() == 0
     assert _added_records(await client_store.list_records()) == []
     assert await server_store.record_by_client_id("client-A") is None
 
@@ -701,7 +800,7 @@ async def test_static_pin_invalid_server_share_is_protocol_error(pake_msg_1: str
         )
 
     assert not isinstance(excinfo.value, PairingAbortError)
-    assert await client_store.pin_failure_count(PairMethod.STATIC_PIN) == 0
+    assert await client_store.pin_failure_count() == 0
     assert _added_records(await client_store.list_records()) == []
 
 
@@ -858,7 +957,7 @@ async def _dynamic_pake_client(
     )
     init = ServerPairInitMessage.from_json((await client_ews.receive()).data)
     nonce_a = b64url_decode(init.payload.nonce_A)
-    pin = pin_mod.derive_pin(_HANDSHAKE_HASH, nonce_a, nonce_b, init.payload.pin_length)
+    pin = pin_mod.derive_pin(_HANDSHAKE_HASH, nonce_a, nonce_b, 8)
     if mangle_pin:
         pin = ("2" if pin[0] == "1" else "1") + pin[1:]
     pin_future.set_result(pin)

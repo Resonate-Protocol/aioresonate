@@ -118,8 +118,6 @@ class PairMethodDescriptor(SendspinModel):
     """The pairing method identifier."""
     out_channels: list[str] | None = None
     """For dynamic_pin only: channels through which the PIN is conveyed to the operator."""
-    locked_out: bool | None = None
-    """For PIN methods only: True when the method is in terminal lockout."""
     min_pin_length: int | None = None
     """For dynamic_pin only: shortest PIN length in digits the client will accept (4-12)."""
 
@@ -445,6 +443,21 @@ class LegacyServerHelloMessage(SendspinModel):
 
 # Server -> Client: server/activate
 @dataclass
+class ActivatePairing(SendspinModel):
+    """Parameters of the pairing attempt a server/activate admits."""
+
+    method: PairMethod
+    """Pairing method the server picked, drawn from the client's supported_pair_methods."""
+    pin_length: int | None = None
+    """The dynamic PIN length for this session. Required for dynamic_pin; absent otherwise."""
+
+    class Config(SendspinConfig):
+        """Config for parsing json messages."""
+
+        omit_none = True
+
+
+@dataclass
 class ServerActivatePayload(SendspinModel):
     """Declares the server's current purpose on this connection."""
 
@@ -454,8 +467,8 @@ class ServerActivatePayload(SendspinModel):
     """Versioned role IDs active for this client (e.g., 'player@v1'). Required on
     connections capable of playback; absent otherwise. Persists across subsequent
     server/activate messages that omit it."""
-    selected_pair_method: PairMethod | None = None
-    """Pairing method the server picked. Required when 'pairing' is in activities."""
+    pairing: ActivatePairing | None = None
+    """Parameters of the admitted pairing attempt. Required when 'pairing' is in activities."""
 
     class Config(SendspinConfig):
         """Config for parsing json messages."""

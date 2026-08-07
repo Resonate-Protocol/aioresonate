@@ -10,6 +10,7 @@ from aiosendspin.models.management import (
     ManagementAddRecordPayload,
     ManagementGetPairingConfigMessage,
     ManagementListRecordsMessage,
+    ManagementOpenPairingWindowMessage,
     ManagementRemoveRecordMessage,
     ManagementRemoveRecordPayload,
     ManagementResultData,
@@ -46,10 +47,11 @@ _PSK_B64 = "a" * 43
         ManagementSetPairingConfigMessage(
             ManagementSetPairingConfigPayload(
                 pairing_psk=SetPairingPskConfig(enabled=False),
-                dynamic_pin=SetDynamicPinConfig(locked_out=False),
+                dynamic_pin=SetDynamicPinConfig(min_pin_length=6),
                 record_mode=RecordModeConfig(psk_id="p1"),
             )
         ),
+        ManagementOpenPairingWindowMessage(),
     ],
 )
 def test_server_request_round_trips(message: ServerMessage) -> None:
@@ -65,6 +67,7 @@ def test_server_request_round_trips(message: ServerMessage) -> None:
         ServerUnpairMessage(),
         ManagementListRecordsMessage(),
         ManagementGetPairingConfigMessage(),
+        ManagementOpenPairingWindowMessage(),
     ],
 )
 def test_empty_payload_messages_send_payload_key(message: ServerMessage) -> None:
@@ -141,10 +144,10 @@ def test_set_config_patch_omits_absent_fields() -> None:
 
 
 def test_get_config_data_round_trips() -> None:
-    """A get-pairing-config result round-trips and omits locked_out for non-PIN methods."""
+    """A get-pairing-config result round-trips and omits escalated for non-dynamic methods."""
     data = ManagementResultData(
         pairing_psk=PairingMethodConfig(enabled=True),
-        dynamic_pin=PairingMethodConfig(enabled=False, locked_out=True),
+        dynamic_pin=PairingMethodConfig(enabled=False, min_pin_length=6, escalated=True),
         record_mode=RecordModeConfig(psk_id="p1"),
         unpaired_access=UnpairedAccess(enabled=False),
     )
@@ -153,5 +156,5 @@ def test_get_config_data_round_trips() -> None:
     )
     assert ClientMessage.from_json(message.to_json()) == message
     raw = orjson.loads(message.to_json())["payload"]["data"]
-    assert "locked_out" not in raw["pairing_psk"]
-    assert raw["dynamic_pin"]["locked_out"] is True
+    assert "escalated" not in raw["pairing_psk"]
+    assert raw["dynamic_pin"]["escalated"] is True

@@ -12,6 +12,7 @@ from aiohttp import ClientSession, WSMsgType, web
 from aiohttp.test_utils import TestServer
 
 from aiosendspin.client.client import SendspinClient as SdkClient
+from aiosendspin.client.models import PairingSupport
 from aiosendspin.models.core import (
     ClientHelloMessage,
     ClientHelloPayload,
@@ -33,7 +34,12 @@ from aiosendspin.models.types import (
     TrustLevel,
 )
 from aiosendspin.noise.keys import Identity, generate_psk, psk_id_for
-from aiosendspin.noise.pairing import PairingAbortError, PairingAttempt, PairingError
+from aiosendspin.noise.pairing import (
+    PairingAbortError,
+    PairingAttempt,
+    PairingError,
+    PairingTimeoutError,
+)
 from aiosendspin.noise.trust_store import (
     ClientPairingRecord,
     InMemoryClientPairingStore,
@@ -467,7 +473,7 @@ async def test_live_pairing_dynamic_pin() -> None:
             pairing_store=client_store,
             client_name="c",
             roles=[Roles.CONTROLLER],
-            pin_display=display,
+            pairing_support=PairingSupport(pin_display=display),
         )
         try:
             await client.connect(url)
@@ -513,7 +519,7 @@ async def test_live_pairing_updates_connection_security_trust() -> None:
             pairing_store=client_store,
             client_name="c",
             roles=[Roles.CONTROLLER],
-            pin_display=display,
+            pairing_support=PairingSupport(pin_display=display),
         )
         try:
             await client.connect(url)
@@ -553,7 +559,7 @@ async def test_live_pairing_dynamic_pin_server_floor_raises_length() -> None:
             pairing_store=client_store,
             client_name="c",
             roles=[Roles.CONTROLLER],
-            pin_display=display,
+            pairing_support=PairingSupport(pin_display=display),
         )
         try:
             await client.connect(url)
@@ -591,7 +597,7 @@ async def test_live_pairing_method_enabled_after_hello() -> None:
             pairing_store=client_store,
             client_name="c",
             roles=[Roles.CONTROLLER],
-            pin_display=display,
+            pairing_support=PairingSupport(pin_display=display),
         )
         try:
             await client.connect(url)
@@ -634,7 +640,7 @@ async def test_live_pairing_method_disabled_after_hello_aborts() -> None:
             pairing_store=client_store,
             client_name="c",
             roles=[Roles.CONTROLLER],
-            pin_display=display,
+            pairing_support=PairingSupport(pin_display=display),
         )
         try:
             await client.connect(url)
@@ -694,7 +700,7 @@ async def test_live_pairing_dynamic_pin_wrong_then_retry() -> None:
             pairing_store=client_store,
             client_name="c",
             roles=[Roles.CONTROLLER],
-            pin_display=display,
+            pairing_support=PairingSupport(pin_display=display),
         )
         try:
             await client.connect(url)
@@ -707,7 +713,7 @@ async def test_live_pairing_dynamic_pin_wrong_then_retry() -> None:
             assert excinfo.value.reason is PairAbortReason.PIN_MISMATCH
             assert client.connected
             assert Activity.PAIRING in client.activities
-            assert await client_store.pin_failure_count(PairMethod.DYNAMIC_PIN) == 1
+            assert await client_store.pin_failure_count() == 1
             # One attempt consumed, no re-handshake between attempts, so the index advanced.
             assert conn._pairing_index == 1  # noqa: SLF001
 
@@ -718,7 +724,7 @@ async def test_live_pairing_dynamic_pin_wrong_then_retry() -> None:
             await _await_long_term_record(client_store, server.id)
             assert client.noise_psk is not None
             assert client.noise_psk.category is PskCategory.LONG_TERM
-            assert await client_store.pin_failure_count(PairMethod.DYNAMIC_PIN) == 0
+            assert await client_store.pin_failure_count() == 0
             # The success re-handshake to the long-term PSK reset the per-handshake index.
             assert conn._pairing_index == 0  # noqa: SLF001
         finally:
@@ -775,7 +781,7 @@ async def test_end_pairing_after_failed_attempt_leaves_pairing() -> None:
             pairing_store=client_store,
             client_name="c",
             roles=[Roles.CONTROLLER],
-            pin_display=display,
+            pairing_support=PairingSupport(pin_display=display),
         )
         try:
             await client.connect(url)
@@ -823,7 +829,7 @@ async def test_end_pairing_during_attempt_leaves_pairing() -> None:
             pairing_store=client_store,
             client_name="c",
             roles=[Roles.CONTROLLER],
-            pin_display=display,
+            pairing_support=PairingSupport(pin_display=display),
         )
         attempt: asyncio.Future[None] | None = None
         try:
@@ -864,6 +870,60 @@ async def test_end_pairing_during_attempt_leaves_pairing() -> None:
             await client.disconnect()
 
 
+async def test_gesture_timeout_leaves_pairing_without_dropping(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The server's gesture bound cancels the attempt in band: no abort frame, connection alive."""
+    monkeypatch.setattr("aiosendspin.noise.pairing.SERVER_GESTURE_TIMEOUT_S", 0.1)
+    server_store = InMemoryServerPairingStore()
+    server = _make_server(server_store)
+    client_identity = Identity.generate()
+    client_store = InMemoryClientPairingStore()
+    await client_store.store_pairing_config(
+        replace(await client_store.get_pairing_config(), static_pin_enabled=True)
+    )
+    await client_store.set_static_pin("12345678")
+
+    aborts: list[PairAbortReason] = []
+
+    async def gesture_prompt(active: bool) -> None:  # noqa: FBT001
+        pass  # never opens a window: the server's gesture bound expires
+
+    async def provide() -> str:
+        return "12345678"
+
+    async with _serve(server) as url:
+        client = make_sdk_client(
+            identity=client_identity,
+            pairing_store=client_store,
+            client_name="c",
+            roles=[Roles.CONTROLLER],
+            pairing_support=PairingSupport(gesture_prompt=gesture_prompt),
+        )
+        client.add_pairing_abort_listener(aborts.append)
+        try:
+            await client.connect(url)
+            conn = await _find_connection_by_client_id(server, client_identity.peer_id)
+            with pytest.raises(PairingTimeoutError):
+                await conn.initiate_pairing(
+                    PairingAttempt(method=PairMethod.STATIC_PIN, pin_provider=provide)
+                )
+            # The leave activate unparks the client; no pair/abort reason exists for this.
+            await _await_left_pairing(client)
+            assert client.connected
+            assert aborts == []
+            assert await client_store.record_by_server_id(server.id) is None
+
+            # The connection is reusable: an opened window admits a fresh attempt.
+            client.open_pairing_window()
+            await conn.initiate_pairing(
+                PairingAttempt(method=PairMethod.STATIC_PIN, pin_provider=provide)
+            )
+            await _await_long_term_record(client_store, server.id)
+        finally:
+            await client.disconnect()
+
+
 async def test_end_pairing_during_gesture_wait_unparks_client() -> None:
     """end_pairing reaches a client parked in the static-PIN gesture wait; it re-pairs after."""
     server_store = InMemoryServerPairingStore()
@@ -875,13 +935,13 @@ async def test_end_pairing_during_gesture_wait_unparks_client() -> None:
     )
     await client_store.set_static_pin("12345678")
 
-    gesture_awaited = asyncio.Event()
-    never_gesture: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+    prompts: list[bool] = []
+    prompted = asyncio.Event()
 
-    async def open_window() -> None:
-        gesture_awaited.set()
-        if not never_gesture.cancelled():  # cancelled by the SDK when the server ends pairing
-            await never_gesture
+    async def gesture_prompt(active: bool) -> None:  # noqa: FBT001
+        prompts.append(active)
+        if active:
+            prompted.set()
 
     async def provide() -> str:
         return "12345678"
@@ -892,7 +952,7 @@ async def test_end_pairing_during_gesture_wait_unparks_client() -> None:
             pairing_store=client_store,
             client_name="c",
             roles=[Roles.CONTROLLER],
-            pairing_window=open_window,
+            pairing_support=PairingSupport(gesture_prompt=gesture_prompt),
         )
         attempt: asyncio.Future[None] | None = None
         try:
@@ -903,7 +963,7 @@ async def test_end_pairing_during_gesture_wait_unparks_client() -> None:
                     PairingAttempt(method=PairMethod.STATIC_PIN, pin_provider=provide)
                 )
             )
-            await gesture_awaited.wait()  # the client is parked awaiting the operator gesture
+            await prompted.wait()  # the client is parked awaiting the operator gesture
 
             await server.end_pairing(client_identity.peer_id)
             with pytest.raises(PairingAbortError) as excinfo:
@@ -912,10 +972,11 @@ async def test_end_pairing_during_gesture_wait_unparks_client() -> None:
             assert excinfo.value.reason is PairAbortReason.USER_CANCELLED
             assert client.connected
             await _await_left_pairing(client)
-            assert never_gesture.cancelled()  # the SDK cancelled the integrator's gesture wait
+            assert prompts == [True, False]  # the SDK cleared the gesture prompt
             assert await client_store.record_by_server_id(server.id) is None
 
-            # The connection is reusable: a fresh attempt (window opens at once) pairs.
+            # The connection is reusable: a proactively opened window admits a fresh attempt.
+            client.open_pairing_window()
             await conn.initiate_pairing(
                 PairingAttempt(method=PairMethod.STATIC_PIN, pin_provider=provide)
             )
@@ -923,8 +984,6 @@ async def test_end_pairing_during_gesture_wait_unparks_client() -> None:
             assert client.noise_psk is not None
             assert client.noise_psk.category is PskCategory.LONG_TERM
         finally:
-            if not never_gesture.done():
-                never_gesture.cancel()
             if attempt is not None:
                 attempt.cancel()
                 with suppress(asyncio.CancelledError, PairingAbortError):
@@ -955,7 +1014,7 @@ async def test_external_cancel_of_initiate_pairing_stays_cancelled() -> None:
             pairing_store=client_store,
             client_name="c",
             roles=[Roles.CONTROLLER],
-            pin_display=display,
+            pairing_support=PairingSupport(pin_display=display),
         )
         try:
             await client.connect(url)
@@ -1007,7 +1066,7 @@ async def _paired_client_with_stalled_success_tail(
         pairing_store=client_store,
         client_name="c",
         roles=[Roles.CONTROLLER],
-        pin_display=display,
+        pairing_support=PairingSupport(pin_display=display),
     )
     await client.connect(url)
     conn = await _find_connection_by_client_id(server, client_identity.peer_id)
@@ -1201,7 +1260,7 @@ async def test_reverification_leaves_staged_and_trusted_unpaired() -> None:
             pairing_store=client_store,
             client_name="c",
             roles=[Roles.CONTROLLER],
-            pin_display=display,
+            pairing_support=PairingSupport(pin_display=display),
         )
         try:
             await client.connect(url)
@@ -1225,13 +1284,14 @@ async def test_live_pairing_static_pin() -> None:
         replace(await client_store.get_pairing_config(), static_pin_enabled=True)
     )
     await client_store.set_static_pin("12345678")
-    await client_store.record_pin_failure(PairMethod.STATIC_PIN)  # reset on success
+    await client_store.record_pin_failure()  # dynamic-PIN counter; static pairing ignores it
 
     window_opened = asyncio.get_running_loop().create_future()
 
-    async def open_window() -> None:
-        if not window_opened.done():
+    async def gesture_prompt(active: bool) -> None:  # noqa: FBT001
+        if active and not window_opened.done():
             window_opened.set_result(None)
+            client.open_pairing_window()
 
     async def provide() -> str:
         return "12345678"
@@ -1242,7 +1302,7 @@ async def test_live_pairing_static_pin() -> None:
             pairing_store=client_store,
             client_name="c",
             roles=[Roles.CONTROLLER],
-            pairing_window=open_window,
+            pairing_support=PairingSupport(gesture_prompt=gesture_prompt),
         )
         try:
             await client.connect(url)
@@ -1261,30 +1321,42 @@ async def test_live_pairing_static_pin() -> None:
             assert server_record is not None
             assert client_record.psk == server_record.psk
             assert client_record.psk_id == server_record.psk_id
-            assert await client_store.pin_failure_count(PairMethod.STATIC_PIN) == 0
+            # The static flow leaves the dynamic-PIN failure counter alone.
+            assert await client_store.pin_failure_count() == 1
         finally:
             await client.disconnect()
 
 
-async def test_live_pairing_static_pin_locked_out_aborts() -> None:
-    """A static-PIN attempt under terminal lockout aborts and persists no record."""
+async def test_live_pairing_escalated_dynamic_pin_waits_for_window() -> None:
+    """An escalated dynamic-PIN attempt is gesture-gated; the gesture unparks it and it pairs."""
     server_store = InMemoryServerPairingStore()
     server = _make_server(server_store)
     client_identity = Identity.generate()
     client_store = InMemoryClientPairingStore()
-    await client_store.store_pairing_config(
-        replace(await client_store.get_pairing_config(), static_pin_enabled=True)
-    )
-    await client_store.set_static_pin("12345678")
     for _ in range(10):
-        await client_store.record_pin_failure(PairMethod.STATIC_PIN)
-    assert await client_store.is_pin_locked_out(PairMethod.STATIC_PIN)
+        await client_store.record_pin_failure()
+    assert await client_store.is_pin_escalated()
 
-    async def open_window() -> None:
-        return
+    window_opened = asyncio.get_running_loop().create_future()
+    pending_signals = 0
+
+    def on_pending() -> None:
+        nonlocal pending_signals
+        pending_signals += 1
+
+    async def gesture_prompt(active: bool) -> None:  # noqa: FBT001
+        if active and not window_opened.done():
+            window_opened.set_result(None)
+            client.open_pairing_window()
+
+    shown: asyncio.Future[str] = asyncio.get_running_loop().create_future()
+
+    async def display(pin: str | None) -> None:
+        if pin is not None and not shown.done():
+            shown.set_result(pin)
 
     async def provide() -> str:
-        return "12345678"
+        return await shown
 
     async with _serve(server) as url:
         client = make_sdk_client(
@@ -1292,17 +1364,25 @@ async def test_live_pairing_static_pin_locked_out_aborts() -> None:
             pairing_store=client_store,
             client_name="c",
             roles=[Roles.CONTROLLER],
-            pairing_window=open_window,
+            pairing_support=PairingSupport(gesture_prompt=gesture_prompt, pin_display=display),
         )
         try:
             await client.connect(url)
             conn = await _find_connection_by_client_id(server, client_identity.peer_id)
-            with pytest.raises(PairingAbortError) as excinfo:
-                await conn.initiate_pairing(
-                    PairingAttempt(method=PairMethod.STATIC_PIN, pin_provider=provide)
+            await conn.initiate_pairing(
+                PairingAttempt(
+                    method=PairMethod.DYNAMIC_PIN,
+                    pin_provider=provide,
+                    on_pair_pending=on_pending,
                 )
-            assert excinfo.value.reason is PairAbortReason.LOCKED_OUT
-            assert await client_store.record_by_server_id(server.id) is None
+            )
+            await _await_long_term_record(client_store, server.id)
+            assert window_opened.done()  # the attempt waited for the gesture
+            assert pending_signals == 1  # the server surfaced the pending gesture
+            assert client.noise_psk is not None
+            assert client.noise_psk.category is PskCategory.LONG_TERM
+            # Successful inner authentication de-escalates the method.
+            assert not await client_store.is_pin_escalated()
         finally:
             await client.disconnect()
 
@@ -1334,7 +1414,7 @@ async def test_live_pairing_pauses_writer_during_exchange() -> None:
             pairing_store=client_store,
             client_name="c",
             roles=[Roles.CONTROLLER],
-            pin_display=display,
+            pairing_support=PairingSupport(pin_display=display),
         )
         try:
             await client.connect(url)
@@ -1480,7 +1560,7 @@ async def test_resync_resends_current_player_state() -> None:
             client_name="c",
             roles=[Roles.PLAYER],
             player_support=player_support,
-            pin_display=display,
+            pairing_support=PairingSupport(pin_display=display),
         )
         try:
             await client.connect(url)
@@ -1555,7 +1635,7 @@ async def test_reverification_over_long_term_keeps_pairing() -> None:
         ClientPairingRecord(psk_id=long_term_id, psk=long_term, server_id=server.id)
     )
     # A pre-existing dynamic-PIN failure count is reset by a successful re-verification.
-    await client_store.record_pin_failure(PairMethod.DYNAMIC_PIN)
+    await client_store.record_pin_failure()
 
     shown: asyncio.Future[str] = asyncio.get_running_loop().create_future()
 
@@ -1572,7 +1652,7 @@ async def test_reverification_over_long_term_keeps_pairing() -> None:
             pairing_store=client_store,
             client_name="c",
             roles=[Roles.CONTROLLER],
-            pin_display=display,
+            pairing_support=PairingSupport(pin_display=display),
         )
         try:
             await client.connect(url)
@@ -1613,16 +1693,13 @@ async def test_reverification_over_long_term_keeps_pairing() -> None:
             ]
             assert len(stored_pubkey) == 1
             # Inner authentication succeeded, so the failure counter resets to zero.
-            assert await client_store.pin_failure_count(PairMethod.DYNAMIC_PIN) == 0
+            assert await client_store.pin_failure_count() == 0
         finally:
             await client.disconnect()
 
 
-async def test_reverification_rejected_under_dynamic_pin_lockout() -> None:
-    """Re-verification is subject to lockout: under terminal lockout it aborts with locked_out.
-
-    Spec :pin-pairing-lockout — re-verification follows the lockout rules like any other attempt.
-    """
+async def test_reverification_under_escalation_is_gesture_gated() -> None:
+    """Re-verification follows the escalation rules: gated on a window, de-escalated on success."""
     server_store = InMemoryServerPairingStore()
     server = _make_server(server_store)
     client_identity = Identity.generate()
@@ -1638,10 +1715,17 @@ async def test_reverification_rejected_under_dynamic_pin_lockout() -> None:
     await client_store.store_record(
         ClientPairingRecord(psk_id=long_term_id, psk=long_term, server_id=server.id)
     )
-    # Drive dynamic PIN into terminal lockout (counter reaches 10).
+    # Drive dynamic PIN into escalation (counter reaches 10).
     for _ in range(10):
-        await client_store.record_pin_failure(PairMethod.DYNAMIC_PIN)
-    assert await client_store.is_pin_locked_out(PairMethod.DYNAMIC_PIN)
+        await client_store.record_pin_failure()
+    assert await client_store.is_pin_escalated()
+
+    window_opened = asyncio.get_running_loop().create_future()
+
+    async def gesture_prompt(active: bool) -> None:  # noqa: FBT001
+        if active and not window_opened.done():
+            window_opened.set_result(None)
+            client.open_pairing_window()
 
     shown: asyncio.Future[str] = asyncio.get_running_loop().create_future()
 
@@ -1658,16 +1742,19 @@ async def test_reverification_rejected_under_dynamic_pin_lockout() -> None:
             pairing_store=client_store,
             client_name="c",
             roles=[Roles.CONTROLLER],
-            pin_display=display,
+            pairing_support=PairingSupport(gesture_prompt=gesture_prompt, pin_display=display),
         )
         try:
             await client.connect(url)
             conn = await _find_connection_by_client_id(server, client_identity.peer_id)
-            with pytest.raises(PairingAbortError) as excinfo:
-                await conn.initiate_pairing(
-                    PairingAttempt(method=PairMethod.DYNAMIC_PIN, pin_provider=provide, verify=True)
-                )
-            assert excinfo.value.reason is PairAbortReason.LOCKED_OUT
+            await conn.initiate_pairing(
+                PairingAttempt(method=PairMethod.DYNAMIC_PIN, pin_provider=provide, verify=True)
+            )
+            assert window_opened.done()  # the attempt waited for the gesture
+            assert client.connected
+            assert client.noise_psk is not None
+            assert client.noise_psk.psk == long_term  # same long-term PSK, no re-pair
+            assert not await client_store.is_pin_escalated()
         finally:
             await client.disconnect()
 

@@ -37,10 +37,12 @@ from aiosendspin.noise.session import NoiseCipherSuite
 from aiosendspin.noise.trust_store import ClientPairingStore, ResolvedPsk
 
 from .connection import DECODABLE_CODECS, UNSYNCED_PLAY_LEAD_US, SendspinConnection
-from .models import AudioFormat, ServerInfo
+from .models import AudioFormat, PairingSupport, ServerInfo
 from .source import SourceCapture
 
 logger = logging.getLogger(__name__)
+
+_PAIRING_WINDOW_LIFETIME_S: float = 300.0
 
 
 def _validate_decodable_formats(player_support: ClientHelloPlayerSupport) -> None:
@@ -149,6 +151,15 @@ class SendspinClient:
     _admission_lock: asyncio.Lock
     """Serializes the admit/displace decision across concurrent connections."""
 
+    _pairing_support: PairingSupport | None
+    """Operator wiring whose presence enables the PIN methods, if configured."""
+    _pairing_window_opened: asyncio.Event
+    """Set when a pairing window opens; wakes a gated attempt's wait."""
+    _pairing_window_deadline: float | None = None
+    """Loop-time deadline of the open pairing window, if one is open."""
+    _pairing_window_waiters: int = 0
+    """Gated attempts currently waiting for a window; refcounts the gesture prompt."""
+
     last_playback_server_id: str | None = None
     """server_id of the last server admitted with the playback activity; the discovery tiebreak."""
 
@@ -205,8 +216,7 @@ class SendspinClient:
         initial_volume: int = 100,
         initial_muted: bool = False,
         state_supported_commands: list[PlayerCommand] | None = None,
-        pin_display: Callable[[str | None], Awaitable[None]] | None = None,
-        pairing_window: Callable[[], Awaitable[None]] | None = None,
+        pairing_support: PairingSupport | None = None,
         clock: Clock | None = None,
         cipher_suite: NoiseCipherSuite = NoiseCipherSuite.CHACHAPOLY,
     ) -> None:
@@ -217,8 +227,7 @@ class SendspinClient:
         self._device_info = device_info
         self._roles = list(roles)
         self._pairing_store = pairing_store
-        self._pin_display = pin_display
-        self._pairing_window = pairing_window
+        self._pairing_support = pairing_support
         self._clock: Clock = clock or RawMonotonicClock()
         self._cipher_suite = cipher_suite
 
@@ -266,6 +275,7 @@ class SendspinClient:
         self._provisional_connections = set()
         self._admission_lock = asyncio.Lock()
         self._last_playback_loaded = False
+        self._pairing_window_opened = asyncio.Event()
 
         # Initialize callback lists
         self._metadata_callbacks = []
@@ -349,27 +359,56 @@ class SendspinClient:
         Called with the PIN string when one is derived, and with ``None`` when the
         pairing exchange ends (success or failure) so the channel can clear.
         """
-        return self._pin_display
+        return self._pairing_support.pin_display if self._pairing_support is not None else None
 
     @property
-    def pairing_window(self) -> Callable[[], Awaitable[None]] | None:
-        """Gesture gate for static-PIN pairing, if configured.
+    def pairing_window_open(self) -> bool:
+        """Whether a pairing window is currently open."""
+        deadline = self._pairing_window_deadline
+        return deadline is not None and self._loop.time() < deadline
 
-        Awaited when a static-PIN attempt is selected; resolves once the operator
-        opens the pairing window, and is cancelled if the server ends the attempt
-        first. The callable owns the window lifetime: an expired window must not
-        resolve the wait. Its presence enables offering ``static_pin``.
+    async def await_pairing_window(self) -> None:
+        """Resolve once a pairing window is open, prompting for a gesture meanwhile."""
+        if self.pairing_window_open:
+            return
+        support = self._pairing_support
+        prompt = support.gesture_prompt if support is not None else None
+        self._pairing_window_waiters += 1
+        try:
+            if self._pairing_window_waiters == 1 and prompt is not None:
+                await prompt(True)  # noqa: FBT003
+            while not self.pairing_window_open:
+                self._pairing_window_opened.clear()
+                await self._pairing_window_opened.wait()
+        finally:
+            self._pairing_window_waiters -= 1
+            if self._pairing_window_waiters == 0 and prompt is not None:
+                await prompt(False)  # noqa: FBT003
+
+    def consume_pairing_window(self) -> None:
+        """Close the pairing window as a pairing attempt starts."""
+        self._pairing_window_deadline = None
+        self._pairing_window_opened.clear()
+
+    def open_pairing_window(self) -> None:
+        """Open a pairing window admitting one gesture-gated pairing attempt.
+
+        Called on an operator gesture, or by a paired server through
+        ``management/open-pairing-window``. A no-op while a window is already open.
         """
-        return self._pairing_window
+        if self.pairing_window_open:
+            return
+        self._pairing_window_deadline = self._loop.time() + _PAIRING_WINDOW_LIFETIME_S
+        self._pairing_window_opened.set()
 
     @property
     def implemented_pair_methods(self) -> frozenset[PairMethod]:
         """Pairing methods this client implements: each PIN method needs its wiring."""
         methods = {PairMethod.PAIRING_PSK}
-        if self._pairing_window is not None:
+        if self._pairing_support is not None:
             methods.add(PairMethod.STATIC_PIN)
-        if self._pin_display is not None:
-            methods.add(PairMethod.DYNAMIC_PIN)
+            if self._pairing_support.pin_display is not None:
+                methods.add(PairMethod.DYNAMIC_PIN)
         return frozenset(methods)
 
     @property

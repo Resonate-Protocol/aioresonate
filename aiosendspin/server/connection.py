@@ -46,6 +46,7 @@ from aiohttp import ClientWebSocketResponse, WSMessage, WSMsgType, web
 
 from aiosendspin.models import BINARY_HEADER_SIZE, unpack_binary_header
 from aiosendspin.models.core import (
+    ActivatePairing,
     ClientCommandMessage,
     ClientGoodbyeMessage,
     ClientHelloMessage,
@@ -71,6 +72,7 @@ from aiosendspin.models.management import (
     ManagementAddRecordPayload,
     ManagementGetPairingConfigMessage,
     ManagementListRecordsMessage,
+    ManagementOpenPairingWindowMessage,
     ManagementRemoveRecordMessage,
     ManagementRemoveRecordPayload,
     ManagementResultData,
@@ -113,6 +115,7 @@ from aiosendspin.noise.pairing import (
     PairingAbortError,
     PairingAttempt,
     PairingError,
+    PairingTimeoutError,
     abort_pairing,
     run_dynamic_pin_server,
     run_pairing_psk_server,
@@ -150,6 +153,7 @@ QUIESCE_TIMEOUT_S: float = 30.0
 
 _PAIRING_MESSAGE_TYPES: frozenset[str] = frozenset(
     {
+        "client/pair-pending",
         "client/pair-init",
         "client/pair-finalize",
         "client/pair-auth",
@@ -162,6 +166,7 @@ _PAIR_TRANSITION_TYPES: frozenset[str] = frozenset(
     {
         "noise/handshake",
         "client/hello",
+        "client/pair-pending",
         "client/pair-init",
         "client/pair-finalize",
         "client/pair-auth",
@@ -916,10 +921,14 @@ class SendspinConnection:
                 try:
                     if not await self._pair(transport):
                         return False
+                except PairingTimeoutError as exc:
+                    # Timeout waiting for client; the connection stays open for a retry.
+                    self._logger.debug("Initial-connect pairing timed out: %s", exc)
+                    self._pairing_attempt = None
                 except PairingAbortError as exc:
                     if exc.reason in CLOSING_ABORT_REASONS:
                         raise
-                    # Non-closing abort reason: the connection stays open for a retry.
+                    # Non-closing abort reason; the connection stays open for a retry.
                     self._logger.debug("Initial-connect pairing aborted: %s", exc)
                     self._pairing_attempt = None
             await self._activate()
@@ -1190,6 +1199,7 @@ class SendspinConnection:
         """Run a pairing attempt on a connection.
 
         A pair abort raises and leaves the connection for a retry or ``end_pairing``.
+        A server-side timeout raises after leaving pairing, also keeping the connection.
         Any other failure propagates for the caller to disconnect.
         """
         if self._pairing_attempt is not None:
@@ -1216,6 +1226,12 @@ class SendspinConnection:
             if current_task is not None and current_task.cancelling():
                 # Our own cancellation was forwarded into the child and converted; restore it.
                 raise asyncio.CancelledError from None
+            raise
+        except PairingTimeoutError:
+            # A server has no pair/abort reason for its own timeout: cancel the attempt in
+            # band with the leave activate (best-effort; the client may be gone).
+            with suppress(Exception):
+                await self._leave_pairing()
             raise
         finally:
             self._pairing_attempt = None
@@ -1267,6 +1283,9 @@ class SendspinConnection:
                 if self._pairing_attempt is not None
                 else PairMethod.PAIRING_PSK
             )
+            pin_length = (
+                self._negotiated_dynamic_pin_length() if method is PairMethod.DYNAMIC_PIN else None
+            )
             # No gate on the hello-advertised methods: the advertisement may lag the client's
             # live pairing config (management can change it mid-connection). The client
             # arbitrates, aborting an unsupported method with ``method_not_supported``.
@@ -1275,11 +1294,11 @@ class SendspinConnection:
                     payload=ServerActivatePayload(
                         activities=[Activity.PAIRING],
                         active_roles=[],
-                        selected_pair_method=method,
+                        pairing=ActivatePairing(method=method, pin_length=pin_length),
                     )
                 ).to_json()
             )
-            record = await self._run_pairing_protocol(method, transport)
+            record = await self._run_pairing_protocol(method, transport, pin_length)
         except asyncio.CancelledError:
             # A cancelled attempt ends like any local abort: the task never reports
             # cancelled(), so awaiting callers see the abort rather than the cancel.
@@ -1301,7 +1320,7 @@ class SendspinConnection:
             return await rehandshake
 
     async def _run_pairing_protocol(
-        self, method: PairMethod, transport: EncryptedWebSocket
+        self, method: PairMethod, transport: EncryptedWebSocket, pin_length: int | None
     ) -> ServerPairingRecord | None:
         """Run ``method``'s exchange, returning the record (``None`` when verifying)."""
         assert self._client_id is not None
@@ -1329,16 +1348,19 @@ class SendspinConnection:
                 client_id=self._client_id,
                 store=self._server.pairing_store,
                 verify=verify,
+                on_pair_pending=self._pairing_attempt.on_pair_pending,
             )
+        assert pin_length is not None
         return await run_dynamic_pin_server(
             transport,
             handshake_hash=self._handshake_hash,
             pairing_index=pairing_index,
             pin_provider=self._pairing_attempt.pin_provider,
-            pin_length=self._negotiated_dynamic_pin_length(),
+            pin_length=pin_length,
             client_id=self._client_id,
             store=self._server.pairing_store,
             verify=verify,
+            on_pair_pending=self._pairing_attempt.on_pair_pending,
         )
 
     def _negotiated_dynamic_pin_length(self) -> int:
@@ -1539,6 +1561,13 @@ class SendspinConnection:
         """Apply a pairing-config patch on the client."""
         payload = await self._management_request(
             ManagementSetPairingConfigMessage(payload=patch), ManagementResultPayload
+        )
+        return payload.result
+
+    async def open_pairing_window(self) -> ManagementResult:
+        """Open a pairing window on the client in place of the operator gesture."""
+        payload = await self._management_request(
+            ManagementOpenPairingWindowMessage(), ManagementResultPayload
         )
         return payload.result
 

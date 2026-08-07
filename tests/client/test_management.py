@@ -9,6 +9,7 @@ from aiosendspin.client.management import (
     handle_add_record,
     handle_get_pairing_config,
     handle_list_records,
+    handle_open_pairing_window,
     handle_remove_record,
     handle_set_pairing_config,
     handle_unpair,
@@ -29,7 +30,7 @@ from aiosendspin.models.management import (
 from aiosendspin.models.types import ManagementResult, PairMethod
 from aiosendspin.noise.keys import b64url_encode, generate_psk, psk_id_for
 from aiosendspin.noise.trust_store import (
-    PIN_LOCKOUT_THRESHOLD,
+    PIN_ESCALATION_THRESHOLD,
     ClientPairingRecord,
     InMemoryClientPairingStore,
 )
@@ -233,7 +234,7 @@ async def test_unpair_unknown_psk_id_is_noop() -> None:
 
 
 async def test_get_pairing_config_projects_state() -> None:
-    """get-config reflects enabled flags + lockout, omits unimplemented methods and secrets."""
+    """get-config reflects enabled flags + escalation, omits unimplemented methods and secrets."""
     store = InMemoryClientPairingStore()
     await store.store_pairing_config(
         replace(
@@ -242,8 +243,8 @@ async def test_get_pairing_config_projects_state() -> None:
             unpaired_access_enabled=True,
         )
     )
-    for _ in range(PIN_LOCKOUT_THRESHOLD):
-        await store.record_pin_failure(PairMethod.DYNAMIC_PIN)
+    for _ in range(PIN_ESCALATION_THRESHOLD):
+        await store.record_pin_failure()
     payload, effect = await handle_get_pairing_config(
         store, implemented_pair_methods=_WITHOUT_STATIC_PIN
     )
@@ -252,9 +253,9 @@ async def test_get_pairing_config_projects_state() -> None:
     assert data is not None
     assert data.pairing_psk is not None
     assert data.pairing_psk.enabled is False
-    assert data.pairing_psk.locked_out is None  # not a PIN method
+    assert data.pairing_psk.escalated is None  # not the dynamic-PIN method
     assert data.dynamic_pin is not None
-    assert data.dynamic_pin.locked_out is True
+    assert data.dynamic_pin.escalated is True
     assert data.dynamic_pin.min_pin_length == 6  # default floor
     assert data.static_pin is None  # not implemented
     assert data.unpaired_access is not None
@@ -266,11 +267,12 @@ async def test_get_pairing_config_projects_state() -> None:
 
 
 async def test_get_pairing_config_shows_static_pin_when_implemented() -> None:
-    """A client that implements static PIN includes it and reports its lockout."""
+    """A client that implements static PIN includes it in the config view."""
     store = InMemoryClientPairingStore()
     payload, _ = await handle_get_pairing_config(store, implemented_pair_methods=_ALL_METHODS)
     assert payload.data is not None
     assert payload.data.static_pin is not None
+    assert payload.data.static_pin.escalated is None  # static PIN has no failure counter
 
 
 # --- set-pairing-config -------------------------------------------------------
@@ -386,30 +388,31 @@ async def test_set_pairing_config_unimplemented_method_is_invalid() -> None:
     assert payload.result is ManagementResult.INVALID
 
 
-async def test_set_pairing_config_clears_lockout() -> None:
-    """locked_out=false clears the PIN failure counter."""
-    store = InMemoryClientPairingStore()
-    for _ in range(PIN_LOCKOUT_THRESHOLD):
-        await store.record_pin_failure(PairMethod.DYNAMIC_PIN)
-    assert await store.is_pin_locked_out(PairMethod.DYNAMIC_PIN)
-    payload, _ = await handle_set_pairing_config(
-        store,
-        ManagementSetPairingConfigPayload(dynamic_pin=SetDynamicPinConfig(locked_out=False)),
-        implemented_pair_methods=_ALL_METHODS,
-    )
-    assert payload.result is ManagementResult.OK
-    assert not await store.is_pin_locked_out(PairMethod.DYNAMIC_PIN)
-
-
-async def test_set_pairing_config_rejects_lockout_true() -> None:
-    """locked_out=true is rejected (only false clears)."""
+async def test_set_pairing_config_enable_static_pin_without_pin_is_invalid() -> None:
+    """Enabling static_pin on a client with no static PIN configured is rejected."""
     store = InMemoryClientPairingStore()
     payload, _ = await handle_set_pairing_config(
         store,
-        ManagementSetPairingConfigPayload(dynamic_pin=SetDynamicPinConfig(locked_out=True)),
+        ManagementSetPairingConfigPayload(static_pin=SetStaticPinConfig(enabled=True)),
         implemented_pair_methods=_ALL_METHODS,
     )
     assert payload.result is ManagementResult.INVALID
+    assert (await store.get_pairing_config()).static_pin_enabled is False
+
+
+async def test_set_pairing_config_enable_static_pin_with_pin_in_patch() -> None:
+    """Enabling static_pin is fine when the same patch provisions the PIN."""
+    store = InMemoryClientPairingStore()
+    payload, _ = await handle_set_pairing_config(
+        store,
+        ManagementSetPairingConfigPayload(
+            static_pin=SetStaticPinConfig(enabled=True, pin="12345678")
+        ),
+        implemented_pair_methods=_ALL_METHODS,
+    )
+    assert payload.result is ManagementResult.OK
+    assert (await store.get_pairing_config()).static_pin_enabled is True
+    assert await store.static_pin() == "12345678"
 
 
 async def test_set_pairing_config_persists_unpaired_access() -> None:
@@ -451,6 +454,56 @@ async def test_set_pairing_config_record_mode_requires_shared_record() -> None:
     )
     assert ok[0].result is ManagementResult.OK
     assert (await store.get_pairing_config()).record_mode_psk_id == shared.psk_id
+
+
+# --- open-pairing-window --------------------------------------------------------
+
+
+async def test_open_pairing_window_opens_when_pin_method_offered() -> None:
+    """A client offering dynamic PIN opens the window and reports ok."""
+    store = InMemoryClientPairingStore()
+    opened: list[None] = []
+    payload, effect = await handle_open_pairing_window(
+        store,
+        implemented_pair_methods=_ALL_METHODS,
+        open_window=lambda: opened.append(None),
+    )
+    assert payload.result is ManagementResult.OK
+    assert effect is ManagementEffect.NONE
+    assert len(opened) == 1
+
+
+async def test_open_pairing_window_with_static_pin_enabled() -> None:
+    """With dynamic PIN unavailable, an enabled static_pin qualifies."""
+    store = InMemoryClientPairingStore()
+    await store.set_static_pin("12345678")
+    await store.store_pairing_config(
+        replace(await store.get_pairing_config(), static_pin_enabled=True)
+    )
+    opened: list[None] = []
+    payload, _ = await handle_open_pairing_window(
+        store,
+        implemented_pair_methods=frozenset({PairMethod.PAIRING_PSK, PairMethod.STATIC_PIN}),
+        open_window=lambda: opened.append(None),
+    )
+    assert payload.result is ManagementResult.OK
+    assert len(opened) == 1
+
+
+async def test_open_pairing_window_invalid_when_no_pin_method_enabled() -> None:
+    """With every PIN method disabled or unimplemented, the request is invalid."""
+    store = InMemoryClientPairingStore()
+    await store.store_pairing_config(
+        replace(await store.get_pairing_config(), dynamic_pin_enabled=False)
+    )
+    opened: list[None] = []
+    payload, _ = await handle_open_pairing_window(
+        store,
+        implemented_pair_methods=_WITHOUT_STATIC_PIN,
+        open_window=lambda: opened.append(None),
+    )
+    assert payload.result is ManagementResult.INVALID
+    assert opened == []
 
 
 # --- storage accounting -------------------------------------------------------

@@ -261,7 +261,6 @@ class PairAbortReason(Enum):
 
     ATTEMPT_TIMEOUT = "attempt_timeout"
     CONCURRENT_ATTEMPT = "concurrent_attempt"
-    LOCKED_OUT = "locked_out"
     METHOD_NOT_SUPPORTED = "method_not_supported"
     PIN_LENGTH_UNACCEPTABLE = "pin_length_unacceptable"
     PIN_MISMATCH = "pin_mismatch"

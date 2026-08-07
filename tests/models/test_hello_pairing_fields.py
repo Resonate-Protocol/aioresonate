@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import orjson
+
 from aiosendspin.models.core import (
+    ActivatePairing,
     ClientHelloPayload,
     PairMethodDescriptor,
     ServerActivatePayload,
@@ -47,15 +50,23 @@ def test_server_hello_round_trips() -> None:
     assert restored.name == "Server"
 
 
-def test_server_activate_selected_pair_method_round_trips() -> None:
-    """server/activate carries the selected pairing method when present, else omits it."""
+def test_server_activate_pairing_object_round_trips() -> None:
+    """server/activate carries the pairing object when present, else omits it."""
     payload = ServerActivatePayload(
         activities=[Activity.PAIRING],
-        selected_pair_method=PairMethod.PAIRING_PSK,
+        pairing=ActivatePairing(method=PairMethod.DYNAMIC_PIN, pin_length=6),
     )
     restored = ServerActivatePayload.from_json(payload.to_json())
-    assert restored.selected_pair_method is PairMethod.PAIRING_PSK
+    assert restored.pairing == ActivatePairing(method=PairMethod.DYNAMIC_PIN, pin_length=6)
     assert restored.activities == [Activity.PAIRING]
-    assert (
-        ServerActivatePayload.from_json('{"activities":["playback"]}').selected_pair_method is None
+    assert ServerActivatePayload.from_json('{"activities":["playback"]}').pairing is None
+
+
+def test_activate_pairing_omits_pin_length_for_non_dynamic_methods() -> None:
+    """The pairing object omits pin_length when the method carries none."""
+    payload = ServerActivatePayload(
+        activities=[Activity.PAIRING],
+        pairing=ActivatePairing(method=PairMethod.STATIC_PIN),
     )
+    raw = orjson.loads(payload.to_json())
+    assert raw["pairing"] == {"method": "static_pin"}
