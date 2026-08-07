@@ -683,7 +683,13 @@ class SendspinClient:
         )
 
     async def send_available(self, *, available: bool) -> None:
-        """Report whether this client is available to participate."""
+        """Report whether this client can participate in Sendspin.
+
+        An active source stream ends before the client reports unavailable.
+
+        Args:
+            available: True when operational and ready, False when unavailable.
+        """
         if self._admitted_connection is None:
             raise RuntimeError("Client is not connected")
         await self._admitted_connection.send_available(available=available)
