@@ -7,6 +7,7 @@ from typing import Any
 import pytest
 
 from aiosendspin.audio.codecs import PcmPassthrough
+from aiosendspin.audio.format import AudioFormat
 from aiosendspin.models.core import ClientStatePayload
 from aiosendspin.models.source import (
     ClientHelloSourceFeatures,
@@ -21,6 +22,7 @@ from aiosendspin.server.roles.source import (
     SourceStreamEndedEvent,
     SourceStreamStartedEvent,
 )
+from aiosendspin.server.roles.source.stream import SourceStream
 from aiosendspin.server.roles.source.v1 import SourceV1Role
 from tests.conftest import sine_pcm_16bit
 
@@ -165,6 +167,16 @@ def test_opus_start_ignores_declared_bit_depth() -> None:
     )
     handle = next(e for e in client.events if isinstance(e, SourceStreamStartedEvent)).handle
     assert handle.audio_format.bit_depth == 16
+
+
+def test_stream_buffer_drops_oldest_beyond_byte_budget() -> None:
+    """A stalled consumer's buffer is bounded by bytes, not just chunk count."""
+    stream = SourceStream(AudioFormat(sample_rate=100, bit_depth=16, channels=1))
+    for i in range(3):
+        stream._push(bytes([i]) * 1500, i)  # noqa: SLF001
+
+    assert [ts for _, ts in stream._queue] == [2]  # noqa: SLF001
+    assert stream._buffered_bytes == 1500  # noqa: SLF001
 
 
 def test_flac_start_requires_streaminfo_header() -> None:
