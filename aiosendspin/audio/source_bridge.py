@@ -67,7 +67,11 @@ def _require_soxr() -> types.ModuleType:
 
 
 class SourceBridge:
-    """Bridge timestamped capture PCM to a steady consumer."""
+    """Buffer timestamped source PCM for a steady-rate consumer.
+
+    Feed captured chunks with ``feed()``, pull exact frame counts with ``read()``,
+    and call ``flush()`` once after input ends.
+    """
 
     def __init__(
         self,
@@ -77,7 +81,14 @@ class SourceBridge:
         target_latency_ms: int = 1000,
         max_latency_ms: int | None = None,
     ) -> None:
-        """Create a bridge with target latency and a drop-oldest maximum."""
+        """Create a bounded-latency source bridge.
+
+        Args:
+            input_format: PCM format passed to ``feed()``.
+            output_format: PCM format returned by ``read()``.
+            target_latency_ms: Buffered duration required before output begins.
+            max_latency_ms: Maximum buffered duration before oldest audio is dropped.
+        """
         if max_latency_ms is None:
             max_latency_ms = 2 * target_latency_ms
         if max_latency_ms <= target_latency_ms:
@@ -113,7 +124,7 @@ class SourceBridge:
         return frames * 1_000_000 // self._out.sample_rate
 
     def feed(self, pcm: bytes, capture_timestamp_us: int) -> None:
-        """Ingest PCM captured at ``capture_timestamp_us``."""
+        """Add PCM whose first sample has the given capture timestamp."""
         if not pcm:
             return
         if len(pcm) % self._in_stride:
@@ -155,7 +166,7 @@ class SourceBridge:
             self._window_overflow_us = 0
 
     def read(self, frames: int) -> bytes:
-        """Return exactly ``frames``, padding with silence when needed."""
+        """Return one consumer pull of exactly ``frames``, padding with silence."""
         wanted = frames * self._out_stride
         if not self._primed:
             if self.occupancy_us < self._target_us:
@@ -182,7 +193,7 @@ class SourceBridge:
         return out
 
     def _correct_drift(self) -> None:
-        """Apply per-feed drift correction."""
+        """SourceBridge corrects once per window, while AsrcSourceBridge corrects per feed."""
 
     def _apply_window_correction(self) -> None:
         """Correct persistent occupancy deviation over a window."""
@@ -233,6 +244,7 @@ class SourceBridge:
         )
 
     def _convert(self, pcm: bytes) -> bytes:
+        # Normalize source PCM to the consumer format before it enters the output buffer.
         raw = self._convert_via(self._resampler, pcm)
         return _convert_s32_to_s24(raw) if self._out.bit_depth == 24 else raw
 
@@ -296,7 +308,7 @@ class SourceBridge:
         return bytes(out)
 
     def flush(self) -> None:
-        """Append buffered resampler output to the bridge."""
+        """Append the resampler tail after the final input chunk."""
         raw = self._drain_av_tail()
         if not raw:
             return
@@ -322,7 +334,7 @@ class SourceBridge:
 
 
 class AsrcSourceBridge(SourceBridge):
-    """Correct source drift with variable-rate resampling."""
+    """Continuously correct source drift while preserving target latency."""
 
     def __init__(
         self,
@@ -334,7 +346,16 @@ class AsrcSourceBridge(SourceBridge):
         quality: str = "HQ",
         max_ratio_adjust: float = _MAX_RATIO_ADJUST,
     ) -> None:
-        """Create an ASRC bridge with bounded ratio adjustment."""
+        """Create a continuously corrected source bridge.
+
+        Args:
+            input_format: PCM format passed to ``feed()``.
+            output_format: PCM format returned by ``read()``.
+            target_latency_ms: Buffered duration required before output begins.
+            max_latency_ms: Maximum buffered duration before oldest audio is dropped.
+            quality: Resampler quality setting.
+            max_ratio_adjust: Maximum fractional source-rate correction.
+        """
         super().__init__(
             input_format=input_format,
             output_format=output_format,
@@ -349,7 +370,7 @@ class AsrcSourceBridge(SourceBridge):
         if np is None:
             raise ImportError(
                 "numpy is required for AsrcSourceBridge. "
-                "Install the 'source' extra: pip install aiosendspin[source]"
+                "Install the 'asrc' extra: pip install aiosendspin[asrc]"
             )
         self._np = np
         # PyAV converts format and layout while soxr owns the rate.
@@ -423,7 +444,7 @@ class AsrcSourceBridge(SourceBridge):
         return _convert_s32_to_s24(data) if self._out.bit_depth == 24 else data
 
     def flush(self) -> None:
-        """Append buffered resampler output to the bridge."""
+        """Append the resampler tail after the final input chunk."""
         raw = self._drain_av_tail()
         arr = self._np.frombuffer(raw, dtype=self._dtype).reshape(-1, self._out.channels)
         resampled = self._soxr_stream.resample_chunk(arr, last=True)

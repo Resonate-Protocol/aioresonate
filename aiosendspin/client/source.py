@@ -18,7 +18,11 @@ if TYPE_CHECKING:
 
 
 class SourceCapture:
-    """Encode and stream local PCM to the server for one input stream lifetime."""
+    """Stream local PCM through the source role.
+
+    Create through ``SendspinClient.create_source_capture()``, start and stop in
+    response to source commands, and feed PCM matching ``audio_format``.
+    """
 
     def __init__(
         self,
@@ -26,7 +30,13 @@ class SourceCapture:
         connection: SendspinConnection,
         audio_format: SupportedAudioFormat,
     ) -> None:
-        """Create a capture streaming ``audio_format`` (codec + PCM shape)."""
+        """Create a capture bound to one client connection and audio format.
+
+        Args:
+            client: Client that supplies local capture timestamps.
+            connection: Admitted source-role connection used for streaming.
+            audio_format: Codec and PCM shape accepted by ``feed()``.
+        """
         self._client = client
         self._connection = connection
         self._codec = audio_format.codec
@@ -82,7 +92,7 @@ class SourceCapture:
         self._started = True
 
     async def feed(self, pcm: bytes, capture_timestamp_us: int | None = None) -> None:
-        """Encode and stream PCM captured at ``capture_timestamp_us``."""
+        """Encode PCM captured at a client-local first-sample timestamp, defaulting to now."""
         if not self._started:
             raise RuntimeError("SourceCapture.start() must be called before feed()")
         if not pcm:

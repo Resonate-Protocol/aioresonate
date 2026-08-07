@@ -7,8 +7,8 @@ import struct
 
 import pytest
 
-from aiosendspin.audio.bridge import AsrcSourceBridge, SourceBridge
 from aiosendspin.audio.format import AudioFormat
+from aiosendspin.audio.source_bridge import AsrcSourceBridge, SourceBridge
 
 FMT = AudioFormat(sample_rate=48000, bit_depth=16, channels=2)
 STRIDE = 4
@@ -312,7 +312,7 @@ def test_underrun_logs_once_while_starved(caplog: pytest.LogCaptureFixture) -> N
     bridge = _bridge()
     bridge.feed(_pattern(4800), 0)
     bridge.read(4800)  # drains the buffer
-    with caplog.at_level(logging.DEBUG, logger="aiosendspin.audio.bridge"):
+    with caplog.at_level(logging.DEBUG, logger="aiosendspin.audio.source_bridge"):
         bridge.read(480)
         bridge.read(480)
     assert sum("Underrun" in r.message for r in caplog.records) == 1
@@ -323,7 +323,7 @@ def test_drift_heartbeat_reports_occupancy_over_window(caplog: pytest.LogCapture
     bridge = _bridge(target_ms=100, max_ms=500)
     bridge.feed(_pattern(9600), 0)
     ts = 200_000
-    with caplog.at_level(logging.DEBUG, logger="aiosendspin.audio.bridge"):
+    with caplog.at_level(logging.DEBUG, logger="aiosendspin.audio.source_bridge"):
         for _ in range(1100):  # crosses the 10s correction window
             bridge.feed(_pattern(480), ts)
             bridge.read(480)
@@ -339,7 +339,7 @@ def test_asrc_heartbeat_reports_resample_ratio(caplog: pytest.LogCaptureFixture)
     )
     bridge.feed(_pattern(9600), 0)
     ts = 200_000
-    with caplog.at_level(logging.DEBUG, logger="aiosendspin.audio.bridge"):
+    with caplog.at_level(logging.DEBUG, logger="aiosendspin.audio.source_bridge"):
         for _ in range(1100):
             bridge.feed(_pattern(480), ts)
             bridge.read(480)

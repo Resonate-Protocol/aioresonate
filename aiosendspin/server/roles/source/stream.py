@@ -19,10 +19,13 @@ DEFAULT_QUEUE_MAXLEN = 512
 
 
 class SourceStream:
-    """Iterate decoded chunks from one source stream."""
+    """Consume decoded source PCM from ``SourceStreamStartedEvent.handle``.
+
+    The source role creates this handle. Iteration yields PCM with server timestamps.
+    """
 
     def __init__(self, audio_format: AudioFormat, *, maxlen: int = DEFAULT_QUEUE_MAXLEN) -> None:
-        """Create a stream carrying decoded audio at ``audio_format``."""
+        """Create the role-owned queue for decoded ``audio_format`` chunks."""
         self._audio_format = audio_format
         self._queue: deque[tuple[bytes, int]] = deque(maxlen=maxlen)
         self._event = asyncio.Event()

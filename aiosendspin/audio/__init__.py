@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from .bridge import AsrcSourceBridge, SourceBridge
 from .format import AudioFormat
+from .source_bridge import AsrcSourceBridge, SourceBridge
 
 __all__ = ["AsrcSourceBridge", "AudioFormat", "SourceBridge"]
