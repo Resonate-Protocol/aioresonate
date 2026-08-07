@@ -166,8 +166,6 @@ class ClientHelloPayload(SendspinModel):
         ClientHelloVisualizerSupportDraftR1 | None, Alias("visualizer@_draft_r1_support")
     ] = None
     """Visualizer support for clients on the legacy `visualizer@_draft_r1` wire."""
-    source_support: Annotated[ClientHelloSourceSupport | None, Alias("source@v1_support")] = None
-    """Source support configuration - only if source role is in supported_roles."""
     supported_pair_methods: list[PairMethodDescriptor] | None = None
     """Pairing methods this client offers."""
     unpaired_access: UnpairedAccess = field(default_factory=UnpairedAccess)
@@ -179,6 +177,8 @@ class ClientHelloPayload(SendspinModel):
     """Roles whose support object was provided without listing the role in
     ``supported_roles`` (dropped during parse), recorded for the server to flag.
     Not part of the wire schema (omitted when None)."""
+    source_support: Annotated[ClientHelloSourceSupport | None, Alias("source@v1_support")] = None
+    """Source support configuration - only if source role is in supported_roles."""
 
     # Static mapping: unversioned support key -> actual alias key.
     _SUPPORT_KEY_ALIASES: ClassVar[dict[str, str]] = {
@@ -315,11 +315,11 @@ class ClientStatePayload(SendspinModel):
     """
     player: PlayerStatePayload | None = None
     """Player state - only if client has player role."""
-    source: SourceStatePayload | None = None
-    """Source state - only if client has source role."""
     legacy_state_used: bool | None = None
     """Set when the parser read a legacy top-level `state` field, recorded for the server
     to flag. Not part of the wire schema (omitted when None)."""
+    source: SourceStatePayload | None = None
+    """Source state - only if client has source role."""
 
     @classmethod
     def __pre_deserialize__(cls, d: dict[str, Any]) -> dict[str, Any]:

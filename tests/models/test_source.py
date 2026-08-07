@@ -7,6 +7,7 @@ import pytest
 from aiosendspin.models.core import (
     ClientHelloPayload,
     ClientStatePayload,
+    PairMethodDescriptor,
     ServerCommandPayload,
 )
 from aiosendspin.models.source import (
@@ -17,7 +18,9 @@ from aiosendspin.models.source import (
 from aiosendspin.models.types import (
     AudioCodec,
     ClientMessage,
+    PairMethod,
     SignalState,
+    TrustLevel,
 )
 
 
@@ -57,11 +60,41 @@ def test_hello_drops_source_support_without_role() -> None:
     assert ClientHelloPayload.from_dict(hello_dict).source_support is None
 
 
+def test_hello_preserves_supported_pair_methods_positional_argument() -> None:
+    """Source support does not displace existing client/hello positional arguments."""
+    pair_methods = [PairMethodDescriptor(method=PairMethod.PAIRING_PSK)]
+    payload = ClientHelloPayload(
+        "Client",
+        [],
+        TrustLevel.NONE,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        pair_methods,
+    )
+
+    assert payload.supported_pair_methods == pair_methods
+    assert payload.source_support is None
+
+
 def test_client_state_carries_source_signal() -> None:
     """client/state parses the source subobject, which now carries only signal."""
     payload = ClientStatePayload.from_dict({"source": {"signal": "present"}})
     assert payload.source is not None
     assert payload.source.signal is SignalState.PRESENT
+
+
+def test_client_state_preserves_legacy_flag_positional_argument() -> None:
+    """Source state does not displace existing client/state positional arguments."""
+    payload = ClientStatePayload(True, None, True)  # noqa: FBT003
+
+    assert payload.legacy_state_used is True
+    assert payload.source is None
+    assert payload.to_dict() == {"available": True, "legacy_state_used": True}
 
 
 def test_server_command_source_carries_start_stop() -> None:
@@ -93,7 +126,7 @@ def test_client_stream_messages_dispatch_by_discriminator() -> None:
 
 
 def test_client_stream_start_header_optional_for_all_codecs() -> None:
-    """codec_header is optional on the wire (if necessary; e.g., FLAC), not enforced."""
+    """Message parsing leaves codec-specific header validation to the source role."""
     for codec in (AudioCodec.OPUS, AudioCodec.FLAC, AudioCodec.PCM):
         src = ClientStreamStartSource(codec=codec, channels=2, sample_rate=48000, bit_depth=16)
         assert src.codec_header is None
