@@ -876,6 +876,8 @@ class SendspinConnection:
             self._ensure_source_authorized()
             if not self.is_time_synchronized():
                 raise RuntimeError("Source capture requires a synchronized clock")
+            if self._exchange_in_progress:
+                raise RuntimeError("Connection is busy with an in-band exchange")
             await self._send_message_locked(message.to_json())
             self._source_stream_active = True
 
@@ -886,6 +888,8 @@ class SendspinConnection:
                 raise RuntimeError("Client is not connected")
             if not self._source_stream_active:
                 return
+            if self._exchange_in_progress:
+                raise RuntimeError("Connection is busy with an in-band exchange")
             await self._send_message_locked(ClientStreamEndMessage().to_json())
             self._source_stream_active = False
 

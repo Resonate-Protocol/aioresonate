@@ -9,7 +9,7 @@ import pytest
 
 from aiosendspin.client.connection import SendspinConnection
 from aiosendspin.models.core import ServerActivatePayload, ServerTimePayload
-from aiosendspin.models.types import Activity, GoodbyeReason, Roles
+from aiosendspin.models.types import Activity, AudioCodec, GoodbyeReason, Roles
 from aiosendspin.noise.trust_store import PskCategory, ResolvedPsk
 
 
@@ -153,6 +153,34 @@ async def test_send_source_chunk_rechecks_connection_under_lock() -> None:
 
     with pytest.raises(RuntimeError, match="not connected"):
         await send_task
+
+
+async def test_stream_start_rejected_during_in_band_exchange() -> None:
+    """A stream start during an in-band exchange fails instead of marking the stream active."""
+    ws = _FakeWs()
+    conn = _connection(ws, active_roles=[Roles.SOURCE.value], stream_active=False)
+    conn._exchange_in_progress = True  # noqa: SLF001
+
+    with pytest.raises(RuntimeError, match="in-band exchange"):
+        await conn.send_client_stream_start(
+            codec=AudioCodec.PCM, sample_rate=48000, channels=2, bit_depth=16, codec_header=None
+        )
+
+    assert not conn.is_source_stream_active()
+    assert ws.sent == []
+
+
+async def test_stream_end_rejected_during_in_band_exchange() -> None:
+    """A stream end during an in-band exchange fails instead of marking the stream inactive."""
+    ws = _FakeWs()
+    conn = _connection(ws, active_roles=[Roles.SOURCE.value], stream_active=True)
+    conn._exchange_in_progress = True  # noqa: SLF001
+
+    with pytest.raises(RuntimeError, match="in-band exchange"):
+        await conn.send_client_stream_end()
+
+    assert conn.is_source_stream_active()
+    assert ws.sent == []
 
 
 async def test_source_unavailable_ends_stream_before_state() -> None:
