@@ -998,11 +998,11 @@ class PushStream:
     ) -> int:
         """Return a safe minimum playback timestamp for late-join replay."""
         now_us = self._clock.now_us()
-        delay_us = role.get_static_delay_us() if role is not None else 0
-        effective_lead_us = max(0, min_lead_us)
         if role is not None:
-            effective_lead_us = max(effective_lead_us, role.get_required_lead_time_us())
-        target_us = now_us + effective_lead_us + delay_us
+            effective_lead_us = max(min_lead_us, self._role_send_ahead_us(role))
+        else:
+            effective_lead_us = max(0, min_lead_us)
+        target_us = now_us + effective_lead_us
         if align_to_channel_tail and channel_id is not None and channel_id in self._channel_timing:
             # For channels that currently have no other subscribers, anchor catch-up
             # to that channel's own live tail when it is near real time. If that tail
