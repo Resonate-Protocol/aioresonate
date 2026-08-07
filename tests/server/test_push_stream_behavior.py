@@ -272,8 +272,8 @@ async def test_late_join_target_includes_player_static_delay() -> None:
 
     stream = PushStream(loop=loop, clock=clock, group=group)
 
-    # now + max(LATE_JOINER_MIN_LEAD_US=100ms, required_lead=250ms) + static_delay=5s
-    assert stream.get_late_join_target_timestamp_us(role=role) == 6_250_000
+    # now + max(min_buffer=500ms, required_lead=250ms) + static_delay=5s
+    assert stream.get_late_join_target_timestamp_us(role=role) == 6_500_000
 
 
 @pytest.mark.asyncio
@@ -305,12 +305,37 @@ async def test_late_join_target_uses_required_lead_time() -> None:
     role = client.role("player@v1")
     assert role is not None
     role.static_delay_ms = 5_000
-    role.required_lead_time_ms = 400  # > 100ms default floor
+    role.required_lead_time_ms = 400
+    role.min_buffer_ms = 100  # below required_lead, so required_lead is the binding floor
 
     stream = PushStream(loop=loop, clock=clock, group=group)
 
-    # now + max(100ms, 400ms required_lead) + 5s static_delay
+    # now + max(100ms min_buffer, 400ms required_lead) + 5s static_delay
     assert stream.get_late_join_target_timestamp_us(role=role) == 6_400_000
+
+
+@pytest.mark.asyncio
+async def test_late_join_target_matches_fresh_start_floor() -> None:
+    """A rejoin gets the buffer horizon the client advertised, same as a fresh start.
+
+    Anchoring late joins at required_lead_time alone left a regrouped or reconnected
+    player with a fraction of the jitter headroom the same client gets on a fresh
+    start, so ordinary network jitter pushed chunks past their play deadline.
+    """
+    loop = asyncio.get_running_loop()
+    clock = ManualClock(now_us_value=1_000_000)
+    group = _DummyGroup(clients=[])
+    client, _ = _make_connected_player(loop, group, "p1", clock=clock)
+    role = client.role("player@v1")
+    assert role is not None
+    role.static_delay_ms = 0
+    role.required_lead_time_ms = 250
+    role.min_buffer_ms = 1_000
+
+    stream = PushStream(loop=loop, clock=clock, group=group)
+
+    # now + max(1s min_buffer, 250ms required_lead)
+    assert stream.get_late_join_target_timestamp_us(role=role) == 2_000_000
 
 
 @pytest.mark.asyncio
