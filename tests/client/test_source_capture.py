@@ -149,6 +149,23 @@ async def test_start_recovers_after_connection_ends_stream() -> None:
     assert [kind for kind, _ in conn.calls] == ["start", "start"]
 
 
+async def test_stop_discards_buffer_after_connection_ends_stream() -> None:
+    """Stopping after a wire end clears buffered capture state."""
+    conn = _FakeConnection()
+    capture = SourceCapture(_FakeClient(), conn, _pcm_format())  # type: ignore[arg-type]
+    await capture.start()
+    await capture.feed(sine_pcm_16bit(1), capture_timestamp_us=1_000_000)
+    conn.source_stream_active = False
+
+    await capture.stop()
+
+    with pytest.raises(RuntimeError, match="start"):
+        await capture.feed(sine_pcm_16bit(1))
+    await capture.start()
+    await capture.feed(sine_pcm_16bit(1200), capture_timestamp_us=2_000_000)
+    assert [timestamp for timestamp, _ in conn.chunks] == [2_000_000]
+
+
 def test_compute_source_timestamp_excludes_static_delay() -> None:
     """Capture timestamps skip the static delay that playback conversion applies."""
     conn = SendspinConnection.__new__(SendspinConnection)

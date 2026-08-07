@@ -107,16 +107,20 @@ class SourceCapture:
         """Flush the encoder and end the input stream."""
         if not self._started:
             return
-        for frame, _frame_duration_us in self._encoder.flush():
-            timestamp_us = self._connection.compute_source_timestamp(
-                self._next_capture_timestamp() - self._encoder.lookahead_us
-            )
-            await self._connection.send_source_chunk(frame, timestamp_us=timestamp_us)
-            self._consume_capture_samples(self._encoder.frame_samples)
-        await self._connection.send_client_stream_end()
-        self._encoder.reset()
-        self._capture_spans.clear()
-        self._started = False
+        try:
+            if not self._connection.is_source_stream_active():
+                return
+            for frame, _frame_duration_us in self._encoder.flush():
+                timestamp_us = self._connection.compute_source_timestamp(
+                    self._next_capture_timestamp() - self._encoder.lookahead_us
+                )
+                await self._connection.send_source_chunk(frame, timestamp_us=timestamp_us)
+                self._consume_capture_samples(self._encoder.frame_samples)
+            await self._connection.send_client_stream_end()
+        finally:
+            self._encoder.reset()
+            self._capture_spans.clear()
+            self._started = False
 
     def _next_capture_timestamp(self) -> int:
         if self._capture_spans:
