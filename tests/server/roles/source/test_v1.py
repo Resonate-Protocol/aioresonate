@@ -153,6 +153,20 @@ def test_impossible_declared_format_opens_no_stream(bad_format: dict[str, int]) 
     assert [e for e in client.events if isinstance(e, SourceStreamStartedEvent)] == []
 
 
+def test_opus_start_ignores_declared_bit_depth() -> None:
+    """An opus stream opens at 16-bit no matter what bit_depth the client declared."""
+    role, client = _make_role()
+    role.on_client_stream_start(
+        ClientStreamStartPayload(
+            source=ClientStreamStartSource(
+                codec=AudioCodec.OPUS, channels=2, sample_rate=48000, bit_depth=17
+            )
+        )
+    )
+    handle = next(e for e in client.events if isinstance(e, SourceStreamStartedEvent)).handle
+    assert handle.audio_format.bit_depth == 16
+
+
 def test_flac_start_requires_streaminfo_header() -> None:
     """A FLAC stream cannot open without its required STREAMINFO header."""
     role, client = _make_role()

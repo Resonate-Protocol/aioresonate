@@ -116,9 +116,11 @@ class SourceV1Role(Role):
         if self._stream_active:
             self._end_stream()
 
+        # The spec ignores bit_depth for opus, so decode at the canonical 16 bits.
+        bit_depth = 16 if source.codec is AudioCodec.OPUS else source.bit_depth
         audio_format = AudioFormat(
             sample_rate=source.sample_rate,
-            bit_depth=source.bit_depth,
+            bit_depth=bit_depth,
             channels=source.channels,
         )
         header = None
@@ -150,7 +152,7 @@ class SourceV1Role(Role):
             self._decoder = create_decoder(
                 source.codec.value,
                 sample_rate=source.sample_rate,
-                bit_depth=source.bit_depth,
+                bit_depth=bit_depth,
                 channels=source.channels,
                 codec_header=header,
             )
