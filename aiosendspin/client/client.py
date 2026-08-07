@@ -675,7 +675,7 @@ class SendspinClient:
         volume: int,
         muted: bool,
     ) -> None:
-        """Send the current player state to the server."""
+        """Send player state and availability. Use ``send_available()`` for availability only."""
         if self._admitted_connection is None:
             raise RuntimeError("Client is not connected")
         await self._admitted_connection.send_player_state(
