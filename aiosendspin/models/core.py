@@ -29,6 +29,11 @@ from .player import (
     StreamRequestFormatPlayer,
     StreamStartPlayer,
 )
+from .source import (
+    ClientHelloSourceSupport,
+    SourceCommandServerPayload,
+    SourceStatePayload,
+)
 from .types import (
     Activity,
     ClientMessage,
@@ -172,6 +177,8 @@ class ClientHelloPayload(SendspinModel):
     """Roles whose support object was provided without listing the role in
     ``supported_roles`` (dropped during parse), recorded for the server to flag.
     Not part of the wire schema (omitted when None)."""
+    source_support: Annotated[ClientHelloSourceSupport | None, Alias("source@v1_support")] = None
+    """Source support configuration."""
 
     # Static mapping: unversioned support key -> actual alias key.
     _SUPPORT_KEY_ALIASES: ClassVar[dict[str, str]] = {
@@ -252,6 +259,17 @@ class ClientHelloPayload(SendspinModel):
                 unlisted.append("visualizer@_draft_r1")
             self.visualizer_draft_r1_support = None
 
+        source_role_supported = Roles.SOURCE.value in self.supported_roles
+        if source_role_supported and self.source_support is None:
+            raise ValueError(
+                "source@v1_support (source_support alias) must be provided when "
+                "'source@v1' is in supported_roles"
+            )
+        if not source_role_supported:
+            if self.source_support is not None:
+                unlisted.append(Roles.SOURCE.value)
+            self.source_support = None
+
         # Overwrite so a client cannot spoof the record via the wire.
         self.unlisted_support_roles = unlisted or None
 
@@ -304,6 +322,8 @@ class ClientStatePayload(SendspinModel):
     legacy_state_used: bool | None = None
     """Set when the parser read a legacy top-level `state` field, recorded for the server
     to flag. Not part of the wire schema (omitted when None)."""
+    source: SourceStatePayload | None = None
+    """Source state."""
 
     @classmethod
     def __pre_deserialize__(cls, d: dict[str, Any]) -> dict[str, Any]:
@@ -548,6 +568,8 @@ class ServerCommandPayload(SendspinModel):
 
     player: PlayerCommandPayload | None = None
     """Player commands - only sent to clients with player role."""
+    source: SourceCommandServerPayload | None = None
+    """Source command - only sent to clients with source role."""
 
     class Config(SendspinConfig):
         """Config for parsing json messages."""

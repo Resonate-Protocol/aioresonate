@@ -27,6 +27,7 @@ if TYPE_CHECKING:
         ClientStatePayload,
         StreamRequestFormatPayload,
     )
+    from aiosendspin.models.source import ClientStreamStartPayload
     from aiosendspin.models.types import ServerMessage
     from aiosendspin.server.audio import AudioFormat, BufferTracker
     from aiosendspin.server.audio_transformers import AudioTransformer
@@ -288,6 +289,10 @@ class Role(ABC):
         """
         return None
 
+    def handles_inbound_binary(self, message_type: int) -> bool:  # noqa: ARG002
+        """Return whether this role consumes an inbound binary message type."""
+        return False
+
     def get_buffer_tracker(self) -> BufferTracker | None:
         """Return the role-owned buffer tracker, if any."""
         return self._buffer_tracker
@@ -371,6 +376,9 @@ class Role(ABC):
 
     def on_stream_end(self) -> None:  # noqa: B027
         """Handle stream stop."""
+
+    def on_binary_chunk(self, message_type: int, timestamp_us: int, data: bytes) -> None:  # noqa: B027
+        """Handle a declared inbound binary message."""
 
     # --- Lifecycle hooks ---
 
@@ -458,3 +466,9 @@ class Role(ABC):
 
         Handlers must be synchronous. For async operations, launch eager tasks.
         """
+
+    def on_client_stream_start(self, payload: ClientStreamStartPayload) -> None:  # noqa: B027
+        """Handle client_stream/start."""
+
+    def on_client_stream_end(self) -> None:  # noqa: B027
+        """Handle client_stream/end."""

@@ -18,7 +18,8 @@ from aiosendspin.models.core import (
     ServerStatePayload,
     StreamStartMessage,
 )
-from aiosendspin.models.player import ClientHelloPlayerSupport
+from aiosendspin.models.player import ClientHelloPlayerSupport, SupportedAudioFormat
+from aiosendspin.models.source import ClientHelloSourceSupport
 from aiosendspin.models.types import (
     Activity,
     GoodbyeReason,
@@ -37,6 +38,7 @@ from aiosendspin.noise.trust_store import ClientPairingStore, ResolvedPsk
 
 from .connection import DECODABLE_CODECS, UNSYNCED_PLAY_LEAD_US, SendspinConnection
 from .models import AudioFormat, ServerInfo
+from .source import SourceCapture
 
 logger = logging.getLogger(__name__)
 
@@ -84,7 +86,7 @@ DisconnectCallback = Callable[[], None]
 # Callback invoked with the abort reason when a non-closing pairing attempt ends.
 PairingAbortCallback = Callable[[PairAbortReason], None]
 
-# Callback invoked when server sends player commands (volume, mute).
+# Callback invoked when the server sends a command.
 ServerCommandCallback = Callable[[ServerCommandPayload], None]
 
 # Callback invoked when visualizer frames are received. Beat events are
@@ -121,6 +123,8 @@ class SendspinClient:
     """Artwork capabilities (only set if ARTWORK role is supported)."""
     _visualizer_support: ClientHelloVisualizerSupport | None
     """Visualizer capabilities (only set if VISUALIZER role is supported)."""
+    _source_support: ClientHelloSourceSupport | None
+    """Source capabilities."""
     _session: ClientSession | None
     """Optional aiohttp ClientSession for WebSocket connection."""
 
@@ -193,6 +197,7 @@ class SendspinClient:
         player_support: ClientHelloPlayerSupport | None = None,
         artwork_support: ClientHelloArtworkSupport | None = None,
         visualizer_support: ClientHelloVisualizerSupport | None = None,
+        source_support: ClientHelloSourceSupport | None = None,
         session: ClientSession | None = None,
         static_delay_ms: float = 0.0,
         required_lead_time_ms: float = 250.0,
@@ -241,6 +246,13 @@ class SendspinClient:
             self._visualizer_support = visualizer_support
         else:
             self._visualizer_support = None
+
+        if Roles.SOURCE in self._roles:
+            if source_support is None:
+                raise ValueError("source_support is required when SOURCE role is specified")
+            self._source_support = source_support
+        else:
+            self._source_support = None
         self._session = session
         self._owns_session = session is None
         self._loop = asyncio.get_running_loop()
@@ -311,6 +323,19 @@ class SendspinClient:
     def visualizer_support(self) -> ClientHelloVisualizerSupport | None:
         """Visualizer capabilities (only set if VISUALIZER role is supported)."""
         return self._visualizer_support
+
+    @property
+    def source_support(self) -> ClientHelloSourceSupport | None:
+        """Source capabilities."""
+        return self._source_support
+
+    def create_source_capture(self, audio_format: SupportedAudioFormat) -> SourceCapture:
+        """Create a capture for PCM matching ``audio_format`` on the source connection."""
+        if Roles.SOURCE not in self._roles:
+            raise RuntimeError("Client does not have the source role")
+        if self._admitted_connection is None:
+            raise RuntimeError("Client is not connected")
+        return SourceCapture(self, self._admitted_connection, audio_format)
 
     @property
     def pairing_store(self) -> ClientPairingStore:
@@ -650,12 +675,29 @@ class SendspinClient:
         volume: int,
         muted: bool,
     ) -> None:
-        """Send the current player state to the server."""
+        """Send player state, including client availability.
+
+        Player clients can report availability here. Use ``send_available()`` when no
+        player fields changed.
+        """
         if self._admitted_connection is None:
             raise RuntimeError("Client is not connected")
         await self._admitted_connection.send_player_state(
             available=available, volume=volume, muted=muted
         )
+
+    async def send_available(self, *, available: bool) -> None:
+        """Report whether this client can participate in Sendspin.
+
+        Use this for non-player clients or when no player fields changed.
+        An active source stream ends before the client reports unavailable.
+
+        Args:
+            available: True when operational and ready, False when unavailable.
+        """
+        if self._admitted_connection is None:
+            raise RuntimeError("Client is not connected")
+        await self._admitted_connection.send_available(available=available)
 
     async def send_group_command(
         self,

@@ -44,6 +44,7 @@ from typing import TYPE_CHECKING, Any, cast
 import orjson
 from aiohttp import ClientWebSocketResponse, WSMessage, WSMsgType, web
 
+from aiosendspin.models import BINARY_HEADER_SIZE, unpack_binary_header
 from aiosendspin.models.core import (
     ClientCommandMessage,
     ClientGoodbyeMessage,
@@ -80,6 +81,10 @@ from aiosendspin.models.management import (
     RecordSummary,
     ServerUnpairMessage,
     StorageAccounting,
+)
+from aiosendspin.models.source import (
+    ClientStreamEndMessage,
+    ClientStreamStartMessage,
 )
 from aiosendspin.models.types import (
     CLOSING_ABORT_REASONS,
@@ -123,7 +128,7 @@ from .client import SendspinClient
 from .compliance import ClientComplianceError
 from .events import ClientEvent, ClientGroupChangedEvent, GroupEvent, GroupStateChangedEvent
 from .roles.negotiation import negotiate_roles
-from .roles.registry import ROLE_FACTORIES, ROLE_SUPPORT_SPECS
+from .roles.registry import ROLE_FACTORIES, ROLE_SUPPORT_SPECS, role_requires_pairing
 
 if TYPE_CHECKING:
     from .audio import BufferTracker
@@ -1028,7 +1033,8 @@ class SendspinConnection:
         if self._client is None:
             client = self._server.get_or_create_client(client_id)
             if not self.is_encrypted:
-                initial_active = self._negotiated_roles  # legacy: no activation filtering
+                # Legacy unencrypted is never paired, so drop pairing-required roles.
+                initial_active = self._filter_pairing_roles(self._negotiated_roles)
             elif self._is_pairing():
                 initial_active = []
             else:
@@ -1097,11 +1103,22 @@ class SendspinConnection:
         )
 
     @property
+    def _is_long_term_paired(self) -> bool:
+        """Whether the connection was admitted by a long-term Sendspin PSK (trust ``user``)."""
+        return self._noise_psk is not None and self._noise_psk.category is PskCategory.LONG_TERM
+
+    def _filter_pairing_roles(self, role_ids: list[str]) -> list[str]:
+        """Drop roles that require pairing unless the connection is long-term paired."""
+        if self._is_long_term_paired:
+            return role_ids
+        return [rid for rid in role_ids if not role_requires_pairing(rid)]
+
+    @property
     def _roles_to_activate(self) -> list[str]:
         """Active roles to advertise — the negotiated set when playback-capable, else empty."""
         if not self._playback_capable:
             return []
-        return self._negotiated_roles
+        return self._filter_pairing_roles(self._negotiated_roles)
 
     @property
     def _desired_activities(self) -> list[Activity]:
@@ -1584,7 +1601,7 @@ class SendspinConnection:
                     break
 
                 if msg.type == WSMsgType.BINARY:
-                    self._logger.warning("Received binary message from client (spec violation)")
+                    self._route_inbound_binary(cast("bytes", msg.data))
                     continue
 
                 if msg.type != WSMsgType.TEXT:
@@ -1631,6 +1648,23 @@ class SendspinConnection:
             if not cancelled:
                 self._connection_done.set()
 
+    def _route_inbound_binary(self, data: bytes) -> None:
+        """Route an inbound binary chunk to the role that declares its message type."""
+        if self._client is None:
+            return
+        if len(data) < BINARY_HEADER_SIZE:
+            self._logger.warning("Inbound binary message shorter than header, dropping")
+            return
+        header = unpack_binary_header(data)
+        payload = data[BINARY_HEADER_SIZE:]
+        for role in self._client.active_roles:
+            if role.handles_inbound_binary(header.message_type):
+                role.on_binary_chunk(header.message_type, header.timestamp_us, payload)
+                return
+        self._logger.warning(
+            "Received unhandled binary message type %s from client", header.message_type
+        )
+
     async def _handle_message(self, message: ClientMessage, timestamp_us: int) -> None:
         """Handle a single client message, dispatching to roles or the connection."""
         if isinstance(message, ClientHelloMessage):
@@ -1651,35 +1685,7 @@ class SendspinConnection:
             return
 
         if isinstance(message, ClientStateMessage):
-            payload = message.payload
-            if self._client is None:
-                return
-
-            # Validate before any side effect, so a strict-mode rejection never leaves
-            # the client marked connected or its availability already changed.
-            is_initial = self.requires_initial_state() and not self._initial_state_received
-            if is_initial:
-                self._flag_initial_state_deviations(payload)
-            if payload.legacy_state_used:
-                self._flag_noncompliance("client/state used the legacy top-level 'state' field")
-            self._flag_inactive_role_payloads("client/state", {"player": payload.player})
-            for role in self._client.active_roles:
-                for reason in role.client_state_deviations(payload):
-                    self._flag_noncompliance(f"client/state {reason}")
-
-            if is_initial:
-                self._initial_state_received = True
-                if self._initial_state_timeout_handle is not None:
-                    self._initial_state_timeout_handle.cancel()
-                    self._initial_state_timeout_handle = None
-                self._client.mark_connected()
-                self._server.on_client_first_connect(self._client.client_id)
-                self._flush_pending_binary()
-
-            if payload.available is not None and payload.available != self._client.available:
-                await self._client.handle_availability_change(available=payload.available)
-            for role in self._client.active_roles:
-                role.on_client_state(payload)
+            await self._handle_client_state(message.payload)
             return
 
         if isinstance(message, StreamRequestFormatMessage):
@@ -1704,6 +1710,20 @@ class SendspinConnection:
                 role.on_command(message.payload)
             return
 
+        if isinstance(message, ClientStreamStartMessage):
+            if self._client is None:
+                return
+            for role in self._client.active_roles:
+                role.on_client_stream_start(message.payload)
+            return
+
+        if isinstance(message, ClientStreamEndMessage):
+            if self._client is None:
+                return
+            for role in self._client.active_roles:
+                role.on_client_stream_end()
+            return
+
         if isinstance(message, ManagementResultMessage):
             self._resolve_management(message.payload)
             return
@@ -1717,6 +1737,38 @@ class SendspinConnection:
             retry = message.payload.reason == GoodbyeReason.RESTART
             await self.disconnect(retry_connection=retry)
             return
+
+    async def _handle_client_state(self, payload: ClientStatePayload) -> None:
+        """Apply a client/state update: compliance checks, initial-state gate, dispatch."""
+        if self._client is None:
+            return
+
+        # Validate before applying initial state.
+        is_initial = self.requires_initial_state() and not self._initial_state_received
+        if is_initial:
+            self._flag_initial_state_deviations(payload)
+        if payload.legacy_state_used:
+            self._flag_noncompliance("client/state used the legacy top-level 'state' field")
+        self._flag_inactive_role_payloads(
+            "client/state", {"player": payload.player, "source": payload.source}
+        )
+        for role in self._client.active_roles:
+            for reason in role.client_state_deviations(payload):
+                self._flag_noncompliance(f"client/state {reason}")
+
+        if is_initial:
+            self._initial_state_received = True
+            if self._initial_state_timeout_handle is not None:
+                self._initial_state_timeout_handle.cancel()
+                self._initial_state_timeout_handle = None
+            self._client.mark_connected()
+            self._server.on_client_first_connect(self._client.client_id)
+            self._flush_pending_binary()
+
+        if payload.available is not None and payload.available != self._client.available:
+            await self._client.handle_availability_change(available=payload.available)
+        for role in self._client.active_roles:
+            role.on_client_state(payload)
 
     def _check_late_binary(
         self,

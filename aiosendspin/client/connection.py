@@ -12,7 +12,12 @@ from typing import TYPE_CHECKING, NoReturn, assert_never
 
 from aiohttp import ClientWebSocketResponse, WSMessage, WSMsgType, web
 
-from aiosendspin.models import BINARY_HEADER_SIZE, BinaryMessageType, unpack_binary_header
+from aiosendspin.models import (
+    BINARY_HEADER_SIZE,
+    BinaryMessageType,
+    pack_binary_header_raw,
+    unpack_binary_header,
+)
 from aiosendspin.models.controller import ControllerCommandPayload
 from aiosendspin.models.core import (
     ClientCommandMessage,
@@ -54,6 +59,13 @@ from aiosendspin.models.management import (
     ServerUnpairMessage,
 )
 from aiosendspin.models.player import PlayerStatePayload, StreamStartPlayer
+from aiosendspin.models.source import (
+    ClientStreamEndMessage,
+    ClientStreamStartMessage,
+    ClientStreamStartPayload,
+    ClientStreamStartSource,
+    SourceStatePayload,
+)
 from aiosendspin.models.types import (
     CLOSING_ABORT_REASONS,
     Activity,
@@ -66,6 +78,7 @@ from aiosendspin.models.types import (
     PlayerCommand,
     Roles,
     ServerMessage,
+    SignalState,
     TrustLevel,
     UndefinedField,
     role_family,
@@ -227,6 +240,8 @@ class SendspinConnection:
     """True if visualizer stream is active."""
     _artwork_stream_active: bool = False
     """True if artwork stream is active."""
+    _source_stream_active: bool = False
+    """True between client_stream/start and client_stream/end for the source role."""
     _current_visualizer_config: StreamStartVisualizer | None = None
     """Current visualizer config from stream/start."""
 
@@ -243,6 +258,7 @@ class SendspinConnection:
         self._reported_available: bool = True
         self._reported_volume = client.initial_volume
         self._reported_muted = client.initial_muted
+        self._reported_source_signal: SignalState | None = None
         self._selected_pair_method: PairMethod | None = None
         self._pairing_index = 0
         self._pairing_attempt_in_progress = False
@@ -432,6 +448,10 @@ class SendspinConnection:
         effective_roles = (
             payload.active_roles if payload.active_roles is not None else self._active_roles
         )
+        if category is not PskCategory.LONG_TERM and any(
+            role_family(role_id) == "source" for role_id in effective_roles
+        ):
+            return GoodbyeReason.UNAUTHORIZED
         has_roles = bool(effective_roles)
         unpaired_access = await self._unpaired_access_enabled()
         if not _admissible(
@@ -447,7 +467,13 @@ class SendspinConnection:
             return GoodbyeReason.UNAUTHORIZED
         self._activities = payload.activities
         if payload.active_roles is not None:
+            source_dropped = (
+                Roles.SOURCE.value in self._active_roles
+                and Roles.SOURCE.value not in payload.active_roles
+            )
             self._active_roles = payload.active_roles
+            if source_dropped and self._source_stream_active and self.connected:
+                await self.send_client_stream_end()
         self._selected_pair_method = payload.selected_pair_method
         await self._client.note_playback_activity(self)
         return None
@@ -477,13 +503,14 @@ class SendspinConnection:
 
     async def _send_full_client_state(self) -> None:
         """Push the client's full state to the server, (re)populating its role instances."""
-        if Roles.PLAYER not in self._client.roles or not self._is_role_active("player"):
-            return
-        await self.send_player_state(
-            available=self._reported_available,
-            volume=self._reported_volume,
-            muted=self._reported_muted,
-        )
+        if Roles.PLAYER in self._client.roles and self._is_role_active("player"):
+            await self.send_player_state(
+                available=self._reported_available,
+                volume=self._reported_volume,
+                muted=self._reported_muted,
+            )
+        if self._is_role_active("source") and self.is_time_synchronized():
+            await self._send_source_state()
 
     async def _pair(self) -> None:
         """Run one pairing attempt; on a non-closing abort stay in pairing for a retry."""
@@ -747,6 +774,7 @@ class SendspinConnection:
         self._current_player = None
         self._artwork_stream_active = False
         self._visualizer_stream_active = False
+        self._source_stream_active = False
         self._current_visualizer_config = None
         self._activities = []
         self._active_roles = []
@@ -764,7 +792,7 @@ class SendspinConnection:
         """Send the current player state to the server."""
         if not self.connected:
             raise RuntimeError("Client is not connected")
-        self._reported_available = available
+        await self._update_reported_available(available=available)
         self._reported_volume = volume
         self._reported_muted = muted
         message = ClientStateMessage(
@@ -781,6 +809,24 @@ class SendspinConnection:
             )
         )
         await self._send_message(message.to_json())
+
+    async def send_available(self, *, available: bool) -> None:
+        """Send the current client-level availability."""
+        if not self.connected:
+            raise RuntimeError("Client is not connected")
+        await self._update_reported_available(available=available)
+        if self._is_role_active("source"):
+            if not self.is_time_synchronized():
+                return
+            await self._send_source_state()
+            return
+        message = ClientStateMessage(payload=ClientStatePayload(available=available))
+        await self._send_message(message.to_json())
+
+    async def _update_reported_available(self, *, available: bool) -> None:
+        if not available and self._source_stream_active:
+            await self.send_client_stream_end()
+        self._reported_available = available
 
     async def send_group_command(
         self,
@@ -805,6 +851,83 @@ class SendspinConnection:
         message = ClientCommandMessage(payload=payload)
         await self._send_message(message.to_json())
 
+    async def send_client_stream_start(
+        self,
+        *,
+        codec: AudioCodec,
+        sample_rate: int,
+        channels: int,
+        bit_depth: int,
+        codec_header: str | None,
+    ) -> None:
+        """Start a source stream."""
+        message = ClientStreamStartMessage(
+            payload=ClientStreamStartPayload(
+                source=ClientStreamStartSource(
+                    codec=codec,
+                    channels=channels,
+                    sample_rate=sample_rate,
+                    bit_depth=bit_depth,
+                    codec_header=codec_header,
+                )
+            )
+        )
+        async with self._send_lock:
+            self._ensure_source_authorized()
+            if not self.is_time_synchronized():
+                raise RuntimeError("Source capture requires a synchronized clock")
+            if self._exchange_in_progress:
+                raise RuntimeError("Connection is busy with an in-band exchange")
+            await self._send_message_locked(message.to_json())
+            self._source_stream_active = True
+
+    async def send_client_stream_end(self) -> None:
+        """End the source stream."""
+        async with self._send_lock:
+            if not self.connected:
+                raise RuntimeError("Client is not connected")
+            if not self._source_stream_active:
+                return
+            if self._exchange_in_progress:
+                raise RuntimeError("Connection is busy with an in-band exchange")
+            await self._send_message_locked(ClientStreamEndMessage().to_json())
+            self._source_stream_active = False
+
+    async def send_source_chunk(self, frame: bytes, *, timestamp_us: int) -> None:
+        """Send an encoded source audio frame."""
+        header = pack_binary_header_raw(BinaryMessageType.SOURCE_AUDIO_CHUNK.value, timestamp_us)
+        async with self._send_lock:
+            self._ensure_source_authorized(require_stream=True)
+            await self._send_bytes_locked(header + frame)
+
+    async def send_source_signal(self, signal: SignalState) -> None:
+        """Report source signal presence."""
+        self._ensure_source_authorized()
+        self._reported_source_signal = signal
+        if not self.is_time_synchronized():
+            return
+        await self._send_source_state()
+
+    async def _send_source_state(self) -> None:
+        """Send current source state."""
+        message = ClientStateMessage(
+            payload=ClientStatePayload(
+                available=self._reported_available,
+                source=SourceStatePayload(signal=self._reported_source_signal),
+            )
+        )
+        await self._send_message(message.to_json())
+
+    def _ensure_source_authorized(self, *, require_stream: bool = False) -> None:
+        if not self.connected:
+            raise RuntimeError("Client is not connected")
+        if self._noise_psk is None or self._noise_psk.category is not PskCategory.LONG_TERM:
+            raise RuntimeError("Source role requires a paired connection")
+        if not self._is_role_active("source"):
+            raise RuntimeError("Source role is not active")
+        if require_stream and not self._source_stream_active:
+            raise RuntimeError("Source stream is not active")
+
     def is_time_synchronized(self) -> bool:
         """Return whether time synchronization with the server has converged."""
         return self._time_filter.is_synchronized
@@ -817,6 +940,7 @@ class SendspinConnection:
             player_support=self._client.player_support,
             artwork_support=self._client.artwork_support,
             visualizer_support=self._client.visualizer_support,
+            source_support=self._client.source_support,
             trust_level=self._compute_trust(),
             supported_pair_methods=[
                 await self._pair_method_descriptor(m) for m in await self._supported_pair_methods()
@@ -863,12 +987,29 @@ class SendspinConnection:
     async def _send_message(self, payload: str, *, force: bool = False) -> None:
         """Send a JSON frame; ``force`` bypasses the in-band-exchange suppression."""
         async with self._send_lock:
-            # Re-check under the lock: disconnect() can null _ws while we await it.
-            if self._ws is None:
-                raise RuntimeError("WebSocket is not connected")
-            if self._exchange_in_progress and not force:
-                return
-            await self._ws.send_str(payload)
+            await self._send_message_locked(payload, force=force)
+
+    async def _send_message_locked(self, payload: str, *, force: bool = False) -> None:
+        if self._ws is None:
+            raise RuntimeError("WebSocket is not connected")
+        if self._exchange_in_progress and not force:
+            return
+        await self._ws.send_str(payload)
+
+    async def _send_bytes(self, payload: bytes) -> None:
+        async with self._send_lock:
+            await self._send_bytes_locked(payload)
+
+    async def _send_bytes_locked(self, payload: bytes) -> None:
+        if self._ws is None:
+            raise RuntimeError("WebSocket is not connected")
+        if self._exchange_in_progress:
+            return
+        await self._ws.send_bytes(payload)
+
+    def is_source_stream_active(self) -> bool:
+        """Return whether this connection has an open source stream."""
+        return self._source_stream_active
 
     @asynccontextmanager
     async def _exchange(self) -> AsyncIterator[None]:
@@ -927,7 +1068,7 @@ class SendspinConnection:
             case ServerActivateMessage(payload=payload):
                 await self._handle_server_activate(payload)
             case ServerTimeMessage(payload=payload):
-                self._handle_server_time(payload)
+                await self._handle_server_time(payload)
             case StreamStartMessage():
                 await self._handle_stream_start(message)
             case StreamClearMessage():
@@ -1013,6 +1154,7 @@ class SendspinConnection:
         self, payload: ServerActivatePayload, *, resync: bool = False
     ) -> None:
         was_player_active = self._is_role_active("player")
+        was_source_active = self._is_role_active("source")
         if (reason := await self._apply_activation(payload)) is not None:
             await self._goodbye_and_disconnect(reason)
             return
@@ -1020,7 +1162,9 @@ class SendspinConnection:
             await self._pair()
             return
         self._resume_time_sync()
-        if resync or not was_player_active:
+        player_activated = not was_player_active and self._is_role_active("player")
+        source_activated = not was_source_active and self._is_role_active("source")
+        if resync or player_activated or source_activated:
             await self._send_full_client_state()
 
     async def _pause_time_sync(self) -> None:
@@ -1035,7 +1179,8 @@ class SendspinConnection:
         if self._time_task is None or self._time_task.done():
             self._time_task = self._client.loop.create_task(self._time_sync_loop())
 
-    def _handle_server_time(self, payload: ServerTimePayload) -> None:
+    async def _handle_server_time(self, payload: ServerTimePayload) -> None:
+        was_synchronized = self._time_filter.is_synchronized
         now_us = self.now_us()
         offset = (
             (payload.server_received - payload.client_transmitted)
@@ -1046,6 +1191,12 @@ class SendspinConnection:
             - (payload.server_transmitted - payload.server_received)
         ) / 2
         self._time_filter.update(round(offset), round(delay), now_us)
+        if (
+            not was_synchronized
+            and self._time_filter.is_synchronized
+            and self._is_role_active("source")
+        ):
+            await self._send_source_state()
 
     async def _handle_stream_start(self, message: StreamStartMessage) -> None:
         if message.payload.visualizer is not None:
@@ -1301,6 +1452,10 @@ class SendspinConnection:
         """Convert a client timestamp to a server timestamp, with static delay removed."""
         adjusted_client_time = client_timestamp_us + self._static_delay_us
         return self._time_filter.compute_server_time(adjusted_client_time)
+
+    def compute_source_timestamp(self, capture_timestamp_us: int) -> int:
+        """Convert a capture timestamp to server time without playback delay."""
+        return self._time_filter.compute_server_time(capture_timestamp_us)
 
     async def _time_sync_loop(self) -> None:
         try:

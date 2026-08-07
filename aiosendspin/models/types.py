@@ -81,6 +81,8 @@ class Roles(Enum):
     """
     COLOR = "color@v1"
     """Receives colors derived from the current audio."""
+    SOURCE = "source@v1"
+    """Captures audio from a local input and streams it to the server."""
 
 
 class BinaryMessageType(Enum):
@@ -118,6 +120,10 @@ class BinaryMessageType(Enum):
     VISUALIZATION_PITCH = 21
     """Perceived pitch (MIDI 8.8 + confidence) (Visualizer role, slot 5)."""
 
+    # Source role (bits 000011xx, IDs 12-15):
+    SOURCE_AUDIO_CHUNK = 12
+    """Encoded audio frame captured by a source client (Source role, slot 0)."""
+
 
 class RepeatMode(Enum):
     """Enum for Repeat Modes."""
@@ -125,6 +131,13 @@ class RepeatMode(Enum):
     OFF = "off"
     ONE = "one"
     ALL = "all"
+
+
+class SignalState(Enum):
+    """Line-sensing/signal presence reported by a source that supports it."""
+
+    PRESENT = "present"
+    ABSENT = "absent"
 
 
 class PlaybackStateType(Enum):
