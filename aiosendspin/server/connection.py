@@ -1658,7 +1658,7 @@ class SendspinConnection:
         header = unpack_binary_header(data)
         payload = data[BINARY_HEADER_SIZE:]
         for role in self._client.active_roles:
-            if header.message_type in role.handled_binary_types:
+            if role.handles_inbound_binary(header.message_type):
                 role.on_binary_chunk(header.message_type, header.timestamp_us, payload)
                 return
         self._logger.warning(

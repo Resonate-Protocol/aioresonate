@@ -5,7 +5,7 @@ from __future__ import annotations
 import base64
 import binascii
 import logging
-from typing import TYPE_CHECKING, ClassVar
+from typing import TYPE_CHECKING
 
 from aiosendspin.audio.codecs import create_decoder
 from aiosendspin.audio.format import AudioFormat
@@ -32,10 +32,6 @@ logger = logging.getLogger(__name__)
 class SourceV1Role(Role):
     """Per-connection role that decodes audio streamed up by a source client."""
 
-    handled_binary_types: ClassVar[frozenset[int]] = frozenset(
-        {BinaryMessageType.SOURCE_AUDIO_CHUNK.value}
-    )
-
     def __init__(self, client: SendspinClient | None = None) -> None:
         """Initialize the source role."""
         if client is None:
@@ -60,6 +56,10 @@ class SourceV1Role(Role):
     def stream_active(self) -> bool:
         """Whether the client currently has an open input stream."""
         return self._stream_active
+
+    def handles_inbound_binary(self, message_type: int) -> bool:
+        """Return whether this role consumes the source audio message type."""
+        return message_type == BinaryMessageType.SOURCE_AUDIO_CHUNK.value
 
     @property
     def role_family(self) -> str:

@@ -104,10 +104,10 @@ async def test_pcm_loopback_is_bit_exact_through_role() -> None:
 
 
 def test_role_declares_only_the_source_binary_type() -> None:
-    """The connection routes by handled_binary_types, which holds only the source type."""
+    """The source role consumes only the source audio binary type."""
     role, _client = _make_role()
-    assert BinaryMessageType.SOURCE_AUDIO_CHUNK.value in role.handled_binary_types
-    assert BinaryMessageType.AUDIO_CHUNK.value not in role.handled_binary_types
+    assert role.handles_inbound_binary(BinaryMessageType.SOURCE_AUDIO_CHUNK.value)
+    assert not role.handles_inbound_binary(BinaryMessageType.AUDIO_CHUNK.value)
 
 
 def test_binary_chunk_dropped_when_inactive() -> None:

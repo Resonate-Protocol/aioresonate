@@ -13,7 +13,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from dataclasses import dataclass
 from functools import cached_property
-from typing import TYPE_CHECKING, Any, ClassVar
+from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
 from aiosendspin.models import BinaryMessageType, pack_binary_header_raw
@@ -225,9 +225,6 @@ class Role(ABC):
     _late_skips_since_log: int = 0
     """Count of skipped late messages since last log."""
 
-    handled_binary_types: ClassVar[frozenset[int]] = frozenset()
-    """Inbound binary message types consumed by this role."""
-
     @property
     @abstractmethod
     def role_id(self) -> str:
@@ -291,6 +288,10 @@ class Role(ABC):
         - Whether to track in buffer tracker
         """
         return None
+
+    def handles_inbound_binary(self, message_type: int) -> bool:  # noqa: ARG002
+        """Return whether this role consumes an inbound binary message type."""
+        return False
 
     def get_buffer_tracker(self) -> BufferTracker | None:
         """Return the role-owned buffer tracker, if any."""

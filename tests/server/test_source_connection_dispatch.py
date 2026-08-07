@@ -20,12 +20,13 @@ class _RecordingRole:
     role_family = "source"
 
     def __init__(self, *, consume: bool = True) -> None:
-        self.handled_binary_types = (
-            frozenset({BinaryMessageType.SOURCE_AUDIO_CHUNK.value}) if consume else frozenset()
-        )
+        self.consume = consume
         self.binary: list[tuple[int, int, bytes]] = []
         self.starts: list[ClientStreamStartPayload] = []
         self.ends = 0
+
+    def handles_inbound_binary(self, message_type: int) -> bool:
+        return self.consume and message_type == BinaryMessageType.SOURCE_AUDIO_CHUNK.value
 
     def on_binary_chunk(self, message_type: int, timestamp_us: int, data: bytes) -> None:
         self.binary.append((message_type, timestamp_us, data))
