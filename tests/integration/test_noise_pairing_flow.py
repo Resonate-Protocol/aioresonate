@@ -14,6 +14,7 @@ from aiohttp.test_utils import TestServer
 from aiosendspin.client.client import SendspinClient as SdkClient
 from aiosendspin.client.models import PairingSupport
 from aiosendspin.models.core import (
+    ActivatePairing,
     ClientHelloMessage,
     ClientHelloPayload,
     ClientStateMessage,
@@ -493,6 +494,96 @@ async def test_live_pairing_dynamic_pin() -> None:
             assert client_record.psk_id == server_record.psk_id
             # Both floors default to 6, so the negotiated PIN is 6 digits.
             assert len(shown.result()) == 6
+        finally:
+            await client.disconnect()
+
+
+async def test_live_pairing_dynamic_pin_carries_language_hint() -> None:
+    """The attempt's languages reach the client on the pairing server/activate."""
+    server_store = InMemoryServerPairingStore()
+    server = _make_server(server_store)
+    client_identity = Identity.generate()
+    client_store = InMemoryClientPairingStore()
+
+    loop = asyncio.get_running_loop()
+    shown: asyncio.Future[str] = loop.create_future()
+    activation: asyncio.Future[ActivatePairing] = loop.create_future()
+
+    async def display(pin: str | None) -> None:
+        if pin is None or shown.done():
+            return
+        shown.set_result(pin)
+        conn = client._admitted_connection  # noqa: SLF001 - assert on the received activation
+        assert conn is not None
+        assert conn._selected_pairing is not None  # noqa: SLF001
+        activation.set_result(conn._selected_pairing)  # noqa: SLF001
+
+    async def provide() -> str:
+        return await shown
+
+    async with _serve(server) as url:
+        client = make_sdk_client(
+            identity=client_identity,
+            pairing_store=client_store,
+            client_name="c",
+            roles=[Roles.CONTROLLER],
+            pairing_support=PairingSupport(pin_display=display),
+        )
+        try:
+            await client.connect(url)
+            conn = await _find_connection_by_client_id(server, client_identity.peer_id)
+            await conn.initiate_pairing(
+                PairingAttempt(
+                    method=PairMethod.DYNAMIC_PIN,
+                    pin_provider=provide,
+                    languages=("ca", "es", "en"),
+                )
+            )
+            await _await_long_term_record(client_store, server.id)
+            assert activation.result().languages == ["ca", "es", "en"]
+        finally:
+            await client.disconnect()
+
+
+async def test_live_pairing_dynamic_pin_omits_absent_language_hint() -> None:
+    """An attempt with no languages leaves the hint off the activation."""
+    server_store = InMemoryServerPairingStore()
+    server = _make_server(server_store)
+    client_identity = Identity.generate()
+    client_store = InMemoryClientPairingStore()
+
+    loop = asyncio.get_running_loop()
+    shown: asyncio.Future[str] = loop.create_future()
+    activation: asyncio.Future[ActivatePairing] = loop.create_future()
+
+    async def display(pin: str | None) -> None:
+        if pin is None or shown.done():
+            return
+        shown.set_result(pin)
+        conn = client._admitted_connection  # noqa: SLF001 - assert on the received activation
+        assert conn is not None
+        assert conn._selected_pairing is not None  # noqa: SLF001
+        activation.set_result(conn._selected_pairing)  # noqa: SLF001
+
+    async def provide() -> str:
+        return await shown
+
+    async with _serve(server) as url:
+        client = make_sdk_client(
+            identity=client_identity,
+            pairing_store=client_store,
+            client_name="c",
+            roles=[Roles.CONTROLLER],
+            pairing_support=PairingSupport(pin_display=display),
+        )
+        try:
+            await client.connect(url)
+            conn = await _find_connection_by_client_id(server, client_identity.peer_id)
+            await conn.initiate_pairing(
+                PairingAttempt(method=PairMethod.DYNAMIC_PIN, pin_provider=provide)
+            )
+            await _await_long_term_record(client_store, server.id)
+            assert activation.result().languages is None
         finally:
             await client.disconnect()
 

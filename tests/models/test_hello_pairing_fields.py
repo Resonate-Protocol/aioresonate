@@ -70,3 +70,27 @@ def test_activate_pairing_omits_pin_length_for_non_dynamic_methods() -> None:
     )
     raw = orjson.loads(payload.to_json())
     assert raw["pairing"] == {"method": "static_pin"}
+
+
+def test_activate_pairing_languages_round_trip() -> None:
+    """The dynamic-PIN pairing object carries the spoken-emission language hint, or omits it."""
+    payload = ServerActivatePayload(
+        activities=[Activity.PAIRING],
+        pairing=ActivatePairing(
+            method=PairMethod.DYNAMIC_PIN, pin_length=6, languages=["ca", "es", "en"]
+        ),
+    )
+    restored = ServerActivatePayload.from_json(payload.to_json())
+    assert restored.pairing is not None
+    assert restored.pairing.languages == ["ca", "es", "en"]
+    bare = ActivatePairing(method=PairMethod.DYNAMIC_PIN, pin_length=6)
+    assert "languages" not in orjson.loads(bare.to_json())
+
+
+def test_pair_method_descriptor_locations_round_trip() -> None:
+    """A static-secret descriptor carries the locations hint; others omit it."""
+    descriptor = PairMethodDescriptor(method=PairMethod.STATIC_PIN, locations=["device", "leaflet"])
+    restored = PairMethodDescriptor.from_json(descriptor.to_json())
+    assert restored.locations == ["device", "leaflet"]
+    bare = PairMethodDescriptor(method=PairMethod.PAIRING_PSK)
+    assert orjson.loads(bare.to_json()) == {"method": "pairing_psk"}
