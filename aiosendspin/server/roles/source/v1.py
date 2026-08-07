@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import binascii
 import logging
 from typing import TYPE_CHECKING, ClassVar
 
@@ -10,7 +11,7 @@ from aiosendspin.audio.codecs import create_decoder
 from aiosendspin.audio.format import AudioFormat
 from aiosendspin.models.core import ServerCommandMessage, ServerCommandPayload
 from aiosendspin.models.source import SourceCommandServerPayload
-from aiosendspin.models.types import BinaryMessageType
+from aiosendspin.models.types import AudioCodec, BinaryMessageType
 from aiosendspin.server.roles.base import Role
 
 from .events import (
@@ -128,7 +129,26 @@ class SourceV1Role(Role):
             bit_depth=source.bit_depth,
             channels=source.channels,
         )
-        header = base64.b64decode(source.codec_header) if source.codec_header else None
+        header = None
+        if source.codec_header is not None:
+            try:
+                header = base64.b64decode(source.codec_header, validate=True)
+            except (binascii.Error, ValueError):
+                self._client.flag_noncompliance(
+                    "client_stream/start codec_header is not valid Base64"
+                )
+                return
+        if source.codec is AudioCodec.FLAC and (
+            header is None
+            or len(header) < 42
+            or header[:4] != b"fLaC"
+            or header[4] & 0x7F
+            or int.from_bytes(header[5:8], "big") != 34
+        ):
+            self._client.flag_noncompliance(
+                "client_stream/start FLAC codec_header must contain STREAMINFO"
+            )
+            return
         try:
             # Validate the declared shape here: a PCM decoder accepts anything, so an
             # impossible format would otherwise only fail inside the consumer.
@@ -217,6 +237,17 @@ class SourceV1Role(Role):
         self._client._signal_event(  # noqa: SLF001
             SourceSignalChangedEvent(signal=source.signal)
         )
+
+    def on_availability_changed(
+        self,
+        old_available: bool,  # noqa: ARG002, FBT001
+        new_available: bool,  # noqa: FBT001
+    ) -> None:
+        """Treat becoming unavailable as an implicit source stop."""
+        if new_available:
+            return
+        self._start_requested = False
+        self._end_stream()
 
     def _line_sense_supported(self) -> bool:
         """Whether the source advertised the 'line_sense' feature in client/hello."""

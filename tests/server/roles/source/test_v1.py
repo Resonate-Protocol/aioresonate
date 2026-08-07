@@ -153,6 +153,24 @@ def test_impossible_declared_format_opens_no_stream(bad_format: dict[str, int]) 
     assert [e for e in client.events if isinstance(e, SourceStreamStartedEvent)] == []
 
 
+def test_flac_start_requires_streaminfo_header() -> None:
+    """A FLAC stream cannot open without its required STREAMINFO header."""
+    role, client = _make_role()
+    role.on_client_stream_start(
+        ClientStreamStartPayload(
+            source=ClientStreamStartSource(
+                codec=AudioCodec.FLAC,
+                channels=2,
+                sample_rate=48000,
+                bit_depth=16,
+            )
+        )
+    )
+
+    assert not role.stream_active
+    assert client.noncompliance == ["client_stream/start FLAC codec_header must contain STREAMINFO"]
+
+
 async def test_stream_replacement_announces_the_end_of_the_old_handle() -> None:
     """Replacing a stream tells listeners the previous handle is finished."""
     role, client = _make_role()
@@ -219,6 +237,21 @@ async def test_binary_chunk_dropped_when_client_not_available() -> None:
 
     drained = [chunk async for chunk, _ in handle]
     assert drained == []
+
+
+def test_becoming_unavailable_implicitly_stops_stream() -> None:
+    """Becoming unavailable closes the stream and clears start permission."""
+    role, client = _make_role()
+    role.on_client_stream_start(_pcm_start_payload())
+
+    role.on_availability_changed(old_available=True, new_available=False)
+    role.on_client_stream_start(_pcm_start_payload())
+
+    assert not role.stream_active
+    assert len([e for e in client.events if isinstance(e, SourceStreamEndedEvent)]) == 1
+    assert client.noncompliance == [
+        "client_stream/start sent without a preceding source start command"
+    ]
 
 
 async def test_second_start_restarts_stream() -> None:

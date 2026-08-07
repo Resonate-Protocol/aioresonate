@@ -131,3 +131,33 @@ async def test_source_loopback(codec: AudioCodec) -> None:
         assert bytes(received) == pcm
     else:
         assert abs(len(received) - len(pcm)) <= 4608 * 4
+
+
+async def test_flac_24_bit_source_loopback_preserves_packed_pcm() -> None:
+    """Packed 24-bit FLAC capture survives the client and server codec path."""
+    pytest.importorskip("av")
+    server_client = _ServerSideClient()
+    role = SourceV1Role(client=server_client)  # type: ignore[arg-type]
+    role.on_connect()
+    role.on_client_state(ClientStatePayload(available=True))
+    role.request_start()
+    conn = _LoopbackConnection(role)
+    capture = SourceCapture(
+        _ClientSideClient(),
+        conn,
+        SupportedAudioFormat(
+            codec=AudioCodec.FLAC,
+            channels=2,
+            sample_rate=48000,
+            bit_depth=24,
+        ),
+    )  # type: ignore[arg-type]
+    pcm = b"\x00\x00\x10\x00\x00\xf0" * 48000
+
+    await capture.start()
+    await capture.feed(pcm, capture_timestamp_us=1_000_000)
+    await capture.stop()
+
+    handle = next(e for e in server_client.events if isinstance(e, SourceStreamStartedEvent)).handle
+    received = b"".join([chunk async for chunk, _ in handle])
+    assert received[: len(pcm)] == pcm

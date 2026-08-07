@@ -13,7 +13,7 @@ from collections import deque
 from typing import TYPE_CHECKING
 
 from aiosendspin.audio.codecs import create_encoder
-from aiosendspin.audio.format import AudioFormat
+from aiosendspin.audio.format import AudioFormat, _convert_s24_to_s32
 from aiosendspin.models.types import AudioCodec
 
 if TYPE_CHECKING:
@@ -70,7 +70,11 @@ class SourceCapture:
     async def start(self) -> None:
         """Send ``client_stream/start`` to begin the capture stream."""
         if self._started:
-            return
+            if self._connection.is_source_stream_active():
+                return
+            self._encoder.reset()
+            self._capture_spans.clear()
+            self._started = False
         if not self._connection.is_time_synchronized():
             raise RuntimeError("Source capture requires a synchronized clock")
         header = self._encoder.get_codec_header()
@@ -98,7 +102,12 @@ class SourceCapture:
         if len(pcm) % self._frame_stride:
             raise ValueError("pcm length must be a whole number of frames")
         self._capture_spans.append((len(pcm) // self._frame_stride, anchor))
-        for frame, _frame_duration_us in self._encoder.process(pcm, anchor, 0):
+        encoder_pcm = (
+            _convert_s24_to_s32(pcm)
+            if self._codec is AudioCodec.FLAC and self._format.bit_depth == 24
+            else pcm
+        )
+        for frame, _frame_duration_us in self._encoder.process(encoder_pcm, anchor, 0):
             timestamp_us = self._connection.compute_source_timestamp(
                 self._next_capture_timestamp() - self._encoder.lookahead_us
             )

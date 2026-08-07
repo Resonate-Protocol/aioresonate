@@ -976,12 +976,16 @@ class SendspinConnection:
             await self._ws.send_str(payload)
 
     async def _send_bytes(self, payload: bytes) -> None:
-        if self._ws is None:
-            raise RuntimeError("WebSocket is not connected")
         async with self._send_lock:
+            if self._ws is None:
+                raise RuntimeError("WebSocket is not connected")
             if self._exchange_in_progress:
                 return
             await self._ws.send_bytes(payload)
+
+    def is_source_stream_active(self) -> bool:
+        """Return whether this connection has an open source stream."""
+        return self._source_stream_active
 
     @asynccontextmanager
     async def _exchange(self) -> AsyncIterator[None]:

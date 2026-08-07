@@ -119,3 +119,17 @@ async def test_source_chunks_rejected_after_role_deactivation() -> None:
         await conn.send_source_chunk(b"audio", timestamp_us=1)
 
     assert ws.sent_bytes == []
+
+
+async def test_send_source_chunk_rechecks_connection_under_lock() -> None:
+    """A binary send reports disconnect while waiting for the send lock."""
+    ws = _FakeWs()
+    conn = _connection(ws, active_roles=[Roles.SOURCE.value], stream_active=True)
+    await conn._send_lock.acquire()  # noqa: SLF001
+    send_task = asyncio.create_task(conn._send_bytes(b"audio"))  # noqa: SLF001
+    await asyncio.sleep(0)
+    conn._ws = None  # type: ignore[assignment]  # noqa: SLF001
+    conn._send_lock.release()  # noqa: SLF001
+
+    with pytest.raises(RuntimeError, match="not connected"):
+        await send_task

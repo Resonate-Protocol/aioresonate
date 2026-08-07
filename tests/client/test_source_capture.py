@@ -18,15 +18,18 @@ class _FakeConnection:
         self.calls: list[tuple[str, Any]] = []
         self.chunks: list[tuple[int, bytes]] = []
         self.synchronized = synchronized
+        self.source_stream_active = False
 
     async def send_client_stream_start(self, **kwargs: Any) -> None:
         self.calls.append(("start", kwargs))
+        self.source_stream_active = True
 
     async def send_source_chunk(self, frame: bytes, *, timestamp_us: int) -> None:
         self.chunks.append((timestamp_us, frame))
 
     async def send_client_stream_end(self) -> None:
         self.calls.append(("end", None))
+        self.source_stream_active = False
 
     def compute_source_timestamp(self, capture_timestamp_us: int) -> int:
         # Identity mapping keeps the timestamp arithmetic easy to assert.
@@ -34,6 +37,9 @@ class _FakeConnection:
 
     def is_time_synchronized(self) -> bool:
         return self.synchronized
+
+    def is_source_stream_active(self) -> bool:
+        return self.source_stream_active
 
 
 class _FakeClient:
@@ -129,6 +135,18 @@ async def test_start_before_time_sync_raises() -> None:
 
     with pytest.raises(RuntimeError, match="synchronized"):
         await capture.start()
+
+
+async def test_start_recovers_after_connection_ends_stream() -> None:
+    """A capture can restart after its connection closes the wire stream."""
+    conn = _FakeConnection()
+    capture = SourceCapture(_FakeClient(), conn, _pcm_format())  # type: ignore[arg-type]
+    await capture.start()
+    conn.source_stream_active = False
+
+    await capture.start()
+
+    assert [kind for kind, _ in conn.calls] == ["start", "start"]
 
 
 def test_compute_source_timestamp_excludes_static_delay() -> None:
