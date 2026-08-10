@@ -310,6 +310,21 @@ async def test_file_client_store_persists_state(tmp_path: Path) -> None:
     assert await reloaded.pin_failure_count() == 1
 
 
+async def test_file_client_store_migrates_per_method_pin_failures(tmp_path: Path) -> None:
+    """A pre-escalation store carries its dynamic-PIN count over, keeping escalation state."""
+    path = tmp_path / "client.json"
+    await FileClientPairingStore.open(path)
+    data = json.loads(path.read_text(encoding="utf-8"))
+    data["pin_failures"] = {
+        PairMethod.DYNAMIC_PIN.value: PIN_ESCALATION_THRESHOLD,
+        PairMethod.STATIC_PIN.value: 3,
+    }
+    path.write_text(json.dumps(data), encoding="utf-8")
+
+    reloaded = await FileClientPairingStore.open(path)
+    assert await reloaded.pin_failure_count() == PIN_ESCALATION_THRESHOLD
+
+
 async def test_file_client_store_persists_last_playback_server(tmp_path: Path) -> None:
     """The last-playback server id survives a reload."""
     path = tmp_path / "client.json"

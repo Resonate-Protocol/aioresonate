@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Callable, Sequence
 from contextlib import suppress
 
 from aiohttp import ClientSession, web
@@ -37,7 +37,7 @@ from aiosendspin.noise.session import NoiseCipherSuite
 from aiosendspin.noise.trust_store import ClientPairingStore, ResolvedPsk
 
 from .connection import DECODABLE_CODECS, UNSYNCED_PLAY_LEAD_US, SendspinConnection
-from .models import AudioFormat, PairingSupport, ServerInfo
+from .models import AudioFormat, PairingSupport, PinDisplay, PinSpeaker, ServerInfo
 from .source import SourceCapture
 
 logger = logging.getLogger(__name__)
@@ -353,7 +353,7 @@ class SendspinClient:
         return self._pairing_store
 
     @property
-    def pin_display(self) -> Callable[[str | None], Awaitable[None]] | None:
+    def pin_display(self) -> PinDisplay | None:
         """Out-channel that surfaces a derived pairing PIN, if configured.
 
         Called with the PIN string when one is derived, and with ``None`` when the
@@ -362,14 +362,34 @@ class SendspinClient:
         return self._pairing_support.pin_display if self._pairing_support is not None else None
 
     @property
+    def pin_speaker(self) -> PinSpeaker | None:
+        """Spoken out-channel for a derived pairing PIN, if configured."""
+        return self._pairing_support.pin_speaker if self._pairing_support is not None else None
+
+    @property
+    def pin_out_channels(self) -> tuple[str, ...]:
+        """Channels the dynamic PIN is conveyed through, in descriptor order."""
+        channels = []
+        if self.pin_display is not None:
+            channels.append("display")
+        if self.pin_speaker is not None:
+            channels.append("speaker")
+        return tuple(channels)
+
+    @property
+    def secret_locations(self) -> tuple[str, ...]:
+        """Where the operator finds a configured static secret, empty when undeclared."""
+        return self._pairing_support.secret_locations if self._pairing_support is not None else ()
+
+    @property
     def pairing_window_open(self) -> bool:
         """Whether a pairing window is currently open."""
         deadline = self._pairing_window_deadline
         return deadline is not None and self._loop.time() < deadline
 
     async def await_pairing_window(self) -> None:
-        """Resolve once a pairing window is open, prompting for a gesture meanwhile."""
-        if self.pairing_window_open:
+        """Claim a pairing window for the caller's attempt, prompting for a gesture meanwhile."""
+        if self._claim_pairing_window():
             return
         support = self._pairing_support
         prompt = support.gesture_prompt if support is not None else None
@@ -377,13 +397,20 @@ class SendspinClient:
         try:
             if self._pairing_window_waiters == 1 and prompt is not None:
                 await prompt(True)  # noqa: FBT003
-            while not self.pairing_window_open:
+            while not self._claim_pairing_window():
                 self._pairing_window_opened.clear()
                 await self._pairing_window_opened.wait()
         finally:
             self._pairing_window_waiters -= 1
             if self._pairing_window_waiters == 0 and prompt is not None:
                 await prompt(False)  # noqa: FBT003
+
+    def _claim_pairing_window(self) -> bool:
+        """Close an open pairing window for one attempt, reporting whether one was open."""
+        if not self.pairing_window_open:
+            return False
+        self.consume_pairing_window()
+        return True
 
     def consume_pairing_window(self) -> None:
         """Close the pairing window as a pairing attempt starts."""
@@ -406,8 +433,9 @@ class SendspinClient:
         """Pairing methods this client implements: each PIN method needs its wiring."""
         methods = {PairMethod.PAIRING_PSK}
         if self._pairing_support is not None:
-            methods.add(PairMethod.STATIC_PIN)
-            if self._pairing_support.pin_display is not None:
+            if self._pairing_support.offer_static_pin:
+                methods.add(PairMethod.STATIC_PIN)
+            if self.pin_out_channels:
                 methods.add(PairMethod.DYNAMIC_PIN)
         return frozenset(methods)
 

@@ -568,7 +568,6 @@ class SendspinConnection:
             # Every static-PIN attempt is gesture-gated.
             if (leave := await self._gate_on_pairing_window(pairing_index)) is not None:
                 return leave
-            self._client.consume_pairing_window()
             with self._attempt_in_progress():
                 return await run_static_pin_client(
                     self._ws,
@@ -597,8 +596,7 @@ class SendspinConnection:
                     store=store,
                 )
         finally:
-            if self._client.pin_display is not None:
-                await self._client.pin_display(None)
+            await self._emit_pin(None)
 
     @contextmanager
     def _attempt_in_progress(self) -> Iterator[None]:
@@ -618,6 +616,8 @@ class SendspinConnection:
         """
         assert self._ws is not None
         if self._client.pairing_window_open:
+            # Claims the window without signalling pair-pending, since none is awaited.
+            await self._client.await_pairing_window()
             return None
         await self._ws.send_str(
             ClientPairPendingMessage(
@@ -702,23 +702,36 @@ class SendspinConnection:
 
     async def _validate_pin_length(self, pin_length: int | None) -> int:
         """Validate the activation's dynamic ``pin_length``, aborting when unacceptable."""
-        config = await self._client.pairing_store.get_pairing_config()
-        min_length = max(config.dynamic_pin_min_length, MIN_PIN_DIGITS)
+        min_length = await self._min_pin_length()
         if pin_length is None or not min_length <= pin_length <= MAX_PIN_DIGITS:
             await self._abort_pairing(PairAbortReason.PIN_LENGTH_UNACCEPTABLE)
         return pin_length
+
+    async def _min_pin_length(self) -> int:
+        """Shortest dynamic PIN this client accepts, held to the spec's advertisable range."""
+        config = await self._client.pairing_store.get_pairing_config()
+        return min(max(config.dynamic_pin_min_length, MIN_PIN_DIGITS), MAX_PIN_DIGITS)
 
     async def _abort_pairing(self, reason: PairAbortReason) -> NoReturn:
         """Send ``pair/abort``; never returns (the abort raises)."""
         assert self._ws is not None
         await abort_pairing(self._ws, reason)
 
-    async def _emit_pin(self, pin: str) -> None:
-        """Surface the derived pairing PIN through the configured out-channel."""
+    async def _emit_pin(self, pin: str | None) -> None:
+        """Hand ``pin`` to every configured out-channel, or release them when it is ``None``."""
+        emissions = []
         if self._client.pin_display is not None:
-            await self._client.pin_display(pin)
-        else:
-            logger.warning("Pairing PIN (no display configured): %s", pin)
+            emissions.append(self._client.pin_display(pin))
+        if self._client.pin_speaker is not None:
+            emissions.append(self._client.pin_speaker(pin, languages=self._activation_languages()))
+        await asyncio.gather(*emissions)
+
+    def _activation_languages(self) -> tuple[str, ...]:
+        """Operator language preferences carried by the pairing activation."""
+        pairing = self._selected_pairing
+        if pairing is None or pairing.languages is None:
+            return ()
+        return tuple(pairing.languages)
 
     async def _rehandshake(self, hs1_text: str | None = None) -> None:
         """Re-run the Noise handshake as responder and swap the session (None reads msg 1)."""
@@ -981,12 +994,15 @@ class SendspinConnection:
     async def _pair_method_descriptor(self, method: PairMethod) -> PairMethodDescriptor:
         """Build the ``client/hello`` descriptor for ``method``."""
         if method is not PairMethod.DYNAMIC_PIN:
-            return PairMethodDescriptor(method=method)
-        config = await self._client.pairing_store.get_pairing_config()
+            locations = self._client.secret_locations
+            return PairMethodDescriptor(
+                method=method, locations=list(locations) if locations else None
+            )
+        out_channels = self._client.pin_out_channels
         return PairMethodDescriptor(
             method=method,
-            out_channels=["display"],
-            min_pin_length=config.dynamic_pin_min_length,
+            out_channels=list(out_channels) if out_channels else None,
+            min_pin_length=await self._min_pin_length(),
         )
 
     def _compute_trust(self) -> TrustLevel:

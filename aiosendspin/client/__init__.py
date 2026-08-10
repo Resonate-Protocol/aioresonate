@@ -11,11 +11,20 @@ from .client import (
     VisualizerCallback,
 )
 from .listener import ClientListener
-from .models import AudioFormat, PairingSupport, PCMFormat, ServerInfo
+from .models import (
+    SECRET_LOCATIONS,
+    AudioFormat,
+    PairingSupport,
+    PCMFormat,
+    PinDisplay,
+    PinSpeaker,
+    ServerInfo,
+)
 from .source import SourceCapture
 from .time_sync import SendspinTimeFilter
 
 __all__ = [
+    "SECRET_LOCATIONS",
     "AudioChunkCallback",
     "AudioFormat",
     "ClientListener",
@@ -24,6 +33,8 @@ __all__ = [
     "MetadataCallback",
     "PCMFormat",
     "PairingSupport",
+    "PinDisplay",
+    "PinSpeaker",
     "SendspinClient",
     "SendspinTimeFilter",
     "ServerInfo",
