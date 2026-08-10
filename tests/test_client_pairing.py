@@ -394,6 +394,88 @@ async def test_await_pairing_window_clears_prompt_on_cancel() -> None:
     assert prompts == [True, False]
 
 
+async def test_declining_static_pin_drops_it_from_implemented_methods() -> None:
+    """A device with no per-device PIN opts out of static PIN, which is otherwise offered."""
+    wired = make_sdk_client(
+        client_name="C", roles=[Roles.CONTROLLER], pairing_support=PairingSupport()
+    )
+    declined = make_sdk_client(
+        client_name="C",
+        roles=[Roles.CONTROLLER],
+        pairing_support=PairingSupport(offer_static_pin=False),
+    )
+    assert PairMethod.STATIC_PIN in wired.implemented_pair_methods
+    assert PairMethod.STATIC_PIN not in declined.implemented_pair_methods
+
+
+async def test_hello_descriptors_carry_the_wired_channels_and_locations() -> None:
+    """Out-channels follow the wired callbacks, and locations ride the static-secret methods."""
+
+    async def display(pin: str | None) -> None:
+        pass
+
+    async def speak(pin: str | None, *, languages: tuple[str, ...]) -> None:
+        pass
+
+    client = make_sdk_client(
+        client_name="C",
+        roles=[Roles.CONTROLLER],
+        pairing_support=PairingSupport(
+            pin_display=display,
+            pin_speaker=speak,
+            secret_locations=("device", "leaflet"),
+        ),
+    )
+    connection = SendspinConnection(client)
+    connection._noise_psk = ResolvedPsk("psk-id", b"\x00" * 32, PskCategory.SENTINEL)  # noqa: SLF001
+    hello = await connection._build_client_hello()  # noqa: SLF001
+    descriptors = {d.method: d for d in hello.payload.supported_pair_methods or []}
+    assert descriptors[PairMethod.DYNAMIC_PIN].out_channels == ["display", "speaker"]
+    assert descriptors[PairMethod.DYNAMIC_PIN].locations is None
+    assert descriptors[PairMethod.PAIRING_PSK].locations == ["device", "leaflet"]
+    assert descriptors[PairMethod.PAIRING_PSK].out_channels is None
+
+
+async def test_pin_speaker_receives_the_activation_languages() -> None:
+    """The activation's language preferences reach the spoken channel, which the display omits."""
+    spoken: list[tuple[str | None, tuple[str, ...]]] = []
+    displayed: list[str | None] = []
+
+    async def display(pin: str | None) -> None:
+        displayed.append(pin)
+
+    async def speak(pin: str | None, *, languages: tuple[str, ...]) -> None:
+        spoken.append((pin, languages))
+
+    client = make_sdk_client(
+        client_name="C",
+        roles=[Roles.CONTROLLER],
+        pairing_support=PairingSupport(pin_display=display, pin_speaker=speak),
+    )
+    connection = SendspinConnection(client)
+    connection._selected_pairing = ActivatePairing(  # noqa: SLF001
+        method=PairMethod.DYNAMIC_PIN, pin_length=6, languages=["ca", "en"]
+    )
+    await connection._emit_pin("123456")  # noqa: SLF001
+    assert spoken == [("123456", ("ca", "en"))]
+    assert displayed == ["123456"]
+
+
+async def test_pin_speaker_alone_enables_dynamic_pin() -> None:
+    """A speaker-only device offers dynamic PIN, with no display wired."""
+
+    async def speak(pin: str | None, *, languages: tuple[str, ...]) -> None:
+        pass
+
+    client = make_sdk_client(
+        client_name="C",
+        roles=[Roles.CONTROLLER],
+        pairing_support=PairingSupport(pin_speaker=speak),
+    )
+    assert PairMethod.DYNAMIC_PIN in client.implemented_pair_methods
+    assert client.pin_out_channels == ("speaker",)
+
+
 async def test_one_window_admits_a_single_attempt() -> None:
     """One window releases one waiter, the rest wait for a fresh gesture."""
     client = make_sdk_client(client_name="C", roles=[Roles.CONTROLLER])

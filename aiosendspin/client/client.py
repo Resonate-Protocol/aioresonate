@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Callable, Sequence
 from contextlib import suppress
 
 from aiohttp import ClientSession, web
@@ -37,7 +37,7 @@ from aiosendspin.noise.session import NoiseCipherSuite
 from aiosendspin.noise.trust_store import ClientPairingStore, ResolvedPsk
 
 from .connection import DECODABLE_CODECS, UNSYNCED_PLAY_LEAD_US, SendspinConnection
-from .models import AudioFormat, PairingSupport, ServerInfo
+from .models import AudioFormat, PairingSupport, PinDisplay, PinSpeaker, ServerInfo
 from .source import SourceCapture
 
 logger = logging.getLogger(__name__)
@@ -353,13 +353,33 @@ class SendspinClient:
         return self._pairing_store
 
     @property
-    def pin_display(self) -> Callable[[str | None], Awaitable[None]] | None:
+    def pin_display(self) -> PinDisplay | None:
         """Out-channel that surfaces a derived pairing PIN, if configured.
 
         Called with the PIN string when one is derived, and with ``None`` when the
         pairing exchange ends (success or failure) so the channel can clear.
         """
         return self._pairing_support.pin_display if self._pairing_support is not None else None
+
+    @property
+    def pin_speaker(self) -> PinSpeaker | None:
+        """Spoken out-channel for a derived pairing PIN, if configured."""
+        return self._pairing_support.pin_speaker if self._pairing_support is not None else None
+
+    @property
+    def pin_out_channels(self) -> tuple[str, ...]:
+        """Channels the dynamic PIN is conveyed through, in descriptor order."""
+        channels = []
+        if self.pin_display is not None:
+            channels.append("display")
+        if self.pin_speaker is not None:
+            channels.append("speaker")
+        return tuple(channels)
+
+    @property
+    def secret_locations(self) -> tuple[str, ...]:
+        """Where the operator finds a configured static secret, empty when undeclared."""
+        return self._pairing_support.secret_locations if self._pairing_support is not None else ()
 
     @property
     def pairing_window_open(self) -> bool:
@@ -413,8 +433,9 @@ class SendspinClient:
         """Pairing methods this client implements: each PIN method needs its wiring."""
         methods = {PairMethod.PAIRING_PSK}
         if self._pairing_support is not None:
-            methods.add(PairMethod.STATIC_PIN)
-            if self._pairing_support.pin_display is not None:
+            if self._pairing_support.offer_static_pin:
+                methods.add(PairMethod.STATIC_PIN)
+            if self.pin_out_channels:
                 methods.add(PairMethod.DYNAMIC_PIN)
         return frozenset(methods)
 
