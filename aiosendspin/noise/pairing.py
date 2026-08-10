@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-from contextlib import suppress
+from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING, NoReturn, Protocol, cast
+from typing import TYPE_CHECKING, NoReturn, Protocol, cast, overload
 
 from aiohttp import WSMsgType
 from cpace import CPace, CPaceError, CPaceRole
@@ -26,6 +26,7 @@ from .models import (
     ClientPairFinalizePayload,
     ClientPairInitMessage,
     ClientPairInitPayload,
+    ClientPairPendingMessage,
     PairAbortMessage,
     PairAbortPayload,
     PairingMessage,
@@ -41,7 +42,7 @@ from .session import NoiseCipherSuite
 from .trust_store import ServerPairingRecord
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
+    from collections.abc import AsyncGenerator, Awaitable, Callable
 
     from .trust_store import ClientPairingStore, ServerPairingStore
     from .wire import EncryptedWebSocket
@@ -53,16 +54,22 @@ _PAKE_SHARE_SIZE = 32
 _KC_TAG_SIZE = 64
 _PSK_WRAP_LABEL = b"sendspin-pair-psk-wrap-v1"
 _PSK_WRAP_NONCE = bytes(12)
-_CLIENT_ATTEMPT_TIMEOUT_S = 120.0
-# Server bounds are local (expiry raises TimeoutError, nothing on the wire) and exceed the
-# client's attempt timeout so the client's in-band abort wins when both sides are live.
-_SERVER_ATTEMPT_TIMEOUT_S = 180.0
-_SERVER_FIRST_MESSAGE_TIMEOUT_S = 60.0
-_SERVER_GESTURE_TIMEOUT_S = 360.0
+_CLIENT_ATTEMPT_TIMEOUT_S: float = 120.0
+# Server bounds raise PairingTimeoutError, sending no pairing message: no pair/abort reason is
+# available to a server for its own timeout. They exceed the client's attempt timeout so the
+# client's in-band abort wins when both sides are live.
+# Public so operator UIs can mirror the enforced bounds (countdowns etc.).
+SERVER_ATTEMPT_TIMEOUT_S: float = 180.0
+SERVER_FIRST_MESSAGE_TIMEOUT_S: float = 60.0
+SERVER_GESTURE_TIMEOUT_S: float = 360.0
 
 
 class PairingError(Exception):
     """A pairing attempt could not complete (malformed message, early close, etc.)."""
+
+
+class PairingTimeoutError(PairingError):
+    """A server-side bound on waiting for a client pairing message expired."""
 
 
 class PairingAbortError(PairingError):
@@ -100,6 +107,8 @@ class PairingAttempt:
     """Required for the Pairing PSK method; the live PSK pasted from a token."""
     verify: bool = False
     """Re-verify an already-paired client instead of pairing anew."""
+    on_pair_pending: Callable[[], None] | None = None
+    """Called when the client reports the attempt gesture-gated."""
 
     def __post_init__(self) -> None:
         """Validate ``method`` / material agree."""
@@ -115,6 +124,9 @@ class PairingAttempt:
                 raise ValueError(msg)
             if self.verify:
                 msg = "PAIRING_PSK does not support verification"
+                raise ValueError(msg)
+            if self.on_pair_pending is not None:
+                msg = "PAIRING_PSK does not use on_pair_pending"
                 raise ValueError(msg)
         else:  # PIN methods (dynamic_pin, static_pin)
             if self.pin_provider is None:
@@ -139,11 +151,8 @@ async def run_pairing_psk_client(
 
     Returns ``None`` on finalize, else the raw ``server/activate`` leave frame.
     """
-    try:
-        async with asyncio.timeout(_CLIENT_ATTEMPT_TIMEOUT_S):
-            return await _finalize_client(ws, server_id=server_id, store=store)
-    except TimeoutError:
-        await abort_pairing(ws, PairAbortReason.ATTEMPT_TIMEOUT)
+    async with _client_timeout(ws):
+        return await _finalize_client(ws, server_id=server_id, store=store)
 
 
 async def run_pairing_psk_server(
@@ -153,7 +162,7 @@ async def run_pairing_psk_server(
     store: ServerPairingStore,
 ) -> ServerPairingRecord:
     """Run the server side of the Pairing PSK flow."""
-    async with asyncio.timeout(_SERVER_FIRST_MESSAGE_TIMEOUT_S):
+    async with _server_timeout(SERVER_FIRST_MESSAGE_TIMEOUT_S, "client/pair-finalize"):
         record = await _finalize_server(
             ws, client_id=client_id, store=store, method=PairMethod.PAIRING_PSK
         )
@@ -166,6 +175,7 @@ async def run_dynamic_pin_client(
     *,
     handshake_hash: bytes,
     pairing_index: int,
+    pin_length: int,
     pin_emitter: PinEmitter,
     server_id: str,
     store: ClientPairingStore,
@@ -176,71 +186,63 @@ async def run_dynamic_pin_client(
     """
     sid = _pake_sid(handshake_hash, pairing_index)
     nonce_b = pin_mod.generate_nonce()
-    try:
-        async with asyncio.timeout(_CLIENT_ATTEMPT_TIMEOUT_S):
-            await ws.send_str(
-                ClientPairInitMessage(
-                    payload=ClientPairInitPayload(
-                        pairing_index=pairing_index,
-                        commit_B=b64url_encode(pin_mod.commit(nonce_b)),
-                    ),
-                ).to_json(),
-            )
+    async with _client_timeout(ws):
+        await ws.send_str(
+            ClientPairInitMessage(
+                payload=ClientPairInitPayload(
+                    pairing_index=pairing_index,
+                    commit_B=b64url_encode(pin_mod.commit(nonce_b)),
+                ),
+            ).to_json(),
+        )
 
-            init = await _receive_pairing(ws, ServerPairInitMessage)
-            nonce_a = _decode_field(init.payload.nonce_A, "nonce_A", expect_len=pin_mod.NONCE_SIZE)
-            pin_length = init.payload.pin_length
-            configured_min = (await store.get_pairing_config()).dynamic_pin_min_length
-            min_length = max(configured_min, pin_mod.MIN_PIN_DIGITS)
-            if not min_length <= pin_length <= pin_mod.MAX_PIN_DIGITS:
-                await abort_pairing(ws, PairAbortReason.PIN_LENGTH_UNACCEPTABLE)
-            pin = pin_mod.derive_pin(handshake_hash, nonce_a, nonce_b, pin_length)
-            await pin_emitter(pin)
-            try:
-                cpace = CPace.start(
-                    role=CPaceRole.RESPONDER, prs=pin.encode("ascii"), sid=sid, ad=_PAKE_AD_CLIENT
-                )
-            except CPaceError as exc:
-                raise PairingError("CPace initialization failed") from exc
+        init = await _receive_pairing(ws, ServerPairInitMessage)
+        nonce_a = _decode_field(init.payload.nonce_A, "nonce_A", expect_len=pin_mod.NONCE_SIZE)
+        pin = pin_mod.derive_pin(handshake_hash, nonce_a, nonce_b, pin_length)
+        await pin_emitter(pin)
+        try:
+            cpace = CPace.start(
+                role=CPaceRole.RESPONDER, prs=pin.encode("ascii"), sid=sid, ad=_PAKE_AD_CLIENT
+            )
+        except CPaceError as exc:
+            raise PairingError("CPace initialization failed") from exc
 
-            auth = await _receive_pairing(ws, ServerPairAuthMessage)
-            await ws.send_str(
-                ClientPairAuthMessage(
-                    payload=ClientPairAuthPayload(pake_msg_2=b64url_encode(cpace.public_share)),
-                ).to_json(),
-            )
-            peer_share = _decode_field(
-                auth.payload.pake_msg_1, "pake_msg_1", expect_len=_PAKE_SHARE_SIZE
-            )
-            try:
-                cpace.derive(peer_share, _PAKE_AD_SERVER)
-            except CPaceError as exc:
-                raise PairingError("malformed pake_msg_1: invalid CPace share") from exc
+        auth = await _receive_pairing(ws, ServerPairAuthMessage)
+        await ws.send_str(
+            ClientPairAuthMessage(
+                payload=ClientPairAuthPayload(pake_msg_2=b64url_encode(cpace.public_share)),
+            ).to_json(),
+        )
+        peer_share = _decode_field(
+            auth.payload.pake_msg_1, "pake_msg_1", expect_len=_PAKE_SHARE_SIZE
+        )
+        try:
+            cpace.derive(peer_share, _PAKE_AD_SERVER)
+        except CPaceError as exc:
+            raise PairingError("malformed pake_msg_1: invalid CPace share") from exc
 
-            confirm = await _receive_pairing(ws, ServerPairConfirmMessage)
-            if not cpace.verify(
-                _decode_field(confirm.payload.server_kc, "server_kc", expect_len=_KC_TAG_SIZE)
-            ):
-                await store.record_pin_failure(PairMethod.DYNAMIC_PIN)
-                await abort_pairing(ws, PairAbortReason.PIN_MISMATCH)
-            await store.reset_pin_failures(PairMethod.DYNAMIC_PIN)
-            await ws.send_str(
-                ClientPairConfirmMessage(
-                    payload=ClientPairConfirmPayload(
-                        client_kc=b64url_encode(cpace.tag()),
-                        nonce_B=b64url_encode(nonce_b),
-                    ),
-                ).to_json(),
-            )
+        confirm = await _receive_pairing(ws, ServerPairConfirmMessage)
+        if not cpace.verify(
+            _decode_field(confirm.payload.server_kc, "server_kc", expect_len=_KC_TAG_SIZE)
+        ):
+            await store.record_pin_failure()
+            await abort_pairing(ws, PairAbortReason.PIN_MISMATCH)
+        await store.reset_pin_failures()
+        await ws.send_str(
+            ClientPairConfirmMessage(
+                payload=ClientPairConfirmPayload(
+                    client_kc=b64url_encode(cpace.tag()),
+                    nonce_B=b64url_encode(nonce_b),
+                ),
+            ).to_json(),
+        )
 
-            return await _finalize_client(
-                ws,
-                server_id=server_id,
-                store=store,
-                wrap_key=_wrap_key(sid, cpace),
-            )
-    except TimeoutError:
-        await abort_pairing(ws, PairAbortReason.ATTEMPT_TIMEOUT)
+        return await _finalize_client(
+            ws,
+            server_id=server_id,
+            store=store,
+            wrap_key=_wrap_key(sid, cpace),
+        )
 
 
 async def run_dynamic_pin_server(
@@ -253,24 +255,22 @@ async def run_dynamic_pin_server(
     client_id: str,
     store: ServerPairingStore,
     verify: bool = False,
+    on_pair_pending: Callable[[], None] | None = None,
 ) -> ServerPairingRecord | None:
     """Run the server side of the dynamic-PIN flow.
 
     Returns the persisted record, or ``None`` when ``verify`` is set (re-verified, left pairing).
     """
     sid = _pake_sid(handshake_hash, pairing_index)
-    async with asyncio.timeout(_SERVER_FIRST_MESSAGE_TIMEOUT_S):
-        init = await _receive_pair_init(ws, pairing_index)
+    init = await _receive_pair_init(ws, pairing_index, on_pending=on_pair_pending)
     if init.payload.commit_B is None:
         raise PairingError("client/pair-init missing commit_B for dynamic PIN")
     commit_b = _decode_field(init.payload.commit_B, "commit_B", expect_len=pin_mod.COMMIT_SIZE)
-    async with asyncio.timeout(_SERVER_ATTEMPT_TIMEOUT_S):
+    async with _server_timeout(SERVER_ATTEMPT_TIMEOUT_S, "the rest of the attempt"):
         nonce_a = pin_mod.generate_nonce()
         await ws.send_str(
             ServerPairInitMessage(
-                payload=ServerPairInitPayload(
-                    nonce_A=b64url_encode(nonce_a), pin_length=pin_length
-                ),
+                payload=ServerPairInitPayload(nonce_A=b64url_encode(nonce_a)),
             ).to_json(),
         )
         pin = await pin_provider()
@@ -333,63 +333,58 @@ async def run_static_pin_client(
     server_id: str,
     store: ClientPairingStore,
 ) -> str | None:
-    """Run the client side of the static-PIN flow (the pairing window must already be open).
+    """Run the client side of the static-PIN flow (the caller has opened the pairing window).
 
     Returns ``None`` on finalize, else the raw ``server/activate`` leave frame.
     """
     sid = _pake_sid(handshake_hash, pairing_index)
-    try:
-        async with asyncio.timeout(_CLIENT_ATTEMPT_TIMEOUT_S):
-            await ws.send_str(
-                ClientPairInitMessage(
-                    payload=ClientPairInitPayload(pairing_index=pairing_index),
-                ).to_json(),
+    async with _client_timeout(ws):
+        await ws.send_str(
+            ClientPairInitMessage(
+                payload=ClientPairInitPayload(pairing_index=pairing_index),
+            ).to_json(),
+        )
+        try:
+            cpace = CPace.start(
+                role=CPaceRole.RESPONDER,
+                prs=static_pin.encode("ascii"),
+                sid=sid,
+                ad=_PAKE_AD_CLIENT,
             )
-            try:
-                cpace = CPace.start(
-                    role=CPaceRole.RESPONDER,
-                    prs=static_pin.encode("ascii"),
-                    sid=sid,
-                    ad=_PAKE_AD_CLIENT,
-                )
-            except CPaceError as exc:
-                raise PairingError("CPace initialization failed") from exc
+        except CPaceError as exc:
+            raise PairingError("CPace initialization failed") from exc
 
-            auth = await _receive_pairing(ws, ServerPairAuthMessage)
-            await ws.send_str(
-                ClientPairAuthMessage(
-                    payload=ClientPairAuthPayload(pake_msg_2=b64url_encode(cpace.public_share)),
-                ).to_json(),
-            )
-            peer_share = _decode_field(
-                auth.payload.pake_msg_1, "pake_msg_1", expect_len=_PAKE_SHARE_SIZE
-            )
-            try:
-                cpace.derive(peer_share, _PAKE_AD_SERVER)
-            except CPaceError as exc:
-                raise PairingError("malformed pake_msg_1: invalid CPace share") from exc
+        auth = await _receive_pairing(ws, ServerPairAuthMessage)
+        await ws.send_str(
+            ClientPairAuthMessage(
+                payload=ClientPairAuthPayload(pake_msg_2=b64url_encode(cpace.public_share)),
+            ).to_json(),
+        )
+        peer_share = _decode_field(
+            auth.payload.pake_msg_1, "pake_msg_1", expect_len=_PAKE_SHARE_SIZE
+        )
+        try:
+            cpace.derive(peer_share, _PAKE_AD_SERVER)
+        except CPaceError as exc:
+            raise PairingError("malformed pake_msg_1: invalid CPace share") from exc
 
-            confirm = await _receive_pairing(ws, ServerPairConfirmMessage)
-            if not cpace.verify(
-                _decode_field(confirm.payload.server_kc, "server_kc", expect_len=_KC_TAG_SIZE)
-            ):
-                await store.record_pin_failure(PairMethod.STATIC_PIN)
-                await abort_pairing(ws, PairAbortReason.PIN_MISMATCH)
-            await store.reset_pin_failures(PairMethod.STATIC_PIN)
-            await ws.send_str(
-                ClientPairConfirmMessage(
-                    payload=ClientPairConfirmPayload(client_kc=b64url_encode(cpace.tag())),
-                ).to_json(),
-            )
+        confirm = await _receive_pairing(ws, ServerPairConfirmMessage)
+        if not cpace.verify(
+            _decode_field(confirm.payload.server_kc, "server_kc", expect_len=_KC_TAG_SIZE)
+        ):
+            await abort_pairing(ws, PairAbortReason.PIN_MISMATCH)
+        await ws.send_str(
+            ClientPairConfirmMessage(
+                payload=ClientPairConfirmPayload(client_kc=b64url_encode(cpace.tag())),
+            ).to_json(),
+        )
 
-            return await _finalize_client(
-                ws,
-                server_id=server_id,
-                store=store,
-                wrap_key=_wrap_key(sid, cpace),
-            )
-    except TimeoutError:
-        await abort_pairing(ws, PairAbortReason.ATTEMPT_TIMEOUT)
+        return await _finalize_client(
+            ws,
+            server_id=server_id,
+            store=store,
+            wrap_key=_wrap_key(sid, cpace),
+        )
 
 
 async def run_static_pin_server(
@@ -401,17 +396,17 @@ async def run_static_pin_server(
     client_id: str,
     store: ServerPairingStore,
     verify: bool = False,
+    on_pair_pending: Callable[[], None] | None = None,
 ) -> ServerPairingRecord | None:
     """Run the server side of the static-PIN flow.
 
     Returns the persisted record, or ``None`` when ``verify`` is set (re-verified, left pairing).
     """
     sid = _pake_sid(handshake_hash, pairing_index)
-    async with asyncio.timeout(_SERVER_GESTURE_TIMEOUT_S):
-        init = await _receive_pair_init(ws, pairing_index)
+    init = await _receive_pair_init(ws, pairing_index, on_pending=on_pair_pending)
     if init.payload.commit_B is not None:
         raise PairingError("client/pair-init carries commit_B for static PIN")
-    async with asyncio.timeout(_SERVER_ATTEMPT_TIMEOUT_S):
+    async with _server_timeout(SERVER_ATTEMPT_TIMEOUT_S, "the rest of the attempt"):
         pin = await pin_provider()
         if not pin_mod.is_valid_static_pin(pin):
             raise PairingError("static PIN must be exactly 8 decimal digits")
@@ -546,6 +541,26 @@ def _decode_field(value: str, what: str, *, expect_len: int | None = None) -> by
     return raw
 
 
+@asynccontextmanager
+async def _client_timeout(ws: EncryptedWebSocket) -> AsyncGenerator[None]:
+    """Bound a client attempt, aborting in band with ``attempt_timeout`` on expiry."""
+    try:
+        async with asyncio.timeout(_CLIENT_ATTEMPT_TIMEOUT_S):
+            yield
+    except TimeoutError:
+        await abort_pairing(ws, PairAbortReason.ATTEMPT_TIMEOUT)
+
+
+@asynccontextmanager
+async def _server_timeout(timeout_s: float, what: str) -> AsyncGenerator[None]:
+    """Bound a server-side wait for ``what``, reporting expiry as a pairing timeout."""
+    try:
+        async with asyncio.timeout(timeout_s):
+            yield
+    except TimeoutError as exc:
+        raise PairingTimeoutError(f"{what} did not arrive in time") from exc
+
+
 async def abort_pairing(ws: EncryptedWebSocket, reason: PairAbortReason) -> NoReturn:
     """Send ``pair/abort`` (best-effort) and raise ``LocalPairingAbortError``."""
     with suppress(Exception):
@@ -553,15 +568,29 @@ async def abort_pairing(ws: EncryptedWebSocket, reason: PairAbortReason) -> NoRe
     raise LocalPairingAbortError(reason)
 
 
+@overload
 async def _receive_pairing_frame[T: PairingMessage](
     ws: EncryptedWebSocket, expected: type[T]
-) -> T | str:
-    """Receive a frame: the parsed ``expected`` message, or the raw text if it isn't pairing."""
+) -> T | str: ...
+
+
+@overload
+async def _receive_pairing_frame[T: PairingMessage, U: PairingMessage](
+    ws: EncryptedWebSocket, expected: tuple[type[T], type[U]]
+) -> T | U | str: ...
+
+
+async def _receive_pairing_frame(
+    ws: EncryptedWebSocket, expected: type[PairingMessage] | tuple[type[PairingMessage], ...]
+) -> PairingMessage | str:
+    """Receive a frame: a parsed ``expected`` message, or the raw text if it isn't pairing."""
+    kinds = expected if isinstance(expected, tuple) else (expected,)
+    expected_names = _expected_names(expected)
     msg = await ws.receive()
     if msg.type in (WSMsgType.CLOSE, WSMsgType.CLOSING, WSMsgType.CLOSED):
-        raise PairingError(f"connection closed while awaiting {expected.__name__}")
+        raise PairingError(f"connection closed while awaiting {expected_names}")
     if msg.type is not WSMsgType.TEXT:
-        raise PairingError(f"expected a JSON frame ({expected.__name__}), got {msg.type.name}")
+        raise PairingError(f"expected a JSON frame ({expected_names}), got {msg.type.name}")
     data = cast("str", msg.data)
     try:
         message = PairingMessage.from_json(data)
@@ -569,17 +598,36 @@ async def _receive_pairing_frame[T: PairingMessage](
         return data
     if isinstance(message, PairAbortMessage):
         raise RemotePairingAbortError(message.payload.reason)
-    if not isinstance(message, expected):
-        raise PairingError(f"expected {expected.__name__}, got {type(message).__name__}")
+    if not isinstance(message, kinds):
+        raise PairingError(f"expected {expected_names}, got {type(message).__name__}")
     return message
 
 
-async def _receive_pairing[T: PairingMessage](ws: EncryptedWebSocket, expected: type[T]) -> T:
-    """Receive the next pairing frame, requiring it to be of type ``expected``."""
+@overload
+async def _receive_pairing[T: PairingMessage](ws: EncryptedWebSocket, expected: type[T]) -> T: ...
+
+
+@overload
+async def _receive_pairing[T: PairingMessage, U: PairingMessage](
+    ws: EncryptedWebSocket, expected: tuple[type[T], type[U]]
+) -> T | U: ...
+
+
+async def _receive_pairing(
+    ws: EncryptedWebSocket,
+    expected: type[PairingMessage] | tuple[type[PairingMessage], type[PairingMessage]],
+) -> PairingMessage:
+    """Receive the next pairing frame, requiring it to be of an ``expected`` type."""
     message = await _receive_pairing_frame(ws, expected)
     if isinstance(message, str):
-        raise PairingError(f"malformed message awaiting {expected.__name__}")
+        raise PairingError(f"malformed message awaiting {_expected_names(expected)}")
     return message
+
+
+def _expected_names(expected: type[PairingMessage] | tuple[type[PairingMessage], ...]) -> str:
+    """Human-readable name(s) of the expected message type(s)."""
+    kinds = expected if isinstance(expected, tuple) else (expected,)
+    return " or ".join(kind.__name__ for kind in kinds)
 
 
 async def receive_pairing_abort(ws: EncryptedWebSocket) -> str:
@@ -594,15 +642,38 @@ async def receive_pairing_abort(ws: EncryptedWebSocket) -> str:
     return frame
 
 
-async def _receive_pair_init(ws: EncryptedWebSocket, pairing_index: int) -> ClientPairInitMessage:
-    """Receive this attempt's ``client/pair-init``, discarding stale leftovers."""
-    while True:
+async def _receive_pair_init(
+    ws: EncryptedWebSocket,
+    pairing_index: int,
+    *,
+    on_pending: Callable[[], None] | None = None,
+) -> ClientPairInitMessage:
+    """Receive this attempt's ``client/pair-init``.
+
+    It allows one gesture-extending ``client/pair-pending``.
+    It also discards any leftover pair-init/pair-pending from a superseded attempt.
+    """
+    async with _server_timeout(SERVER_FIRST_MESSAGE_TIMEOUT_S, "client/pair-init"):
+        while True:
+            message = await _receive_pairing(ws, (ClientPairInitMessage, ClientPairPendingMessage))
+            if message.payload.pairing_index > pairing_index:
+                raise PairingError(
+                    f"{type(message).__name__} pairing_index is ahead of the server's count"
+                )
+            if message.payload.pairing_index == pairing_index:
+                break
+            # A leftover from a superseded pairing server/activate: discard silently.
+    if isinstance(message, ClientPairInitMessage):
+        return message
+    if on_pending is not None:
+        on_pending()
+    # In-order delivery leaves no room for leftovers after the matching pair-pending:
+    # the next pairing frame must be this attempt's client/pair-init.
+    async with _server_timeout(SERVER_GESTURE_TIMEOUT_S, "gesture-gated client/pair-init"):
         init = await _receive_pairing(ws, ClientPairInitMessage)
-        if init.payload.pairing_index > pairing_index:
-            raise PairingError("client/pair-init pairing_index is ahead of the server's count")
-        if init.payload.pairing_index == pairing_index:
-            return init
-        # A leftover from a superseded pairing server/activate: discard silently.
+    if init.payload.pairing_index != pairing_index:
+        raise PairingError("client/pair-init pairing_index does not match the attempt")
+    return init
 
 
 def _pake_sid(handshake_hash: bytes, pairing_index: int) -> bytes:

@@ -3,8 +3,29 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from aiosendspin.models.types import AudioCodec
+
+if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+
+
+@dataclass(frozen=True, slots=True)
+class PairingSupport:
+    """Operator wiring for PIN pairing: an operator can perform the pairing gesture here.
+
+    The gesture itself is reported by calling ``SendspinClient.open_pairing_window``.
+    Its presence enables offering ``static_pin``; ``pin_display`` additionally
+    enables ``dynamic_pin``.
+    """
+
+    gesture_prompt: Callable[[bool], Awaitable[None]] | None = None
+    """Optional operator prompt: awaited with ``True`` when a gated attempt starts
+    waiting for a pairing window, and with ``False`` when the wait ends."""
+    pin_display: Callable[[str | None], Awaitable[None]] | None = None
+    """Out-channel that surfaces a derived dynamic PIN; called with ``None`` when the
+    pairing exchange ends (success or failure) so the channel can clear."""
 
 
 @dataclass(slots=True)

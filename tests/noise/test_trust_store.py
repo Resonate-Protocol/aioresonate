@@ -12,7 +12,7 @@ import pytest
 from aiosendspin.models.types import PairMethod
 from aiosendspin.noise.keys import generate_psk, psk_id_for
 from aiosendspin.noise.trust_store import (
-    PIN_LOCKOUT_THRESHOLD,
+    PIN_ESCALATION_THRESHOLD,
     ClientPairingRecord,
     ClientPairingStore,
     FileClientPairingStore,
@@ -301,13 +301,13 @@ async def test_file_client_store_persists_state(tmp_path: Path) -> None:
     await store.store_record(record)
     await store.set_pairing_psk(pairing)
     await store.set_static_pin("12345678")
-    await store.record_pin_failure(PairMethod.DYNAMIC_PIN)
+    await store.record_pin_failure()
 
     reloaded = await FileClientPairingStore.open(path)
     assert await reloaded.record_by_server_id("server-X") == record
     assert await reloaded.pairing_psk() == pairing
     assert await reloaded.static_pin() == "12345678"
-    assert await reloaded.pin_failure_count(PairMethod.DYNAMIC_PIN) == 1
+    assert await reloaded.pin_failure_count() == 1
 
 
 async def test_file_client_store_persists_last_playback_server(tmp_path: Path) -> None:
@@ -484,32 +484,25 @@ async def test_client_store_reports_no_storage_accounting_by_default(
 
 
 async def test_pin_failure_counter_increments_and_resets(client_store: ClientPairingStore) -> None:
-    """Failures accumulate per method and reset clears the counter."""
-    assert await client_store.pin_failure_count(PairMethod.DYNAMIC_PIN) == 0
-    assert await client_store.record_pin_failure(PairMethod.DYNAMIC_PIN) == 1
-    assert await client_store.record_pin_failure(PairMethod.DYNAMIC_PIN) == 2
-    await client_store.reset_pin_failures(PairMethod.DYNAMIC_PIN)
-    assert await client_store.pin_failure_count(PairMethod.DYNAMIC_PIN) == 0
+    """Failures accumulate and reset clears the counter."""
+    assert await client_store.pin_failure_count() == 0
+    assert await client_store.record_pin_failure() == 1
+    assert await client_store.record_pin_failure() == 2
+    await client_store.reset_pin_failures()
+    assert await client_store.pin_failure_count() == 0
 
 
-async def test_pin_failure_counter_is_per_method(client_store: ClientPairingStore) -> None:
-    """static_pin and dynamic_pin counters are tracked independently."""
-    await client_store.record_pin_failure(PairMethod.DYNAMIC_PIN)
-    assert await client_store.pin_failure_count(PairMethod.STATIC_PIN) == 0
-    assert await client_store.pin_failure_count(PairMethod.DYNAMIC_PIN) == 1
-
-
-async def test_pin_lockout_at_threshold_and_clears_on_reset(
+async def test_pin_escalation_at_threshold_and_clears_on_reset(
     client_store: ClientPairingStore,
 ) -> None:
-    """Lockout trips at the threshold and clears only on reset."""
-    for _ in range(PIN_LOCKOUT_THRESHOLD - 1):
-        await client_store.record_pin_failure(PairMethod.DYNAMIC_PIN)
-    assert not await client_store.is_pin_locked_out(PairMethod.DYNAMIC_PIN)
-    await client_store.record_pin_failure(PairMethod.DYNAMIC_PIN)
-    assert await client_store.is_pin_locked_out(PairMethod.DYNAMIC_PIN)
-    await client_store.reset_pin_failures(PairMethod.DYNAMIC_PIN)
-    assert not await client_store.is_pin_locked_out(PairMethod.DYNAMIC_PIN)
+    """Escalation trips at the threshold and clears only on reset."""
+    for _ in range(PIN_ESCALATION_THRESHOLD - 1):
+        await client_store.record_pin_failure()
+    assert not await client_store.is_pin_escalated()
+    await client_store.record_pin_failure()
+    assert await client_store.is_pin_escalated()
+    await client_store.reset_pin_failures()
+    assert not await client_store.is_pin_escalated()
 
 
 # --- shared-PSK records --------------------------------------------------

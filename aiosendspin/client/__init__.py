@@ -11,7 +11,7 @@ from .client import (
     VisualizerCallback,
 )
 from .listener import ClientListener
-from .models import AudioFormat, PCMFormat, ServerInfo
+from .models import AudioFormat, PairingSupport, PCMFormat, ServerInfo
 from .source import SourceCapture
 from .time_sync import SendspinTimeFilter
 
@@ -23,6 +23,7 @@ __all__ = [
     "GroupUpdateCallback",
     "MetadataCallback",
     "PCMFormat",
+    "PairingSupport",
     "SendspinClient",
     "SendspinTimeFilter",
     "ServerInfo",

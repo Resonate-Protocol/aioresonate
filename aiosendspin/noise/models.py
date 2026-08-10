@@ -141,6 +141,22 @@ class PairAbortMessage(PairingMessage):
 
 
 @dataclass
+class ClientPairPendingPayload(SendspinModel):
+    """``client/pair-pending`` payload — a gesture-gated attempt awaits a pairing window."""
+
+    pairing_index: int
+    """Pairing ``server/activate`` message count received since the last Noise handshake."""
+
+
+@dataclass
+class ClientPairPendingMessage(PairingMessage):
+    """Envelope for ``ClientPairPendingPayload``."""
+
+    payload: ClientPairPendingPayload
+    type: Literal["client/pair-pending"] = "client/pair-pending"
+
+
+@dataclass
 class ClientPairInitPayload(SendspinModel):
     """``client/pair-init`` payload — signals readiness for the PIN-pairing flow."""
 
@@ -169,8 +185,6 @@ class ServerPairInitPayload(SendspinModel):
 
     nonce_A: str  # noqa: N815 - spec wire field name
     """32 bytes from a CSPRNG, base64url-encoded (43 chars)."""
-    pin_length: int
-    """Negotiated PIN length in digits: ``max(client_min, server_min)`` clamped to 4-12."""
 
 
 @dataclass

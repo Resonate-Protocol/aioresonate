@@ -14,6 +14,7 @@ COMMIT_SIZE: Final[int] = 32
 MIN_PIN_DIGITS: Final[int] = 4
 MAX_PIN_DIGITS: Final[int] = 12
 DEFAULT_MIN_PIN_DIGITS: Final[int] = 6
+SHORT_PIN_DIGITS: Final[int] = 6
 STATIC_PIN_DIGITS: Final[int] = 8
 
 
