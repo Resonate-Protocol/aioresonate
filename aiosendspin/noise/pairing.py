@@ -140,6 +140,9 @@ class PairingAttempt:
         if self.languages and self.method is not PairMethod.DYNAMIC_PIN:
             msg = f"{self.method.value} does not use languages"
             raise ValueError(msg)
+        if not all(self.languages):
+            msg = "languages must not contain a blank tag"
+            raise ValueError(msg)
 
 
 if TYPE_CHECKING:
