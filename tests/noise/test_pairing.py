@@ -94,7 +94,7 @@ def test_pairing_attempt_pin_methods_require_pin_provider(method: PairMethod) ->
 
 
 def test_pairing_attempt_languages_are_dynamic_pin_only() -> None:
-    """The spoken-emission hint belongs to dynamic PIN; the other methods reject it."""
+    """The spoken-emission hint belongs to dynamic PIN, the other methods reject it."""
     assert PairingAttempt(
         method=PairMethod.DYNAMIC_PIN, pin_provider=_pin, languages=("ca", "en")
     ).languages == ("ca", "en")

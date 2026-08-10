@@ -88,7 +88,7 @@ def test_activate_pairing_languages_round_trip() -> None:
 
 
 def test_pair_method_descriptor_locations_round_trip() -> None:
-    """A static-secret descriptor carries the locations hint; others omit it."""
+    """A static-secret descriptor carries the locations hint, others omit it."""
     descriptor = PairMethodDescriptor(method=PairMethod.STATIC_PIN, locations=["device", "leaflet"])
     restored = PairMethodDescriptor.from_json(descriptor.to_json())
     assert restored.locations == ["device", "leaflet"]
