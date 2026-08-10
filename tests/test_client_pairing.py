@@ -29,6 +29,7 @@ from aiosendspin.noise.models import (
     ServerPairAuthPayload,
 )
 from aiosendspin.noise.pairing import PairingError
+from aiosendspin.noise.pin import MAX_PIN_DIGITS
 from aiosendspin.noise.trust_store import PIN_ESCALATION_THRESHOLD, PskCategory, ResolvedPsk
 
 from .conftest import make_sdk_client
@@ -202,6 +203,28 @@ async def test_dynamic_activation_with_unacceptable_pin_length_aborts(
         await connection._run_pairing_protocol()  # noqa: SLF001
     abort = PairAbortMessage.from_json(ws.sent[0])
     assert abort.payload.reason is PairAbortReason.PIN_LENGTH_UNACCEPTABLE
+
+
+async def test_configured_minimum_below_the_spec_floor_still_rejects() -> None:
+    """The spec floor holds even for a store written outside the management API."""
+    connection, ws = _dynamic_pin_connection()
+    await _set_min_pin_length(connection, 2)
+    connection._selected_pairing = ActivatePairing(  # noqa: SLF001
+        method=PairMethod.DYNAMIC_PIN, pin_length=2
+    )
+    with pytest.raises(PairingError):
+        await connection._run_pairing_protocol()  # noqa: SLF001
+    abort = PairAbortMessage.from_json(ws.sent[0])
+    assert abort.payload.reason is PairAbortReason.PIN_LENGTH_UNACCEPTABLE
+
+
+async def test_configured_minimum_above_the_spec_ceiling_is_capped() -> None:
+    """A floor past 12 is advertised capped, since a higher one no server could satisfy."""
+    connection, _ws = _dynamic_pin_connection()
+    await _set_min_pin_length(connection, 20)
+    hello = await connection._build_client_hello()  # noqa: SLF001
+    descriptors = {d.method: d for d in hello.payload.supported_pair_methods or []}
+    assert descriptors[PairMethod.DYNAMIC_PIN].min_pin_length == MAX_PIN_DIGITS
 
 
 async def test_short_pin_attempt_is_gesture_gated() -> None:
