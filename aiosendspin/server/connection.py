@@ -1288,7 +1288,9 @@ class SendspinConnection:
             )
             languages = (
                 list(self._pairing_attempt.languages)
-                if self._pairing_attempt is not None and self._pairing_attempt.languages
+                if method is PairMethod.DYNAMIC_PIN
+                and self._pairing_attempt is not None
+                and self._pairing_attempt.languages
                 else None
             )
             # No gate on the hello-advertised methods: the advertisement may lag the client's
