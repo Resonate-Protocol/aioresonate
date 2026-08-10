@@ -368,8 +368,8 @@ class SendspinClient:
         return deadline is not None and self._loop.time() < deadline
 
     async def await_pairing_window(self) -> None:
-        """Resolve once a pairing window is open, prompting for a gesture meanwhile."""
-        if self.pairing_window_open:
+        """Claim a pairing window for the caller's attempt, prompting for a gesture meanwhile."""
+        if self._claim_pairing_window():
             return
         support = self._pairing_support
         prompt = support.gesture_prompt if support is not None else None
@@ -377,13 +377,20 @@ class SendspinClient:
         try:
             if self._pairing_window_waiters == 1 and prompt is not None:
                 await prompt(True)  # noqa: FBT003
-            while not self.pairing_window_open:
+            while not self._claim_pairing_window():
                 self._pairing_window_opened.clear()
                 await self._pairing_window_opened.wait()
         finally:
             self._pairing_window_waiters -= 1
             if self._pairing_window_waiters == 0 and prompt is not None:
                 await prompt(False)  # noqa: FBT003
+
+    def _claim_pairing_window(self) -> bool:
+        """Close an open pairing window for one attempt, reporting whether one was open."""
+        if not self.pairing_window_open:
+            return False
+        self.consume_pairing_window()
+        return True
 
     def consume_pairing_window(self) -> None:
         """Close the pairing window as a pairing attempt starts."""

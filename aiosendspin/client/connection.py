@@ -568,7 +568,6 @@ class SendspinConnection:
             # Every static-PIN attempt is gesture-gated.
             if (leave := await self._gate_on_pairing_window(pairing_index)) is not None:
                 return leave
-            self._client.consume_pairing_window()
             with self._attempt_in_progress():
                 return await run_static_pin_client(
                     self._ws,
@@ -618,6 +617,8 @@ class SendspinConnection:
         """
         assert self._ws is not None
         if self._client.pairing_window_open:
+            # Claims the window without signalling pair-pending, since none is awaited.
+            await self._client.await_pairing_window()
             return None
         await self._ws.send_str(
             ClientPairPendingMessage(

@@ -293,6 +293,28 @@ async def test_gated_attempt_consumes_open_window(monkeypatch: pytest.MonkeyPatc
     assert not client.pairing_window_open  # consumed by the attempt
 
 
+async def test_static_pin_attempt_consumes_a_pre_open_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A static-PIN attempt that finds a window already open spends it rather than leaving it."""
+    connection, ws = _dynamic_pin_connection()
+    client = connection._client  # noqa: SLF001
+    await client.pairing_store.set_static_pin("12345678")
+    config = await client.pairing_store.get_pairing_config()
+    await client.pairing_store.store_pairing_config(replace(config, static_pin_enabled=True))
+    client.open_pairing_window()
+    connection._selected_pairing = ActivatePairing(method=PairMethod.STATIC_PIN)  # noqa: SLF001
+
+    async def fake_run(_ws: object, **kwargs: object) -> None:
+        pass
+
+    monkeypatch.setattr("aiosendspin.client.connection.run_static_pin_client", fake_run)
+
+    assert await connection._run_pairing_protocol() is None  # noqa: SLF001
+    assert ws.sent == []  # no pair-pending
+    assert not client.pairing_window_open
+
+
 async def test_ungated_attempt_consumes_open_window(monkeypatch: pytest.MonkeyPatch) -> None:
     """An ungated attempt still spends an open window: its lifetime ends at pair-init."""
     connection, ws = _dynamic_pin_connection()
@@ -349,7 +371,6 @@ async def test_await_pairing_window_prompts_for_gesture() -> None:
     assert prompts == [True]
     client.open_pairing_window()
     await asyncio.wait_for(waiter, timeout=1)
-    assert client.pairing_window_open
     assert prompts == [True, False]
 
 
@@ -371,6 +392,21 @@ async def test_await_pairing_window_clears_prompt_on_cancel() -> None:
     with pytest.raises(asyncio.CancelledError):
         await waiter
     assert prompts == [True, False]
+
+
+async def test_one_window_admits_a_single_attempt() -> None:
+    """One window releases one waiter, the rest wait for a fresh gesture."""
+    client = make_sdk_client(client_name="C", roles=[Roles.CONTROLLER])
+    first = asyncio.ensure_future(client.await_pairing_window())
+    second = asyncio.ensure_future(client.await_pairing_window())
+    await asyncio.sleep(0)
+    client.open_pairing_window()
+    await asyncio.wait_for(first, timeout=1)
+    await asyncio.sleep(0)
+    assert not second.done()
+    assert not client.pairing_window_open
+    client.open_pairing_window()
+    await asyncio.wait_for(second, timeout=1)
 
 
 async def test_overlapping_window_waits_share_the_prompt() -> None:
@@ -406,7 +442,7 @@ async def test_await_pairing_window_resolves_on_explicit_open() -> None:
     assert not waiter.done()
     client.open_pairing_window()
     await asyncio.wait_for(waiter, timeout=1)
-    assert client.pairing_window_open
+    assert not client.pairing_window_open
 
 
 async def _cancel_time_task(connection: SendspinConnection) -> None:
