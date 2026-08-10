@@ -93,6 +93,23 @@ def test_pairing_attempt_pin_methods_require_pin_provider(method: PairMethod) ->
         PairingAttempt(method=method, pin_provider=_pin, pairing_psk=generate_psk())
 
 
+def test_pairing_attempt_languages_are_dynamic_pin_only() -> None:
+    """The spoken-emission hint belongs to dynamic PIN, the other methods reject it."""
+    assert PairingAttempt(
+        method=PairMethod.DYNAMIC_PIN, pin_provider=_pin, languages=("ca", "en")
+    ).languages == ("ca", "en")
+    with pytest.raises(ValueError, match="does not use languages"):
+        PairingAttempt(method=PairMethod.STATIC_PIN, pin_provider=_pin, languages=("en",))
+    with pytest.raises(ValueError, match="does not use languages"):
+        PairingAttempt(method=PairMethod.PAIRING_PSK, pairing_psk=generate_psk(), languages=("en",))
+
+
+def test_pairing_attempt_rejects_a_blank_language_tag() -> None:
+    """A blank tag is not a BCP 47 value, so it must not reach the activation."""
+    with pytest.raises(ValueError, match="blank tag"):
+        PairingAttempt(method=PairMethod.DYNAMIC_PIN, pin_provider=_pin, languages=("en", ""))
+
+
 _paired_encrypted_ws = make_paired_encrypted_ws
 
 

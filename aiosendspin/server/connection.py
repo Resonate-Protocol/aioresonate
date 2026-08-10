@@ -1286,6 +1286,13 @@ class SendspinConnection:
             pin_length = (
                 self._negotiated_dynamic_pin_length() if method is PairMethod.DYNAMIC_PIN else None
             )
+            languages = (
+                list(self._pairing_attempt.languages)
+                if method is PairMethod.DYNAMIC_PIN
+                and self._pairing_attempt is not None
+                and self._pairing_attempt.languages
+                else None
+            )
             # No gate on the hello-advertised methods: the advertisement may lag the client's
             # live pairing config (management can change it mid-connection). The client
             # arbitrates, aborting an unsupported method with ``method_not_supported``.
@@ -1294,7 +1301,9 @@ class SendspinConnection:
                     payload=ServerActivatePayload(
                         activities=[Activity.PAIRING],
                         active_roles=[],
-                        pairing=ActivatePairing(method=method, pin_length=pin_length),
+                        pairing=ActivatePairing(
+                            method=method, pin_length=pin_length, languages=languages
+                        ),
                     )
                 ).to_json()
             )

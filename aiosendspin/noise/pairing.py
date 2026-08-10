@@ -109,6 +109,8 @@ class PairingAttempt:
     """Re-verify an already-paired client instead of pairing anew."""
     on_pair_pending: Callable[[], None] | None = None
     """Called when the client reports the attempt gesture-gated."""
+    languages: tuple[str, ...] = ()
+    """Dynamic PIN only: BCP 47 tags in descending operator preference for spoken emission."""
 
     def __post_init__(self) -> None:
         """Validate ``method`` / material agree."""
@@ -135,6 +137,12 @@ class PairingAttempt:
             if self.pairing_psk is not None:
                 msg = f"{self.method.value} does not use pairing_psk"
                 raise ValueError(msg)
+        if self.languages and self.method is not PairMethod.DYNAMIC_PIN:
+            msg = f"{self.method.value} does not use languages"
+            raise ValueError(msg)
+        if not all(self.languages):
+            msg = "languages must not contain a blank tag"
+            raise ValueError(msg)
 
 
 if TYPE_CHECKING:
