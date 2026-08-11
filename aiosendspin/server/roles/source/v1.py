@@ -24,6 +24,7 @@ from .stream import SourceStream
 if TYPE_CHECKING:
     from aiosendspin.models.core import ClientStatePayload
     from aiosendspin.models.source import ClientStreamStartPayload
+    from aiosendspin.models.types import SignalState
     from aiosendspin.server.client import SendspinClient
 
 logger = logging.getLogger(__name__)
@@ -46,6 +47,7 @@ class SourceV1Role(Role):
         self._start_requested = False
         # Stamp decoder output produced during flush.
         self._last_timestamp_us = 0
+        self._signal: SignalState | None = None
 
     @property
     def role_id(self) -> str:
@@ -74,12 +76,14 @@ class SourceV1Role(Role):
         self._end_stream()
         self._initial_state_received = False
         self._start_requested = False
+        self._signal = None
 
     def on_deactivate(self) -> None:
         """End any active stream when the role leaves active_roles."""
         self._end_stream()
         self._initial_state_received = False
         self._start_requested = False
+        self._signal = None
         super().on_deactivate()
 
     def requires_initial_state(self) -> bool:
@@ -216,6 +220,9 @@ class SourceV1Role(Role):
         source = payload.source
         if source is None or source.signal is None or not self._line_sense_supported():
             return
+        if source.signal == self._signal:
+            return
+        self._signal = source.signal
         self._client._signal_event(  # noqa: SLF001
             SourceSignalChangedEvent(signal=source.signal)
         )
