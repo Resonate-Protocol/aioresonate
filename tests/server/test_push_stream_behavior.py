@@ -982,9 +982,14 @@ async def test_pcm_cache_catchup_for_uncached_codec() -> None:
 
 
 async def _drain_catchup_tasks(stream: PushStream) -> None:
-    """Run the loop until every catch-up task has finished."""
+    """Run the loop until every catch-up task has finished, re-raising any failure."""
     while pending := [t for t in stream._catchup_tasks.values() if not t.done()]:  # noqa: SLF001
-        await asyncio.wait(pending)
+        done, _ = await asyncio.wait(pending)
+        for task in done:
+            if not task.cancelled():
+                # surface a crashed catch-up here instead of leaving the caller to fail
+                # on a missing-audio assertion that says nothing about the real cause
+                task.result()
     await asyncio.sleep(0)
 
 
