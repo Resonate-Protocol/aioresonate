@@ -3192,13 +3192,15 @@ def test_encode_pcm_sequence_yields_while_replaying_deep_cache(
             channel_id=MAIN_CHANNEL,
             frame_duration_us=25_000,
         )
-        # 3 seconds of cached PCM in 100ms chunks, as the producer buffers it.
+        # 3 seconds of cached PCM in 100ms chunks, as the producer buffers it. The source
+        # rate differs from the target so a resampler carries FIR state across the yields,
+        # and the audio is a ramp rather than silence so any lost state changes the bytes.
         chunks = [
             CachedPCMChunk(
                 timestamp_us=1_000_000 + index * 100_000,
                 duration_us=100_000,
-                pcm_data=bytes(19_200),
-                sample_rate=48_000,
+                pcm_data=bytes((index * 4410 + frame) % 251 for frame in range(4410 * 2 * 2)),
+                sample_rate=44_100,
                 bit_depth=16,
                 channels=2,
             )
