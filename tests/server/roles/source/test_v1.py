@@ -344,3 +344,33 @@ def test_request_start_and_stop_send_server_command() -> None:
     role.request_stop()
     commands = [m.payload.source.command for m in client.sent]
     assert commands == ["start", "stop"]
+
+
+def test_client_state_signal_event_only_fires_on_change() -> None:
+    """Clients repeat the signal in every state, so only transitions are surfaced."""
+    client = _FakeClient(line_sense=True)
+    role = SourceV1Role(client=client)  # type: ignore[arg-type]
+    role.on_connect()
+
+    for _ in range(3):
+        role.on_client_state(
+            ClientStatePayload(source=SourceStatePayload(signal=SignalState.PRESENT))
+        )
+    role.on_client_state(ClientStatePayload(source=SourceStatePayload(signal=SignalState.ABSENT)))
+    role.on_client_state(ClientStatePayload(source=SourceStatePayload(signal=SignalState.ABSENT)))
+
+    signals = [e.signal for e in client.events if isinstance(e, SourceSignalChangedEvent)]
+    assert signals == [SignalState.PRESENT, SignalState.ABSENT]
+
+
+def test_reconnect_resurfaces_the_current_signal() -> None:
+    """A disconnect forgets the signal, so the client's next report is surfaced again."""
+    client = _FakeClient(line_sense=True)
+    role = SourceV1Role(client=client)  # type: ignore[arg-type]
+    role.on_connect()
+    role.on_client_state(ClientStatePayload(source=SourceStatePayload(signal=SignalState.PRESENT)))
+    role.on_disconnect()
+    role.on_client_state(ClientStatePayload(source=SourceStatePayload(signal=SignalState.PRESENT)))
+
+    signals = [e.signal for e in client.events if isinstance(e, SourceSignalChangedEvent)]
+    assert signals == [SignalState.PRESENT, SignalState.PRESENT]
