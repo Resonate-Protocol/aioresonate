@@ -33,6 +33,7 @@ __all__ = [
     "SendspinEvent",
     "SendspinGroup",
     "SendspinServer",
+    "SignalState",
     "SourceSignalChangedEvent",
     "SourceStream",
     "SourceStreamEndedEvent",
@@ -41,7 +42,7 @@ __all__ = [
     "VolumeChangedEvent",
 ]
 
-from aiosendspin.models.types import AudioCodec
+from aiosendspin.models.types import AudioCodec, SignalState
 
 from .audio import AudioFormat
 from .client import ConnectionSecurity, DisconnectBehaviour, SendspinClient
