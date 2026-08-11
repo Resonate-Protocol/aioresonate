@@ -470,6 +470,45 @@ async def test_finalize_rotate_preserves_birth_and_appends_method() -> None:
     assert rotated.pair_methods == [PairMethod.DYNAMIC_PIN, PairMethod.PAIRING_PSK]
 
 
+async def test_finalize_stamps_owner_on_a_fresh_record() -> None:
+    """A pairing run with an owner binds the persisted record to that owner."""
+    client_ews, server_ews, _client_raw, _server_raw = _paired_encrypted_ws()
+    client_store = InMemoryClientPairingStore()
+    server_store = InMemoryServerPairingStore()
+
+    _client_ret, record = await asyncio.gather(
+        run_pairing_psk_client(client_ews, server_id="server-X", store=client_store),
+        run_pairing_psk_server(
+            server_ews, client_id="client-A", store=server_store, owner="user-1"
+        ),
+    )
+
+    assert record.owner == "user-1"
+    assert await server_store.record_by_client_id("client-A") == record
+
+
+async def test_finalize_rotate_restamps_owner() -> None:
+    """Re-pairing re-stamps ownership from the new attempt, superseding the old owner."""
+    client_ews, server_ews, _client_raw, _server_raw = _paired_encrypted_ws()
+    client_store = InMemoryClientPairingStore()
+    server_store = InMemoryServerPairingStore()
+    seeded = ServerPairingRecord(
+        psk_id="old",
+        psk=generate_psk(),
+        client_id="client-A",
+        pair_methods=[PairMethod.PAIRING_PSK],
+        owner="user-1",
+    )
+    await server_store.store_record(seeded)
+
+    _client_ret, rotated = await asyncio.gather(
+        run_pairing_psk_client(client_ews, server_id="server-X", store=client_store),
+        run_pairing_psk_server(server_ews, client_id="client-A", store=server_store),
+    )
+
+    assert rotated.owner is None  # an unowned re-pair promotes the record to durable
+
+
 async def test_client_finalize_raises_if_server_closes_before_ack() -> None:
     """If the server closes before sending server/pair-finalize, the client raises."""
     client_ews, _server_ews, _client_raw, server_raw = _paired_encrypted_ws()
