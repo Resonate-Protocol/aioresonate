@@ -111,6 +111,8 @@ class PairingAttempt:
     """Called when the client reports the attempt gesture-gated."""
     languages: tuple[str, ...] = ()
     """Dynamic PIN only: BCP 47 tags in descending operator preference for spoken emission."""
+    owner: str | None = None
+    """Application-defined authorization id the resulting record is bound to."""
 
     def __post_init__(self) -> None:
         """Validate ``method`` / material agree."""
@@ -168,11 +170,12 @@ async def run_pairing_psk_server(
     *,
     client_id: str,
     store: ServerPairingStore,
+    owner: str | None = None,
 ) -> ServerPairingRecord:
     """Run the server side of the Pairing PSK flow."""
     async with _server_timeout(SERVER_FIRST_MESSAGE_TIMEOUT_S, "client/pair-finalize"):
         record = await _finalize_server(
-            ws, client_id=client_id, store=store, method=PairMethod.PAIRING_PSK
+            ws, client_id=client_id, store=store, method=PairMethod.PAIRING_PSK, owner=owner
         )
     assert record is not None
     return record
@@ -264,6 +267,7 @@ async def run_dynamic_pin_server(
     store: ServerPairingStore,
     verify: bool = False,
     on_pair_pending: Callable[[], None] | None = None,
+    owner: str | None = None,
 ) -> ServerPairingRecord | None:
     """Run the server side of the dynamic-PIN flow.
 
@@ -329,6 +333,7 @@ async def run_dynamic_pin_server(
             method=PairMethod.DYNAMIC_PIN,
             verify=verify,
             wrap_key=_wrap_key(sid, cpace),
+            owner=owner,
         )
 
 
@@ -405,6 +410,7 @@ async def run_static_pin_server(
     store: ServerPairingStore,
     verify: bool = False,
     on_pair_pending: Callable[[], None] | None = None,
+    owner: str | None = None,
 ) -> ServerPairingRecord | None:
     """Run the server side of the static-PIN flow.
 
@@ -459,6 +465,7 @@ async def run_static_pin_server(
             method=PairMethod.STATIC_PIN,
             verify=verify,
             wrap_key=_wrap_key(sid, cpace),
+            owner=owner,
         )
 
 
@@ -496,6 +503,7 @@ async def _finalize_server(
     method: PairMethod,
     verify: bool = False,
     wrap_key: bytes | None = None,
+    owner: str | None = None,
 ) -> ServerPairingRecord | None:
     """Consume ``client/pair-finalize``: finalize a record, or re-verify (returns ``None``)."""
     finalize = await _receive_pairing(ws, ClientPairFinalizeMessage)
@@ -505,10 +513,15 @@ async def _finalize_server(
         psk = _unwrap_psk(ws.session.suite, finalize.payload, wrap_key)
         if record is None:
             record = ServerPairingRecord(
-                psk_id=psk_id_for(psk), psk=psk, client_id=client_id, pair_methods=[method]
+                psk_id=psk_id_for(psk),
+                psk=psk,
+                client_id=client_id,
+                pair_methods=[method],
+                owner=owner,
             )
         else:
-            record = replace(record, psk_id=psk_id_for(psk), psk=psk)
+            # Ownership tracks the latest authorization that minted the credential.
+            record = replace(record, psk_id=psk_id_for(psk), psk=psk, owner=owner)
     if record is not None and record is not existing:
         await store.store_record(record)  # persist before acking
     if verify:

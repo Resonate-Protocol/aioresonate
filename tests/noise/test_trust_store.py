@@ -115,6 +115,39 @@ def test_server_record_pair_methods_round_trip_and_back_compat() -> None:
     assert ServerPairingRecord.from_dict(legacy).pair_methods == []
 
 
+def test_server_record_owner_round_trips_and_back_compat() -> None:
+    """Owner round-trips; a legacy dict without the key loads as ``None``."""
+    record = _server_record()
+    assert record.owner is None
+    owned = ServerPairingRecord(
+        psk_id=record.psk_id,
+        psk=record.psk,
+        client_id=record.client_id,
+        pair_methods=[],
+        owner="user-1",
+    )
+    assert ServerPairingRecord.from_dict(owned.to_dict()) == owned
+    legacy = owned.to_dict()
+    del legacy["owner"]
+    assert ServerPairingRecord.from_dict(legacy).owner is None
+
+
+async def test_server_store_records_by_owner(server_store: ServerPairingStore) -> None:
+    """records_by_owner returns only the records bound to the given owner."""
+    unowned = _server_record(client_id="client-A")
+    psk_b, psk_c = generate_psk(), generate_psk()
+    owned_b = ServerPairingRecord(
+        psk_id=psk_id_for(psk_b), psk=psk_b, client_id="client-B", pair_methods=[], owner="user-1"
+    )
+    owned_c = ServerPairingRecord(
+        psk_id=psk_id_for(psk_c), psk=psk_c, client_id="client-C", pair_methods=[], owner="user-2"
+    )
+    for record in (unowned, owned_b, owned_c):
+        await server_store.store_record(record)
+    assert list(await server_store.records_by_owner("user-1")) == [owned_b]
+    assert list(await server_store.records_by_owner("user-3")) == []
+
+
 def test_client_record_round_trips_and_resolves() -> None:
     """ClientPairingRecord to/from dict round-trips; as_resolved names the server."""
     record = _client_record(server_id="server-X")

@@ -95,6 +95,13 @@ class ServerPairingRecord:
     client_id: str
     pair_methods: list[PairMethod]
     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
+    owner: str | None = None
+    """Application-defined id of the authorization this record is bound to.
+
+    Owned records are meant to be removed once the owning authorization (e.g. a user
+    account or session) ends; the server attaches no behavior to this field. ``None``
+    marks a self-standing credential.
+    """
 
     def __post_init__(self) -> None:
         """Validate the PSK size."""
@@ -118,6 +125,7 @@ class ServerPairingRecord:
             "client_id": self.client_id,
             "pair_methods": [m.value for m in self.pair_methods],
             "created_at": self.created_at.isoformat(),
+            "owner": self.owner,
         }
 
     @classmethod
@@ -129,6 +137,7 @@ class ServerPairingRecord:
             client_id=_str(data, "client_id"),
             pair_methods=_pair_methods(data, "pair_methods"),
             created_at=datetime.fromisoformat(_str(data, "created_at")),
+            owner=_opt_str(data, "owner"),
         )
 
 
@@ -348,6 +357,10 @@ class ServerPairingStore(ABC):
     @abstractmethod
     async def remove_trusted_unpaired(self, client_id: str) -> None:
         """Revoke client's unpaired-playback approval (no-op if absent)."""
+
+    async def records_by_owner(self, owner: str) -> Sequence[ServerPairingRecord]:
+        """Return all long-term records bound to ``owner``."""
+        return [record for record in await self.list_records() if record.owner == owner]
 
 
 class ClientPairingStore(ABC):

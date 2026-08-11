@@ -1336,10 +1336,13 @@ class SendspinConnection:
         self._pairing_index += 1
         pairing_index = self._pairing_index
         if method is PairMethod.PAIRING_PSK:
+            # The attempt is absent when the client dialed in with a staged Pairing PSK.
+            attempt = self._pairing_attempt
             return await run_pairing_psk_server(
                 transport,
                 client_id=self._client_id,
                 store=self._server.pairing_store,
+                owner=attempt.owner if attempt is not None else None,
             )
         assert self._pairing_attempt is not None
         assert self._pairing_attempt.pin_provider is not None
@@ -1358,6 +1361,7 @@ class SendspinConnection:
                 store=self._server.pairing_store,
                 verify=verify,
                 on_pair_pending=self._pairing_attempt.on_pair_pending,
+                owner=self._pairing_attempt.owner,
             )
         assert pin_length is not None
         return await run_dynamic_pin_server(
@@ -1370,6 +1374,7 @@ class SendspinConnection:
             store=self._server.pairing_store,
             verify=verify,
             on_pair_pending=self._pairing_attempt.on_pair_pending,
+            owner=self._pairing_attempt.owner,
         )
 
     def _negotiated_dynamic_pin_length(self) -> int:
