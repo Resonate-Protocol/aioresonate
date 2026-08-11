@@ -45,6 +45,10 @@ _LOGGER = logging.getLogger(__name__)
 DEFAULT_INITIAL_DELAY_US = 250_000  # 250ms
 # Pre-roll amount for catch-up encoding to absorb codec startup delay.
 ENCODER_CATCHUP_WARMUP_US = 120_000
+# Source audio encoded between yields while replaying the PCM cache. The cache holds
+# everything the producer has buffered ahead (tens of seconds), so encoding it in one
+# step would stall the loop and starve the live commit that keeps the timeline moving.
+_PCM_SEQUENCE_YIELD_INTERVAL_US = 500_000
 # Dithering policy when reducing to 16-bit integer PCM.
 _DITHER_METHOD_TRIANGULAR_HP = "triangular_hp"
 # Maximum allowed drift between transformer's internal timeline and the expected output
@@ -2143,7 +2147,7 @@ class PushStream:
         )
         self._channel_timing_residue[channel_id] = 0
 
-    def _encode_pcm_sequence(
+    async def _encode_pcm_sequence(
         self,
         pcm_chunks: list[CachedPCMChunk],
         encoder: AudioTransformer | None,
@@ -2155,6 +2159,9 @@ class PushStream:
     ) -> list[CachedChunk]:
         """Resample PCM chunks to the target format and encode them sequentially.
 
+        Yields periodically so a deep cache does not stall the loop. Output timestamps
+        come from the cached chunks, so they are unaffected by when the work runs.
+
         Pass `resamplers`/`quantizers` to share state across calls (single resampler
         instance per key reused between batches).
         """
@@ -2165,8 +2172,14 @@ class PushStream:
         if quantizers is None:
             quantizers = {}
         prev_resampler_key: _ResamplerKey | None = None
+        since_yield_us = 0
 
         for chunk in pcm_chunks:
+            since_yield_us += chunk.duration_us
+            if since_yield_us >= _PCM_SEQUENCE_YIELD_INTERVAL_US:
+                since_yield_us = 0
+                await asyncio.sleep(0)
+
             source_format = AudioFormat(
                 sample_rate=chunk.sample_rate,
                 bit_depth=chunk.bit_depth,
@@ -2273,7 +2286,7 @@ class PushStream:
         resamplers: dict[_ResamplerKey, _ResamplerState] | None = None,
         quantizers: dict[_ResamplerKey, _ResamplerState] | None = None,
     ) -> list[CachedChunk]:
-        return self._encode_pcm_sequence(
+        return await self._encode_pcm_sequence(
             pcm_chunks,
             encoder,
             req,

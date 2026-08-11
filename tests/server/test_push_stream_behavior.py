@@ -981,6 +981,13 @@ async def test_pcm_cache_catchup_for_uncached_codec() -> None:
     assert role2.received
 
 
+async def _drain_catchup_tasks(stream: PushStream) -> None:
+    """Run the loop until every catch-up task has finished."""
+    while pending := [t for t in stream._catchup_tasks.values() if not t.done()]:  # noqa: SLF001
+        await asyncio.wait(pending)
+    await asyncio.sleep(0)
+
+
 @pytest.mark.asyncio
 async def test_non_main_pcm_catchup_does_not_anchor_to_far_channel_tail() -> None:
     """Non-main PCM catch-up should start near now, not at a far-ahead channel tail."""
@@ -1060,10 +1067,7 @@ async def test_non_main_pcm_catchup_does_not_anchor_to_far_channel_tail() -> Non
     group.clients.append(_DummyClient([role2]))
 
     stream.on_role_join(role2)
-    for _ in range(50):
-        if role2.received:
-            break
-        await asyncio.sleep(0)
+    await _drain_catchup_tasks(stream)
 
     assert role2.started == 1
     assert role2.received
@@ -1177,10 +1181,7 @@ async def test_catchup_handoff_commit_race_does_not_overlap() -> None:
         AudioFormat(sample_rate=48000, bit_depth=24, channels=2),
     )
     await stream.commit_audio()
-    for _ in range(50):
-        if role2.received:
-            break
-        await asyncio.sleep(0)
+    await _drain_catchup_tasks(stream)
 
     received = sorted(role2.received, key=lambda c: c.timestamp_us)
     assert received
@@ -1192,6 +1193,7 @@ async def test_catchup_handoff_commit_race_does_not_overlap() -> None:
 async def test_catchup_handoff_delivers_contiguous_audio() -> None:
     """Audio across the catch-up hand-off has no gaps through later commits."""
     stream, role2, tail_us = await _setup_deep_buffer_catchup_join()
+    await _drain_catchup_tasks(stream)
 
     for _ in range(3):
         stream.prepare_audio(
@@ -1295,10 +1297,7 @@ async def test_late_joiner_shares_group_timeline() -> None:
     commit_one()
     await stream.commit_audio()
 
-    for _ in range(50):
-        if role2.received:
-            break
-        await asyncio.sleep(0)
+    await _drain_catchup_tasks(stream)
 
     assert role2.started >= 1
     assert role2.received, "joiner was stranded with no audio"
@@ -1410,10 +1409,7 @@ async def test_main_join_with_established_resampler_backfills_near_now() -> None
     group.clients.append(_DummyClient([role2]))
 
     stream.on_role_join(role2)
-    for _ in range(50):
-        if role2.received:
-            break
-        await asyncio.sleep(0)
+    await _drain_catchup_tasks(stream)
 
     assert role2.started == 1
     assert role2.received
@@ -3090,7 +3086,8 @@ def test_24bit_input_expands_to_s32_before_graph(monkeypatch: pytest.MonkeyPatch
     assert captured_input == _expand_packed_s24_to_s32(packed_pcm)
 
 
-def test_encode_pcm_sequence_preserves_packed_s24_for_pcm_passthrough() -> None:
+@pytest.mark.asyncio
+async def test_encode_pcm_sequence_preserves_packed_s24_for_pcm_passthrough() -> None:
     """Raw PCM output should convert internal s32 back to packed s24 on the wire."""
     group = _DummyGroup(clients=[])
     stream = PushStream(loop=MagicMock(), clock=ManualClock(), group=group)
@@ -3113,13 +3110,16 @@ def test_encode_pcm_sequence_preserves_packed_s24_for_pcm_passthrough() -> None:
         channels=2,
     )
 
-    encoded = stream._encode_pcm_sequence([pcm_chunk], encoder, req, MAIN_CHANNEL)  # noqa: SLF001
+    encoded = await stream._encode_pcm_sequence(  # noqa: SLF001
+        [pcm_chunk], encoder, req, MAIN_CHANNEL
+    )
 
     assert len(encoded) == 1
     assert encoded[0].payload == packed_pcm
 
 
-def test_encode_pcm_sequence_expands_s24_before_flac_encoder(
+@pytest.mark.asyncio
+async def test_encode_pcm_sequence_expands_s24_before_flac_encoder(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """FLAC encoding should receive AV-format s32 bytes for 24-bit PCM."""
@@ -3162,11 +3162,63 @@ def test_encode_pcm_sequence_expands_s24_before_flac_encoder(
         channels=2,
     )
 
-    encoded = stream._encode_pcm_sequence([pcm_chunk], encoder, req, MAIN_CHANNEL)  # noqa: SLF001
+    encoded = await stream._encode_pcm_sequence(  # noqa: SLF001
+        [pcm_chunk], encoder, req, MAIN_CHANNEL
+    )
 
     assert len(encoded) == 1
     assert encoded[0].payload == b"flac"
     assert captured_chunk == _expand_packed_s24_to_s32(packed_pcm)
+
+
+def test_encode_pcm_sequence_yields_while_replaying_deep_cache(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A deep PCM cache is encoded across several loop steps, without changing output."""
+
+    def _encode() -> tuple[int, list[CachedChunk]]:
+        stream = PushStream(loop=MagicMock(), clock=ManualClock(), group=_DummyGroup(clients=[]))
+        encoder = PcmPassthrough(sample_rate=48_000, bit_depth=16, channels=2)
+        req = AudioRequirements(
+            sample_rate=48_000,
+            bit_depth=16,
+            channels=2,
+            transformer=encoder,
+            channel_id=MAIN_CHANNEL,
+            frame_duration_us=25_000,
+        )
+        # 3 seconds of cached PCM in 100ms chunks, as the producer buffers it.
+        chunks = [
+            CachedPCMChunk(
+                timestamp_us=1_000_000 + index * 100_000,
+                duration_us=100_000,
+                pcm_data=bytes(19_200),
+                sample_rate=48_000,
+                bit_depth=16,
+                channels=2,
+            )
+            for index in range(30)
+        ]
+        # Drive the coroutine by hand so every suspension point is counted.
+        coro = stream._encode_pcm_sequence(chunks, encoder, req, MAIN_CHANNEL)  # noqa: SLF001
+        yields = 0
+        while True:
+            try:
+                coro.send(None)
+            except StopIteration as stop:
+                return yields, stop.value
+            yields += 1
+
+    yields, encoded = _encode()
+    monkeypatch.setattr(push_stream_module, "_PCM_SEQUENCE_YIELD_INTERVAL_US", 10**12)
+    single_step_yields, single_step_encoded = _encode()
+
+    assert single_step_yields == 0
+    assert yields >= 5
+    assert encoded
+    assert [(c.timestamp_us, c.duration_us, c.payload) for c in encoded] == [
+        (c.timestamp_us, c.duration_us, c.payload) for c in single_step_encoded
+    ]
 
 
 def test_soxr_fallback_caches_failure_per_format(
