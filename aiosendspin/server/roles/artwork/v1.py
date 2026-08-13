@@ -229,7 +229,7 @@ class ArtworkV1Role(Role):
             else:
                 artwork = group_role.get_artist_artwork()
 
-            if artwork is not None:
-                group_role._schedule_send_artwork(  # noqa: SLF001
-                    self, artwork, request.channel, updated
+            if artwork is not None or updated.source in group_role._pending_artwork:  # noqa: SLF001
+                group_role._schedule_artwork_replay(  # noqa: SLF001
+                    self, request.channel, updated
                 )

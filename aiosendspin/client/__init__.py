@@ -1,8 +1,12 @@
 """Public interface for the Sendspin client package."""
 
 from .client import (
+    ArtworkTimestampCallback,
     AudioChunkCallback,
     DisconnectCallback,
+    EffectiveArtworkCallback,
+    EffectiveColorCallback,
+    EffectiveMetadataCallback,
     GroupUpdateCallback,
     MetadataCallback,
     SendspinClient,
@@ -25,10 +29,14 @@ from .time_sync import SendspinTimeFilter
 
 __all__ = [
     "SECRET_LOCATIONS",
+    "ArtworkTimestampCallback",
     "AudioChunkCallback",
     "AudioFormat",
     "ClientListener",
     "DisconnectCallback",
+    "EffectiveArtworkCallback",
+    "EffectiveColorCallback",
+    "EffectiveMetadataCallback",
     "GroupUpdateCallback",
     "MetadataCallback",
     "PCMFormat",

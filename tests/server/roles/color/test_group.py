@@ -126,3 +126,68 @@ def test_on_member_join_sends_cleared_when_no_color() -> None:
     assert isinstance(msg, ServerStateMessage)
     assert msg.payload.color is not None
     assert msg.payload.color.primary is None
+
+
+def test_future_color_keeps_current_and_replays_both_states() -> None:
+    """A future palette remains pending and replays after current state."""
+    group = _make_group_stub()
+    cgr = ColorGroupRole(group)
+    cgr.set_color(Color(primary=(1, 2, 3)))
+    cgr.set_color(Color(primary=(4, 5, 6)), timestamp_us=2_000_000)
+
+    assert cgr.color == Color(primary=(1, 2, 3))
+
+    member = MagicMock()
+    cgr.on_member_join(member)
+
+    updates = [call.args[0].payload.color for call in member.send_message.call_args_list]
+    assert [update.timestamp for update in updates] == [1_000_000, 2_000_000]
+    assert updates[0].primary == (1, 2, 3)
+    assert updates[1].primary == (4, 5, 6)
+
+
+def test_earlier_color_replaces_pending_without_committing_it() -> None:
+    """An earlier palette discards the prior pending palette."""
+    group = _make_group_stub()
+    cgr = ColorGroupRole(group)
+    current = Color(primary=(1, 2, 3))
+    earlier = Color(primary=(4, 5, 6))
+    cgr.set_color(current)
+    cgr.set_color(Color(primary=(7, 8, 9)), timestamp_us=3_000_000)
+    cgr.set_color(earlier, timestamp_us=2_000_000)
+
+    assert cgr.color == current
+    assert cgr._pending_color == earlier  # noqa: SLF001
+
+
+def test_later_color_commits_pending_before_storing_replacement() -> None:
+    """A later palette commits pending before becoming the replacement."""
+    group = _make_group_stub()
+    cgr = ColorGroupRole(group)
+    pending = Color(primary=(4, 5, 6))
+    replacement = Color(primary=(7, 8, 9))
+    cgr.set_color(Color(primary=(1, 2, 3)))
+    cgr.set_color(pending, timestamp_us=2_000_000)
+    cgr.set_color(replacement, timestamp_us=3_000_000)
+
+    assert cgr.color == pending
+    assert cgr._pending_color == replacement  # noqa: SLF001
+
+
+def test_present_color_cancels_pending_with_timestamp_only_update() -> None:
+    """A present unchanged palette cancels pending with only a timestamp."""
+    group = _make_group_stub()
+    cgr = ColorGroupRole(group)
+    member = MagicMock()
+    cgr._members = [member]  # noqa: SLF001
+    current = Color(primary=(1, 2, 3))
+    cgr.set_color(current)
+    cgr.set_color(Color(primary=(4, 5, 6)), timestamp_us=2_000_000)
+    member.reset_mock()
+
+    cgr.set_color(current)
+
+    assert cgr._pending_update is None  # noqa: SLF001
+    update = member.send_message.call_args.args[0].payload.color
+    assert update.timestamp == 1_000_000
+    assert "primary" not in update.to_dict()
