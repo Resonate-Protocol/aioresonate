@@ -342,7 +342,9 @@ def test_artwork_format_request_replays_current_then_pending() -> None:
     client.group.group_role.return_value = group_role
     role = ArtworkV1Role(client=client)
     role.on_connect()
-    group_role._pending_artwork[ArtworkSource.ALBUM] = MagicMock()  # noqa: SLF001
+    pending = MagicMock()
+    pending.timestamp_us = 2_000_000
+    group_role._pending_artwork[ArtworkSource.ALBUM] = pending  # noqa: SLF001
 
     with patch.object(group_role, "_schedule_artwork_replay") as replay:
         role.on_stream_request_format(

@@ -288,8 +288,25 @@ def test_future_metadata_keeps_current_and_replays_both_states() -> None:
     assert messages[1].title == "Next"
 
 
-def test_earlier_metadata_replaces_pending_without_committing_it() -> None:
-    """An earlier timestamp discards the prior pending update."""
+def test_late_join_initial_metadata_is_current_after_pending_becomes_due() -> None:
+    """A due update becomes the present-timestamped initial state."""
+    group = _make_group_stub()
+    mgr = MetadataGroupRole(group)
+    mgr.set_metadata(Metadata(title="Current"))
+    mgr.set_metadata(Metadata(title="Next", timestamp_us=2_000_000))
+    group._server.clock.now_us.return_value = 3_000_000  # noqa: SLF001
+    member = MagicMock()
+
+    mgr.on_member_join(member)
+
+    updates = [call.args[0].payload.metadata for call in member.send_message.call_args_list]
+    assert len(updates) == 1
+    assert updates[0].timestamp == 3_000_000
+    assert updates[0].title == "Next"
+
+
+def test_later_arrival_replaces_pending_when_timestamp_goes_backwards() -> None:
+    """Future metadata replacement follows arrival order, not timestamp order."""
     group = _make_group_stub()
     mgr = MetadataGroupRole(group)
     mgr.set_metadata(Metadata(title="Current"))
@@ -302,18 +319,40 @@ def test_earlier_metadata_replaces_pending_without_committing_it() -> None:
     assert mgr._pending_metadata.title == "Earlier"  # noqa: SLF001
 
 
-def test_later_metadata_commits_pending_before_storing_replacement() -> None:
-    """A later timestamp commits pending before becoming the replacement."""
+def test_chained_scheduled_metadata_updates_carry_prior_fields() -> None:
+    """Each scheduled update includes every field carried by its predecessor."""
     group = _make_group_stub()
     mgr = MetadataGroupRole(group)
-    mgr.set_metadata(Metadata(title="Current"))
-    mgr.set_metadata(Metadata(title="Pending", artist="One", timestamp_us=2_000_000))
-    mgr.set_metadata(Metadata(title="Replacement", artist="One", timestamp_us=3_000_000))
+    member = MagicMock()
+    mgr._members = [member]  # noqa: SLF001
+    mgr.set_metadata(Metadata(title="Current", artist="Artist", album="Base"))
+    member.reset_mock()
 
+    mgr.set_metadata(Metadata(title="First", artist="Artist", album="Base", timestamp_us=3_000_000))
+    mgr.set_metadata(
+        Metadata(title="Current", artist="Second", album="Base", timestamp_us=2_500_000)
+    )
+    mgr.set_metadata(Metadata(title="Third", artist="Artist", album="Next", timestamp_us=2_000_000))
+
+    updates = [
+        call.args[0].payload.metadata.to_dict() for call in member.send_message.call_args_list
+    ]
+    assert updates[0] == {"timestamp": 3_000_000, "title": "First"}
+    assert updates[1] == {
+        "timestamp": 2_500_000,
+        "title": "Current",
+        "artist": "Second",
+    }
+    assert updates[2] == {
+        "timestamp": 2_000_000,
+        "title": "Third",
+        "artist": "Artist",
+        "album": "Next",
+    }
     assert mgr.metadata is not None
-    assert mgr.metadata.title == "Pending"
+    assert mgr.metadata.title == "Current"
     assert mgr._pending_metadata is not None  # noqa: SLF001
-    assert mgr._pending_metadata.title == "Replacement"  # noqa: SLF001
+    assert mgr._pending_metadata.title == "Third"  # noqa: SLF001
 
 
 def test_present_metadata_cancels_pending_even_when_current_is_unchanged() -> None:
@@ -331,7 +370,49 @@ def test_present_metadata_cancels_pending_even_when_current_is_unchanged() -> No
     assert mgr._pending_update is None  # noqa: SLF001
     update = member.send_message.call_args.args[0].payload.metadata
     assert update.timestamp == 1_000_000
-    assert "title" not in update.to_dict()
+    assert update.title == "Current"
+
+
+def test_scheduled_progress_obligation_uses_progress_at_next_timestamp() -> None:
+    """Forced progress preserves the applied track trajectory."""
+    group = _make_group_stub()
+    group.has_active_stream = True
+    mgr = MetadataGroupRole(group)
+    member = MagicMock()
+    mgr._members = [member]  # noqa: SLF001
+    current = Metadata(
+        title="Current",
+        track_progress=30_000,
+        track_duration=200_000,
+        playback_speed=1000,
+    )
+    mgr.set_metadata(current)
+    mgr.set_metadata(
+        Metadata(
+            title="Next",
+            track_progress=0,
+            track_duration=180_000,
+            playback_speed=1000,
+        ),
+        timestamp_us=5_000_000,
+    )
+    group._server.clock.now_us.return_value = 2_000_000  # noqa: SLF001
+    member.reset_mock()
+
+    mgr.set_metadata(
+        Metadata(
+            title="Updated",
+            track_progress=30_000,
+            track_duration=200_000,
+            playback_speed=1000,
+        )
+    )
+
+    update = member.send_message.call_args.args[0].payload.metadata
+    assert update.timestamp == 2_000_000
+    assert update.progress is not None
+    assert not isinstance(update.progress, UndefinedField)
+    assert update.progress.track_progress == 31_000
 
 
 def test_freeze_progress_uses_current_and_discards_pending() -> None:
@@ -367,20 +448,6 @@ def test_freeze_progress_uses_current_and_discards_pending() -> None:
     assert mgr._pending_update is None  # noqa: SLF001
 
 
-def test_equal_metadata_commits_pending_before_storing_replacement() -> None:
-    """An equal timestamp commits pending before retaining the new update."""
-    group = _make_group_stub()
-    mgr = MetadataGroupRole(group)
-    mgr.set_metadata(Metadata(title="Current"))
-    mgr.set_metadata(Metadata(title="Pending", timestamp_us=2_000_000))
-    mgr.set_metadata(Metadata(title="Replacement", timestamp_us=2_000_000))
-
-    assert mgr.metadata is not None
-    assert mgr.metadata.title == "Pending"
-    assert mgr._pending_metadata is not None  # noqa: SLF001
-    assert mgr._pending_metadata.title == "Replacement"  # noqa: SLF001
-
-
 def test_present_update_commits_pending_that_has_taken_effect() -> None:
     """A later present update commits a pending update before diffing."""
     group = _make_group_stub()
@@ -394,7 +461,7 @@ def test_present_update_commits_pending_that_has_taken_effect() -> None:
     mgr.set_metadata(Metadata(title="Pending", artist="Updated"))
 
     update = member.send_message.call_args.args[0].payload.metadata
-    assert "title" not in update.to_dict()
+    assert update.title == "Pending"
     assert update.artist == "Updated"
 
 

@@ -84,8 +84,8 @@ async def test_scheduled_artwork_clear_keeps_current_and_replays_in_order() -> N
 
 
 @pytest.mark.asyncio
-async def test_earlier_artwork_replaces_pending_without_committing_it() -> None:
-    """An earlier artwork message discards the prior pending image."""
+async def test_later_arrival_replaces_artwork_when_timestamp_goes_backwards() -> None:
+    """Future artwork replacement follows arrival order, not timestamp order."""
     group = _make_group_stub()
     agr = ArtworkGroupRole(group)
     current = Image.new("RGB", (10, 10), (255, 0, 0))
@@ -100,8 +100,8 @@ async def test_earlier_artwork_replaces_pending_without_committing_it() -> None:
 
 
 @pytest.mark.asyncio
-async def test_later_artwork_commits_pending_before_storing_replacement() -> None:
-    """A later artwork message commits pending before replacing it."""
+async def test_later_artwork_timestamp_does_not_apply_displaced_pending() -> None:
+    """Replacing pending artwork never promotes the displaced image."""
     group = _make_group_stub()
     agr = ArtworkGroupRole(group)
     current = Image.new("RGB", (10, 10), (255, 0, 0))
@@ -111,8 +111,23 @@ async def test_later_artwork_commits_pending_before_storing_replacement() -> Non
     await agr.set_album_artwork(pending, timestamp_us=500_000)
     await agr.set_album_artwork(replacement, timestamp_us=600_000)
 
-    assert agr.get_album_artwork() is pending
+    assert agr.get_album_artwork() is current
     assert agr._pending_artwork[ArtworkSource.ALBUM].image is replacement  # noqa: SLF001
+
+
+@pytest.mark.asyncio
+async def test_immediate_artwork_discards_pending() -> None:
+    """A present artwork update replaces current and discards pending."""
+    group = _make_group_stub()
+    agr = ArtworkGroupRole(group)
+    pending = Image.new("RGB", (10, 10), (0, 255, 0))
+    immediate = Image.new("RGB", (10, 10), (0, 0, 255))
+    await agr.set_album_artwork(pending, timestamp_us=500_000)
+
+    await agr.set_album_artwork(immediate)
+
+    assert agr.get_album_artwork() is immediate
+    assert ArtworkSource.ALBUM not in agr._pending_artwork  # noqa: SLF001
 
 
 @pytest.mark.asyncio
