@@ -184,7 +184,7 @@ def test_player_format_request_uses_client_priority_order_when_codec_missing(
         "p1",
         supported_formats=[
             SupportedAudioFormat(
-                codec=AudioCodec.FLAC, sample_rate=44100, bit_depth=32, channels=2
+                codec=AudioCodec.FLAC, sample_rate=44100, bit_depth=24, channels=2
             ),
             SupportedAudioFormat(
                 codec=AudioCodec.OPUS, sample_rate=48000, bit_depth=16, channels=2
@@ -213,7 +213,7 @@ def test_player_format_request_uses_client_priority_order_when_codec_missing(
     assert player_role.preferred_format is not None
     assert player_role.preferred_format.sample_rate == 44100
     assert player_role.preferred_format.channels == 2
-    assert player_role.preferred_format.bit_depth == 32
+    assert player_role.preferred_format.bit_depth == 24
 
 
 def test_player_partial_format_request_preserves_unchanged_fields(

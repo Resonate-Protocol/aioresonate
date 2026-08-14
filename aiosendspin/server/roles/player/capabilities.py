@@ -11,7 +11,11 @@ from aiosendspin.models.player import SupportedAudioFormat
 from aiosendspin.server.roles.player.audio_transformers import OpusEncoder
 
 PCM_BIT_DEPTHS: frozenset[int] = frozenset({16, 24, 32})
-FLAC_BIT_DEPTHS: frozenset[int] = frozenset({16, 24, 32})
+
+# ffmpeg's FLAC encoder takes only s16/s32, and `AudioFormat.resolve_av_format`
+# maps both 24- and 32-bit to s32, so STREAMINFO always declares
+# bits_per_sample = 24. Accepting 32 would announce a depth we never send.
+FLAC_BIT_DEPTHS: frozenset[int] = frozenset({16, 24})
 OPUS_BIT_DEPTHS: frozenset[int] = frozenset({16})
 
 # Supported channel counts — matches the layout map in server/audio.py.
@@ -23,7 +27,7 @@ def can_encode_format(fmt: SupportedAudioFormat) -> bool:
 
     Validates against server encoding constraints:
     - PCM bit depth: 16, 24, or 32; channels: 1-8 or 10 (up to 9.1)
-    - FLAC bit depth: 16, 24, or 32; channels: 1-8 or 10 (up to 9.1)
+    - FLAC bit depth: 16 or 24; channels: 1-8 or 10 (up to 9.1)
     - Opus bit depth: 16 only; channels: 1 or 2 only, as multichannel not yet implemented
     - Opus: sample rate must be one of 8k, 12k, 16k, 24k, 48k
     - FLAC/PCM: any sample rate

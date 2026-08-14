@@ -225,7 +225,7 @@ async def test_reconnect_refreshes_audio_requirements_from_new_hello() -> None:
                     codec=AudioCodec.FLAC,
                     channels=2,
                     sample_rate=48_000,
-                    bit_depth=32,
+                    bit_depth=16,
                 )
             ],
         ),
@@ -239,7 +239,7 @@ async def test_reconnect_refreshes_audio_requirements_from_new_hello() -> None:
     first_req = role.get_audio_requirements()
     assert first_req is not None
     assert first_req.sample_rate == 48_000
-    assert first_req.bit_depth == 32
+    assert first_req.bit_depth == 16
     assert first_req.channels == 2
 
     client.detach_connection(None)

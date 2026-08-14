@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import struct
 
+import pytest
+
 from aiosendspin.server.audio_transformers import (
     AudioTransformer,
     TransformerPool,
@@ -14,6 +16,7 @@ from aiosendspin.server.roles.player.audio_transformers import (
     OpusEncoder,
     PcmPassthrough,
 )
+from aiosendspin.server.roles.player.capabilities import FLAC_BIT_DEPTHS
 
 
 class TestAudioTransformerProtocol:
@@ -575,17 +578,6 @@ class TestFlacEncoder:
             total_output.extend(result)
         assert len(total_output) > 0
 
-    def test_flac_encoder_supports_32_bit(self) -> None:
-        """FlacEncoder accepts 32-bit PCM input."""
-        encoder = FlacEncoder(sample_rate=48000, bit_depth=32, channels=2)
-        # 25ms at 48kHz stereo 32-bit: 1200 samples * 8 bytes = 9600 bytes.
-        pcm = bytes(9600)
-        total_output: list[tuple[bytes, int]] = []
-        for i in range(4):
-            result = encoder.process(pcm, timestamp_us=i * 25_000, duration_us=25_000)
-            total_output.extend(result)
-        assert len(total_output) > 0
-
     def test_flac_encoder_has_header(self) -> None:
         """FlacEncoder produces fLaC header."""
         encoder = FlacEncoder(sample_rate=48000, bit_depth=16, channels=2)
@@ -696,6 +688,30 @@ class TestFlacEncoder:
                 f"Frame {i}: gap={gap}us, expected {frame_dur}us. "
                 f"Timestamps around gap: {timestamps[max(0, i - 2) : i + 2]}"
             )
+
+
+class TestFlacEncoderStreamInfo:
+    """Tests that the FLAC stream delivered matches the bit depth the server announces."""
+
+    @pytest.mark.parametrize("bit_depth", sorted(FLAC_BIT_DEPTHS))
+    def test_streaminfo_bit_depth_matches_announced_depth(self, bit_depth: int) -> None:
+        """Every depth the server accepts is the depth STREAMINFO declares."""
+        encoder = FlacEncoder(sample_rate=48_000, bit_depth=bit_depth, channels=2)
+        encoder._ensure_initialized()  # noqa: SLF001
+
+        header = encoder.get_header()
+        assert header is not None, "FLAC encoder should expose a STREAMINFO header"
+        assert header.startswith(b"fLaC\x80")
+
+        # get_header() prefixes the 34-byte STREAMINFO block with "fLaC", a 1-byte
+        # metadata block header and a 3-byte length. Within the block (RFC 9639 §8.2)
+        # the 64 bits at offset 10 hold: sample rate (20), channels (3),
+        # bits per sample (5, stored as value-1), total samples (36).
+        streaminfo = header[8:]
+        packed = struct.unpack_from(">Q", streaminfo, 10)[0]
+        streaminfo_bit_depth = ((packed >> 36) & 0x1F) + 1
+
+        assert streaminfo_bit_depth == bit_depth
 
 
 class TestOpusEncoderLookaheadCompensation:

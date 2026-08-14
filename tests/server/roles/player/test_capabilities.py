@@ -2,7 +2,10 @@
 
 from aiosendspin.models.player import SupportedAudioFormat
 from aiosendspin.models.types import AudioCodec
-from aiosendspin.server.roles.player.capabilities import can_encode_format
+from aiosendspin.server.roles.player.capabilities import (
+    can_encode_format,
+    filter_encodable_formats,
+)
 
 
 def test_can_encode_format_accepts_pcm_32_bit() -> None:
@@ -11,10 +14,30 @@ def test_can_encode_format_accepts_pcm_32_bit() -> None:
     assert can_encode_format(fmt)
 
 
-def test_can_encode_format_accepts_flac_32_bit() -> None:
-    """FLAC 32-bit should be considered encodable."""
-    fmt = SupportedAudioFormat(codec=AudioCodec.FLAC, sample_rate=48_000, bit_depth=32, channels=2)
+def test_can_encode_format_accepts_flac_24_bit() -> None:
+    """FLAC 24-bit should be considered encodable."""
+    fmt = SupportedAudioFormat(codec=AudioCodec.FLAC, sample_rate=48_000, bit_depth=24, channels=2)
     assert can_encode_format(fmt)
+
+
+def test_can_encode_format_rejects_flac_32_bit() -> None:
+    """FLAC 32-bit should be rejected — the encoder cannot deliver it."""
+    fmt = SupportedAudioFormat(codec=AudioCodec.FLAC, sample_rate=48_000, bit_depth=32, channels=2)
+    assert not can_encode_format(fmt)
+
+
+def test_filter_encodable_formats_drops_flac_32_bit() -> None:
+    """FLAC 32-bit should be filtered out while other formats keep client priority order."""
+    flac_32 = SupportedAudioFormat(
+        codec=AudioCodec.FLAC, sample_rate=48_000, bit_depth=32, channels=2
+    )
+    flac_24 = SupportedAudioFormat(
+        codec=AudioCodec.FLAC, sample_rate=48_000, bit_depth=24, channels=2
+    )
+    pcm_16 = SupportedAudioFormat(
+        codec=AudioCodec.PCM, sample_rate=48_000, bit_depth=16, channels=2
+    )
+    assert filter_encodable_formats([flac_32, flac_24, pcm_16]) == [flac_24, pcm_16]
 
 
 def test_can_encode_format_rejects_opus_32_bit() -> None:
