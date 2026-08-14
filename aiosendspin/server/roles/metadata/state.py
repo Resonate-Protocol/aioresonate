@@ -128,6 +128,8 @@ class Metadata:
         :param timestamp: Server clock time in microseconds for the update.
         :param include: Field names to restate with their current value even
             when unchanged, e.g. fields a superseded scheduled update touched.
+            Progress keeps its own diff rules; restating it is the caller's
+            concern.
         """
         metadata_update = SessionUpdateMetadata(timestamp=timestamp)
 
