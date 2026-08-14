@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
 
 from aiosendspin.models.metadata import Progress, SessionUpdateMetadata
@@ -114,28 +115,40 @@ class Metadata:
         progress_drift = abs(actual_progress_change - expected_progress_change)
         return progress_drift <= progress_tolerance_ms
 
-    def diff_update(self, last: Metadata | None, timestamp: int) -> SessionUpdateMetadata:
-        """Build a SessionUpdateMetadata containing only changed fields compared to last."""
+    def diff_update(
+        self,
+        last: Metadata | None,
+        timestamp: int,
+        *,
+        include: AbstractSet[str] = frozenset(),
+    ) -> SessionUpdateMetadata:
+        """Build a SessionUpdateMetadata with changed fields compared to last.
+
+        :param last: The previous metadata state to diff against.
+        :param timestamp: Server clock time in microseconds for the update.
+        :param include: Field names to restate with their current value even
+            when unchanged, e.g. fields a superseded scheduled update touched.
+        """
         metadata_update = SessionUpdateMetadata(timestamp=timestamp)
 
         # Only include fields that have changed since the last metadata update
-        if last is None or last.title != self.title:
+        if last is None or "title" in include or last.title != self.title:
             metadata_update.title = self.title
-        if last is None or last.artist != self.artist:
+        if last is None or "artist" in include or last.artist != self.artist:
             metadata_update.artist = self.artist
-        if last is None or last.album_artist != self.album_artist:
+        if last is None or "album_artist" in include or last.album_artist != self.album_artist:
             metadata_update.album_artist = self.album_artist
-        if last is None or last.album != self.album:
+        if last is None or "album" in include or last.album != self.album:
             metadata_update.album = self.album
-        if last is None or last.artwork_url != self.artwork_url:
+        if last is None or "artwork_url" in include or last.artwork_url != self.artwork_url:
             metadata_update.artwork_url = self.artwork_url
-        if last is None or last.year != self.year:
+        if last is None or "year" in include or last.year != self.year:
             metadata_update.year = self.year
-        if last is None or last.track != self.track:
+        if last is None or "track" in include or last.track != self.track:
             metadata_update.track = self.track
-        if last is None or last.repeat != self.repeat:
+        if last is None or "repeat" in include or last.repeat != self.repeat:
             metadata_update.repeat = self.repeat
-        if last is None or last.shuffle != self.shuffle:
+        if last is None or "shuffle" in include or last.shuffle != self.shuffle:
             metadata_update.shuffle = self.shuffle
 
         # Emit progress=null to clear when the previous state had progress and the new state

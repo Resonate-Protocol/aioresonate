@@ -11,6 +11,7 @@ from aiosendspin.server.roles.base import GroupRole, Role
 from aiosendspin.server.roles.color.events import ColorClearedEvent, ColorUpdatedEvent
 from aiosendspin.server.roles.color.state import Color
 from aiosendspin.server.roles.color.types import ColorRoleProtocol
+from aiosendspin.server.roles.scheduled_state import ScheduledRoleState
 
 if TYPE_CHECKING:
     from aiosendspin.server.group import SendspinGroup
@@ -27,16 +28,12 @@ class ColorGroupRole(GroupRole):
     def __init__(self, group: SendspinGroup) -> None:
         """Initialize ColorGroupRole."""
         super().__init__(group)
-        self._current_color: Color | None = None
-        self._pending_color: Color | None = None
-        self._pending_update: SessionUpdateColor | None = None
-        self._scheduled_fields: set[str] = set()
+        self._state: ScheduledRoleState[Color, SessionUpdateColor] = ScheduledRoleState()
 
     @property
     def color(self) -> Color | None:
         """Return current color palette."""
-        self._promote_due_pending(self._group._server.clock.now_us())  # noqa: SLF001
-        return self._current_color
+        return self._state.current(self._now_us())
 
     def on_member_join(self, role: Role) -> None:
         """Send current color to newly joined member."""
@@ -44,20 +41,20 @@ class ColorGroupRole(GroupRole):
 
     def _send_state_to_role(self, role: ColorRoleProtocol) -> None:
         """Send current color state to a single role."""
-        timestamp = self._group._server.clock.now_us()  # noqa: SLF001
-        self._promote_due_pending(timestamp)
-        if self._current_color is not None:
-            color_update = self._current_color.snapshot_update(timestamp)
+        timestamp = self._now_us()
+        current = self._state.current(timestamp)
+        if current is not None:
+            color_update = current.snapshot_update(timestamp)
         else:
             color_update = SessionUpdateColor.cleared(timestamp)
         role.send_message(ServerStateMessage(ServerStatePayload(color=color_update)))
-        if self._pending_update is not None:
-            role.send_message(ServerStateMessage(ServerStatePayload(color=self._pending_update)))
+        if (pending_update := self._state.pending_update) is not None:
+            role.send_message(ServerStateMessage(ServerStatePayload(color=pending_update)))
 
     def set_color(self, color: Color | None, *, timestamp_us: int | None = None) -> None:
         """Set or schedule a color palette and push it to subscribed roles."""
-        now_us = self._group._server.clock.now_us()  # noqa: SLF001
-        self._promote_due_pending(now_us)
+        now_us = self._now_us()
+        current = self._state.current(now_us)
         timestamp = now_us if timestamp_us is None else timestamp_us
         if color is not None:
             if timestamp_us is not None:
@@ -67,26 +64,23 @@ class ColorGroupRole(GroupRole):
             else:
                 timestamp = color.timestamp_us
 
-        had_pending = self._pending_update is not None
-        if not had_pending and not self._scheduled_fields and color == self._current_color:
+        if not self._state.has_pending and not self._state.scheduled_fields and color == current:
             return
 
-        last_color = self._current_color
+        last_color = current
         if color is None:
             color_update = SessionUpdateColor.cleared(timestamp)
         else:
-            color_update = color.diff_update(last_color, timestamp)
-        self._include_scheduled_fields(color_update, color)
+            color_update = color.diff_update(
+                last_color, timestamp, include=self._state.scheduled_fields
+            )
 
-        self._pending_color = None
-        self._pending_update = None
         if timestamp > now_us:
-            self._pending_color = color
-            self._pending_update = color_update
-            self._scheduled_fields = set(color_update.to_dict()) - {"timestamp"}
+            self._state.schedule(
+                color, color_update, timestamp, set(color_update.to_dict()) - {"timestamp"}
+            )
         else:
-            self._current_color = color
-            self._scheduled_fields.clear()
+            self._state.apply(color, timestamp)
 
         for role in self._members:
             state_message = ServerStateMessage(ServerStatePayload(color=color_update))
@@ -104,29 +98,6 @@ class ColorGroupRole(GroupRole):
                 timestamp_us=timestamp,
             )
         )
-
-    def _promote_due_pending(self, now_us: int) -> None:
-        pending_update = self._pending_update
-        if pending_update is None or pending_update.timestamp > now_us:
-            return
-        self._current_color = self._pending_color
-        self._pending_color = None
-        self._pending_update = None
-
-    def _include_scheduled_fields(
-        self,
-        update: SessionUpdateColor,
-        color: Color | None,
-    ) -> None:
-        if not self._scheduled_fields:
-            return
-        snapshot = (
-            SessionUpdateColor.cleared(update.timestamp)
-            if color is None
-            else color.snapshot_update(update.timestamp)
-        )
-        for field_name in self._scheduled_fields:
-            setattr(update, field_name, getattr(snapshot, field_name))
 
     def clear(self, *, timestamp_us: int | None = None) -> None:
         """Clear the color palette."""

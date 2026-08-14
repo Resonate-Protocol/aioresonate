@@ -315,8 +315,8 @@ def test_later_arrival_replaces_pending_when_timestamp_goes_backwards() -> None:
 
     assert mgr.metadata is not None
     assert mgr.metadata.title == "Current"
-    assert mgr._pending_metadata is not None  # noqa: SLF001
-    assert mgr._pending_metadata.title == "Earlier"  # noqa: SLF001
+    assert mgr._state.pending is not None  # noqa: SLF001
+    assert mgr._state.pending.title == "Earlier"  # noqa: SLF001
 
 
 def test_chained_scheduled_metadata_updates_carry_prior_fields() -> None:
@@ -351,8 +351,8 @@ def test_chained_scheduled_metadata_updates_carry_prior_fields() -> None:
     }
     assert mgr.metadata is not None
     assert mgr.metadata.title == "Current"
-    assert mgr._pending_metadata is not None  # noqa: SLF001
-    assert mgr._pending_metadata.title == "Third"  # noqa: SLF001
+    assert mgr._state.pending is not None  # noqa: SLF001
+    assert mgr._state.pending.title == "Third"  # noqa: SLF001
 
 
 def test_present_metadata_cancels_pending_even_when_current_is_unchanged() -> None:
@@ -367,7 +367,7 @@ def test_present_metadata_cancels_pending_even_when_current_is_unchanged() -> No
 
     mgr.set_metadata(Metadata(title="Current"))
 
-    assert mgr._pending_update is None  # noqa: SLF001
+    assert mgr._state.pending_update is None  # noqa: SLF001
     update = member.send_message.call_args.args[0].payload.metadata
     assert update.timestamp == 1_000_000
     assert update.title == "Current"
@@ -445,7 +445,7 @@ def test_freeze_progress_uses_current_and_discards_pending() -> None:
     assert mgr.metadata.title == "Current"
     assert mgr.metadata.track_progress == 2_000
     assert mgr.metadata.playback_speed == 0
-    assert mgr._pending_update is None  # noqa: SLF001
+    assert mgr._state.pending_update is None  # noqa: SLF001
 
 
 def test_present_update_commits_pending_that_has_taken_effect() -> None:

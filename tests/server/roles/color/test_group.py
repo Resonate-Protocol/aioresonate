@@ -101,7 +101,7 @@ def test_on_member_join_sends_current_color() -> None:
     """on_member_join sends a snapshot to the new member."""
     group = _make_group_stub()
     cgr = ColorGroupRole(group)
-    cgr._current_color = Color(primary=(100, 150, 200))  # noqa: SLF001
+    cgr._state.apply(Color(primary=(100, 150, 200)), 0)  # noqa: SLF001
 
     member = MagicMock()
     cgr.on_member_join(member)
@@ -174,7 +174,7 @@ def test_later_arrival_replaces_color_when_timestamp_goes_backwards() -> None:
     cgr.set_color(earlier, timestamp_us=2_000_000)
 
     assert cgr.color == current
-    assert cgr._pending_color == earlier  # noqa: SLF001
+    assert cgr._state.pending == earlier  # noqa: SLF001
 
 
 def test_chained_scheduled_color_updates_carry_prior_fields() -> None:
@@ -218,7 +218,7 @@ def test_present_color_cancels_pending_with_timestamp_only_update() -> None:
 
     cgr.set_color(current)
 
-    assert cgr._pending_update is None  # noqa: SLF001
+    assert cgr._state.pending_update is None  # noqa: SLF001
     update = member.send_message.call_args.args[0].payload.color
     assert update.timestamp == 1_000_000
     assert update.primary == (1, 2, 3)

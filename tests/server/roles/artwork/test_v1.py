@@ -290,10 +290,12 @@ def test_artwork_role_on_connect_schedules_artwork_once_per_channel() -> None:
     group._server = MagicMock()  # noqa: SLF001
     group._server.clock.now_us.return_value = 1_000_000  # noqa: SLF001
     group_role = ArtworkGroupRole(group)
-    group_role._current_artwork = {  # noqa: SLF001
-        ArtworkSource.ALBUM: Image.new("RGB", (10, 10)),
-        ArtworkSource.ARTIST: Image.new("RGB", (10, 10)),
-    }
+    group_role._artwork_state(ArtworkSource.ALBUM).apply(  # noqa: SLF001
+        Image.new("RGB", (10, 10)), 1_000_000
+    )
+    group_role._artwork_state(ArtworkSource.ARTIST).apply(  # noqa: SLF001
+        Image.new("RGB", (10, 10)), 1_000_000
+    )
     client.group.group_role.return_value = group_role
 
     role = ArtworkV1Role(client=client)
@@ -342,9 +344,9 @@ def test_artwork_format_request_replays_current_then_pending() -> None:
     client.group.group_role.return_value = group_role
     role = ArtworkV1Role(client=client)
     role.on_connect()
-    pending = MagicMock()
-    pending.timestamp_us = 2_000_000
-    group_role._pending_artwork[ArtworkSource.ALBUM] = pending  # noqa: SLF001
+    group_role._artwork_state(ArtworkSource.ALBUM).schedule(  # noqa: SLF001
+        MagicMock(), None, 2_000_000
+    )
 
     with patch.object(group_role, "_schedule_artwork_replay") as replay:
         role.on_stream_request_format(

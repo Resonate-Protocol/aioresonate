@@ -96,7 +96,7 @@ async def test_later_arrival_replaces_artwork_when_timestamp_goes_backwards() ->
     await agr.set_album_artwork(earlier, timestamp_us=400_000)
 
     assert agr.get_album_artwork() is current
-    assert agr._pending_artwork[ArtworkSource.ALBUM].image is earlier  # noqa: SLF001
+    assert agr._artwork[ArtworkSource.ALBUM].pending is earlier  # noqa: SLF001
 
 
 @pytest.mark.asyncio
@@ -112,7 +112,7 @@ async def test_later_artwork_timestamp_does_not_apply_displaced_pending() -> Non
     await agr.set_album_artwork(replacement, timestamp_us=600_000)
 
     assert agr.get_album_artwork() is current
-    assert agr._pending_artwork[ArtworkSource.ALBUM].image is replacement  # noqa: SLF001
+    assert agr._artwork[ArtworkSource.ALBUM].pending is replacement  # noqa: SLF001
 
 
 @pytest.mark.asyncio
@@ -127,7 +127,7 @@ async def test_immediate_artwork_discards_pending() -> None:
     await agr.set_album_artwork(immediate)
 
     assert agr.get_album_artwork() is immediate
-    assert ArtworkSource.ALBUM not in agr._pending_artwork  # noqa: SLF001
+    assert not agr._artwork[ArtworkSource.ALBUM].has_pending  # noqa: SLF001
 
 
 @pytest.mark.asyncio
