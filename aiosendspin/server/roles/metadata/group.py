@@ -158,12 +158,12 @@ class MetadataGroupRole(GroupRole):
             metadata_update = metadata.diff_update(
                 last_metadata, timestamp, include=scheduled_fields - {"progress"}
             )
-            if "progress" in scheduled_fields and isinstance(
-                metadata_update.progress, UndefinedField
-            ):
-                metadata_update.progress = self._scheduled_progress_value(
-                    last_metadata, metadata, timestamp
-                )
+            if isinstance(metadata_update.progress, UndefinedField):
+                metadata = self._rebase_omitted_progress(last_metadata, metadata, timestamp)
+                if "progress" in scheduled_fields:
+                    metadata_update.progress = self._scheduled_progress_value(
+                        last_metadata, metadata, timestamp
+                    )
 
         if timestamp > now_us:
             self._warn_scheduled_lead(timestamp, now_us)
@@ -224,6 +224,16 @@ class MetadataGroupRole(GroupRole):
                 playback_speed=metadata.playback_speed,
             )
         return None
+
+    def _rebase_omitted_progress(
+        self,
+        last_metadata: Metadata | None,
+        metadata: Metadata,
+        timestamp_us: int,
+    ) -> Metadata:
+        """Align stored progress with the trajectory clients keep extrapolating."""
+        progress = self._get_track_progress_at(last_metadata, timestamp_us)
+        return metadata if progress is None else replace(metadata, track_progress=progress)
 
     def update(
         self,

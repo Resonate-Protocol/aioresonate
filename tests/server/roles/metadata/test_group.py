@@ -418,6 +418,37 @@ def test_scheduled_progress_obligation_uses_progress_at_next_timestamp() -> None
     assert update.progress is not None
     assert not isinstance(update.progress, UndefinedField)
     assert update.progress.track_progress == 31_000
+    assert mgr.metadata is not None
+    assert mgr.metadata.track_progress == 31_000
+
+
+def test_scheduled_metadata_without_progress_rebases_stored_state() -> None:
+    """Promoting an omitted progress update preserves the client trajectory."""
+    group = _make_group_stub()
+    group.has_active_stream = True
+    mgr = MetadataGroupRole(group)
+    mgr.set_metadata(
+        Metadata(
+            title="Current",
+            track_progress=30_000,
+            track_duration=200_000,
+            playback_speed=1000,
+        )
+    )
+    mgr.set_metadata(
+        Metadata(
+            title="Updated",
+            track_progress=30_000,
+            track_duration=200_000,
+            playback_speed=1000,
+        ),
+        timestamp_us=5_000_000,
+    )
+
+    group._server.clock.now_us.return_value = 5_000_000  # noqa: SLF001
+
+    assert mgr.metadata is not None
+    assert mgr.metadata.track_progress == 34_000
 
 
 def test_freeze_progress_uses_current_and_discards_pending() -> None:

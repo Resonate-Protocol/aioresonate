@@ -180,3 +180,53 @@ async def test_live_artwork_waits_for_complete_replay() -> None:
     await asyncio.gather(replay, live)
 
     assert sent_timestamps == [123_456, 500_000, 600_000]
+
+
+@pytest.mark.asyncio
+async def test_warm_reconnect_reuses_lock_while_old_replay_finishes() -> None:
+    """A reconnect replay cannot overtake encoding left by the prior subscription."""
+    group = _make_group_stub()
+    agr = ArtworkGroupRole(group)
+    current = Image.new("RGB", (10, 10), (255, 0, 0))
+    await agr.set_album_artwork(current)
+    role = MagicMock(spec=ArtworkRoleProtocol)
+    config = ArtworkChannel(
+        source=ArtworkSource.ALBUM,
+        format=PictureFormat.JPEG,
+        media_width=10,
+        media_height=10,
+    )
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    sent: list[int] = []
+    calls = 0
+
+    async def send(
+        _role: ArtworkRoleProtocol,
+        _image: Image.Image | None,
+        _channel: int,
+        _config: ArtworkChannel,
+        timestamp_us: int,
+    ) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            entered.set()
+            await release.wait()
+        sent.append(timestamp_us)
+
+    agr._encode_and_send_artwork = send  # type: ignore[method-assign]  # noqa: SLF001
+    first = asyncio.create_task(agr._send_artwork_replay(role, 0, config))  # noqa: SLF001
+    await entered.wait()
+
+    agr.on_member_leave(role)
+    group._server.clock.now_us.return_value = 200_000  # noqa: SLF001
+    second = asyncio.create_task(agr._send_artwork_replay(role, 0, config))  # noqa: SLF001
+    await asyncio.sleep(0)
+
+    assert sent == []
+
+    release.set()
+    await asyncio.gather(first, second)
+
+    assert sent == [123_456, 200_000]
