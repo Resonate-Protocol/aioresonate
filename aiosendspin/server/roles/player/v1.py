@@ -543,11 +543,11 @@ class PlayerV1Role(Role):
                 state = self._state()
                 state.preferred_format_override = None
                 state.preferred_codec_override = None
+                before = self._effective_format()
                 self._ensure_preferred_format()
                 self._ensure_audio_requirements(force=True)
-                if self._client.group.has_active_stream:
-                    self._pending_stream_start = True
-                    self._client.group.on_role_format_changed(self)
+                if self._client.group.has_active_stream and self._effective_format() != before:
+                    self._begin_format_transition()
                 return True
 
         if codec is None:
@@ -587,14 +587,13 @@ class PlayerV1Role(Role):
         self._preferred_format = audio_format
         self._preferred_codec = codec
 
+        before = self._effective_format()
+
         # Rebuild audio requirements with the new format
         self._ensure_audio_requirements(force=True)
 
-        # Mid-stream server-driven format change: defer stream/start until next chunk
-        # and invalidate push-stream caches for this role.
-        if self._client.group.has_active_stream:
-            self._pending_stream_start = True
-            self._client.group.on_role_format_changed(self)
+        if self._client.group.has_active_stream and self._effective_format() != before:
+            self._begin_format_transition()
 
         return True
 
@@ -792,18 +791,60 @@ class PlayerV1Role(Role):
         self.preferred_format = requested_format
         self.preferred_codec = requested_codec
 
+        current_format = self._effective_format()
+        if current_format is not None and current_format == (requested_codec, requested_format):
+            # Already on the requested format. Running the boundary would evict
+            # valid audio while the announcement's identity guard suppresses
+            # the stream/start that would justify it.
+            return
+
         stream_active = self._client.group.has_active_stream
         if stream_active:
-            # Mid-stream format change: rebuild requirements and defer stream/start
-            # until the next audio chunk (which provides the codec header).
             self._ensure_audio_requirements(force=True)
-            self._pending_stream_start = True
-            self._client.group.on_role_format_changed(self)
+            self._begin_format_transition()
         else:
             # No active stream: also defer stream/start via _pending_stream_start
             # so codec header is included when the first chunk arrives.
             self._ensure_audio_requirements(force=True)
             self._pending_stream_start = True
+
+    def _effective_format(self) -> tuple[AudioCodec, AudioFormat] | None:
+        """Return the current negotiated (codec, format), or None without requirements."""
+        req = self.get_audio_requirements()
+        if req is None:
+            return None
+        transformer = req.transformer
+        if isinstance(transformer, FlacEncoder):
+            codec = AudioCodec.FLAC
+        elif isinstance(transformer, OpusEncoder):
+            codec = AudioCodec.OPUS
+        else:
+            codec = AudioCodec.PCM
+        return (
+            codec,
+            AudioFormat(
+                sample_rate=req.sample_rate,
+                bit_depth=req.bit_depth,
+                channels=req.channels,
+            ),
+        )
+
+    def _begin_format_transition(self) -> None:
+        """Start a mid-stream format change at a clean boundary.
+
+        Frames queued under the old format must never reach the client after
+        the new stream/start; the announcement itself waits for the next
+        chunk so it can carry the new codec header.
+        """
+        self._client.drop_pending_binary([self.role_family])
+        # Everything the buffer tracker and binary timing know about was just
+        # invalidated with the old format; without resetting them the writer
+        # paces the replacement audio against a buffer the client flushed.
+        self.reset_binary_timing()
+        if self._buffer_tracker is not None:
+            self._buffer_tracker.reset()
+        self._pending_stream_start = True
+        self._client.group.on_role_format_changed(self)
 
     # ---- Internal helpers ----
 

@@ -26,12 +26,16 @@ from aiosendspin.server.roles.player.v1 import PlayerV1Role
 class _FakeConnection:
     def __init__(self) -> None:
         self.sent: list[object] = []
+        self.dropped_pending_binary: list[list[str] | None] = []
 
     async def disconnect(self, *, retry_connection: bool = True) -> None:  # noqa: ARG002
         return
 
     def send_message(self, message: object) -> None:
         self.sent.append(message)
+
+    def drop_pending_binary(self, roles: list[str] | None) -> None:
+        self.dropped_pending_binary.append(roles)
 
     def send_role_message(self, role: str, message: object) -> None:  # noqa: ARG002
         self.sent.append(message)
@@ -252,3 +256,75 @@ def test_player_partial_format_request_preserves_unchanged_fields(
     assert player_role.preferred_format.sample_rate == 44100
     assert player_role.preferred_format.bit_depth == 16
     assert player_role.preferred_format.channels == 2
+
+
+def test_format_request_resets_buffer_tracker(mock_server: MagicMock) -> None:
+    """A mid-stream format change resets buffer tracking and binary timing.
+
+    The client flushes its buffer at the new stream/start, so the writer must
+    not pace the replacement audio against the old-format audio still
+    registered in the buffer tracker.
+    """
+    client, _conn = _make_player_client(mock_server, "p1")
+    client.group.start_stream()
+
+    player_role = client.role("player@v1")
+    assert isinstance(player_role, PlayerV1Role)
+    tracker = player_role._buffer_tracker  # noqa: SLF001
+    assert tracker is not None
+
+    clock = mock_server.clock
+    now_us = clock.now_us()
+    tracker.register(now_us + 10_000_000, 100_000, 10_000_000)
+    tracker.prune_consumed(now_us)
+    assert tracker.buffered_duration_us > 0
+
+    # Request a genuinely different format (FLAC); an identical-format request
+    # must be ignored entirely.
+    player_role.on_stream_request_format(
+        StreamRequestFormatPayload(
+            player=StreamRequestFormatPlayer(
+                codec=AudioCodec.FLAC,
+                sample_rate=48000,
+                channels=2,
+                bit_depth=16,
+            )
+        )
+    )
+
+    assert tracker.buffered_duration_us == 0
+
+
+def test_noop_format_request_runs_no_boundary(mock_server: MagicMock) -> None:
+    """A request for the format already in use must not run the transition.
+
+    The stream/start identity guard would suppress the announcement, so the
+    boundary would evict queued audio the client still holds with nothing
+    replacing it.
+    """
+    client, conn = _make_player_client(mock_server, "p1")
+    client.group.start_stream()
+
+    player_role = client.role("player@v1")
+    assert isinstance(player_role, PlayerV1Role)
+    tracker = player_role._buffer_tracker  # noqa: SLF001
+    assert tracker is not None
+    clock = mock_server.clock
+    now_us = clock.now_us()
+    tracker.register(now_us + 10_000_000, 100_000, 10_000_000)
+    tracker.prune_consumed(now_us)
+
+    # PCM 48kHz stereo 16-bit is the default negotiated format for this client.
+    player_role.on_stream_request_format(
+        StreamRequestFormatPayload(
+            player=StreamRequestFormatPlayer(
+                codec=AudioCodec.PCM,
+                sample_rate=48000,
+                channels=2,
+                bit_depth=16,
+            )
+        )
+    )
+
+    assert tracker.buffered_duration_us > 0
+    assert conn.dropped_pending_binary == []
