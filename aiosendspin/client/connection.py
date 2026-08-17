@@ -319,13 +319,11 @@ class SendspinConnection:
         self._metadata_state = ScheduledStateUpdate[SessionUpdateMetadata](
             map_to_client_time=self._map_to_client_time,
             now_us=self.now_us,
-            commit=self._commit_metadata,
             merge=_merge_session_update,
         )
         self._color_state = ScheduledStateUpdate[SessionUpdateColor](
             map_to_client_time=self._map_to_client_time,
             now_us=self.now_us,
-            commit=self._commit_color,
             merge=_merge_session_update,
         )
         self._artwork_channels = {}
@@ -1295,6 +1293,10 @@ class SendspinConnection:
             - (payload.server_transmitted - payload.server_received)
         ) / 2
         self._time_filter.update(round(offset), round(delay), now_us)
+        self._metadata_state.reschedule_pending()
+        self._color_state.reschedule_pending()
+        for state in self._artwork_channels.values():
+            state.reschedule_pending()
         if (
             not was_synchronized
             and self._time_filter.is_synchronized
@@ -1393,17 +1395,25 @@ class SendspinConnection:
         if not isinstance(payload.controller, UndefinedField):
             self._client.notify_controller_callback(payload)
         if not isinstance(payload.metadata, UndefinedField):
-            self._client.notify_metadata_callback(payload)
             if payload.metadata is None:
-                self._metadata_state.clear_immediately()
-            else:
-                self._metadata_state.handle_update(payload.metadata)
+                self._metadata_state.clear_immediately(
+                    lambda: self._client.notify_metadata_callback(payload)
+                )
+            elif self._metadata_state.handle_update(
+                payload.metadata,
+                lambda: self._client.notify_metadata_callback(payload),
+            ):
+                self._client.notify_scheduled_metadata(payload)
         if not isinstance(payload.color, UndefinedField):
-            self._client.notify_color_callback(payload)
             if payload.color is None:
-                self._color_state.clear_immediately()
-            else:
-                self._color_state.handle_update(payload.color)
+                self._color_state.clear_immediately(
+                    lambda: self._client.notify_color_callback(payload)
+                )
+            elif self._color_state.handle_update(
+                payload.color,
+                lambda: self._client.notify_color_callback(payload),
+            ):
+                self._client.notify_scheduled_color(payload)
 
     def _handle_server_command(self, payload: ServerCommandPayload) -> None:
         """Handle server/command message."""
@@ -1490,8 +1500,6 @@ class SendspinConnection:
     ) -> None:
         """Handle incoming artwork chunk and notify callbacks."""
         channel = int(message_type.value - BinaryMessageType.ARTWORK_CHANNEL_0.value)
-        self._client.notify_artwork(channel, payload)
-        self._client.notify_artwork_timestamp(channel, payload, timestamp_us)
         image_data = payload or None
         frame = _ArtworkFrame(image_data=image_data, timestamp=timestamp_us)
         state = self._artwork_channels.get(channel)
@@ -1506,7 +1514,8 @@ class SendspinConnection:
                 commit=commit,
             )
             self._artwork_channels[channel] = state
-        state.handle_update(frame)
+        if state.handle_update(frame):
+            self._client.notify_scheduled_artwork(channel, payload, timestamp_us)
 
     def _handle_visualization_frame(self, message_type: BinaryMessageType, payload: bytes) -> None:
         """Parse a single-type visualization binary and notify callbacks."""
@@ -1629,17 +1638,8 @@ class SendspinConnection:
         lead time: it is used to classify server/state and artwork timestamps as
         future/now/past, not to schedule audio playback.
         """
-        if self._time_filter.is_synchronized:
-            return self._time_filter.compute_client_time(server_timestamp_us)
-        return self.now_us()
-
-    def _commit_metadata(self, update: SessionUpdateMetadata | None) -> None:
-        self._client.notify_effective_metadata(ServerStatePayload(metadata=update))
-
-    def _commit_color(self, update: SessionUpdateColor | None) -> None:
-        self._client.notify_effective_color(ServerStatePayload(color=update))
+        return self._time_filter.compute_client_time(server_timestamp_us)
 
     def _commit_artwork(self, channel: int, frame: _ArtworkFrame | None) -> None:
         payload = b"" if frame is None or frame.image_data is None else frame.image_data
-        timestamp_us = self.now_us() if frame is None else frame.timestamp
-        self._client.notify_effective_artwork(channel, payload, timestamp_us)
+        self._client.notify_artwork(channel, payload)

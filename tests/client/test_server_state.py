@@ -25,11 +25,11 @@ def _make_connection() -> tuple[SendspinConnection, MagicMock]:
 def test_absent_role_does_not_fire_callback() -> None:
     """A role omitted from server/state (UndefinedField) fires no callback."""
     conn, client = _make_connection()
-    conn._handle_server_state(  # noqa: SLF001
-        ServerStatePayload(metadata=SessionUpdateMetadata(timestamp=1))
-    )
+    payload = ServerStatePayload(metadata=SessionUpdateMetadata(timestamp=1))
+    conn._handle_server_state(payload)  # noqa: SLF001
     client.notify_metadata_callback.assert_called_once()
-    client.notify_effective_metadata.assert_called_once()
+    assert client.notify_metadata_callback.call_args.args[0] is payload
+    client.notify_scheduled_metadata.assert_not_called()
     client.notify_color_callback.assert_not_called()
     client.notify_controller_callback.assert_not_called()
 
@@ -39,13 +39,13 @@ def test_whole_role_null_fires_callback() -> None:
     conn, client = _make_connection()
     conn._handle_server_state(ServerStatePayload(color=None))  # noqa: SLF001
     client.notify_color_callback.assert_called_once()
-    client.notify_effective_color.assert_called_once()
+    client.notify_scheduled_color.assert_not_called()
     client.notify_metadata_callback.assert_not_called()
     client.notify_controller_callback.assert_not_called()
 
 
-def test_raw_listener_keeps_diff_while_effective_listener_gets_snapshot() -> None:
-    """Raw listeners retain wire diffs while effective listeners receive merged state."""
+def test_listener_keeps_raw_diff_while_internal_state_is_merged() -> None:
+    """Listeners retain wire diffs while the scheduler keeps merged state."""
     conn, client = _make_connection()
     conn._handle_server_state(  # noqa: SLF001
         ServerStatePayload(
@@ -56,7 +56,7 @@ def test_raw_listener_keeps_diff_while_effective_listener_gets_snapshot() -> Non
         ServerStatePayload(metadata=SessionUpdateMetadata(timestamp=2, title="Second"))
     )
 
-    raw = client.notify_metadata_callback.call_args_list[1].args[0].metadata
-    effective = client.notify_effective_metadata.call_args_list[1].args[0].metadata
-    assert isinstance(raw.artist, UndefinedField)
-    assert effective.artist == "Artist"
+    delivered = client.notify_metadata_callback.call_args_list[1].args[0].metadata
+    assert isinstance(delivered.artist, UndefinedField)
+    assert conn._metadata_state.confirmed is not None  # noqa: SLF001
+    assert conn._metadata_state.confirmed.artist == "Artist"  # noqa: SLF001

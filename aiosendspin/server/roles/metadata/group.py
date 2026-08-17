@@ -123,8 +123,14 @@ class MetadataGroupRole(GroupRole):
     def set_metadata(self, metadata: Metadata | None, *, timestamp_us: int | None = None) -> None:
         """Set or schedule metadata and push updates to all subscribed roles.
 
-        Only sends updates for fields that have changed. Per spec, a future
-        timestamp_us should be at most 20 seconds ahead.
+        A future timestamp schedules one pending update. Another future call replaces
+        that pending update by arrival order. An omitted, past, or present timestamp
+        applies the metadata immediately and cancels any pending update. When
+        ``timestamp_us`` is omitted, ``metadata.timestamp_us`` is used if set.
+
+        To show metadata now and schedule the next track, call this method first with
+        the current metadata, then again with the future timestamp. Only changed
+        fields are sent. Per spec, schedule at most 20 seconds ahead.
         """
         now_us = self._now_us()
         current = self._state.current(now_us)
@@ -267,5 +273,5 @@ class MetadataGroupRole(GroupRole):
         self.set_metadata(new_metadata)
 
     def clear(self, *, timestamp_us: int | None = None) -> None:
-        """Clear all metadata."""
+        """Clear metadata immediately or at a future server timestamp."""
         self.set_metadata(None, timestamp_us=timestamp_us)

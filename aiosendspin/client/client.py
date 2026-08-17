@@ -56,8 +56,9 @@ def _validate_decodable_formats(player_support: ClientHelloPlayerSupport) -> Non
         )
 
 
-# Callback invoked when server state metadata updates are received.
+# Callback invoked when a metadata update becomes current.
 MetadataCallback = Callable[[ServerStatePayload], None]
+ScheduledMetadataCallback = Callable[[ServerStatePayload], None]
 
 # Callback invoked when group state updates are received.
 GroupUpdateCallback = Callable[[GroupUpdateServerPayload], None]
@@ -65,10 +66,9 @@ GroupUpdateCallback = Callable[[GroupUpdateServerPayload], None]
 # Callback invoked when controller state updates are received.
 ControllerStateCallback = Callable[[ServerStatePayload], None]
 
-# Callback invoked when server state color updates are received.
+# Callback invoked when a color update becomes current.
 ColorCallback = Callable[[ServerStatePayload], None]
-EffectiveMetadataCallback = Callable[[ServerStatePayload], None]
-EffectiveColorCallback = Callable[[ServerStatePayload], None]
+ScheduledColorCallback = Callable[[ServerStatePayload], None]
 
 # Callback invoked when audio streaming begins.
 StreamStartCallback = Callable[[StreamStartMessage], None]
@@ -98,14 +98,11 @@ ServerCommandCallback = Callable[[ServerCommandPayload], None]
 # only `timestamp_us` + `is_downbeat`.
 VisualizerCallback = Callable[[list[VisualizerFrame]], None]
 
-# Callback invoked when artwork binary frames are received.
+# Callback invoked when artwork becomes current.
 ArtworkCallback = Callable[[int, bytes], None]
 
-# Callback invoked with (channel, artwork_data, server_timestamp_us) when artwork binary
-# frames are received. Additive alongside ArtworkCallback for callers that need the
-# server clock timestamp retained from the binary message header.
-ArtworkTimestampCallback = Callable[[int, bytes, int], None]
-EffectiveArtworkCallback = Callable[[int, bytes, int], None]
+# Callback invoked when future artwork becomes or replaces a pending frame.
+ScheduledArtworkCallback = Callable[[int, bytes, int], None]
 
 
 class SendspinClient:
@@ -172,17 +169,17 @@ class SendspinClient:
     """server_id of the last server admitted with the playback activity; the discovery tiebreak."""
 
     _metadata_callbacks: list[MetadataCallback]
-    """Callbacks invoked on server/state messages with metadata."""
+    """Callbacks invoked when metadata becomes current."""
+    _scheduled_metadata_callbacks: list[ScheduledMetadataCallback]
+    """Callbacks invoked when future metadata becomes pending."""
     _group_callbacks: list[GroupUpdateCallback]
     """Callbacks invoked on group/update messages."""
     _controller_callbacks: list[ControllerStateCallback]
     """Callbacks invoked on server/state messages."""
     _color_callbacks: list[ColorCallback]
-    """Callbacks invoked on server/state messages with color."""
-    _effective_metadata_callbacks: list[EffectiveMetadataCallback]
-    """Callbacks invoked when merged metadata state takes effect."""
-    _effective_color_callbacks: list[EffectiveColorCallback]
-    """Callbacks invoked when merged color state takes effect."""
+    """Callbacks invoked when color becomes current."""
+    _scheduled_color_callbacks: list[ScheduledColorCallback]
+    """Callbacks invoked when future color becomes pending."""
     _stream_start_callbacks: list[StreamStartCallback]
     """Callbacks invoked when a stream starts."""
     _stream_end_callbacks: list[StreamEndCallback]
@@ -201,10 +198,8 @@ class SendspinClient:
     """Callbacks invoked when visualizer frames are received (beats included)."""
     _artwork_callbacks: list[ArtworkCallback]
     """Callbacks invoked when artwork frames are received."""
-    _artwork_timestamp_callbacks: list[ArtworkTimestampCallback]
-    """Callbacks invoked when artwork frames are received, with the header timestamp."""
-    _effective_artwork_callbacks: list[EffectiveArtworkCallback]
-    """Callbacks invoked when reconciled artwork takes effect."""
+    _scheduled_artwork_callbacks: list[ScheduledArtworkCallback]
+    """Callbacks invoked when future artwork becomes pending."""
 
     _initial_volume: int
     """Initial volume level for player role (0-100)."""
@@ -295,11 +290,11 @@ class SendspinClient:
 
         # Initialize callback lists
         self._metadata_callbacks = []
+        self._scheduled_metadata_callbacks = []
         self._group_callbacks = []
         self._controller_callbacks = []
         self._color_callbacks = []
-        self._effective_metadata_callbacks = []
-        self._effective_color_callbacks = []
+        self._scheduled_color_callbacks = []
         self._stream_start_callbacks = []
         self._stream_end_callbacks = []
         self._stream_clear_callbacks = []
@@ -309,8 +304,7 @@ class SendspinClient:
         self._server_command_callbacks = []
         self._visualizer_callbacks = []
         self._artwork_callbacks = []
-        self._artwork_timestamp_callbacks = []
-        self._effective_artwork_callbacks = []
+        self._scheduled_artwork_callbacks = []
 
     # --- Configuration ---
 
@@ -833,7 +827,7 @@ class SendspinClient:
     # --- Listener registration ---
 
     def add_metadata_listener(self, callback: MetadataCallback) -> Callable[[], None]:
-        """Add a listener for server/state messages with metadata.
+        """Add a listener invoked when metadata becomes current.
 
         Returns:
             A function that removes this listener when called.
@@ -842,6 +836,22 @@ class SendspinClient:
         return lambda: (
             self._metadata_callbacks.remove(callback)
             if callback in self._metadata_callbacks
+            else None
+        )
+
+    def add_scheduled_metadata_listener(
+        self, callback: ScheduledMetadataCallback
+    ) -> Callable[[], None]:
+        """Add a listener invoked when future metadata becomes pending.
+
+        The callback receives the raw update. Keep at most one pending value,
+        replacing it on each callback. Remove it when ``add_metadata_listener``
+        fires, or when the role is cleared or disconnected.
+        """
+        self._scheduled_metadata_callbacks.append(callback)
+        return lambda: (
+            self._scheduled_metadata_callbacks.remove(callback)
+            if callback in self._scheduled_metadata_callbacks
             else None
         )
 
@@ -872,7 +882,7 @@ class SendspinClient:
         )
 
     def add_color_listener(self, callback: ColorCallback) -> Callable[[], None]:
-        """Add a listener for server/state messages with color.
+        """Add a listener invoked when a color palette becomes current.
 
         Returns:
             A function that removes this listener when called.
@@ -882,23 +892,17 @@ class SendspinClient:
             self._color_callbacks.remove(callback) if callback in self._color_callbacks else None
         )
 
-    def add_effective_metadata_listener(
-        self, callback: EffectiveMetadataCallback
-    ) -> Callable[[], None]:
-        """Add a listener for merged metadata state when it takes effect."""
-        self._effective_metadata_callbacks.append(callback)
-        return lambda: (
-            self._effective_metadata_callbacks.remove(callback)
-            if callback in self._effective_metadata_callbacks
-            else None
-        )
+    def add_scheduled_color_listener(self, callback: ScheduledColorCallback) -> Callable[[], None]:
+        """Add a listener invoked when a future color palette becomes pending.
 
-    def add_effective_color_listener(self, callback: EffectiveColorCallback) -> Callable[[], None]:
-        """Add a listener for merged color state when it takes effect."""
-        self._effective_color_callbacks.append(callback)
+        The callback receives the raw update. Keep at most one pending value,
+        replacing it on each callback. Remove it when ``add_color_listener`` fires,
+        or when the role is cleared or disconnected.
+        """
+        self._scheduled_color_callbacks.append(callback)
         return lambda: (
-            self._effective_color_callbacks.remove(callback)
-            if callback in self._effective_color_callbacks
+            self._scheduled_color_callbacks.remove(callback)
+            if callback in self._scheduled_color_callbacks
             else None
         )
 
@@ -1020,7 +1024,7 @@ class SendspinClient:
         )
 
     def add_artwork_listener(self, callback: ArtworkCallback) -> Callable[[], None]:
-        """Add a listener for artwork binary frame events."""
+        """Add a listener invoked when artwork becomes current."""
         self._artwork_callbacks.append(callback)
         return lambda: (
             self._artwork_callbacks.remove(callback)
@@ -1028,45 +1032,45 @@ class SendspinClient:
             else None
         )
 
-    def add_artwork_timestamp_listener(
-        self, callback: ArtworkTimestampCallback
+    def add_scheduled_artwork_listener(
+        self, callback: ScheduledArtworkCallback
     ) -> Callable[[], None]:
-        """Add a listener for artwork binary frame events with their server timestamp.
+        """Add a listener invoked when future artwork becomes pending.
 
         The callback receives (channel, artwork_data, server_timestamp_us), where
-        server_timestamp_us is retained from the binary message header. Fires
-        alongside add_artwork_listener() for the same frame.
+        an empty payload schedules a clear. Keep at most one cached entry per channel,
+        replacing it on each callback. When ``add_artwork_listener`` fires, remove that
+        entry and reuse its decoded artwork if the cached bytes equal the effective bytes;
+        otherwise decode the effective bytes. Clear all entries on artwork stream end or
+        disconnect.
 
         Returns:
             A function that removes this listener when called.
         """
-        self._artwork_timestamp_callbacks.append(callback)
+        self._scheduled_artwork_callbacks.append(callback)
         return lambda: (
-            self._artwork_timestamp_callbacks.remove(callback)
-            if callback in self._artwork_timestamp_callbacks
-            else None
-        )
-
-    def add_effective_artwork_listener(
-        self, callback: EffectiveArtworkCallback
-    ) -> Callable[[], None]:
-        """Add a listener for reconciled artwork when it takes effect."""
-        self._effective_artwork_callbacks.append(callback)
-        return lambda: (
-            self._effective_artwork_callbacks.remove(callback)
-            if callback in self._effective_artwork_callbacks
+            self._scheduled_artwork_callbacks.remove(callback)
+            if callback in self._scheduled_artwork_callbacks
             else None
         )
 
     # --- Listener dispatch ---
 
     def notify_metadata_callback(self, payload: ServerStatePayload) -> None:
-        """Dispatch a server/state with metadata to the registered listeners."""
+        """Dispatch metadata that has become current."""
         for callback in list(self._metadata_callbacks):
             try:
                 callback(payload)
             except Exception:
                 logger.exception("Error in metadata callback %s", callback)
+
+    def notify_scheduled_metadata(self, payload: ServerStatePayload) -> None:
+        """Dispatch newly pending metadata."""
+        for callback in list(self._scheduled_metadata_callbacks):
+            try:
+                callback(payload)
+            except Exception:
+                logger.exception("Error in scheduled metadata callback %s", callback)
 
     def notify_group_callback(self, payload: GroupUpdateServerPayload) -> None:
         """Dispatch a group/update to the registered listeners."""
@@ -1085,28 +1089,20 @@ class SendspinClient:
                 logger.exception("Error in controller callback %s", callback)
 
     def notify_color_callback(self, payload: ServerStatePayload) -> None:
-        """Dispatch a server/state with color to the registered listeners."""
+        """Dispatch a color palette that has become current."""
         for callback in list(self._color_callbacks):
             try:
                 callback(payload)
             except Exception:
                 logger.exception("Error in color callback %s", callback)
 
-    def notify_effective_metadata(self, payload: ServerStatePayload) -> None:
-        """Dispatch effective merged metadata state."""
-        for callback in list(self._effective_metadata_callbacks):
+    def notify_scheduled_color(self, payload: ServerStatePayload) -> None:
+        """Dispatch a newly pending color palette."""
+        for callback in list(self._scheduled_color_callbacks):
             try:
                 callback(payload)
             except Exception:
-                logger.exception("Error in effective metadata callback %s", callback)
-
-    def notify_effective_color(self, payload: ServerStatePayload) -> None:
-        """Dispatch effective merged color state."""
-        for callback in list(self._effective_color_callbacks):
-            try:
-                callback(payload)
-            except Exception:
-                logger.exception("Error in effective color callback %s", callback)
+                logger.exception("Error in scheduled color callback %s", callback)
 
     def notify_stream_start(self, message: StreamStartMessage) -> None:
         """Dispatch a stream/start to the registered listeners."""
@@ -1182,18 +1178,10 @@ class SendspinClient:
             except Exception:
                 logger.exception("Error in artwork callback %s", callback)
 
-    def notify_artwork_timestamp(self, channel: int, payload: bytes, timestamp_us: int) -> None:
-        """Dispatch an artwork chunk with its server timestamp to the registered listeners."""
-        for callback in list(self._artwork_timestamp_callbacks):
+    def notify_scheduled_artwork(self, channel: int, payload: bytes, timestamp_us: int) -> None:
+        """Dispatch newly pending artwork to the registered listeners."""
+        for callback in list(self._scheduled_artwork_callbacks):
             try:
                 callback(channel, payload, timestamp_us)
             except Exception:
-                logger.exception("Error in artwork timestamp callback %s", callback)
-
-    def notify_effective_artwork(self, channel: int, payload: bytes, timestamp_us: int) -> None:
-        """Dispatch reconciled artwork when it takes effect."""
-        for callback in list(self._effective_artwork_callbacks):
-            try:
-                callback(channel, payload, timestamp_us)
-            except Exception:
-                logger.exception("Error in effective artwork callback %s", callback)
+                logger.exception("Error in scheduled artwork callback %s", callback)
