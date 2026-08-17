@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
+import logging
+from typing import TYPE_CHECKING
 from unittest.mock import MagicMock
 
 from aiosendspin.models.core import ServerStateMessage
 from aiosendspin.models.types import UndefinedField
 from aiosendspin.server.roles.metadata import Metadata, MetadataClearedEvent, MetadataUpdatedEvent
 from aiosendspin.server.roles.metadata.group import MetadataGroupRole
+
+if TYPE_CHECKING:
+    import pytest
 
 
 def _make_group_stub() -> MagicMock:
@@ -519,3 +524,17 @@ def test_progress_omitted_when_unchanged() -> None:
 
     assert isinstance(update.progress, UndefinedField)
     assert "progress" not in update.to_json()
+
+
+def test_scheduling_beyond_lead_cap_warns(caplog: pytest.LogCaptureFixture) -> None:
+    """A schedule further out than the spec's 20-second cap logs a warning."""
+    group = _make_group_stub()
+    mgr = MetadataGroupRole(group)
+
+    with caplog.at_level(logging.WARNING):
+        mgr.set_metadata(Metadata(title="Soon"), timestamp_us=21_000_000)
+        assert not caplog.records
+
+        mgr.set_metadata(Metadata(title="Late"), timestamp_us=21_000_001)
+
+    assert any("at most 20 s" in record.getMessage() for record in caplog.records)

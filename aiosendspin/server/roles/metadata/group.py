@@ -160,6 +160,7 @@ class MetadataGroupRole(GroupRole):
                 )
 
         if timestamp > now_us:
+            self._warn_scheduled_lead(timestamp, now_us)
             self._state.schedule(
                 metadata, metadata_update, timestamp, set(metadata_update.to_dict()) - {"timestamp"}
             )
