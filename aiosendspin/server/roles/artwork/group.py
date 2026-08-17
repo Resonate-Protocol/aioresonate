@@ -67,6 +67,7 @@ class ArtworkGroupRole(GroupRole):
         Args:
             image: The artwork image to set, or None to clear.
             timestamp_us: Server timestamp when the update takes effect.
+                Per spec, schedule at most 20 seconds ahead.
         """
         await self._set_artwork(ArtworkSource.ALBUM, image, timestamp_us=timestamp_us)
 
@@ -78,6 +79,7 @@ class ArtworkGroupRole(GroupRole):
         Args:
             image: The artwork image to set, or None to clear.
             timestamp_us: Server timestamp when the update takes effect.
+                Per spec, schedule at most 20 seconds ahead.
         """
         await self._set_artwork(ArtworkSource.ARTIST, image, timestamp_us=timestamp_us)
 

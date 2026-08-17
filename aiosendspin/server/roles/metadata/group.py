@@ -123,7 +123,8 @@ class MetadataGroupRole(GroupRole):
     def set_metadata(self, metadata: Metadata | None, *, timestamp_us: int | None = None) -> None:
         """Set or schedule metadata and push updates to all subscribed roles.
 
-        Only sends updates for fields that have changed.
+        Only sends updates for fields that have changed. Per spec, a future
+        timestamp_us should be at most 20 seconds ahead.
         """
         now_us = self._now_us()
         current = self._state.current(now_us)
