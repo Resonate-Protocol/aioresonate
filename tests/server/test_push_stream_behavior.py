@@ -1321,6 +1321,78 @@ async def test_late_joiner_shares_group_timeline() -> None:
 
 
 @pytest.mark.asyncio
+async def test_late_joiner_on_own_channel_shares_timeline_after_stall() -> None:
+    """A joiner on its own channel must share the timeline even after a production stall.
+
+    Members that need per-player audio processing get their own channel, so the
+    join introduces a channel with no timing yet. If audio production has stalled
+    meanwhile, the next commit rebases the timeline up to the send-ahead floor;
+    the new channel must land on the existing member's timeline rather than one
+    rebase beyond it.
+    """
+    joiner_channel = UUID("2a4f6e8c-0b1d-4f3a-9c5e-7d8f0a1b2c3d")
+    fmt = AudioFormat(sample_rate=48000, bit_depth=16, channels=2)
+
+    group = _DummyGroup(clients=[])
+    role1 = _DummyRole(
+        AudioRequirements(
+            sample_rate=48000,
+            bit_depth=16,
+            channels=2,
+            transformer=None,
+            channel_id=MAIN_CHANNEL,
+            frame_duration_us=25_000,
+        )
+    )
+    group.clients.append(_DummyClient([role1]))
+
+    loop = asyncio.get_running_loop()
+    clock = ManualClock()
+    stream = PushStream(loop=loop, clock=clock, group=group)
+
+    # The existing member plays alone, establishing the shared timeline.
+    stream.prepare_audio(bytes(4800), fmt)  # 25ms @ 48kHz stereo 16-bit
+    await stream.commit_audio()
+
+    # Production stalls: the clock runs past the audio already scheduled, so the
+    # timeline sits below now + send-ahead and the next commit has to rebase it.
+    clock.advance_us(DEFAULT_INITIAL_DELAY_US + 200_000)
+
+    role2 = _DummyRole(
+        AudioRequirements(
+            sample_rate=48000,
+            bit_depth=16,
+            channels=2,
+            transformer=None,
+            channel_id=joiner_channel,
+            frame_duration_us=25_000,
+        )
+    )
+    group.clients.append(_DummyClient([role2]))
+    stream.on_role_join(role2)
+
+    # First commit carrying the joiner's channel.
+    role1_already_received = len(role1.received)
+    stream.prepare_audio(bytes(4800), fmt)
+    stream.prepare_audio(bytes(4800), fmt, channel_id=joiner_channel)
+    await stream.commit_audio()
+
+    role1_joint = role1.received[role1_already_received:]
+    assert role1_joint, "existing member received nothing from the joint commit"
+    assert role2.received, "joiner was stranded with no audio"
+
+    role1_start_us = min(chunk.timestamp_us for chunk in role1_joint)
+    role2_start_us = min(chunk.timestamp_us for chunk in role2.received)
+
+    # Core sync invariant: the joiner's channel sits on the existing timeline.
+    assert role2_start_us == role1_start_us, (
+        f"joiner desynced by {role2_start_us - role1_start_us}us from the existing member"
+    )
+    # The rebase must still leave that shared timeline in the future.
+    assert role1_start_us >= clock.now_us()
+
+
+@pytest.mark.asyncio
 async def test_main_join_with_established_resampler_backfills_near_now() -> None:
     """Deeply-buffered main-channel join must backfill near now, not inherit the tail.
 
