@@ -1209,8 +1209,11 @@ class PushStream:
                 if shared_candidates:
                     # Late-introduced channels should join the shared timeline
                     # instead of restarting from now+delay behind active channels.
-                    shared_timing_us = min(shared_candidates)
-                    self._channel_timing[channel_id] = max(shared_timing_us, target_min_us)
+                    # The rebase below shifts every channel up together until the
+                    # earliest reaches the send-ahead floor, so clamping here would
+                    # advance this one twice and leave it permanently behind the
+                    # members it just joined.
+                    self._channel_timing[channel_id] = min(shared_candidates)
                     self._channel_timing_residue[channel_id] = 0
                 else:
                     self._channel_timing[channel_id] = target_min_us
