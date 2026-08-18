@@ -230,3 +230,42 @@ async def test_warm_reconnect_reuses_lock_while_old_replay_finishes() -> None:
     await asyncio.gather(first, second)
 
     assert sent == [123_456, 200_000]
+
+
+@pytest.mark.asyncio
+async def test_member_leave_invalidates_in_flight_replay() -> None:
+    """Artwork encoded after member leave is not sent through a replacement connection."""
+    group = _make_group_stub()
+    agr = ArtworkGroupRole(group)
+    current = Image.new("RGB", (10, 10), (255, 0, 0))
+    await agr.set_album_artwork(current)
+    role = MagicMock(spec=ArtworkRoleProtocol)
+    config = ArtworkChannel(
+        source=ArtworkSource.ALBUM,
+        format=PictureFormat.JPEG,
+        media_width=10,
+        media_height=10,
+    )
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def send(
+        send_role: ArtworkRoleProtocol,
+        _image: Image.Image | None,
+        _channel: int,
+        _config: ArtworkChannel,
+        _timestamp_us: int,
+    ) -> None:
+        entered.set()
+        await release.wait()
+        send_role.send_artwork(0, b"stale", 123_456)
+
+    agr._encode_and_send_artwork = send  # type: ignore[method-assign]  # noqa: SLF001
+    agr._schedule_artwork_replay(role, 0, config)  # noqa: SLF001
+    await entered.wait()
+
+    agr.on_member_leave(role)
+    release.set()
+    await asyncio.sleep(0)
+
+    role.send_artwork.assert_not_called()

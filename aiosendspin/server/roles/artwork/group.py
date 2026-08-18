@@ -43,10 +43,20 @@ class ArtworkGroupRole(GroupRole):
         self._send_locks: WeakKeyDictionary[ArtworkRoleProtocol, dict[int, asyncio.Lock]] = (
             WeakKeyDictionary()
         )
+        self._replay_tasks: WeakKeyDictionary[
+            ArtworkRoleProtocol, dict[int, asyncio.Task[None]]
+        ] = WeakKeyDictionary()
 
     def on_member_join(self, role: Role) -> None:
         """Send current artwork to newly joined member."""
         self._send_artwork_to_role(role)
+
+    def on_member_leave(self, role: Role) -> None:
+        """Cancel artwork replay still targeting the departing role."""
+        if not isinstance(role, ArtworkRoleProtocol):
+            return
+        for task in self._replay_tasks.pop(role, {}).values():
+            task.cancel()
 
     def _artwork_state(self, source: ArtworkSource) -> ScheduledRoleState[Image.Image, None]:
         if (state := self._artwork.get(source)) is None:
@@ -81,7 +91,16 @@ class ArtworkGroupRole(GroupRole):
         channel: int,
         channel_config: ArtworkChannel,
     ) -> None:
-        create_task(self._send_artwork_replay(role, channel, channel_config))
+        tasks = self._replay_tasks.setdefault(role, {})
+        if previous := tasks.get(channel):
+            previous.cancel()
+        task = create_task(self._send_artwork_replay(role, channel, channel_config))
+        if task.done():
+            return
+        tasks[channel] = task
+        task.add_done_callback(
+            lambda completed: tasks.pop(channel, None) if tasks.get(channel) is completed else None
+        )
 
     async def _send_artwork_replay(
         self,
