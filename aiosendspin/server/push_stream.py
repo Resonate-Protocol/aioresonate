@@ -1689,6 +1689,12 @@ class PushStream:
         active_roles = {role for _client, role in self._get_audio_roles()}
 
         for tkey, frame_list in transformed.items():
+            roles = roles_by_transform.get(tkey, [])
+            if not any(r in active_roles for r in roles):
+                # Every recipient was excluded mid-commit (e.g. a format change
+                # deferred the sole role to the join path); caching these frames
+                # would repopulate the transform key the boundary just evicted.
+                continue
             cached_for_key: list[CachedChunk] = []
             for data, ts, dur in frame_list:
                 cached = CachedChunk(
@@ -1700,7 +1706,6 @@ class PushStream:
             cache_results[tkey].extend(cached_for_key)
 
             # Deliver live chunks directly; connection layer enforces late-drop/backpressure.
-            roles = roles_by_transform.get(tkey, [])
             # Share one AudioChunk across roles so its packed frame is built once.
             audio_chunks = [
                 AudioChunk(

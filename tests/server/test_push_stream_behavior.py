@@ -2119,6 +2119,9 @@ async def test_format_change_during_inflight_commit_aborts_old_format_delivery(
 
     role = client.role("player@v1")
     assert role is not None
+    old_tkey = stream._build_transform_key(  # noqa: SLF001
+        role.get_audio_requirements(), MAIN_CHANNEL, role
+    )
     conn.sent_json.clear()
     conn.sent_binary.clear()
 
@@ -2159,6 +2162,9 @@ async def test_format_change_during_inflight_commit_aborts_old_format_delivery(
     # join; the excluded commit must not have delivered old-format frames.
     assert conn.sent_binary
     assert all(len(frame) != 9 + 4800 for frame in conn.sent_binary)
+
+    # Nor may the excluded commit repopulate the evicted old-format cache.
+    assert not stream._role_chunk_cache.get(old_tkey)  # noqa: SLF001
 
     # The next commit delivers the deferred stream/start, then only new-format audio.
     stream.prepare_audio(
