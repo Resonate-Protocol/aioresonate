@@ -148,6 +148,11 @@ logger = logging.getLogger(__name__)
 
 MAX_PENDING_MSG = 4096  # Default queue cap (per role queues, and global control queues)
 
+# Quiet period between repeats of a throttled warning. Each warning reports how
+# many occurrences it stands for, so a sustained fault keeps its magnitude visible
+# at default level without emitting one line per event.
+_WARN_INTERVAL_S = 30.0
+
 # Bound the wait for the writer to drain when quiescing.
 QUIESCE_TIMEOUT_S: float = 30.0
 
@@ -202,6 +207,8 @@ class _RoleQueueEntry:
     # Exactly one of these is set
     binary: _BinaryData | None = None
     json_message: ServerMessage | None = None
+    # Server clock at enqueue, for late-drop diagnostics (0 for JSON entries)
+    enqueued_at_us: int = 0
 
 
 class _QueuedTransport(EncryptedWebSocket):
@@ -278,6 +285,11 @@ class SendspinConnection:
         self._max_pending_msg_by_role: defaultdict[str, int] = defaultdict(lambda: MAX_PENDING_MSG)
         # Last timestamp per role for JSON inheritance (JSON gets previous message's timestamp)
         self._last_enqueued_ts_by_role: dict[str, int] = {}
+        # Rate-limit state for already-late-at-enqueue and slow-send warnings
+        self._late_at_enqueue_count: dict[str, int] = {}
+        self._last_late_at_enqueue_log_s: dict[str, float] = {}
+        self._last_slow_send_log_s = 0.0
+        self._slow_send_count = 0
         # Global scheduler heaps for families
         self._ready_roles: list[tuple[int, int, str]] = []
         self._delayed_roles: list[tuple[int, int, str]] = []
@@ -466,6 +478,10 @@ class SendspinConnection:
             )
             return
 
+        now_us = self._server.clock.now_us()
+        if timestamp_us != 0 and timestamp_us + (duration_us or 0) <= now_us:
+            self._warn_late_at_enqueue(role, message_type, timestamp_us, now_us)
+
         # Keep per-role queue ordering monotonic so role-scoped lifecycle JSON
         # (stream/start, stream/end, stream/clear) cannot be overtaken by binary
         # packets that carry an older playback timestamp (e.g. historical backfill).
@@ -480,9 +496,42 @@ class SendspinConnection:
                 buffer_byte_count=buffer_byte_count,
                 duration_us=duration_us,
             ),
+            enqueued_at_us=now_us,
         )
         self._last_enqueued_ts_by_role[role] = sort_ts
         self._enqueue_role_entry(role, sort_ts, entry)
+
+    def _warn_late_at_enqueue(
+        self, role: str, message_type: int, timestamp_us: int, now_us: int
+    ) -> None:
+        """Warn when a binary message is already past its play deadline at enqueue.
+
+        A late drop at send time only says a deadline was missed; this names the
+        moment the unplayable data entered the queue, which points at the producer
+        (stale timestamps, timeline reset) rather than the transport.
+        """
+        cached = None
+        if self._client is not None:
+            cached = self._client.get_binary_handling_cached(message_type)
+        if cached is None or not cached[0].drop_late:
+            return
+        self._late_at_enqueue_count[role] = self._late_at_enqueue_count.get(role, 0) + 1
+        now_s = time.monotonic()
+        if now_s - self._last_late_at_enqueue_log_s.get(role, 0.0) < _WARN_INTERVAL_S:
+            return
+        self._logger.warning(
+            "Enqueued already-late binary type=%s role=%s: %s message(s); "
+            "behind_by_us=%s ts_us=%s now_us=%s queue=%s",
+            message_type,
+            role,
+            self._late_at_enqueue_count[role],
+            now_us - timestamp_us,
+            timestamp_us,
+            now_us,
+            len(self._role_queues.get(role, [])),
+        )
+        self._late_at_enqueue_count[role] = 0
+        self._last_late_at_enqueue_log_s[role] = now_s
 
     def queue_status(self) -> tuple[int, int]:
         """Return (qsize, maxsize) for the outgoing queue."""
@@ -1813,11 +1862,31 @@ class SendspinConnection:
         for role in self._client.active_roles:
             role.on_client_state(payload)
 
+    def _late_binary_diagnostics(
+        self, role: Role, entry: _RoleQueueEntry, now_us: int, elapsed_us: int
+    ) -> str:
+        """Build the field list that tells the late-drop regimes apart.
+
+        enq_lead is the margin the chunk had when it was queued and queue_age how
+        long it then waited, which separates a thin producer lead from a chunk that
+        aged in transit. buf reports the tracked device buffer, and stream_elapsed
+        marks a startup or restart window. Fields with no value are omitted.
+        """
+        fields: list[str] = []
+        if entry.enqueued_at_us:
+            fields.append(f"enq_lead_ms={(entry.timestamp_us - entry.enqueued_at_us) / 1000:.0f}")
+            fields.append(f"queue_age_ms={(now_us - entry.enqueued_at_us) / 1000:.0f}")
+        if (tracker := role.get_buffer_tracker()) is not None:
+            fields.append(f"buf_ms={tracker.buffered_horizon_us(now_us) / 1000:.0f}")
+            fields.append(f"buf_bytes={tracker.buffered_bytes}/{tracker.capacity_bytes}")
+        fields.append(f"stream_elapsed_s={elapsed_us / 1_000_000:.1f}")
+        return " ".join(fields)
+
     def _check_late_binary(
         self,
         handling: BinaryHandling | None,
         role: Role | None,
-        timestamp_us: int,
+        entry: _RoleQueueEntry,
         message_type: int = 0,
     ) -> bool:
         """Check if a binary message's playback time has passed and should be dropped.
@@ -1826,6 +1895,7 @@ class SendspinConnection:
         grace period (configurable per-role), late messages are allowed through to give
         clients time to build their initial buffer.
         """
+        timestamp_us = entry.timestamp_us
         # timestamp_us=0 means "no playback semantics" - skip late detection
         if handling is None or role is None or not handling.drop_late or timestamp_us == 0:
             return False
@@ -1847,11 +1917,11 @@ class SendspinConnection:
                 -late_by_us / 1000,
             )
             now_s = time.monotonic()
-            if now_s - role._last_late_log_s >= 1.0:  # noqa: SLF001
+            if now_s - role._last_late_log_s >= _WARN_INTERVAL_S:  # noqa: SLF001
                 qsize, qmax = self.queue_status()
                 self._logger.warning(
                     "Late binary type=%s role=%s: skipping %s chunk(s); "
-                    "late_by_us=%s ts_us=%s now_us=%s queue=%s/%s",
+                    "late_by_us=%s ts_us=%s now_us=%s queue=%s/%s %s",
                     message_type,
                     role.role_family,
                     role._late_skips_since_log,  # noqa: SLF001
@@ -1860,6 +1930,7 @@ class SendspinConnection:
                     now,
                     qsize,
                     qmax,
+                    self._late_binary_diagnostics(role, entry, now, elapsed),
                 )
                 role._late_skips_since_log = 0  # noqa: SLF001
                 role._last_late_log_s = now_s  # noqa: SLF001
@@ -1901,13 +1972,31 @@ class SendspinConnection:
         elapsed_ms = (time.monotonic() - start_s) * 1000
         if elapsed_ms >= 50.0:
             # Slow writes indicate transport/backpressure issues but are not fatal.
-            self._logger.debug(
-                "Slow send_bytes: %.1fms size=%s ts_us=%s role=%s",
-                elapsed_ms,
-                len(binary.data),
-                entry.timestamp_us,
-                role,
-            )
+            # Extreme stalls surface at WARNING (rate-limited) so default-level
+            # logs show transport backpressure alongside any late-binary drops.
+            if elapsed_ms >= 500.0:
+                self._slow_send_count += 1
+            now_s = time.monotonic()
+            if elapsed_ms >= 500.0 and now_s - self._last_slow_send_log_s >= _WARN_INTERVAL_S:
+                self._logger.warning(
+                    "Slow send_bytes: %.1fms size=%s ts_us=%s role=%s; "
+                    "%s stall(s) over 500ms since last report",
+                    elapsed_ms,
+                    len(binary.data),
+                    entry.timestamp_us,
+                    role,
+                    self._slow_send_count,
+                )
+                self._slow_send_count = 0
+                self._last_slow_send_log_s = now_s
+            else:
+                self._logger.debug(
+                    "Slow send_bytes: %.1fms size=%s ts_us=%s role=%s",
+                    elapsed_ms,
+                    len(binary.data),
+                    entry.timestamp_us,
+                    role,
+                )
 
         # Buffer tracking via role's tracker (framework-managed)
         if (
@@ -2112,9 +2201,7 @@ class SendspinConnection:
         if (
             handling is not None
             and handling_role is not None
-            and self._check_late_binary(
-                handling, handling_role, entry.timestamp_us, entry.binary.message_type
-            )
+            and self._check_late_binary(handling, handling_role, entry, entry.binary.message_type)
         ):
             self._discard_role_head(role)
             self._schedule_role_head(role)

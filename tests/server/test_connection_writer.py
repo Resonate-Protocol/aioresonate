@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from dataclasses import dataclass
 from typing import Any, Never
 from unittest.mock import AsyncMock, MagicMock
@@ -21,6 +22,7 @@ from aiosendspin.models.core import (
 )
 from aiosendspin.models.player import StreamStartPlayer
 from aiosendspin.models.types import AudioCodec, BinaryMessageType
+from aiosendspin.server.audio import BufferTracker
 from aiosendspin.server.clock import LoopClock, ManualClock
 from aiosendspin.server.connection import (
     MAX_PENDING_MSG,
@@ -300,7 +302,8 @@ def test_check_late_binary_uses_player_effective_timestamp() -> None:
         handling = BinaryHandling(drop_late=True, grace_period_us=2_000_000)
 
         # Raw timestamp is still 4s in the future, but effective play time is 1s in the past.
-        assert conn._check_late_binary(handling, role, 14_000_000) is True  # noqa: SLF001
+        entry = _RoleQueueEntry(epoch=0, timestamp_us=14_000_000)
+        assert conn._check_late_binary(handling, role, entry) is True  # noqa: SLF001
     finally:
         loop.close()
 
@@ -617,5 +620,162 @@ def test_per_role_queue_limit_is_isolated_between_roles() -> None:
         assert len(conn._role_queues["player"]) == 1  # noqa: SLF001
         assert len(conn._role_queues["visualizer"]) == 1  # noqa: SLF001
         assert conn.disconnect.call_count == 0  # type: ignore[attr-defined]
+    finally:
+        loop.close()
+
+
+def _make_connection_with_droppable_client(
+    clock: ManualClock, loop: asyncio.AbstractEventLoop, *, drop_late: bool = True
+) -> SendspinConnection:
+    server = _DummyServer(loop=loop, clock=clock)
+    wsock = MagicMock()
+    wsock.closed = False
+    conn = SendspinConnection(server, wsock_client=wsock)
+    conn._transport = wsock  # noqa: SLF001
+    client = MagicMock()
+    client.active_roles = []
+    client.get_binary_handling_cached.return_value = (
+        BinaryHandling(drop_late=drop_late, grace_period_us=2_000_000),
+        MagicMock(),
+    )
+    conn._client = client  # noqa: SLF001
+    return conn
+
+
+def test_send_binary_warns_when_chunk_already_past_deadline(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Enqueuing a droppable chunk whose play window fully passed warns immediately."""
+    loop = asyncio.new_event_loop()
+    try:
+        clock = ManualClock(now_us_value=10_000_000)
+        conn = _make_connection_with_droppable_client(clock, loop)
+
+        with caplog.at_level(logging.WARNING):
+            conn.send_binary(
+                b"audio",
+                role="player",
+                timestamp_us=8_000_000,
+                message_type=BinaryMessageType.AUDIO_CHUNK.value,
+                duration_us=25_000,
+            )
+
+        assert "Enqueued already-late binary" in caplog.text
+        assert "behind_by_us=2000000" in caplog.text
+    finally:
+        loop.close()
+
+
+def test_send_binary_no_doomed_warning_without_drop_late(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Past timestamps on non-droppable message types are not flagged."""
+    loop = asyncio.new_event_loop()
+    try:
+        clock = ManualClock(now_us_value=10_000_000)
+        conn = _make_connection_with_droppable_client(clock, loop, drop_late=False)
+
+        with caplog.at_level(logging.WARNING):
+            conn.send_binary(
+                b"data",
+                role="visualizer",
+                timestamp_us=8_000_000,
+                message_type=BinaryMessageType.AUDIO_CHUNK.value,
+                duration_us=25_000,
+            )
+
+        assert "Enqueued already-late binary" not in caplog.text
+    finally:
+        loop.close()
+
+
+def test_late_binary_warning_reports_regime_diagnostics(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The late-drop warning includes enqueue lead, queue age and stream elapsed time."""
+    loop = asyncio.new_event_loop()
+    try:
+        clock = ManualClock(now_us_value=10_000_000)
+        server = _DummyServer(loop=loop, clock=clock)
+        wsock = MagicMock()
+        wsock.closed = False
+        conn = SendspinConnection(server, wsock_client=wsock)
+        conn._transport = wsock  # noqa: SLF001
+
+        role = PlayerV1Role(client=_make_player_client_stub())
+        role._stream_start_time_us = 0  # noqa: SLF001
+        handling = BinaryHandling(drop_late=True, grace_period_us=2_000_000)
+
+        entry = _RoleQueueEntry(epoch=0, timestamp_us=9_000_000, enqueued_at_us=8_500_000)
+        with caplog.at_level(logging.WARNING):
+            assert conn._check_late_binary(handling, role, entry) is True  # noqa: SLF001
+
+        assert "enq_lead_ms=500" in caplog.text
+        assert "queue_age_ms=1500" in caplog.text
+        assert "stream_elapsed_s=10.0" in caplog.text
+        # This role has no buffer tracker, so the buffer fields are left out
+        # rather than reported as placeholder values.
+        assert "buf_ms" not in caplog.text
+    finally:
+        loop.close()
+
+
+def test_late_binary_warning_reports_buffer_state_when_tracked(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """With a buffer tracker present the warning reports the device buffer state."""
+    loop = asyncio.new_event_loop()
+    try:
+        clock = ManualClock(now_us_value=10_000_000)
+        server = _DummyServer(loop=loop, clock=clock)
+        wsock = MagicMock()
+        wsock.closed = False
+        conn = SendspinConnection(server, wsock_client=wsock)
+        conn._transport = wsock  # noqa: SLF001
+
+        role = PlayerV1Role(client=_make_player_client_stub())
+        role._stream_start_time_us = 0  # noqa: SLF001
+        tracker = BufferTracker(
+            clock=clock, client_id="p", capacity_bytes=200_000, max_duration_us=30_000_000
+        )
+        tracker.register(12_000_000, 4_000, 25_000)
+        role._state().buffer_tracker = tracker  # noqa: SLF001
+
+        entry = _RoleQueueEntry(epoch=0, timestamp_us=9_000_000, enqueued_at_us=8_500_000)
+        handling = BinaryHandling(drop_late=True, grace_period_us=2_000_000)
+        with caplog.at_level(logging.WARNING):
+            assert conn._check_late_binary(handling, role, entry) is True  # noqa: SLF001
+
+        assert "buf_ms=2000" in caplog.text
+        assert "buf_bytes=4000/200000" in caplog.text
+    finally:
+        loop.close()
+
+
+def test_late_binary_warning_is_throttled_across_a_burst(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A burst of late chunks yields one warning that carries the suppressed count."""
+    loop = asyncio.new_event_loop()
+    try:
+        clock = ManualClock(now_us_value=10_000_000)
+        server = _DummyServer(loop=loop, clock=clock)
+        wsock = MagicMock()
+        wsock.closed = False
+        conn = SendspinConnection(server, wsock_client=wsock)
+        conn._transport = wsock  # noqa: SLF001
+
+        role = PlayerV1Role(client=_make_player_client_stub())
+        role._stream_start_time_us = 0  # noqa: SLF001
+        handling = BinaryHandling(drop_late=True, grace_period_us=2_000_000)
+
+        with caplog.at_level(logging.WARNING):
+            for _ in range(5):
+                entry = _RoleQueueEntry(epoch=0, timestamp_us=9_000_000, enqueued_at_us=8_500_000)
+                assert conn._check_late_binary(handling, role, entry) is True  # noqa: SLF001
+
+        assert caplog.text.count("Late binary") == 1
+        # The suppressed drops still accumulate for the next warning to report.
+        assert role._late_skips_since_log == 4  # noqa: SLF001
     finally:
         loop.close()
