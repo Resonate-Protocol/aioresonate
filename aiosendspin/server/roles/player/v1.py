@@ -844,6 +844,9 @@ class PlayerV1Role(Role):
         if self._buffer_tracker is not None:
             self._buffer_tracker.reset()
         self._pending_stream_start = True
+        # The client flushes its invalidated buffer only on a stream/start, so a
+        # flip-flop back to the announced format must not suppress one.
+        self._last_sent_format = None
         self._client.group.on_role_format_changed(self)
 
     # ---- Internal helpers ----

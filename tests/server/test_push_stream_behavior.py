@@ -2088,6 +2088,76 @@ async def test_format_change_during_active_stream(mock_loop: Any) -> None:
 
 
 @pytest.mark.asyncio
+async def test_format_flipflop_without_a_chunk_announces_the_return(mock_loop: Any) -> None:
+    """Returning to the last announced format must still announce the boundary.
+
+    Two requests with no chunk between them leave the client configured for
+    the format it is already playing, so the sent-format guard suppresses the
+    second stream/start. The boundary has meanwhile dropped the client's
+    queued audio and re-anchored near the playhead, so without the
+    announcement the client never flushes and plays the old buffer over the
+    replacement audio.
+    """
+    group = _DummyGroup(clients=[])
+    client, conn = _make_connected_player_multi_format(mock_loop, group, "p1")
+    clock = LoopClock(mock_loop)
+
+    stream = PushStream(loop=mock_loop, clock=clock, group=group)
+    group._push_stream = stream  # noqa: SLF001
+    group.has_active_stream = True
+
+    role = client.role("player@v1")
+    assert role is not None
+
+    def request_format(sample_rate: int) -> None:
+        role.on_stream_request_format(
+            StreamRequestFormatPayload(
+                player=StreamRequestFormatPlayer(
+                    codec=AudioCodec.PCM,
+                    sample_rate=sample_rate,
+                    channels=2,
+                    bit_depth=16,
+                )
+            )
+        )
+
+    for _ in range(20):
+        stream.prepare_audio(
+            bytes(4800),
+            AudioFormat(sample_rate=48000, bit_depth=16, channels=2),
+        )
+        await stream.commit_audio()
+
+    pre_change_count = len(conn.sent_binary)
+    pre_change_end_us = unpack_binary_header(conn.sent_binary[-1]).timestamp_us + 25_000
+    conn.sent_json.clear()
+
+    request_format(44100)
+    request_format(48000)
+    for _ in range(5):
+        await asyncio.sleep(0)
+
+    stream.prepare_audio(
+        bytes(4800),
+        AudioFormat(sample_rate=48000, bit_depth=16, channels=2),
+    )
+    await stream.commit_audio()
+
+    post_change_binary = conn.sent_binary[pre_change_count:]
+    assert post_change_binary
+    first_post_header = unpack_binary_header(post_change_binary[0])
+    assert first_post_header.timestamp_us < pre_change_end_us
+
+    stream_starts = [msg for msg in conn.sent_json if isinstance(msg, StreamStartMessage)]
+    assert len(stream_starts) == 1, (
+        f"Audio re-anchored to {first_post_header.timestamp_us}us behind the "
+        f"{pre_change_end_us}us tail with {len(stream_starts)} stream/start(s)"
+    )
+    assert stream_starts[0].payload.player is not None
+    assert stream_starts[0].payload.player.sample_rate == 48000
+
+
+@pytest.mark.asyncio
 async def test_format_change_during_inflight_commit_aborts_old_format_delivery(
     mock_loop: Any,
     monkeypatch: pytest.MonkeyPatch,
