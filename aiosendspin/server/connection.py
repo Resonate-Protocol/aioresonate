@@ -479,7 +479,15 @@ class SendspinConnection:
             return
 
         now_us = self._server.clock.now_us()
-        if timestamp_us != 0 and timestamp_us + (duration_us or 0) <= now_us:
+        # buffer_end_time_us already carries the role's static delay, which shifts the
+        # deadline earlier than the raw timestamp. Fall back to the raw span only when
+        # a caller does not supply it.
+        deadline_us = (
+            buffer_end_time_us
+            if buffer_end_time_us is not None
+            else timestamp_us + (duration_us or 0)
+        )
+        if timestamp_us != 0 and deadline_us <= now_us:
             self._warn_late_at_enqueue(role, message_type, timestamp_us, now_us)
 
         # Keep per-role queue ordering monotonic so role-scoped lifecycle JSON
@@ -515,6 +523,7 @@ class SendspinConnection:
             cached = self._client.get_binary_handling_cached(message_type)
         if cached is None or not cached[0].drop_late:
             return
+        behind_by_us = now_us - (timestamp_us - cached[1].get_static_delay_us())
         self._late_at_enqueue_count[role] = self._late_at_enqueue_count.get(role, 0) + 1
         now_s = time.monotonic()
         if now_s - self._last_late_at_enqueue_log_s.get(role, 0.0) < _WARN_INTERVAL_S:
@@ -525,7 +534,7 @@ class SendspinConnection:
             message_type,
             role,
             self._late_at_enqueue_count[role],
-            now_us - timestamp_us,
+            behind_by_us,
             timestamp_us,
             now_us,
             len(self._role_queues.get(role, [])),
@@ -1874,7 +1883,10 @@ class SendspinConnection:
         """
         fields: list[str] = []
         if entry.enqueued_at_us:
-            fields.append(f"enq_lead_ms={(entry.timestamp_us - entry.enqueued_at_us) / 1000:.0f}")
+            # Same effective play time the late-drop decision uses, so this field and
+            # late_by_us in the surrounding line share one basis.
+            effective_ts_us = entry.timestamp_us - role.get_static_delay_us()
+            fields.append(f"enq_lead_ms={(effective_ts_us - entry.enqueued_at_us) / 1000:.0f}")
             fields.append(f"queue_age_ms={(now_us - entry.enqueued_at_us) / 1000:.0f}")
         if (tracker := role.get_buffer_tracker()) is not None:
             fields.append(f"buf_ms={tracker.buffered_horizon_us(now_us) / 1000:.0f}")

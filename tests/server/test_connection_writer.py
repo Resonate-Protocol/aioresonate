@@ -634,9 +634,11 @@ def _make_connection_with_droppable_client(
     conn._transport = wsock  # noqa: SLF001
     client = MagicMock()
     client.active_roles = []
+    role = MagicMock()
+    role.get_static_delay_us.return_value = 0
     client.get_binary_handling_cached.return_value = (
         BinaryHandling(drop_late=drop_late, grace_period_us=2_000_000),
-        MagicMock(),
+        role,
     )
     conn._client = client  # noqa: SLF001
     return conn
@@ -777,5 +779,36 @@ def test_late_binary_warning_is_throttled_across_a_burst(
         assert caplog.text.count("Late binary") == 1
         # The suppressed drops still accumulate for the next warning to report.
         assert role._late_skips_since_log == 4  # noqa: SLF001
+    finally:
+        loop.close()
+
+
+def test_late_binary_diagnostics_use_the_effective_play_time(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A static delay shifts the deadline, so enq_lead must agree with late_by_us."""
+    loop = asyncio.new_event_loop()
+    try:
+        clock = ManualClock(now_us_value=10_000_000)
+        server = _DummyServer(loop=loop, clock=clock)
+        wsock = MagicMock()
+        wsock.closed = False
+        conn = SendspinConnection(server, wsock_client=wsock)
+        conn._transport = wsock  # noqa: SLF001
+
+        role = PlayerV1Role(client=_make_player_client_stub())
+        role._stream_start_time_us = 0  # noqa: SLF001
+        role.static_delay_ms = 5_000
+
+        # Raw timestamp is 4s ahead, but the effective play time is 1s in the past.
+        entry = _RoleQueueEntry(epoch=0, timestamp_us=14_000_000, enqueued_at_us=9_500_000)
+        handling = BinaryHandling(drop_late=True, grace_period_us=2_000_000)
+        with caplog.at_level(logging.WARNING):
+            assert conn._check_late_binary(handling, role, entry) is True  # noqa: SLF001
+
+        # Reported against the same deadline as late_by_us, not the raw timestamp
+        # (which would have claimed a healthy +4500ms lead for a late chunk).
+        assert "enq_lead_ms=-500" in caplog.text
+        assert "late_by_us=1000000" in caplog.text
     finally:
         loop.close()
