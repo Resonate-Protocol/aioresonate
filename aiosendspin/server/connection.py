@@ -1835,7 +1835,7 @@ class SendspinConnection:
             role._stream_start_time_us = now  # noqa: SLF001
         elapsed = now - role._stream_start_time_us  # noqa: SLF001
         in_grace_period = elapsed < handling.grace_period_us
-        late_by_us = now - (timestamp_us - role.get_static_delay_us())
+        late_by_us = now - (timestamp_us - role.get_output_delay_us())
 
         if late_by_us > 0 and not in_grace_period:
             role._late_skips_since_log += 1  # noqa: SLF001

@@ -283,7 +283,7 @@ async def test_writer_blocks_on_buffer_tracker_capacity() -> None:
 
 
 def test_check_late_binary_uses_player_effective_timestamp() -> None:
-    """Static delay should make late-drop compare against effective play time."""
+    """Output delay should make late-drop compare against effective play time."""
     loop = asyncio.new_event_loop()
     try:
         clock = ManualClock(now_us_value=10_000_000)
@@ -294,7 +294,7 @@ def test_check_late_binary_uses_player_effective_timestamp() -> None:
         conn._transport = wsock  # noqa: SLF001
 
         role = PlayerV1Role(client=_make_player_client_stub())
-        role.static_delay_ms = 5_000
+        role.output_delay_ms = 5_000
         role._stream_start_time_us = 0  # noqa: SLF001
 
         handling = BinaryHandling(drop_late=True, grace_period_us=2_000_000)
