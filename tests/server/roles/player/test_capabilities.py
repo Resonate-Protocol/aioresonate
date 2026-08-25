@@ -21,7 +21,7 @@ def test_can_encode_format_accepts_flac_24_bit() -> None:
 
 
 def test_can_encode_format_rejects_flac_32_bit() -> None:
-    """FLAC 32-bit should be rejected — the encoder cannot deliver it."""
+    """FLAC 32-bit should be rejected, since the server does not offer that depth."""
     fmt = SupportedAudioFormat(codec=AudioCodec.FLAC, sample_rate=48_000, bit_depth=32, channels=2)
     assert not can_encode_format(fmt)
 

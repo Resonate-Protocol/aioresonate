@@ -578,6 +578,11 @@ class TestFlacEncoder:
             total_output.extend(result)
         assert len(total_output) > 0
 
+    def test_flac_encoder_rejects_32_bit(self) -> None:
+        """FlacEncoder refuses 32-bit input rather than emitting a 24-bit stream."""
+        with pytest.raises(ValueError, match="bit depths"):
+            FlacEncoder(sample_rate=48000, bit_depth=32, channels=2)
+
     def test_flac_encoder_has_header(self) -> None:
         """FlacEncoder produces fLaC header."""
         encoder = FlacEncoder(sample_rate=48000, bit_depth=16, channels=2)
@@ -697,7 +702,6 @@ class TestFlacEncoderStreamInfo:
     def test_streaminfo_bit_depth_matches_announced_depth(self, bit_depth: int) -> None:
         """Every depth the server accepts is the depth STREAMINFO declares."""
         encoder = FlacEncoder(sample_rate=48_000, bit_depth=bit_depth, channels=2)
-        encoder._ensure_initialized()  # noqa: SLF001
 
         header = encoder.get_header()
         assert header is not None, "FLAC encoder should expose a STREAMINFO header"
