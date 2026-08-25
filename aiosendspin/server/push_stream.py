@@ -1692,6 +1692,12 @@ class PushStream:
         active_roles = {role for _client, role in self._get_audio_roles()}
 
         for tkey, frame_list in transformed.items():
+            roles = roles_by_transform.get(tkey, [])
+            if not any(r in active_roles for r in roles):
+                # Every recipient was excluded mid-commit (e.g. a format change
+                # deferred the sole role to the join path); caching these frames
+                # would repopulate the transform key the boundary just evicted.
+                continue
             cached_for_key: list[CachedChunk] = []
             for data, ts, dur in frame_list:
                 cached = CachedChunk(
@@ -1703,7 +1709,6 @@ class PushStream:
             cache_results[tkey].extend(cached_for_key)
 
             # Deliver live chunks directly; connection layer enforces late-drop/backpressure.
-            roles = roles_by_transform.get(tkey, [])
             # Share one AudioChunk across roles so its packed frame is built once.
             audio_chunks = [
                 AudioChunk(
@@ -1877,11 +1882,13 @@ class PushStream:
             self._transform_last_input_end_us.pop(stale_tkey, None)
 
     def on_role_format_changed(self, role: Role) -> None:
-        """Invalidate caches after a role's audio format changed mid-stream.
+        """Re-anchor a role whose audio format changed mid-stream.
 
-        Unlike on_role_leave(), this does NOT touch _started_roles or epoch.
-        The role stays active; only stale caches are cleared so the next
-        commit_audio() picks up the new AudioRequirements.
+        The role stays active (unlike on_role_leave()) but is treated as a
+        late joiner: stale transform-key work is discarded and the join path
+        re-anchors it near the playhead in the new format. In-flight commits
+        need no abort: the synchronous join deferral moves the role into
+        _pending_join_roles, which excludes it from live delivery.
         """
         # Invalidate transform key cache entries for this role
         role_id = id(role)
@@ -1892,6 +1899,13 @@ class PushStream:
                 self._transform_key_cache.pop(cache_key, None)
         for stale_tkey in stale_transform_keys:
             self._transform_last_input_end_us.pop(stale_tkey, None)
+            if not self._other_roles_use_transform_key(stale_tkey, role):
+                # Sole user of the old format: drop its encoded cache and
+                # reset the encoder so a change back starts clean.
+                self._role_chunk_cache.pop(stale_tkey, None)
+                transformer = self._group.transformer_pool.get(stale_tkey)
+                if transformer is not None:
+                    transformer.reset()
 
         # Clean up any catchup state referencing this role
         for tkey in list(self._catchup_roles.keys()):
@@ -1903,6 +1917,13 @@ class PushStream:
                 task = self._catchup_tasks.pop(tkey, None)
                 if task is not None:
                     task.cancel()
+
+        # The changing role's client discards its un-played buffer at the new
+        # stream/start, so re-anchor it near the playhead via the late-join
+        # path: the buffered content is re-encoded in the new format and
+        # handed off to live at the tail, leaving the shared channel timeline
+        # untouched for unchanged roles.
+        self.on_role_join(role)
 
     def has_cached_chunks(self) -> bool:
         """Return True if there are cached chunks for late joiners."""

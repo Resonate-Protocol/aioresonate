@@ -426,6 +426,12 @@ class SendspinConnection:
         roles_to_drop = list(self._epoch_by_role.keys()) if roles is None else roles
         for role in roles_to_drop:
             self._epoch_by_role[role] += 1
+            if role in self._blocked_until_us:
+                # The backpressure deadline was computed against audio that is
+                # now invalid; new-epoch work must not wait behind it.
+                self._blocked_until_us.pop(role, None)
+                self._block_generation[role] += 1
+                self._schedule_role_head(role)
         self._wake_writer()
 
     def send_binary(

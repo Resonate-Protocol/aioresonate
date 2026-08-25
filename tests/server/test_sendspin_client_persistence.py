@@ -62,6 +62,9 @@ class _DummyConnection:
     def send_message(self, message: object) -> None:
         self.sent_json.append(message)
 
+    def drop_pending_binary(self, roles: list[str] | None) -> None:  # noqa: ARG002
+        return
+
     def send_role_message(self, role: str, message: object) -> None:  # noqa: ARG002
         self.sent_json.append(message)
 

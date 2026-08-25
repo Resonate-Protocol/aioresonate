@@ -284,6 +284,82 @@ async def test_writer_blocks_on_buffer_tracker_capacity() -> None:
     await conn.disconnect(retry_connection=False)
 
 
+@pytest.mark.asyncio
+async def test_drop_pending_binary_unblocks_backpressured_role() -> None:
+    """drop_pending_binary() must immediately release a backpressured role.
+
+    A stream boundary evicts queued audio whose backpressure deadline was
+    computed against now-invalidated state; new-epoch work must be
+    schedulable right away while the stale entry is epoch-discarded.
+    """
+    loop = asyncio.get_running_loop()
+    server = _DummyServer(loop=loop, clock=LoopClock(loop))
+
+    wsock = MagicMock()
+    wsock.closed = False
+    wsock.send_str = AsyncMock()
+    wsock.send_bytes = AsyncMock()
+
+    conn = SendspinConnection(server, wsock_client=wsock)
+    conn._transport = wsock  # noqa: SLF001
+    await conn._setup_connection()  # noqa: SLF001
+    conn._writer_task = asyncio.create_task(conn._writer())  # noqa: SLF001
+
+    mock_role = MagicMock()
+    mock_buffer_tracker = MagicMock()
+    mock_buffer_tracker.time_until_ready.return_value = 1_000_000
+    mock_role.get_buffer_tracker.return_value = mock_buffer_tracker
+    mock_role._stream_start_time_us = None  # noqa: SLF001
+    mock_role._last_late_log_s = 0.0  # noqa: SLF001
+    mock_role._late_skips_since_log = 0  # noqa: SLF001
+
+    mock_client = MagicMock()
+    binary_handling = BinaryHandling(drop_late=False, buffer_track=True)
+    mock_client.get_binary_handling_cached.return_value = (binary_handling, mock_role)
+    conn._client = mock_client  # noqa: SLF001
+
+    message_type = BinaryMessageType.AUDIO_CHUNK.value
+    conn.send_binary(
+        pack_binary_header_raw(message_type, 0) + b"stale",
+        role="player",
+        timestamp_us=0,
+        message_type=message_type,
+        buffer_end_time_us=1_000_000,
+        buffer_byte_count=100,
+        duration_us=50_000,
+    )
+
+    for _ in range(10):
+        await asyncio.sleep(0)
+    assert wsock.send_bytes.call_count == 0
+    assert "player" in conn._blocked_until_us  # noqa: SLF001
+
+    # Stream boundary: evict the queued binary and open capacity.
+    conn.drop_pending_binary(["player"])
+    mock_buffer_tracker.time_until_ready.return_value = 0
+
+    conn.send_binary(
+        pack_binary_header_raw(message_type, 0) + b"fresh",
+        role="player",
+        timestamp_us=0,
+        message_type=message_type,
+        buffer_end_time_us=2_000_000,
+        buffer_byte_count=100,
+        duration_us=50_000,
+    )
+
+    for _ in range(10):
+        await asyncio.sleep(0)
+
+    # The stale entry was epoch-discarded and the new-epoch frame went out
+    # immediately instead of waiting out the old backpressure deadline.
+    assert wsock.send_bytes.call_count == 1
+    assert wsock.send_bytes.call_args[0][0].endswith(b"fresh")
+    assert "player" not in conn._blocked_until_us  # noqa: SLF001
+
+    await conn.disconnect(retry_connection=False)
+
+
 def test_check_late_binary_uses_player_effective_timestamp() -> None:
     """Static delay should make late-drop compare against effective play time."""
     loop = asyncio.new_event_loop()

@@ -166,6 +166,10 @@ class TransformerPool:
             self._transformers[key] = transformer_type(**transformer_kwargs)
         return self._transformers[key]  # type: ignore[return-value]
 
+    def get(self, key: TransformKey) -> AudioTransformer | None:
+        """Return the pooled transformer for key, if one exists."""
+        return self._transformers.get(key)
+
     def reset_all(self) -> None:
         """Reset all transformers (called on stream/clear)."""
         for transformer in self._transformers.values():

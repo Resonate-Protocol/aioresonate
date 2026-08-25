@@ -804,6 +804,12 @@ class SendspinClient:
             duration_us=duration_us,
         )
 
+    def drop_pending_binary(self, roles: list[str] | None) -> None:
+        """Drop queued binary payloads for the given role families, if connected."""
+        if self._connection is None:
+            return
+        self._connection.drop_pending_binary(roles)
+
     def get_binary_handling_cached(self, message_type: int) -> tuple[BinaryHandling, Role] | None:
         """Return cached binary handling for a message type."""
         return self._binary_handling_cache.get(message_type)
