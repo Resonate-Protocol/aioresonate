@@ -272,8 +272,8 @@ async def test_late_join_target_includes_player_static_delay() -> None:
 
     stream = PushStream(loop=loop, clock=clock, group=group)
 
-    # now + max(min_buffer=500ms, required_lead=250ms) + static_delay=5s
-    assert stream.get_late_join_target_timestamp_us(role=role) == 6_500_000
+    # now + max(min_buffer=1000ms, required_lead=250ms) + static_delay=5s
+    assert stream.get_late_join_target_timestamp_us(role=role) == 7_000_000
 
 
 @pytest.mark.asyncio
@@ -356,7 +356,7 @@ async def test_non_main_join_rebase_includes_player_static_delay() -> None:
 
     stream._rebase_far_ahead_join_tail(channel_id, role)  # noqa: SLF001
 
-    assert stream._channel_timing[channel_id] == 6_500_000  # noqa: SLF001
+    assert stream._channel_timing[channel_id] == 7_000_000  # noqa: SLF001
 
 
 @pytest.mark.asyncio
