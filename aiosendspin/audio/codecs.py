@@ -139,6 +139,10 @@ class PcmPassthrough:
 class FlacEncoder:
     """FLAC audio encoder transformer."""
 
+    # ffmpeg encodes wider than 24 bits only under `-strict experimental`, and decoders
+    # older than libFLAC 1.4 cannot read 32-bit FLAC.
+    VALID_BIT_DEPTHS = frozenset({16, 24})
+
     def __init__(
         self,
         *,
@@ -149,6 +153,11 @@ class FlacEncoder:
         options: Mapping[str, str] | None = None,
     ) -> None:
         """Initialize FLAC encoder with audio format parameters."""
+        if bit_depth not in self.VALID_BIT_DEPTHS:
+            valid = sorted(self.VALID_BIT_DEPTHS)
+            msg = f"FLAC only supports bit depths {valid}, got {bit_depth}"
+            raise ValueError(msg)
+
         self._sample_rate = sample_rate
         self._bit_depth = bit_depth
         self._channels = channels
