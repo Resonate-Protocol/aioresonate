@@ -290,17 +290,19 @@ def test_artwork_role_on_connect_schedules_artwork_once_per_channel() -> None:
     group._server = MagicMock()  # noqa: SLF001
     group._server.clock.now_us.return_value = 1_000_000  # noqa: SLF001
     group_role = ArtworkGroupRole(group)
-    group_role._current_artwork = {  # noqa: SLF001
-        ArtworkSource.ALBUM: Image.new("RGB", (10, 10)),
-        ArtworkSource.ARTIST: Image.new("RGB", (10, 10)),
-    }
+    group_role._artwork_state(ArtworkSource.ALBUM).apply(  # noqa: SLF001
+        Image.new("RGB", (10, 10)), 1_000_000
+    )
+    group_role._artwork_state(ArtworkSource.ARTIST).apply(  # noqa: SLF001
+        Image.new("RGB", (10, 10)), 1_000_000
+    )
     client.group.group_role.return_value = group_role
 
     role = ArtworkV1Role(client=client)
-    with patch.object(group_role, "_schedule_send_artwork") as schedule:
+    with patch.object(group_role, "_schedule_artwork_replay") as schedule:
         role.on_connect()
 
-    channels_sent = [call.args[2] for call in schedule.call_args_list]
+    channels_sent = [call.args[1] for call in schedule.call_args_list]
     assert sorted(channels_sent) == [0, 1]
 
 
@@ -331,3 +333,26 @@ def test_artwork_partial_format_request_preserves_unchanged_fields() -> None:
     assert configs[0].source == ArtworkSource.ALBUM
     assert configs[0].media_width == 300
     assert configs[0].media_height == 300
+
+
+def test_artwork_format_request_replays_current_then_pending() -> None:
+    """A format update replays current artwork followed by pending artwork."""
+    client = _make_client_stub_with_channel()
+    group = MagicMock()
+    group._server.clock.now_us.return_value = 1_000_000  # noqa: SLF001
+    group_role = ArtworkGroupRole(group)
+    client.group.group_role.return_value = group_role
+    role = ArtworkV1Role(client=client)
+    role.on_connect()
+    group_role._artwork_state(ArtworkSource.ALBUM).schedule(  # noqa: SLF001
+        MagicMock(), None, 2_000_000
+    )
+
+    with patch.object(group_role, "_schedule_artwork_replay") as replay:
+        role.on_stream_request_format(
+            StreamRequestFormatPayload(
+                artwork=StreamRequestFormatArtwork(channel=0, format=PictureFormat.PNG)
+            )
+        )
+
+    replay.assert_called_once_with(role, 0, role.get_channel_configs()[0])

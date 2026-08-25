@@ -6,10 +6,12 @@ from dataclasses import replace
 from typing import TYPE_CHECKING
 
 from aiosendspin.models.core import ServerStateMessage, ServerStatePayload
-from aiosendspin.models.metadata import Progress
+from aiosendspin.models.metadata import Progress, SessionUpdateMetadata
+from aiosendspin.models.types import UndefinedField
 from aiosendspin.server.roles.base import GroupRole, Role
 from aiosendspin.server.roles.metadata.events import MetadataClearedEvent, MetadataUpdatedEvent
 from aiosendspin.server.roles.metadata.state import Metadata
+from aiosendspin.server.roles.scheduled_state import ScheduledRoleState
 
 if TYPE_CHECKING:
     from aiosendspin.server.group import SendspinGroup
@@ -28,13 +30,15 @@ class MetadataGroupRole(GroupRole):
     def __init__(self, group: SendspinGroup) -> None:
         """Initialize MetadataGroupRole."""
         super().__init__(group)
-        self._current_metadata: Metadata | None = None
+        self._state: ScheduledRoleState[Metadata, SessionUpdateMetadata] = ScheduledRoleState(
+            self._on_state_commit
+        )
         self._track_progress_timestamp_us: int | None = None
 
     @property
     def metadata(self) -> Metadata | None:
         """Return current metadata."""
-        return self._current_metadata
+        return self._state.current(self._now_us())
 
     def on_member_join(self, role: Role) -> None:
         """Send current metadata to newly joined member."""
@@ -43,60 +47,68 @@ class MetadataGroupRole(GroupRole):
     def _send_state_to_role(self, role: Role) -> None:
         """Send current metadata state to a single role."""
         # TODO: refactor to guard clause: if metadata is None, send clear and return
-        timestamp = self._group._server.clock.now_us()  # noqa: SLF001
+        timestamp = self._now_us()
+        current = self._state.current(timestamp)
 
-        if self._current_metadata is not None:
-            metadata_update = self._current_metadata.snapshot_update(timestamp)
-            current_progress = self._get_current_track_progress()
+        if current is not None:
+            metadata_update = current.snapshot_update(timestamp)
+            current_progress = self._get_track_progress_at(current, timestamp)
             if (
                 current_progress is not None
-                and self._current_metadata.track_duration is not None
-                and self._current_metadata.playback_speed is not None
+                and current.track_duration is not None
+                and current.playback_speed is not None
             ):
                 metadata_update.progress = Progress(
                     track_progress=current_progress,
-                    track_duration=self._current_metadata.track_duration,
-                    playback_speed=self._current_metadata.playback_speed,
+                    track_duration=current.track_duration,
+                    playback_speed=current.playback_speed,
                 )
         else:
             metadata_update = Metadata.cleared_update(timestamp)
 
         state_message = ServerStateMessage(ServerStatePayload(metadata=metadata_update))
         role.send_message(state_message)
+        if (pending_update := self._state.pending_update) is not None:
+            role.send_message(ServerStateMessage(ServerStatePayload(metadata=pending_update)))
 
     def _get_current_track_progress(self) -> int | None:
         """Calculate current track progress in milliseconds."""
-        if self._current_metadata is None or self._current_metadata.track_progress is None:
+        now_us = self._now_us()
+        return self._get_track_progress_at(self._state.current(now_us), now_us)
+
+    def _get_track_progress_at(self, metadata: Metadata | None, timestamp_us: int) -> int | None:
+        if metadata is None or metadata.track_progress is None:
             return None
 
         if (
             self._track_progress_timestamp_us is not None
             and self._group.has_active_stream
-            and self._current_metadata.playback_speed is not None
+            and metadata.playback_speed is not None
         ):
-            current_time_us = self._group._server.clock.now_us()  # noqa: SLF001
-            elapsed_us = current_time_us - self._track_progress_timestamp_us
-            elapsed_ms = (elapsed_us * self._current_metadata.playback_speed) // 1_000_000
-            calculated_progress = self._current_metadata.track_progress + elapsed_ms
+            elapsed_us = timestamp_us - self._track_progress_timestamp_us
+            elapsed_ms = (elapsed_us * metadata.playback_speed) // 1_000_000
+            calculated_progress = metadata.track_progress + elapsed_ms
 
-            if (
-                self._current_metadata.track_duration is not None
-                and self._current_metadata.track_duration > 0
-            ):
-                calculated_progress = max(
-                    0, min(calculated_progress, self._current_metadata.track_duration)
-                )
+            if metadata.track_duration is not None and metadata.track_duration > 0:
+                calculated_progress = max(0, min(calculated_progress, metadata.track_duration))
             else:
                 calculated_progress = max(0, calculated_progress)
 
             return calculated_progress
 
-        return self._current_metadata.track_progress
+        return metadata.track_progress
 
     def freeze_progress(self) -> None:
         """Snapshot current progress and stop further client-side progress extrapolation."""
-        metadata = self._current_metadata
-        if metadata is None or (current_progress := self._get_current_track_progress()) is None:
+        now_us = self._now_us()
+        metadata = self._state.current(now_us)
+        if metadata is None:
+            return
+
+        current_progress = self._get_track_progress_at(metadata, now_us)
+        if current_progress is None:
+            if self._state.has_pending:
+                self.set_metadata(replace(metadata, timestamp_us=None))
             return
 
         self.set_metadata(
@@ -104,37 +116,62 @@ class MetadataGroupRole(GroupRole):
                 metadata,
                 track_progress=current_progress,
                 playback_speed=0,
+                timestamp_us=None,
             )
         )
 
-    def set_metadata(self, metadata: Metadata | None) -> None:
-        """Set metadata and push updates to all subscribed roles.
+    def set_metadata(self, metadata: Metadata | None, *, timestamp_us: int | None = None) -> None:
+        """Set or schedule metadata and push updates to all subscribed roles.
 
-        Only sends updates for fields that have changed.
+        A future timestamp schedules one pending update. Another future call replaces
+        that pending update by arrival order. An omitted, past, or present timestamp
+        applies the metadata immediately and cancels any pending update. When
+        ``timestamp_us`` is omitted, ``metadata.timestamp_us`` is used if set.
+
+        To show metadata now and schedule the next track, call this method first with
+        the current metadata, then again with the future timestamp. Only changed
+        fields are sent. Per spec, schedule at most 20 seconds ahead.
         """
-        timestamp = self._group._server.clock.now_us()  # noqa: SLF001
+        now_us = self._now_us()
+        current = self._state.current(now_us)
+        timestamp = now_us if timestamp_us is None else timestamp_us
 
         if metadata is not None:
-            if metadata.timestamp_us is None:
+            if timestamp_us is not None:
+                metadata = replace(metadata, timestamp_us=timestamp_us)
+            elif metadata.timestamp_us is None:
                 metadata = replace(metadata, timestamp_us=timestamp)
             else:
                 timestamp = metadata.timestamp_us
 
-        if metadata is None and self._current_metadata is None:
-            return
-        if metadata is not None and metadata.equals(self._current_metadata):
-            return
+        if not self._state.has_pending and not self._state.scheduled_fields:
+            if metadata is None and current is None:
+                return
+            if metadata is not None and metadata.equals(current):
+                return
 
-        last_metadata = self._current_metadata
+        last_metadata = current
+        scheduled_fields = self._state.scheduled_fields
         if metadata is None:
             metadata_update = Metadata.cleared_update(timestamp)
         else:
-            metadata_update = metadata.diff_update(last_metadata, timestamp)
+            metadata_update = metadata.diff_update(
+                last_metadata, timestamp, include=scheduled_fields - {"progress"}
+            )
+            if isinstance(metadata_update.progress, UndefinedField):
+                metadata = self._rebase_omitted_progress(last_metadata, metadata, timestamp)
+                if "progress" in scheduled_fields:
+                    metadata_update.progress = self._scheduled_progress_value(
+                        last_metadata, metadata, timestamp
+                    )
 
-        self._current_metadata = metadata
-
-        if metadata is not None and metadata.track_progress is not None:
-            self._track_progress_timestamp_us = timestamp
+        if timestamp > now_us:
+            self._warn_scheduled_lead(timestamp, now_us)
+            self._state.schedule(
+                metadata, metadata_update, timestamp, set(metadata_update.to_dict()) - {"timestamp"}
+            )
+        else:
+            self._state.apply(metadata, timestamp)
 
         for role in self._members:
             state_message = ServerStateMessage(ServerStatePayload(metadata=metadata_update))
@@ -152,6 +189,51 @@ class MetadataGroupRole(GroupRole):
                 timestamp_us=timestamp,
             )
         )
+
+    def _on_state_commit(self, metadata: Metadata | None, timestamp_us: int) -> None:
+        self._track_progress_timestamp_us = (
+            timestamp_us if metadata is not None and metadata.track_progress is not None else None
+        )
+
+    def _scheduled_progress_value(
+        self,
+        last_metadata: Metadata | None,
+        metadata: Metadata,
+        timestamp_us: int,
+    ) -> Progress | None:
+        """Progress a scheduled diff must restate when it would otherwise omit it."""
+        progress = self._get_track_progress_at(last_metadata, timestamp_us)
+        if (
+            progress is not None
+            and metadata.track_duration is not None
+            and metadata.playback_speed is not None
+        ):
+            return Progress(
+                track_progress=progress,
+                track_duration=metadata.track_duration,
+                playback_speed=metadata.playback_speed,
+            )
+        if (
+            metadata.track_progress is not None
+            and metadata.track_duration is not None
+            and metadata.playback_speed is not None
+        ):
+            return Progress(
+                track_progress=metadata.track_progress,
+                track_duration=metadata.track_duration,
+                playback_speed=metadata.playback_speed,
+            )
+        return None
+
+    def _rebase_omitted_progress(
+        self,
+        last_metadata: Metadata | None,
+        metadata: Metadata,
+        timestamp_us: int,
+    ) -> Metadata:
+        """Align stored progress with the trajectory clients keep extrapolating."""
+        progress = self._get_track_progress_at(last_metadata, timestamp_us)
+        return metadata if progress is None else replace(metadata, track_progress=progress)
 
     def update(
         self,
@@ -171,7 +253,7 @@ class MetadataGroupRole(GroupRole):
 
         Fields set to `_UNSET` are left unchanged. Passing `None` clears a field.
         """
-        current = self._current_metadata or Metadata()
+        current = self.metadata or Metadata()
         kwargs: dict[str, object] = {}
         if title is not _UNSET:
             kwargs["title"] = title
@@ -200,6 +282,6 @@ class MetadataGroupRole(GroupRole):
         new_metadata = replace(current, **kwargs)  # type: ignore[arg-type]
         self.set_metadata(new_metadata)
 
-    def clear(self) -> None:
-        """Clear all metadata."""
-        self.set_metadata(None)
+    def clear(self, *, timestamp_us: int | None = None) -> None:
+        """Clear metadata immediately or at a future server timestamp."""
+        self.set_metadata(None, timestamp_us=timestamp_us)

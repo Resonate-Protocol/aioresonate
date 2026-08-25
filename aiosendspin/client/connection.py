@@ -8,6 +8,7 @@ import logging
 import struct
 from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager, contextmanager, suppress
+from dataclasses import dataclass, fields, replace
 from typing import TYPE_CHECKING, NoReturn, assert_never
 
 from aiohttp import ClientWebSocketResponse, WSMessage, WSMsgType, web
@@ -18,6 +19,7 @@ from aiosendspin.models import (
     pack_binary_header_raw,
     unpack_binary_header,
 )
+from aiosendspin.models.color import SessionUpdateColor
 from aiosendspin.models.controller import ControllerCommandPayload
 from aiosendspin.models.core import (
     ActivatePairing,
@@ -60,6 +62,7 @@ from aiosendspin.models.management import (
     ManagementSetPairingConfigMessage,
     ServerUnpairMessage,
 )
+from aiosendspin.models.metadata import SessionUpdateMetadata
 from aiosendspin.models.player import PlayerStatePayload, StreamStartPlayer
 from aiosendspin.models.source import (
     ClientStreamEndMessage,
@@ -125,6 +128,7 @@ from .management import (
     with_storage,
 )
 from .models import AudioFormat, PCMFormat, ServerInfo
+from .scheduled_state import ScheduledStateUpdate
 from .time_sync import SendspinTimeFilter
 
 if TYPE_CHECKING:
@@ -176,6 +180,36 @@ _VISUALIZATION_BINARY_TYPES: frozenset[BinaryMessageType] = frozenset(
         BinaryMessageType.VISUALIZATION_PITCH,
     }
 )
+
+
+@dataclass(slots=True)
+class _ArtworkFrame:
+    """An artwork binary update for one channel, with its header timestamp retained."""
+
+    image_data: bytes | None
+    """Encoded image bytes, or None for a (possibly scheduled) empty clear."""
+    timestamp: int
+    """Server clock time in microseconds from the binary message header."""
+
+
+def _merge_session_update[T: SessionUpdateMetadata | SessionUpdateColor](
+    confirmed: T | None, overlay: T
+) -> T:
+    """Shallow-merge overlay onto confirmed to build the confirmed snapshot.
+
+    Fields left as UndefinedField in overlay keep confirmed's value; any other
+    value, including None, replaces confirmed's field outright. Nested objects
+    such as Progress are replaced wholesale, never merged field by field.
+    """
+    if confirmed is None:
+        return overlay
+    changes = {
+        field.name: getattr(overlay, field.name)
+        for field in fields(overlay)
+        if field.name != "timestamp"
+        and not isinstance(getattr(overlay, field.name), UndefinedField)
+    }
+    return replace(confirmed, timestamp=overlay.timestamp, **changes)
 
 
 def _activities_allowed(
@@ -254,6 +288,13 @@ class SendspinConnection:
     _server_state: ServerStatePayload | None = None
     """Latest server state received from server."""
 
+    _metadata_state: ScheduledStateUpdate[SessionUpdateMetadata]
+    """Confirmed metadata plus at most one pending update, applied at effective time."""
+    _color_state: ScheduledStateUpdate[SessionUpdateColor]
+    """Confirmed color plus at most one pending update, applied at effective time."""
+    _artwork_channels: dict[int, ScheduledStateUpdate[_ArtworkFrame]]
+    """Per-channel confirmed artwork plus at most one pending update."""
+
     def __init__(self, client: SendspinClient) -> None:
         """Create a connection owned by ``client``, seeding per-connection state."""
         self._client = client
@@ -271,6 +312,21 @@ class SendspinConnection:
         self._time_filter = SendspinTimeFilter()
         self._static_delay_us = client.static_delay_us
         self._closed = asyncio.Event()
+        self._init_state_trackers()
+
+    def _init_state_trackers(self) -> None:
+        """(Re)create the pending-state trackers for metadata, color, and artwork."""
+        self._metadata_state = ScheduledStateUpdate[SessionUpdateMetadata](
+            map_to_client_time=self._map_to_client_time,
+            now_us=self.now_us,
+            merge=_merge_session_update,
+        )
+        self._color_state = ScheduledStateUpdate[SessionUpdateColor](
+            map_to_client_time=self._map_to_client_time,
+            now_us=self.now_us,
+            merge=_merge_session_update,
+        )
+        self._artwork_channels = {}
 
     @property
     def connected(self) -> bool:
@@ -820,6 +876,10 @@ class SendspinConnection:
         self._current_visualizer_config = None
         self._activities = []
         self._active_roles = []
+        self._metadata_state.discard_pending()
+        self._color_state.discard_pending()
+        for state in self._artwork_channels.values():
+            state.discard_pending()
 
         self._closed.set()
         self._client.on_connection_closed(self)
@@ -1171,11 +1231,13 @@ class SendspinConnection:
             self._handle_audio_chunk(header.timestamp_us, payload[BINARY_HEADER_SIZE:])
         elif message_type in _ARTWORK_BINARY_TYPES:
             try:
-                unpack_binary_header(payload)
+                header = unpack_binary_header(payload)
             except Exception:
                 logger.exception("Failed to unpack binary header")
                 return
-            self._handle_artwork_chunk(message_type, payload[BINARY_HEADER_SIZE:])
+            self._handle_artwork_chunk(
+                message_type, header.timestamp_us, payload[BINARY_HEADER_SIZE:]
+            )
         elif message_type is BinaryMessageType.VISUALIZATION_BEAT:
             self._handle_visualization_beat(payload[1:])
         elif message_type in _VISUALIZATION_BINARY_TYPES:
@@ -1231,6 +1293,10 @@ class SendspinConnection:
             - (payload.server_transmitted - payload.server_received)
         ) / 2
         self._time_filter.update(round(offset), round(delay), now_us)
+        self._metadata_state.reschedule_pending()
+        self._color_state.reschedule_pending()
+        for state in self._artwork_channels.values():
+            state.reschedule_pending()
         if (
             not was_synchronized
             and self._time_filter.is_synchronized
@@ -1315,6 +1381,8 @@ class SendspinConnection:
             self._current_visualizer_config = None
         if roles is None or "artwork" in roles:
             self._artwork_stream_active = False
+            for state in self._artwork_channels.values():
+                state.discard_pending()
 
         self._client.notify_stream_end(roles)
 
@@ -1327,9 +1395,25 @@ class SendspinConnection:
         if not isinstance(payload.controller, UndefinedField):
             self._client.notify_controller_callback(payload)
         if not isinstance(payload.metadata, UndefinedField):
-            self._client.notify_metadata_callback(payload)
+            if payload.metadata is None:
+                self._metadata_state.clear_immediately(
+                    lambda: self._client.notify_metadata_callback(payload)
+                )
+            elif self._metadata_state.handle_update(
+                payload.metadata,
+                lambda: self._client.notify_metadata_callback(payload),
+            ):
+                self._client.notify_scheduled_metadata(payload)
         if not isinstance(payload.color, UndefinedField):
-            self._client.notify_color_callback(payload)
+            if payload.color is None:
+                self._color_state.clear_immediately(
+                    lambda: self._client.notify_color_callback(payload)
+                )
+            elif self._color_state.handle_update(
+                payload.color,
+                lambda: self._client.notify_color_callback(payload),
+            ):
+                self._client.notify_scheduled_color(payload)
 
     def _handle_server_command(self, payload: ServerCommandPayload) -> None:
         """Handle server/command message."""
@@ -1411,10 +1495,27 @@ class SendspinConnection:
         # to allow for dynamic time base updates
         self._client.notify_audio_chunk(timestamp_us, payload, self._current_audio_format)
 
-    def _handle_artwork_chunk(self, message_type: BinaryMessageType, payload: bytes) -> None:
+    def _handle_artwork_chunk(
+        self, message_type: BinaryMessageType, timestamp_us: int, payload: bytes
+    ) -> None:
         """Handle incoming artwork chunk and notify callbacks."""
         channel = int(message_type.value - BinaryMessageType.ARTWORK_CHANNEL_0.value)
-        self._client.notify_artwork(channel, payload)
+        image_data = payload or None
+        frame = _ArtworkFrame(image_data=image_data, timestamp=timestamp_us)
+        state = self._artwork_channels.get(channel)
+        if state is None:
+
+            def commit(applied: _ArtworkFrame | None, channel: int = channel) -> None:
+                self._commit_artwork(channel, applied)
+
+            state = ScheduledStateUpdate[_ArtworkFrame](
+                map_to_client_time=self._map_to_client_time,
+                now_us=self.now_us,
+                commit=commit,
+            )
+            self._artwork_channels[channel] = state
+        if state.handle_update(frame):
+            self._client.notify_scheduled_artwork(channel, payload, timestamp_us)
 
     def _handle_visualization_frame(self, message_type: BinaryMessageType, payload: bytes) -> None:
         """Parse a single-type visualization binary and notify callbacks."""
@@ -1529,3 +1630,16 @@ class SendspinConnection:
     def now_us(self) -> int:
         """Return current timestamp from the client's clock in microseconds."""
         return self._client.clock.now_us()
+
+    def _map_to_client_time(self, server_timestamp_us: int) -> int:
+        """Map a server-clock timestamp to the client's local clock, for scheduling.
+
+        Unlike `compute_play_time`, this applies no static delay or unsynchronized
+        lead time: it is used to classify server/state and artwork timestamps as
+        future/now/past, not to schedule audio playback.
+        """
+        return self._time_filter.compute_client_time(server_timestamp_us)
+
+    def _commit_artwork(self, channel: int, frame: _ArtworkFrame | None) -> None:
+        payload = b"" if frame is None or frame.image_data is None else frame.image_data
+        self._client.notify_artwork(channel, payload)

@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
+import logging
+from typing import TYPE_CHECKING
 from unittest.mock import MagicMock
 
 from aiosendspin.models.core import ServerStateMessage
 from aiosendspin.models.types import UndefinedField
 from aiosendspin.server.roles.metadata import Metadata, MetadataClearedEvent, MetadataUpdatedEvent
 from aiosendspin.server.roles.metadata.group import MetadataGroupRole
+
+if TYPE_CHECKING:
+    import pytest
 
 
 def _make_group_stub() -> MagicMock:
@@ -269,6 +274,233 @@ def test_metadata_group_role_member_join_does_not_rewind_after_freeze() -> None:
     assert msg.payload.metadata.progress.playback_speed == 0
 
 
+def test_future_metadata_keeps_current_and_replays_both_states() -> None:
+    """A future update remains pending and is replayed after current state."""
+    group = _make_group_stub()
+    mgr = MetadataGroupRole(group)
+    mgr.set_metadata(Metadata(title="Current"))
+    mgr.set_metadata(Metadata(title="Next", timestamp_us=2_000_000))
+
+    assert mgr.metadata is not None
+    assert mgr.metadata.title == "Current"
+
+    member = MagicMock()
+    mgr.on_member_join(member)
+
+    messages = [call.args[0].payload.metadata for call in member.send_message.call_args_list]
+    assert [message.timestamp for message in messages] == [1_000_000, 2_000_000]
+    assert messages[0].title == "Current"
+    assert messages[1].title == "Next"
+
+
+def test_late_join_initial_metadata_is_current_after_pending_becomes_due() -> None:
+    """A due update becomes the present-timestamped initial state."""
+    group = _make_group_stub()
+    mgr = MetadataGroupRole(group)
+    mgr.set_metadata(Metadata(title="Current"))
+    mgr.set_metadata(Metadata(title="Next", timestamp_us=2_000_000))
+    group._server.clock.now_us.return_value = 3_000_000  # noqa: SLF001
+    member = MagicMock()
+
+    mgr.on_member_join(member)
+
+    updates = [call.args[0].payload.metadata for call in member.send_message.call_args_list]
+    assert len(updates) == 1
+    assert updates[0].timestamp == 3_000_000
+    assert updates[0].title == "Next"
+
+
+def test_later_arrival_replaces_pending_when_timestamp_goes_backwards() -> None:
+    """Future metadata replacement follows arrival order, not timestamp order."""
+    group = _make_group_stub()
+    mgr = MetadataGroupRole(group)
+    mgr.set_metadata(Metadata(title="Current"))
+    mgr.set_metadata(Metadata(title="Later", timestamp_us=3_000_000))
+    mgr.set_metadata(Metadata(title="Earlier", timestamp_us=2_000_000))
+
+    assert mgr.metadata is not None
+    assert mgr.metadata.title == "Current"
+    assert mgr._state.pending is not None  # noqa: SLF001
+    assert mgr._state.pending.title == "Earlier"  # noqa: SLF001
+
+
+def test_chained_scheduled_metadata_updates_carry_prior_fields() -> None:
+    """Each scheduled update includes every field carried by its predecessor."""
+    group = _make_group_stub()
+    mgr = MetadataGroupRole(group)
+    member = MagicMock()
+    mgr._members = [member]  # noqa: SLF001
+    mgr.set_metadata(Metadata(title="Current", artist="Artist", album="Base"))
+    member.reset_mock()
+
+    mgr.set_metadata(Metadata(title="First", artist="Artist", album="Base", timestamp_us=3_000_000))
+    mgr.set_metadata(
+        Metadata(title="Current", artist="Second", album="Base", timestamp_us=2_500_000)
+    )
+    mgr.set_metadata(Metadata(title="Third", artist="Artist", album="Next", timestamp_us=2_000_000))
+
+    updates = [
+        call.args[0].payload.metadata.to_dict() for call in member.send_message.call_args_list
+    ]
+    assert updates[0] == {"timestamp": 3_000_000, "title": "First"}
+    assert updates[1] == {
+        "timestamp": 2_500_000,
+        "title": "Current",
+        "artist": "Second",
+    }
+    assert updates[2] == {
+        "timestamp": 2_000_000,
+        "title": "Third",
+        "artist": "Artist",
+        "album": "Next",
+    }
+    assert mgr.metadata is not None
+    assert mgr.metadata.title == "Current"
+    assert mgr._state.pending is not None  # noqa: SLF001
+    assert mgr._state.pending.title == "Third"  # noqa: SLF001
+
+
+def test_present_metadata_cancels_pending_even_when_current_is_unchanged() -> None:
+    """A present timestamp cancels pending without requiring changed fields."""
+    group = _make_group_stub()
+    mgr = MetadataGroupRole(group)
+    member = MagicMock()
+    mgr._members = [member]  # noqa: SLF001
+    mgr.set_metadata(Metadata(title="Current"))
+    mgr.set_metadata(Metadata(title="Pending", timestamp_us=2_000_000))
+    member.reset_mock()
+
+    mgr.set_metadata(Metadata(title="Current"))
+
+    assert mgr._state.pending_update is None  # noqa: SLF001
+    update = member.send_message.call_args.args[0].payload.metadata
+    assert update.timestamp == 1_000_000
+    assert update.title == "Current"
+
+
+def test_scheduled_progress_obligation_uses_progress_at_next_timestamp() -> None:
+    """Forced progress preserves the applied track trajectory."""
+    group = _make_group_stub()
+    group.has_active_stream = True
+    mgr = MetadataGroupRole(group)
+    member = MagicMock()
+    mgr._members = [member]  # noqa: SLF001
+    current = Metadata(
+        title="Current",
+        track_progress=30_000,
+        track_duration=200_000,
+        playback_speed=1000,
+    )
+    mgr.set_metadata(current)
+    mgr.set_metadata(
+        Metadata(
+            title="Next",
+            track_progress=0,
+            track_duration=180_000,
+            playback_speed=1000,
+        ),
+        timestamp_us=5_000_000,
+    )
+    group._server.clock.now_us.return_value = 2_000_000  # noqa: SLF001
+    member.reset_mock()
+
+    mgr.set_metadata(
+        Metadata(
+            title="Updated",
+            track_progress=30_000,
+            track_duration=200_000,
+            playback_speed=1000,
+        )
+    )
+
+    update = member.send_message.call_args.args[0].payload.metadata
+    assert update.timestamp == 2_000_000
+    assert update.progress is not None
+    assert not isinstance(update.progress, UndefinedField)
+    assert update.progress.track_progress == 31_000
+    assert mgr.metadata is not None
+    assert mgr.metadata.track_progress == 31_000
+
+
+def test_scheduled_metadata_without_progress_rebases_stored_state() -> None:
+    """Promoting an omitted progress update preserves the client trajectory."""
+    group = _make_group_stub()
+    group.has_active_stream = True
+    mgr = MetadataGroupRole(group)
+    mgr.set_metadata(
+        Metadata(
+            title="Current",
+            track_progress=30_000,
+            track_duration=200_000,
+            playback_speed=1000,
+        )
+    )
+    mgr.set_metadata(
+        Metadata(
+            title="Updated",
+            track_progress=30_000,
+            track_duration=200_000,
+            playback_speed=1000,
+        ),
+        timestamp_us=5_000_000,
+    )
+
+    group._server.clock.now_us.return_value = 5_000_000  # noqa: SLF001
+
+    assert mgr.metadata is not None
+    assert mgr.metadata.track_progress == 34_000
+
+
+def test_freeze_progress_uses_current_and_discards_pending() -> None:
+    """Freezing snapshots confirmed progress and cancels pending metadata."""
+    group = _make_group_stub()
+    group.has_active_stream = True
+    mgr = MetadataGroupRole(group)
+    mgr.set_metadata(
+        Metadata(
+            title="Current",
+            track_progress=1_000,
+            track_duration=10_000,
+            playback_speed=1000,
+        )
+    )
+    mgr.set_metadata(
+        Metadata(
+            title="Pending",
+            track_progress=0,
+            track_duration=20_000,
+            playback_speed=1000,
+            timestamp_us=5_000_000,
+        )
+    )
+    group._server.clock.now_us.return_value = 2_000_000  # noqa: SLF001
+
+    mgr.freeze_progress()
+
+    assert mgr.metadata is not None
+    assert mgr.metadata.title == "Current"
+    assert mgr.metadata.track_progress == 2_000
+    assert mgr.metadata.playback_speed == 0
+    assert mgr._state.pending_update is None  # noqa: SLF001
+
+
+def test_present_update_commits_pending_that_has_taken_effect() -> None:
+    """A later present update commits a pending update before diffing."""
+    group = _make_group_stub()
+    mgr = MetadataGroupRole(group)
+    mgr.set_metadata(Metadata(title="Current", artist="Artist"))
+    mgr.set_metadata(Metadata(title="Pending", artist="Artist", timestamp_us=2_000_000))
+    group._server.clock.now_us.return_value = 3_000_000  # noqa: SLF001
+    member = MagicMock()
+    mgr._members = [member]  # noqa: SLF001
+
+    mgr.set_metadata(Metadata(title="Pending", artist="Updated"))
+
+    update = member.send_message.call_args.args[0].payload.metadata
+    assert update.title == "Pending"
+    assert update.artist == "Updated"
+
+
 def test_progress_set_on_first_update() -> None:
     """diff_update emits a full Progress object on the first update."""
     current = Metadata(
@@ -323,3 +555,17 @@ def test_progress_omitted_when_unchanged() -> None:
 
     assert isinstance(update.progress, UndefinedField)
     assert "progress" not in update.to_json()
+
+
+def test_scheduling_beyond_lead_cap_warns(caplog: pytest.LogCaptureFixture) -> None:
+    """A schedule further out than the spec's 20-second cap logs a warning."""
+    group = _make_group_stub()
+    mgr = MetadataGroupRole(group)
+
+    with caplog.at_level(logging.WARNING):
+        mgr.set_metadata(Metadata(title="Soon"), timestamp_us=21_000_000)
+        assert not caplog.records
+
+        mgr.set_metadata(Metadata(title="Late"), timestamp_us=21_000_001)
+
+    assert any("at most 20 s" in record.getMessage() for record in caplog.records)

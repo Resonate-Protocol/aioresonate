@@ -68,6 +68,7 @@ def _connection(
     conn._reported_available = True  # noqa: SLF001
     conn._reported_source_signal = None  # noqa: SLF001
     conn._time_filter = _FakeTimeFilter(synchronized=synchronized)  # type: ignore[assignment]  # noqa: SLF001
+    conn._init_state_trackers()  # noqa: SLF001
     conn._selected_pairing = None  # noqa: SLF001
 
     async def _unpaired_access_enabled() -> bool:

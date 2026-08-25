@@ -224,12 +224,7 @@ class ArtworkV1Role(Role):
         # TODO: refactor to guard clause: if source == NONE or _group_role is None: return
         if updated.source != ArtworkSource.NONE and isinstance(self._group_role, ArtworkGroupRole):
             group_role = self._group_role
-            if updated.source == ArtworkSource.ALBUM:
-                artwork = group_role.get_album_artwork()
-            else:
-                artwork = group_role.get_artist_artwork()
-
-            if artwork is not None:
-                group_role._schedule_send_artwork(  # noqa: SLF001
-                    self, artwork, request.channel, updated
+            if group_role._has_replayable_artwork(updated.source):  # noqa: SLF001
+                group_role._schedule_artwork_replay(  # noqa: SLF001
+                    self, request.channel, updated
                 )

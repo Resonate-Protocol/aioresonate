@@ -101,7 +101,7 @@ def test_on_member_join_sends_current_color() -> None:
     """on_member_join sends a snapshot to the new member."""
     group = _make_group_stub()
     cgr = ColorGroupRole(group)
-    cgr._current_color = Color(primary=(100, 150, 200))  # noqa: SLF001
+    cgr._state.apply(Color(primary=(100, 150, 200)), 0)  # noqa: SLF001
 
     member = MagicMock()
     cgr.on_member_join(member)
@@ -126,3 +126,99 @@ def test_on_member_join_sends_cleared_when_no_color() -> None:
     assert isinstance(msg, ServerStateMessage)
     assert msg.payload.color is not None
     assert msg.payload.color.primary is None
+
+
+def test_future_color_keeps_current_and_replays_both_states() -> None:
+    """A future palette remains pending and replays after current state."""
+    group = _make_group_stub()
+    cgr = ColorGroupRole(group)
+    cgr.set_color(Color(primary=(1, 2, 3)))
+    cgr.set_color(Color(primary=(4, 5, 6)), timestamp_us=2_000_000)
+
+    assert cgr.color == Color(primary=(1, 2, 3))
+
+    member = MagicMock()
+    cgr.on_member_join(member)
+
+    updates = [call.args[0].payload.color for call in member.send_message.call_args_list]
+    assert [update.timestamp for update in updates] == [1_000_000, 2_000_000]
+    assert updates[0].primary == (1, 2, 3)
+    assert updates[1].primary == (4, 5, 6)
+
+
+def test_late_join_initial_color_is_current_after_pending_becomes_due() -> None:
+    """A due palette becomes the present-timestamped initial state."""
+    group = _make_group_stub()
+    cgr = ColorGroupRole(group)
+    cgr.set_color(Color(primary=(1, 2, 3)))
+    cgr.set_color(Color(primary=(4, 5, 6)), timestamp_us=2_000_000)
+    group._server.clock.now_us.return_value = 3_000_000  # noqa: SLF001
+    member = MagicMock()
+
+    cgr.on_member_join(member)
+
+    updates = [call.args[0].payload.color for call in member.send_message.call_args_list]
+    assert len(updates) == 1
+    assert updates[0].timestamp == 3_000_000
+    assert updates[0].primary == (4, 5, 6)
+
+
+def test_later_arrival_replaces_color_when_timestamp_goes_backwards() -> None:
+    """Future color replacement follows arrival order, not timestamp order."""
+    group = _make_group_stub()
+    cgr = ColorGroupRole(group)
+    current = Color(primary=(1, 2, 3))
+    earlier = Color(primary=(4, 5, 6))
+    cgr.set_color(current)
+    cgr.set_color(Color(primary=(7, 8, 9)), timestamp_us=3_000_000)
+    cgr.set_color(earlier, timestamp_us=2_000_000)
+
+    assert cgr.color == current
+    assert cgr._state.pending == earlier  # noqa: SLF001
+
+
+def test_chained_scheduled_color_updates_carry_prior_fields() -> None:
+    """Each scheduled palette includes every field carried by its predecessor."""
+    group = _make_group_stub()
+    cgr = ColorGroupRole(group)
+    member = MagicMock()
+    cgr._members = [member]  # noqa: SLF001
+    cgr.set_color(Color(primary=(1, 2, 3), accent=(2, 3, 4)))
+    member.reset_mock()
+
+    cgr.set_color(Color(primary=(4, 5, 6), accent=(2, 3, 4)), timestamp_us=3_000_000)
+    cgr.set_color(Color(primary=(1, 2, 3), accent=(5, 6, 7)), timestamp_us=2_500_000)
+    cgr.set_color(Color(primary=(7, 8, 9), accent=(2, 3, 4)), timestamp_us=2_000_000)
+
+    updates = [call.args[0].payload.color.to_dict() for call in member.send_message.call_args_list]
+    assert updates[0] == {"timestamp": 3_000_000, "primary": [4, 5, 6]}
+    assert updates[1] == {
+        "timestamp": 2_500_000,
+        "primary": [1, 2, 3],
+        "accent": [5, 6, 7],
+    }
+    assert updates[2] == {
+        "timestamp": 2_000_000,
+        "primary": [7, 8, 9],
+        "accent": [2, 3, 4],
+    }
+    assert cgr.color == Color(primary=(1, 2, 3), accent=(2, 3, 4))
+
+
+def test_present_color_cancels_pending_with_timestamp_only_update() -> None:
+    """A present unchanged palette cancels pending with only a timestamp."""
+    group = _make_group_stub()
+    cgr = ColorGroupRole(group)
+    member = MagicMock()
+    cgr._members = [member]  # noqa: SLF001
+    current = Color(primary=(1, 2, 3))
+    cgr.set_color(current)
+    cgr.set_color(Color(primary=(4, 5, 6)), timestamp_us=2_000_000)
+    member.reset_mock()
+
+    cgr.set_color(current)
+
+    assert cgr._state.pending_update is None  # noqa: SLF001
+    update = member.send_message.call_args.args[0].payload.color
+    assert update.timestamp == 1_000_000
+    assert update.primary == (1, 2, 3)

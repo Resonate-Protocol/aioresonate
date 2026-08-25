@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
+import asyncio
 from unittest.mock import MagicMock
 
 import pytest
 from PIL import Image
 
-from aiosendspin.models.types import ArtworkSource
+from aiosendspin.models.artwork import ArtworkChannel
+from aiosendspin.models.types import ArtworkSource, PictureFormat
 from aiosendspin.server.roles.artwork.events import ArtworkClearedEvent, ArtworkUpdatedEvent
 from aiosendspin.server.roles.artwork.group import ArtworkGroupRole
+from aiosendspin.server.roles.artwork.types import ArtworkRoleProtocol
 
 
 def _make_group_stub() -> MagicMock:
@@ -54,3 +57,215 @@ async def test_clear_album_artwork_emits_cleared_event() -> None:
     assert event.source == ArtworkSource.ALBUM
     assert event.timestamp_us == 123_456
     assert agr.get_album_artwork() is None
+
+
+@pytest.mark.asyncio
+async def test_scheduled_artwork_clear_keeps_current_and_replays_in_order() -> None:
+    """A scheduled clear replays after the current image."""
+    group = _make_group_stub()
+    agr = ArtworkGroupRole(group)
+    image = Image.new("RGB", (10, 10), (255, 0, 0))
+    await agr.set_album_artwork(image)
+    await agr.set_album_artwork(None, timestamp_us=500_000)
+    role = MagicMock(spec=ArtworkRoleProtocol)
+    config = ArtworkChannel(
+        source=ArtworkSource.ALBUM,
+        format=PictureFormat.JPEG,
+        media_width=10,
+        media_height=10,
+    )
+    agr._process_and_encode_image = MagicMock(return_value=b"current")  # type: ignore[method-assign]  # noqa: SLF001
+
+    await agr._send_artwork_replay(role, 0, config)  # noqa: SLF001
+
+    assert agr.get_album_artwork() is image
+    assert role.method_calls[0].args == (0, b"current", 123_456)
+    assert role.method_calls[1].args == (0, 500_000)
+
+
+@pytest.mark.asyncio
+async def test_later_arrival_replaces_artwork_when_timestamp_goes_backwards() -> None:
+    """Future artwork replacement follows arrival order, not timestamp order."""
+    group = _make_group_stub()
+    agr = ArtworkGroupRole(group)
+    current = Image.new("RGB", (10, 10), (255, 0, 0))
+    later = Image.new("RGB", (10, 10), (0, 255, 0))
+    earlier = Image.new("RGB", (10, 10), (0, 0, 255))
+    await agr.set_album_artwork(current)
+    await agr.set_album_artwork(later, timestamp_us=500_000)
+    await agr.set_album_artwork(earlier, timestamp_us=400_000)
+
+    assert agr.get_album_artwork() is current
+    assert agr._artwork[ArtworkSource.ALBUM].pending is earlier  # noqa: SLF001
+
+
+@pytest.mark.asyncio
+async def test_later_artwork_timestamp_does_not_apply_displaced_pending() -> None:
+    """Replacing pending artwork never promotes the displaced image."""
+    group = _make_group_stub()
+    agr = ArtworkGroupRole(group)
+    current = Image.new("RGB", (10, 10), (255, 0, 0))
+    pending = Image.new("RGB", (10, 10), (0, 255, 0))
+    replacement = Image.new("RGB", (10, 10), (0, 0, 255))
+    await agr.set_album_artwork(current)
+    await agr.set_album_artwork(pending, timestamp_us=500_000)
+    await agr.set_album_artwork(replacement, timestamp_us=600_000)
+
+    assert agr.get_album_artwork() is current
+    assert agr._artwork[ArtworkSource.ALBUM].pending is replacement  # noqa: SLF001
+
+
+@pytest.mark.asyncio
+async def test_immediate_artwork_discards_pending() -> None:
+    """A present artwork update replaces current and discards pending."""
+    group = _make_group_stub()
+    agr = ArtworkGroupRole(group)
+    pending = Image.new("RGB", (10, 10), (0, 255, 0))
+    immediate = Image.new("RGB", (10, 10), (0, 0, 255))
+    await agr.set_album_artwork(pending, timestamp_us=500_000)
+
+    await agr.set_album_artwork(immediate)
+
+    assert agr.get_album_artwork() is immediate
+    assert not agr._artwork[ArtworkSource.ALBUM].has_pending  # noqa: SLF001
+
+
+@pytest.mark.asyncio
+async def test_live_artwork_waits_for_complete_replay() -> None:
+    """A live update cannot interleave with current then pending replay."""
+    group = _make_group_stub()
+    agr = ArtworkGroupRole(group)
+    current = Image.new("RGB", (10, 10), (255, 0, 0))
+    pending = Image.new("RGB", (10, 10), (0, 255, 0))
+    replacement = Image.new("RGB", (10, 10), (0, 0, 255))
+    await agr.set_album_artwork(current)
+    await agr.set_album_artwork(pending, timestamp_us=500_000)
+    role = MagicMock(spec=ArtworkRoleProtocol)
+    role.get_channel_configs.return_value = {
+        0: ArtworkChannel(
+            source=ArtworkSource.ALBUM,
+            format=PictureFormat.JPEG,
+            media_width=10,
+            media_height=10,
+        )
+    }
+    agr._members = [role]  # noqa: SLF001
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    sent_timestamps: list[int] = []
+
+    async def send(
+        _role: ArtworkRoleProtocol,
+        _image: Image.Image | None,
+        _channel: int,
+        _config: ArtworkChannel,
+        timestamp_us: int,
+    ) -> None:
+        sent_timestamps.append(timestamp_us)
+        if len(sent_timestamps) == 1:
+            entered.set()
+            await release.wait()
+
+    agr._encode_and_send_artwork = send  # type: ignore[method-assign]  # noqa: SLF001
+    replay = asyncio.create_task(
+        agr._send_artwork_replay(role, 0, role.get_channel_configs()[0])  # noqa: SLF001
+    )
+    await entered.wait()
+    live = asyncio.create_task(agr.set_album_artwork(replacement, timestamp_us=600_000))
+    await asyncio.sleep(0)
+
+    assert sent_timestamps == [123_456]
+
+    release.set()
+    await asyncio.gather(replay, live)
+
+    assert sent_timestamps == [123_456, 500_000, 600_000]
+
+
+@pytest.mark.asyncio
+async def test_warm_reconnect_reuses_lock_while_old_replay_finishes() -> None:
+    """A reconnect replay cannot overtake encoding left by the prior subscription."""
+    group = _make_group_stub()
+    agr = ArtworkGroupRole(group)
+    current = Image.new("RGB", (10, 10), (255, 0, 0))
+    await agr.set_album_artwork(current)
+    role = MagicMock(spec=ArtworkRoleProtocol)
+    config = ArtworkChannel(
+        source=ArtworkSource.ALBUM,
+        format=PictureFormat.JPEG,
+        media_width=10,
+        media_height=10,
+    )
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    sent: list[int] = []
+    calls = 0
+
+    async def send(
+        _role: ArtworkRoleProtocol,
+        _image: Image.Image | None,
+        _channel: int,
+        _config: ArtworkChannel,
+        timestamp_us: int,
+    ) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            entered.set()
+            await release.wait()
+        sent.append(timestamp_us)
+
+    agr._encode_and_send_artwork = send  # type: ignore[method-assign]  # noqa: SLF001
+    first = asyncio.create_task(agr._send_artwork_replay(role, 0, config))  # noqa: SLF001
+    await entered.wait()
+
+    agr.on_member_leave(role)
+    group._server.clock.now_us.return_value = 200_000  # noqa: SLF001
+    second = asyncio.create_task(agr._send_artwork_replay(role, 0, config))  # noqa: SLF001
+    await asyncio.sleep(0)
+
+    assert sent == []
+
+    release.set()
+    await asyncio.gather(first, second)
+
+    assert sent == [123_456, 200_000]
+
+
+@pytest.mark.asyncio
+async def test_member_leave_invalidates_in_flight_replay() -> None:
+    """Artwork encoded after member leave is not sent through a replacement connection."""
+    group = _make_group_stub()
+    agr = ArtworkGroupRole(group)
+    current = Image.new("RGB", (10, 10), (255, 0, 0))
+    await agr.set_album_artwork(current)
+    role = MagicMock(spec=ArtworkRoleProtocol)
+    config = ArtworkChannel(
+        source=ArtworkSource.ALBUM,
+        format=PictureFormat.JPEG,
+        media_width=10,
+        media_height=10,
+    )
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def send(
+        send_role: ArtworkRoleProtocol,
+        _image: Image.Image | None,
+        _channel: int,
+        _config: ArtworkChannel,
+        _timestamp_us: int,
+    ) -> None:
+        entered.set()
+        await release.wait()
+        send_role.send_artwork(0, b"stale", 123_456)
+
+    agr._encode_and_send_artwork = send  # type: ignore[method-assign]  # noqa: SLF001
+    agr._schedule_artwork_replay(role, 0, config)  # noqa: SLF001
+    await entered.wait()
+
+    agr.on_member_leave(role)
+    release.set()
+    await asyncio.sleep(0)
+
+    role.send_artwork.assert_not_called()

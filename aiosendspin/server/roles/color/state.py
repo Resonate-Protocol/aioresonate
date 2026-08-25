@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
 
 from aiosendspin.models.color import SessionUpdateColor, _validate_rgb
@@ -87,21 +88,24 @@ class Color:
         if self.on_light is not None:
             _assert_contrast("on_light vs white text", self.on_light, _WHITE)
 
-    def diff_update(self, last: Color | None, timestamp: int) -> SessionUpdateColor:
-        """Build a SessionUpdateColor containing only changed fields compared to last."""
+    def diff_update(
+        self,
+        last: Color | None,
+        timestamp: int,
+        *,
+        include: AbstractSet[str] = frozenset(),
+    ) -> SessionUpdateColor:
+        """Build a SessionUpdateColor with changed fields compared to last.
+
+        :param last: The previous color state to diff against.
+        :param timestamp: Server clock time in microseconds for the update.
+        :param include: Field names to restate with their current value even
+            when unchanged, e.g. fields a superseded scheduled update touched.
+        """
         update = SessionUpdateColor(timestamp=timestamp)
-        if last is None or last.background_dark != self.background_dark:
-            update.background_dark = self.background_dark
-        if last is None or last.background_light != self.background_light:
-            update.background_light = self.background_light
-        if last is None or last.primary != self.primary:
-            update.primary = self.primary
-        if last is None or last.accent != self.accent:
-            update.accent = self.accent
-        if last is None or last.on_dark != self.on_dark:
-            update.on_dark = self.on_dark
-        if last is None or last.on_light != self.on_light:
-            update.on_light = self.on_light
+        for name in _RGB_FIELDS:
+            if last is None or name in include or getattr(last, name) != getattr(self, name):
+                setattr(update, name, getattr(self, name))
         return update
 
     def snapshot_update(self, timestamp: int) -> SessionUpdateColor:
