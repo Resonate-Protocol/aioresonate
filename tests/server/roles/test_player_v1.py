@@ -1010,13 +1010,13 @@ def test_on_client_state_no_event_if_unchanged() -> None:
 
 
 def test_timing_defaults() -> None:
-    """Lead time defaults to 250 ms and min buffer to 500 ms."""
+    """Lead time defaults to 250 ms and min buffer to 1000 ms."""
     client = _make_client_stub()
     role = PlayerV1Role(client=client)
     assert role.required_lead_time_ms == 250
-    assert role.min_buffer_ms == 500
+    assert role.min_buffer_ms == 1000
     assert role.get_required_lead_time_us() == 250_000
-    assert role.get_min_buffer_us() == 500_000
+    assert role.get_min_buffer_us() == 1_000_000
 
 
 def test_on_client_state_updates_required_lead_time() -> None:
