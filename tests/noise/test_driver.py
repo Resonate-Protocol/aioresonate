@@ -106,7 +106,7 @@ async def test_full_handshake_yields_paired_encrypted_websockets(
     assert server_result.suite is suite
     assert client_result.suite is suite
     assert server_result.psk.psk == client_result.psk.psk
-    # Both sides agree on the Noise handshake hash (used by PIN pairing / CPace).
+    # Both sides agree on the Noise handshake hash (used by pairing-code pairing / CPace).
     assert server_result.handshake_hash == client_result.handshake_hash
     assert len(server_result.handshake_hash) == 32
 

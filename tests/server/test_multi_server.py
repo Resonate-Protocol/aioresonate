@@ -1246,7 +1246,7 @@ class TestCustomRoleSupportParsing:
     def test_custom_underscore_player_version_with_v1_compatible_support_parses(self) -> None:
         """`player@_experimental` (no registered factory) parses against v1 schema.
 
-        Pins the implicit contract: an underscore-prefixed custom version of a
+        PairingCodes the implicit contract: an underscore-prefixed custom version of a
         spec family keeps its support payload v1-compatible since the family's
         registered schema is what the deserializer uses. The custom role
         implementer owns both ends, so this trade-off is intentional.

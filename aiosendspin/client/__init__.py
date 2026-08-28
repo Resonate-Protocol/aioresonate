@@ -14,10 +14,10 @@ from .listener import ClientListener
 from .models import (
     SECRET_LOCATIONS,
     AudioFormat,
+    PairingCodeDisplay,
+    PairingCodeSpeaker,
     PairingSupport,
     PCMFormat,
-    PinDisplay,
-    PinSpeaker,
     ServerInfo,
 )
 from .source import SourceCapture
@@ -32,9 +32,9 @@ __all__ = [
     "GroupUpdateCallback",
     "MetadataCallback",
     "PCMFormat",
+    "PairingCodeDisplay",
+    "PairingCodeSpeaker",
     "PairingSupport",
-    "PinDisplay",
-    "PinSpeaker",
     "SendspinClient",
     "SendspinTimeFilter",
     "ServerInfo",

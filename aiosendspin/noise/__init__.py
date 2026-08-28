@@ -46,12 +46,12 @@ from .models import (
 )
 from .pairing import (
     PairingError,
-    run_dynamic_pin_client,
-    run_dynamic_pin_server,
+    run_dynamic_pairing_code_client,
+    run_dynamic_pairing_code_server,
     run_pairing_psk_client,
     run_pairing_psk_server,
-    run_static_pin_client,
-    run_static_pin_server,
+    run_static_pairing_code_client,
+    run_static_pairing_code_server,
 )
 from .pairing_token import PSKPairingToken, decode_token, encode_token
 from .session import NoiseCipherSuite, NoiseSession
@@ -130,14 +130,14 @@ __all__ = [
     "encode_token",
     "generate_psk",
     "psk_id_for",
-    "run_dynamic_pin_client",
-    "run_dynamic_pin_server",
+    "run_dynamic_pairing_code_client",
+    "run_dynamic_pairing_code_server",
     "run_handshake_client",
     "run_handshake_server",
     "run_pairing_psk_client",
     "run_pairing_psk_server",
     "run_rehandshake_client",
     "run_rehandshake_server",
-    "run_static_pin_client",
-    "run_static_pin_server",
+    "run_static_pairing_code_client",
+    "run_static_pairing_code_server",
 ]

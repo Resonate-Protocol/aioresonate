@@ -117,11 +117,10 @@ from aiosendspin.noise.pairing import (
     PairingError,
     PairingTimeoutError,
     abort_pairing,
-    run_dynamic_pin_server,
+    run_dynamic_pairing_code_server,
     run_pairing_psk_server,
-    run_static_pin_server,
+    run_static_pairing_code_server,
 )
-from aiosendspin.noise.pin import MAX_PIN_DIGITS, MIN_PIN_DIGITS
 from aiosendspin.noise.session import NoiseSession
 from aiosendspin.noise.trust_store import PskCategory, ResolvedPsk, ServerPairingRecord
 from aiosendspin.noise.wire import EncryptedWebSocket
@@ -245,7 +244,7 @@ class SendspinConnection:
         Exactly one of `request` (client-initiated) or `wsock_client` (server-initiated)
         must be provided. For server-initiated connections, `url` should be provided
         for connection reason lookup and client URL registration, and
-        ``expected_client_id`` may be set to pin the handshake to a known peer.
+        ``expected_client_id`` may be set to pairing_code the handshake to a known peer.
         ``pairing_attempt`` carries an operator-initiated pairing intent for this dial.
         """
         self._server = server
@@ -1347,12 +1346,14 @@ class SendspinConnection:
                 if self._pairing_attempt is not None
                 else PairMethod.PAIRING_PSK
             )
-            pin_length = (
-                self._negotiated_dynamic_pin_length() if method is PairMethod.DYNAMIC_PIN else None
+            pairing_format = (
+                self._negotiated_dynamic_pairing_format()
+                if method is PairMethod.DYNAMIC_PAIRING_CODE
+                else None
             )
             languages = (
                 list(self._pairing_attempt.languages)
-                if method is PairMethod.DYNAMIC_PIN
+                if method is PairMethod.DYNAMIC_PAIRING_CODE
                 and self._pairing_attempt is not None
                 and self._pairing_attempt.languages
                 else None
@@ -1366,12 +1367,12 @@ class SendspinConnection:
                         activities=[Activity.PAIRING],
                         active_roles=[],
                         pairing=ActivatePairing(
-                            method=method, pin_length=pin_length, languages=languages
+                            method=method, format=pairing_format, languages=languages
                         ),
                     )
                 ).to_json()
             )
-            record = await self._run_pairing_protocol(method, transport, pin_length)
+            record = await self._run_pairing_protocol(method, transport, pairing_format)
         except asyncio.CancelledError:
             # A cancelled attempt ends like any local abort: the task never reports
             # cancelled(), so awaiting callers see the abort rather than the cancel.
@@ -1393,7 +1394,7 @@ class SendspinConnection:
             return await rehandshake
 
     async def _run_pairing_protocol(
-        self, method: PairMethod, transport: EncryptedWebSocket, pin_length: int | None
+        self, method: PairMethod, transport: EncryptedWebSocket, pairing_format: str | None
     ) -> ServerPairingRecord | None:
         """Run ``method``'s exchange, returning the record (``None`` when verifying)."""
         assert self._client_id is not None
@@ -1409,31 +1410,31 @@ class SendspinConnection:
                 owner=attempt.owner if attempt is not None else None,
             )
         assert self._pairing_attempt is not None
-        assert self._pairing_attempt.pin_provider is not None
+        assert self._pairing_attempt.pairing_code_provider is not None
         assert self._handshake_hash is not None
         assert self._noise_psk is not None
         verify = self._pairing_attempt.verify
         if verify and self._noise_psk.category is not PskCategory.LONG_TERM:
             raise PairingError("verification requires an existing pairing")
-        if method is PairMethod.STATIC_PIN:
-            return await run_static_pin_server(
+        if method is PairMethod.STATIC_PAIRING_CODE:
+            return await run_static_pairing_code_server(
                 transport,
                 handshake_hash=self._handshake_hash,
                 pairing_index=pairing_index,
-                pin_provider=self._pairing_attempt.pin_provider,
+                pairing_code_provider=self._pairing_attempt.pairing_code_provider,
                 client_id=self._client_id,
                 store=self._server.pairing_store,
                 verify=verify,
                 on_pair_pending=self._pairing_attempt.on_pair_pending,
                 owner=self._pairing_attempt.owner,
             )
-        assert pin_length is not None
-        return await run_dynamic_pin_server(
+        assert pairing_format is not None
+        return await run_dynamic_pairing_code_server(
             transport,
             handshake_hash=self._handshake_hash,
             pairing_index=pairing_index,
-            pin_provider=self._pairing_attempt.pin_provider,
-            pin_length=pin_length,
+            pairing_code_provider=self._pairing_attempt.pairing_code_provider,
+            pairing_format=pairing_format,
             client_id=self._client_id,
             store=self._server.pairing_store,
             verify=verify,
@@ -1441,26 +1442,28 @@ class SendspinConnection:
             owner=self._pairing_attempt.owner,
         )
 
-    def _negotiated_dynamic_pin_length(self) -> int:
-        """Return negotiated dynamic PIN length."""
+    def _negotiated_dynamic_pairing_format(self) -> str:
+        """Return the dynamic emission format selected by the operator."""
         assert self._client_info is not None
         descriptor = next(
             (
                 d
                 for d in (self._client_info.supported_pair_methods or [])
-                if d.method is PairMethod.DYNAMIC_PIN
+                if d.method is PairMethod.DYNAMIC_PAIRING_CODE
             ),
             None,
         )
-        if descriptor is None:
-            # Method enabled after hello (management): no advertised floor, so use our own and
-            # let the client arbitrate via ``pin_length_unacceptable``.
-            return self._server.min_pin_length
-        client_min = descriptor.min_pin_length
-        if client_min is None or not MIN_PIN_DIGITS <= client_min <= MAX_PIN_DIGITS:
-            raise PairingError("client does not (correctly) offer dynamic PIN pairing")
-        # Both floors are validated to [MIN_PIN_DIGITS, MAX_PIN_DIGITS], so the max stays in range.
-        return max(client_min, self._server.min_pin_length)
+        offered = descriptor.formats if descriptor is not None else None
+        requested = (
+            self._pairing_attempt.pairing_format if self._pairing_attempt is not None else None
+        )
+        if requested is not None and offered is not None and requested in offered:
+            return requested
+        if offered and "digits" in offered:
+            return "digits"
+        if offered and "qr_code" in offered:
+            return "qr_code"
+        raise PairingError("client does not offer a dynamic pairing-code format")
 
     async def _rehandshake_for_pairing_if_needed(self, transport: Transport) -> bool:
         """If the attempt needs a PSK other than the current one, rehandshake and redo hellos."""
@@ -1481,7 +1484,7 @@ class SendspinConnection:
         else:
             if self._noise_psk.category in (PskCategory.SENTINEL, PskCategory.LONG_TERM):
                 # Long-term: verification runs over the existing PSK.
-                # Sentinel: a fresh PIN pairing.
+                # Sentinel: a fresh pairing-code pairing.
                 return True
             target = ResolvedPsk(psk_id_for(SENTINEL_PSK), SENTINEL_PSK, PskCategory.SENTINEL)
         assert isinstance(transport, EncryptedWebSocket)

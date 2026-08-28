@@ -15,7 +15,7 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM, ChaCha20Poly1305
 
 from aiosendspin.models.types import PairAbortReason, PairMethod
 
-from . import pin as pin_mod
+from . import pairing_code as pairing_code_mod
 from .keys import PSK_SIZE, b64url_decode, b64url_encode, psk_id_for
 from .models import (
     ClientPairAuthMessage,
@@ -89,11 +89,11 @@ class RemotePairingAbortError(PairingAbortError):
     """The peer aborted the pairing; its ``pair/abort`` was received."""
 
 
-class PinProvider(Protocol):
-    """Supplies the PIN the operator entered into the server."""
+class PairingCodeProvider(Protocol):
+    """Supplies the pairing code the operator entered into the server."""
 
     def __call__(self) -> Awaitable[str]:
-        """Return the operator-entered PIN as an awaitable."""
+        """Return the operator-entered PAIRING_CODE as an awaitable."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -101,8 +101,10 @@ class PairingAttempt:
     """Operator-initiated pairing intent attached to a server-side dial."""
 
     method: PairMethod
-    pin_provider: PinProvider | None = None
-    """Required for PIN methods; supplies the operator-entered PIN."""
+    pairing_code_provider: PairingCodeProvider | None = None
+    """Required for code methods; supplies the operator-entered pairing code or token."""
+    pairing_format: str | None = None
+    """Dynamic pairing-code format requested by the operator (digits or qr_code)."""
     pairing_psk: bytes | None = None
     """Required for the Pairing PSK method; the live PSK pasted from a token."""
     verify: bool = False
@@ -110,7 +112,10 @@ class PairingAttempt:
     on_pair_pending: Callable[[], None] | None = None
     """Called when the client reports the attempt gesture-gated."""
     languages: tuple[str, ...] = ()
-    """Dynamic PIN only: BCP 47 tags in descending operator preference for spoken emission."""
+    """Dynamic pairing code only: BCP 47 tags in descending operator preference.
+
+    Used for spoken emission.
+    """
     owner: str | None = None
     """Application-defined authorization id the resulting record is bound to."""
 
@@ -123,8 +128,8 @@ class PairingAttempt:
             if len(self.pairing_psk) != PSK_SIZE:
                 msg = f"pairing_psk must be {PSK_SIZE} bytes, got {len(self.pairing_psk)}"
                 raise ValueError(msg)
-            if self.pin_provider is not None:
-                msg = "PAIRING_PSK does not use pin_provider"
+            if self.pairing_code_provider is not None or self.pairing_format is not None:
+                msg = "PAIRING_PSK does not use code pairing fields"
                 raise ValueError(msg)
             if self.verify:
                 msg = "PAIRING_PSK does not support verification"
@@ -132,14 +137,21 @@ class PairingAttempt:
             if self.on_pair_pending is not None:
                 msg = "PAIRING_PSK does not use on_pair_pending"
                 raise ValueError(msg)
-        else:  # PIN methods (dynamic_pin, static_pin)
-            if self.pin_provider is None:
-                msg = f"{self.method.value} requires pin_provider"
+        else:  # Pairing-code methods
+            if self.pairing_code_provider is None:
+                msg = f"{self.method.value} requires pairing_code_provider"
                 raise ValueError(msg)
             if self.pairing_psk is not None:
                 msg = f"{self.method.value} does not use pairing_psk"
                 raise ValueError(msg)
-        if self.languages and self.method is not PairMethod.DYNAMIC_PIN:
+            if self.method is PairMethod.DYNAMIC_PAIRING_CODE:
+                if self.pairing_format not in ("digits", "qr_code", None):
+                    msg = "dynamic pairing format must be digits or qr_code"
+                    raise ValueError(msg)
+            elif self.pairing_format is not None:
+                msg = "static pairing code does not use pairing_format"
+                raise ValueError(msg)
+        if self.languages and self.method is not PairMethod.DYNAMIC_PAIRING_CODE:
             msg = f"{self.method.value} does not use languages"
             raise ValueError(msg)
         if not all(self.languages):
@@ -148,7 +160,7 @@ class PairingAttempt:
 
 
 if TYPE_CHECKING:
-    PinEmitter = Callable[[str], Awaitable[None]]
+    PairingCodeEmitter = Callable[[str], Awaitable[None]]
 
 
 async def run_pairing_psk_client(
@@ -181,40 +193,49 @@ async def run_pairing_psk_server(
     return record
 
 
-async def run_dynamic_pin_client(
+async def run_dynamic_pairing_code_client(
     ws: EncryptedWebSocket,
     *,
     handshake_hash: bytes,
     pairing_index: int,
-    pin_length: int,
-    pin_emitter: PinEmitter,
+    pairing_format: str,
+    pairing_code_emitter: PairingCodeEmitter,
     server_id: str,
     store: ClientPairingStore,
 ) -> str | None:
-    """Run the client side of the dynamic-PIN flow.
+    """Run the client side of the dynamic-pairing-code flow.
 
     Returns ``None`` on finalize, else the raw ``server/activate`` leave frame.
     """
     sid = _pake_sid(handshake_hash, pairing_index)
-    nonce_b = pin_mod.generate_nonce()
+    nonce_b = pairing_code_mod.generate_nonce()
     async with _client_timeout(ws):
         await ws.send_str(
             ClientPairInitMessage(
                 payload=ClientPairInitPayload(
                     pairing_index=pairing_index,
-                    commit_B=b64url_encode(pin_mod.commit(nonce_b)),
+                    commit_B=b64url_encode(pairing_code_mod.commit(nonce_b)),
                 ),
             ).to_json(),
         )
 
         init = await _receive_pairing(ws, ServerPairInitMessage)
-        nonce_a = _decode_field(init.payload.nonce_A, "nonce_A", expect_len=pin_mod.NONCE_SIZE)
-        pin = pin_mod.derive_pin(handshake_hash, nonce_a, nonce_b, pin_length)
-        await pin_emitter(pin)
-        try:
-            cpace = CPace.start(
-                role=CPaceRole.RESPONDER, prs=pin.encode("ascii"), sid=sid, ad=_PAKE_AD_CLIENT
+        nonce_a = _decode_field(
+            init.payload.nonce_A, "nonce_A", expect_len=pairing_code_mod.NONCE_SIZE
+        )
+        if pairing_format == "digits":
+            pairing_code = pairing_code_mod.derive_digits(handshake_hash, nonce_a, nonce_b)
+            prs = pairing_code.encode("ascii")
+        elif pairing_format == "qr_code":
+            pairing_code = pairing_code_mod.encode_qr_token(
+                pairing_code_mod.derive_qr_code(handshake_hash, nonce_a, nonce_b)
             )
+            prs = pairing_code_mod.decode_qr_token(pairing_code)
+        else:
+            raise PairingError(f"unsupported dynamic pairing format: {pairing_format}")
+        await pairing_code_emitter(pairing_code)
+        try:
+            cpace = CPace.start(role=CPaceRole.RESPONDER, prs=prs, sid=sid, ad=_PAKE_AD_CLIENT)
         except CPaceError as exc:
             raise PairingError("CPace initialization failed") from exc
 
@@ -236,9 +257,9 @@ async def run_dynamic_pin_client(
         if not cpace.verify(
             _decode_field(confirm.payload.server_kc, "server_kc", expect_len=_KC_TAG_SIZE)
         ):
-            await store.record_pin_failure()
-            await abort_pairing(ws, PairAbortReason.PIN_MISMATCH)
-        await store.reset_pin_failures()
+            await store.record_pairing_code_failure()
+            await abort_pairing(ws, PairAbortReason.PAIRING_CODE_MISMATCH)
+        await store.reset_pairing_code_failures()
         await ws.send_str(
             ClientPairConfirmMessage(
                 payload=ClientPairConfirmPayload(
@@ -256,40 +277,55 @@ async def run_dynamic_pin_client(
         )
 
 
-async def run_dynamic_pin_server(
+async def run_dynamic_pairing_code_server(
     ws: EncryptedWebSocket,
     *,
     handshake_hash: bytes,
     pairing_index: int,
-    pin_provider: PinProvider,
-    pin_length: int,
+    pairing_code_provider: PairingCodeProvider,
+    pairing_format: str,
     client_id: str,
     store: ServerPairingStore,
     verify: bool = False,
     on_pair_pending: Callable[[], None] | None = None,
     owner: str | None = None,
 ) -> ServerPairingRecord | None:
-    """Run the server side of the dynamic-PIN flow.
+    """Run the server side of the dynamic-pairing-code flow.
 
     Returns the persisted record, or ``None`` when ``verify`` is set (re-verified, left pairing).
     """
     sid = _pake_sid(handshake_hash, pairing_index)
     init = await _receive_pair_init(ws, pairing_index, on_pending=on_pair_pending)
     if init.payload.commit_B is None:
-        raise PairingError("client/pair-init missing commit_B for dynamic PIN")
-    commit_b = _decode_field(init.payload.commit_B, "commit_B", expect_len=pin_mod.COMMIT_SIZE)
+        raise PairingError("client/pair-init missing commit_B for dynamic pairing code")
+    commit_b = _decode_field(
+        init.payload.commit_B, "commit_B", expect_len=pairing_code_mod.COMMIT_SIZE
+    )
     async with _server_timeout(SERVER_ATTEMPT_TIMEOUT_S, "the rest of the attempt"):
-        nonce_a = pin_mod.generate_nonce()
+        nonce_a = pairing_code_mod.generate_nonce()
         await ws.send_str(
             ServerPairInitMessage(
                 payload=ServerPairInitPayload(nonce_A=b64url_encode(nonce_a)),
             ).to_json(),
         )
-        pin = await pin_provider()
+        entered = await pairing_code_provider()
+        if pairing_format == "digits":
+            if (
+                not entered.isascii()
+                or not entered.isdigit()
+                or len(entered) != pairing_code_mod.DYNAMIC_DIGITS
+            ):
+                raise PairingError("dynamic pairing code must be exactly 6 ASCII digits")
+            prs = entered.encode("ascii")
+        elif pairing_format == "qr_code":
+            try:
+                prs = pairing_code_mod.decode_qr_token(entered)
+            except ValueError as exc:
+                raise PairingError("malformed QR pairing token") from exc
+        else:
+            raise PairingError(f"unsupported dynamic pairing format: {pairing_format}")
         try:
-            cpace = CPace.start(
-                role=CPaceRole.INITIATOR, prs=pin.encode("ascii"), sid=sid, ad=_PAKE_AD_SERVER
-            )
+            cpace = CPace.start(role=CPaceRole.INITIATOR, prs=prs, sid=sid, ad=_PAKE_AD_SERVER)
         except CPaceError as exc:
             raise PairingError("CPace initialization failed") from exc
         await ws.send_str(
@@ -314,41 +350,49 @@ async def run_dynamic_pin_server(
 
         confirm = await _receive_pairing(ws, ClientPairConfirmMessage)
         if confirm.payload.nonce_B is None:
-            raise PairingError("client/pair-confirm missing nonce_B for dynamic PIN")
-        nonce_b = _decode_field(confirm.payload.nonce_B, "nonce_B", expect_len=pin_mod.NONCE_SIZE)
-        if not pin_mod.verify_commit(nonce_b, commit_b):
+            raise PairingError("client/pair-confirm missing nonce_B for dynamic pairing code")
+        nonce_b = _decode_field(
+            confirm.payload.nonce_B, "nonce_B", expect_len=pairing_code_mod.NONCE_SIZE
+        )
+        if not pairing_code_mod.verify_commit(nonce_b, commit_b):
             raise PairingError("revealed nonce_B does not match commit_B")
-        if (
-            not cpace.verify(
-                _decode_field(confirm.payload.client_kc, "client_kc", expect_len=_KC_TAG_SIZE)
-            )
-            or pin_mod.derive_pin(handshake_hash, nonce_a, nonce_b, pin_length) != pin
+        derived = (
+            pairing_code_mod.derive_digits(handshake_hash, nonce_a, nonce_b)
+            if pairing_format == "digits"
+            else pairing_code_mod.derive_qr_code(handshake_hash, nonce_a, nonce_b)
+        )
+        entered_code = entered if pairing_format == "digits" else prs
+        if not cpace.verify(
+            _decode_field(confirm.payload.client_kc, "client_kc", expect_len=_KC_TAG_SIZE)
+        ) or (entered_code.encode("ascii") if isinstance(entered_code, str) else entered_code) != (
+            derived.encode("ascii") if isinstance(derived, str) else derived
         ):
-            await abort_pairing(ws, PairAbortReason.PIN_MISMATCH)
+            await abort_pairing(ws, PairAbortReason.PAIRING_CODE_MISMATCH)
 
         return await _finalize_server(
             ws,
             client_id=client_id,
             store=store,
-            method=PairMethod.DYNAMIC_PIN,
+            method=PairMethod.DYNAMIC_PAIRING_CODE,
             verify=verify,
             wrap_key=_wrap_key(sid, cpace),
             owner=owner,
         )
 
 
-async def run_static_pin_client(
+async def run_static_pairing_code_client(
     ws: EncryptedWebSocket,
     *,
     handshake_hash: bytes,
     pairing_index: int,
-    static_pin: str,
+    static_pairing_code: str,
     server_id: str,
     store: ClientPairingStore,
 ) -> str | None:
-    """Run the client side of the static-PIN flow (the caller has opened the pairing window).
+    """Run the client side of the static-pairing-code flow.
 
-    Returns ``None`` on finalize, else the raw ``server/activate`` leave frame.
+    The caller has opened the pairing window. Returns ``None`` on finalize,
+    else the raw ``server/activate`` leave frame.
     """
     sid = _pake_sid(handshake_hash, pairing_index)
     async with _client_timeout(ws):
@@ -360,7 +404,7 @@ async def run_static_pin_client(
         try:
             cpace = CPace.start(
                 role=CPaceRole.RESPONDER,
-                prs=static_pin.encode("ascii"),
+                prs=static_pairing_code.encode("ascii"),
                 sid=sid,
                 ad=_PAKE_AD_CLIENT,
             )
@@ -385,7 +429,7 @@ async def run_static_pin_client(
         if not cpace.verify(
             _decode_field(confirm.payload.server_kc, "server_kc", expect_len=_KC_TAG_SIZE)
         ):
-            await abort_pairing(ws, PairAbortReason.PIN_MISMATCH)
+            await abort_pairing(ws, PairAbortReason.PAIRING_CODE_MISMATCH)
         await ws.send_str(
             ClientPairConfirmMessage(
                 payload=ClientPairConfirmPayload(client_kc=b64url_encode(cpace.tag())),
@@ -400,33 +444,36 @@ async def run_static_pin_client(
         )
 
 
-async def run_static_pin_server(
+async def run_static_pairing_code_server(
     ws: EncryptedWebSocket,
     *,
     handshake_hash: bytes,
     pairing_index: int,
-    pin_provider: PinProvider,
+    pairing_code_provider: PairingCodeProvider,
     client_id: str,
     store: ServerPairingStore,
     verify: bool = False,
     on_pair_pending: Callable[[], None] | None = None,
     owner: str | None = None,
 ) -> ServerPairingRecord | None:
-    """Run the server side of the static-PIN flow.
+    """Run the server side of the static-pairing-code flow.
 
     Returns the persisted record, or ``None`` when ``verify`` is set (re-verified, left pairing).
     """
     sid = _pake_sid(handshake_hash, pairing_index)
     init = await _receive_pair_init(ws, pairing_index, on_pending=on_pair_pending)
     if init.payload.commit_B is not None:
-        raise PairingError("client/pair-init carries commit_B for static PIN")
+        raise PairingError("client/pair-init carries commit_B for static pairing code")
     async with _server_timeout(SERVER_ATTEMPT_TIMEOUT_S, "the rest of the attempt"):
-        pin = await pin_provider()
-        if not pin_mod.is_valid_static_pin(pin):
-            raise PairingError("static PIN must be exactly 8 decimal digits")
+        pairing_code = await pairing_code_provider()
+        if not pairing_code_mod.is_valid_static_pairing_code(pairing_code):
+            raise PairingError("static pairing code must be exactly 8 decimal digits")
         try:
             cpace = CPace.start(
-                role=CPaceRole.INITIATOR, prs=pin.encode("ascii"), sid=sid, ad=_PAKE_AD_SERVER
+                role=CPaceRole.INITIATOR,
+                prs=pairing_code.encode("ascii"),
+                sid=sid,
+                ad=_PAKE_AD_SERVER,
             )
         except CPaceError as exc:
             raise PairingError("CPace initialization failed") from exc
@@ -452,17 +499,17 @@ async def run_static_pin_server(
 
         confirm = await _receive_pairing(ws, ClientPairConfirmMessage)
         if confirm.payload.nonce_B is not None:
-            raise PairingError("client/pair-confirm carries nonce_B for static PIN")
+            raise PairingError("client/pair-confirm carries nonce_B for static pairing code")
         if not cpace.verify(
             _decode_field(confirm.payload.client_kc, "client_kc", expect_len=_KC_TAG_SIZE)
         ):
-            await abort_pairing(ws, PairAbortReason.PIN_MISMATCH)
+            await abort_pairing(ws, PairAbortReason.PAIRING_CODE_MISMATCH)
 
         return await _finalize_server(
             ws,
             client_id=client_id,
             store=store,
-            method=PairMethod.STATIC_PIN,
+            method=PairMethod.STATIC_PAIRING_CODE,
             verify=verify,
             wrap_key=_wrap_key(sid, cpace),
             owner=owner,
@@ -476,9 +523,10 @@ async def _finalize_client(
     store: ClientPairingStore,
     wrap_key: bytes | None = None,
 ) -> str | None:
-    """Send ``client/pair-finalize``, wrapping the PSK when ``wrap_key`` is set (PIN flows).
+    """Send ``client/pair-finalize``, wrapping the PSK when ``wrap_key`` is set.
 
-    Returns ``None`` after persisting on the server's ack, else its raw leave frame.
+    Pairing-code flows set ``wrap_key``. Returns ``None`` after persisting on the
+    server's ack, else its raw leave frame.
     """
     psk, record = await store.resolve_pairing_outcome(server_id=server_id)
     if wrap_key is None:
@@ -698,7 +746,7 @@ async def _receive_pair_init(
 
 
 def _pake_sid(handshake_hash: bytes, pairing_index: int) -> bytes:
-    """CPace session id binding the PAKE to the Noise handshake and PIN-pairing attempt."""
+    """CPace session id binding the PAKE to the Noise handshake and pairing-code pairing attempt."""
     return _PAKE_SID_LABEL + handshake_hash + pairing_index.to_bytes(4, "big")
 
 

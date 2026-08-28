@@ -1,5 +1,7 @@
 """Tests for the pairing-related fields on client/hello and server/hello."""
 
+# ruff: noqa: E501
+
 from __future__ import annotations
 
 import orjson
@@ -54,42 +56,46 @@ def test_server_activate_pairing_object_round_trips() -> None:
     """server/activate carries the pairing object when present, else omits it."""
     payload = ServerActivatePayload(
         activities=[Activity.PAIRING],
-        pairing=ActivatePairing(method=PairMethod.DYNAMIC_PIN, pin_length=6),
+        pairing=ActivatePairing(method=PairMethod.DYNAMIC_PAIRING_CODE, format="digits"),
     )
     restored = ServerActivatePayload.from_json(payload.to_json())
-    assert restored.pairing == ActivatePairing(method=PairMethod.DYNAMIC_PIN, pin_length=6)
+    assert restored.pairing == ActivatePairing(
+        method=PairMethod.DYNAMIC_PAIRING_CODE, format="digits"
+    )
     assert restored.activities == [Activity.PAIRING]
     assert ServerActivatePayload.from_json('{"activities":["playback"]}').pairing is None
 
 
-def test_activate_pairing_omits_pin_length_for_non_dynamic_methods() -> None:
-    """The pairing object omits pin_length when the method carries none."""
+def test_activate_pairing_omits_pairing_code_length_for_non_dynamic_methods() -> None:
+    """The pairing object omits pairing_code_length when the method carries none."""
     payload = ServerActivatePayload(
         activities=[Activity.PAIRING],
-        pairing=ActivatePairing(method=PairMethod.STATIC_PIN),
+        pairing=ActivatePairing(method=PairMethod.STATIC_PAIRING_CODE),
     )
     raw = orjson.loads(payload.to_json())
-    assert raw["pairing"] == {"method": "static_pin"}
+    assert raw["pairing"] == {"method": "static_pairing_code"}
 
 
 def test_activate_pairing_languages_round_trip() -> None:
-    """The dynamic-PIN pairing object carries the spoken-emission language hint, or omits it."""
+    """The dynamic-pairing-code pairing object carries the spoken-emission language hint, or omits it."""
     payload = ServerActivatePayload(
         activities=[Activity.PAIRING],
         pairing=ActivatePairing(
-            method=PairMethod.DYNAMIC_PIN, pin_length=6, languages=["ca", "es", "en"]
+            method=PairMethod.DYNAMIC_PAIRING_CODE, format="digits", languages=["ca", "es", "en"]
         ),
     )
     restored = ServerActivatePayload.from_json(payload.to_json())
     assert restored.pairing is not None
     assert restored.pairing.languages == ["ca", "es", "en"]
-    bare = ActivatePairing(method=PairMethod.DYNAMIC_PIN, pin_length=6)
+    bare = ActivatePairing(method=PairMethod.DYNAMIC_PAIRING_CODE, format="digits")
     assert "languages" not in orjson.loads(bare.to_json())
 
 
 def test_pair_method_descriptor_locations_round_trip() -> None:
     """A static-secret descriptor carries the locations hint, others omit it."""
-    descriptor = PairMethodDescriptor(method=PairMethod.STATIC_PIN, locations=["device", "leaflet"])
+    descriptor = PairMethodDescriptor(
+        method=PairMethod.STATIC_PAIRING_CODE, locations=["device", "leaflet"]
+    )
     restored = PairMethodDescriptor.from_json(descriptor.to_json())
     assert restored.locations == ["device", "leaflet"]
     bare = PairMethodDescriptor(method=PairMethod.PAIRING_PSK)

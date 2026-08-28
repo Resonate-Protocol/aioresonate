@@ -1,5 +1,7 @@
 """End-to-end management command tests: records, gating, interleaving."""
 
+# ruff: noqa: E501
+
 from __future__ import annotations
 
 import asyncio
@@ -433,14 +435,14 @@ async def test_set_pairing_config_disables_offered_method() -> None:
 
 
 async def test_open_pairing_window_round_trip() -> None:
-    """open-pairing-window opens the client's window; without a PIN method it is invalid."""
+    """open-pairing-window opens the client's window; without a pairing-code method it is invalid."""
     server_store = InMemoryServerPairingStore()
     server = _make_server(server_store)
     identity = Identity.generate()
     client_store = InMemoryClientPairingStore()
     await _seed_pairing(server, server_store, client_store, identity.peer_id)
 
-    async def display(pin: str | None) -> None:
+    async def display(pairing_code: str | None) -> None:
         pass
 
     async with _serve(server) as url:
@@ -449,7 +451,7 @@ async def test_open_pairing_window_round_trip() -> None:
             pairing_store=client_store,
             client_name="c",
             roles=[Roles.CONTROLLER],
-            pairing_support=PairingSupport(pin_display=display),
+            pairing_support=PairingSupport(pairing_code_display=display),
         )
         try:
             await client.connect(url)
@@ -465,7 +467,7 @@ async def test_open_pairing_window_round_trip() -> None:
         finally:
             await client.disconnect()
 
-        # A client with no PIN method enabled rejects the request as invalid.
+        # A client with no pairing-code method enabled rejects the request as invalid.
         no_pin = make_sdk_client(
             identity=identity,
             pairing_store=client_store,

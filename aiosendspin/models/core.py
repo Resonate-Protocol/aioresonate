@@ -116,12 +116,22 @@ class PairMethodDescriptor(SendspinModel):
 
     method: PairMethod
     """The pairing method identifier."""
+    formats: list[str] | None = None
+    """For dynamic_pairing_code only: emission formats offered by the client."""
     out_channels: list[str] | None = None
-    """For dynamic_pin only: channels through which the PIN is conveyed to the operator."""
-    min_pin_length: int | None = None
-    """For dynamic_pin only: shortest PIN length in digits the client will accept (4-12)."""
+    """For dynamic_pairing_code only: channels through which the code is conveyed."""
     locations: list[str] | None = None
-    """For static_pin and pairing_psk only: where the operator finds the configured secret."""
+    """For static_pairing_code and pairing_psk only: where the operator finds the secret."""
+
+    def __post_init__(self) -> None:
+        """Enforce the method-specific descriptor shape."""
+        if self.method is PairMethod.DYNAMIC_PAIRING_CODE:
+            if not self.formats or any(fmt not in ("digits", "qr_code") for fmt in self.formats):
+                raise ValueError("dynamic_pairing_code requires non-empty formats")
+            if self.locations is not None:
+                raise ValueError("dynamic_pairing_code does not use locations")
+        elif self.formats is not None or self.out_channels is not None:
+            raise ValueError(f"{self.method.value} does not use dynamic descriptor fields")
 
     class Config(SendspinConfig):
         """Omit method-specific fields where they do not apply."""
@@ -450,11 +460,18 @@ class ActivatePairing(SendspinModel):
 
     method: PairMethod
     """Pairing method the server picked, drawn from the client's supported_pair_methods."""
-    pin_length: int | None = None
-    """The dynamic PIN length for this session. Required for dynamic_pin; absent otherwise."""
+    format: str | None = None
+    """The dynamic pairing-code emission format; required for dynamic_pairing_code."""
     languages: list[str] | None = None
-    """BCP 47 tags in descending operator preference, for spoken PIN emission. Optional
-    for dynamic_pin; absent otherwise."""
+    """BCP 47 tags in descending operator preference, for spoken pairing-code emission."""
+
+    def __post_init__(self) -> None:
+        """Enforce method-specific activation fields."""
+        if self.method is PairMethod.DYNAMIC_PAIRING_CODE:
+            if self.format not in ("digits", "qr_code"):
+                raise ValueError("dynamic_pairing_code requires format")
+        elif self.format is not None or self.languages is not None:
+            raise ValueError(f"{self.method.value} does not use dynamic activation fields")
 
     class Config(SendspinConfig):
         """Config for parsing json messages."""

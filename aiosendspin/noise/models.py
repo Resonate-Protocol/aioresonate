@@ -95,7 +95,10 @@ class ClientPairFinalizePayload(SendspinModel):
     long_term_psk: str | None = None
     """43-char base64url 32-byte PSK, sent directly. Pairing PSK flow only."""
     wrapped_psk: str | None = None
-    """The PSK sealed under the CPace-derived wrap key (64-char base64url). PIN flows only."""
+    """The PSK sealed under the CPace-derived wrap key (64-char base64url).
+
+    Present only in pairing-code flows.
+    """
 
     class Config(SendspinConfig):
         """Omit the field the flow doesn't use."""
@@ -158,15 +161,18 @@ class ClientPairPendingMessage(PairingMessage):
 
 @dataclass
 class ClientPairInitPayload(SendspinModel):
-    """``client/pair-init`` payload — signals readiness for the PIN-pairing flow."""
+    """``client/pair-init`` payload — signals readiness for the pairing code-pairing flow."""
 
     pairing_index: int
     """Pairing ``server/activate`` message count received since the last Noise handshake."""
     commit_B: str | None = None  # noqa: N815 - spec wire field name
-    """``SHA-256(nonce_B)`` (43-char base64url). Present in dynamic PIN; absent in static."""
+    """``SHA-256(nonce_B)`` (43-char base64url).
+
+    Present in dynamic pairing code and absent in static pairing code.
+    """
 
     class Config(SendspinConfig):
-        """Omit the optional commitment when absent (static PIN)."""
+        """Omit the optional commitment when absent (static pairing code)."""
 
         omit_none = True
 
@@ -181,7 +187,7 @@ class ClientPairInitMessage(PairingMessage):
 
 @dataclass
 class ServerPairInitPayload(SendspinModel):
-    """``server/pair-init`` payload — the server's nonce contribution (dynamic PIN)."""
+    """``server/pair-init`` payload — the server's nonce contribution (dynamic pairing code)."""
 
     nonce_A: str  # noqa: N815 - spec wire field name
     """32 bytes from a CSPRNG, base64url-encoded (43 chars)."""
@@ -250,10 +256,10 @@ class ClientPairConfirmPayload(SendspinModel):
     client_kc: str
     """CPace MCF tag ``Tb`` (HMAC-SHA-512, 86-char base64url)."""
     nonce_B: str | None = None  # noqa: N815 - spec wire field name
-    """Preimage of ``commit_B`` (43-char base64url). Present in dynamic PIN only."""
+    """Preimage of ``commit_B`` (43-char base64url). Present in dynamic pairing code only."""
 
     class Config(SendspinConfig):
-        """Omit the optional nonce opening when absent (static PIN)."""
+        """Omit the optional nonce opening when absent (static pairing code)."""
 
         omit_none = True
 

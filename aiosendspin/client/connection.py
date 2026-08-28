@@ -105,11 +105,10 @@ from aiosendspin.noise.pairing import (
     PairingAbortError,
     abort_pairing,
     receive_pairing_abort,
-    run_dynamic_pin_client,
+    run_dynamic_pairing_code_client,
     run_pairing_psk_client,
-    run_static_pin_client,
+    run_static_pairing_code_client,
 )
-from aiosendspin.noise.pin import MAX_PIN_DIGITS, MIN_PIN_DIGITS, SHORT_PIN_DIGITS
 from aiosendspin.noise.trust_store import PskCategory, ResolvedPsk
 from aiosendspin.noise.wire import EncryptedWebSocket
 
@@ -155,7 +154,7 @@ POST_PAIRING_ACTIVATE_TIMEOUT_S: float = 60.0
 # Lead time applied to play-time estimates before clock sync converges.
 UNSYNCED_PLAY_LEAD_US: int = 500_000
 
-# psk_id of the Sentinel PSK — the client matches it during PIN pairing / discovery.
+# psk_id of the Sentinel PSK — the client matches it during pairing-code pairing / discovery.
 _SENTINEL_PSK_ID: str = psk_id_for(SENTINEL_PSK)
 
 _ARTWORK_BINARY_TYPES: frozenset[BinaryMessageType] = frozenset(
@@ -562,41 +561,42 @@ class SendspinConnection:
                     self._ws, server_id=self._server_id, store=store
                 )
         assert self._handshake_hash is not None
-        if method is PairMethod.STATIC_PIN:
-            static_pin = await store.static_pin()
-            assert static_pin is not None  # offered only when configured
-            # Every static-PIN attempt is gesture-gated.
+        if method is PairMethod.STATIC_PAIRING_CODE:
+            static_pairing_code = await store.static_pairing_code()
+            assert static_pairing_code is not None  # offered only when configured
+            # Every static-pairing-code attempt is gesture-gated.
             if (leave := await self._gate_on_pairing_window(pairing_index)) is not None:
                 return leave
             with self._attempt_in_progress():
-                return await run_static_pin_client(
+                return await run_static_pairing_code_client(
                     self._ws,
                     handshake_hash=self._handshake_hash,
                     pairing_index=pairing_index,
-                    static_pin=static_pin,
+                    static_pairing_code=static_pairing_code,
                     server_id=self._server_id,
                     store=store,
                 )
-        # PairMethod.DYNAMIC_PIN: gesture-gated only when escalated or the PIN is short.
-        pin_length = await self._validate_pin_length(pairing.pin_length)
-        if (await store.is_pin_escalated() or pin_length < SHORT_PIN_DIGITS) and (
-            leave := await self._gate_on_pairing_window(pairing_index)
-        ) is not None:
+        # Dynamic pairing code is gesture-gated only after the failure counter escalates.
+        pairing_format = await self._validate_pairing_format(pairing.format)
+        if (
+            await store.is_pairing_code_escalated()
+            and (leave := await self._gate_on_pairing_window(pairing_index)) is not None
+        ):
             return leave
         self._client.consume_pairing_window()
         try:
             with self._attempt_in_progress():
-                return await run_dynamic_pin_client(
+                return await run_dynamic_pairing_code_client(
                     self._ws,
                     handshake_hash=self._handshake_hash,
                     pairing_index=pairing_index,
-                    pin_length=pin_length,
-                    pin_emitter=self._emit_pin,
+                    pairing_format=pairing_format,
+                    pairing_code_emitter=self._emit_pairing_code,
                     server_id=self._server_id,
                     store=store,
                 )
         finally:
-            await self._emit_pin(None)
+            await self._emit_pairing_code(None)
 
     @contextmanager
     def _attempt_in_progress(self) -> Iterator[None]:
@@ -666,7 +666,7 @@ class SendspinConnection:
     async def _supported_pair_methods(self) -> tuple[PairMethod, ...]:
         """Methods this client advertises: each implemented method that config enables.
 
-        ``static_pin`` additionally requires a configured PIN.
+        ``static_pairing_code`` additionally requires a configured PAIRING_CODE.
         """
         implemented = self._client.implemented_pair_methods
         config = await self._client.pairing_store.get_pairing_config()
@@ -674,13 +674,13 @@ class SendspinConnection:
         if config.pairing_psk_enabled:
             methods.append(PairMethod.PAIRING_PSK)
         if (
-            PairMethod.STATIC_PIN in implemented
-            and config.static_pin_enabled
-            and await self._client.pairing_store.static_pin() is not None
+            PairMethod.STATIC_PAIRING_CODE in implemented
+            and config.static_pairing_code_enabled
+            and await self._client.pairing_store.static_pairing_code() is not None
         ):
-            methods.append(PairMethod.STATIC_PIN)
-        if PairMethod.DYNAMIC_PIN in implemented and config.dynamic_pin_enabled:
-            methods.append(PairMethod.DYNAMIC_PIN)
+            methods.append(PairMethod.STATIC_PAIRING_CODE)
+        if PairMethod.DYNAMIC_PAIRING_CODE in implemented and config.dynamic_pairing_code_enabled:
+            methods.append(PairMethod.DYNAMIC_PAIRING_CODE)
         return tuple(methods)
 
     async def _unpaired_access_enabled(self) -> bool:
@@ -691,7 +691,7 @@ class SendspinConnection:
         """Reject a pairing whose method the matched PSK disallows or the client did not offer."""
         assert self._noise_psk is not None
         method = pairing.method if pairing is not None else None
-        # pairing_psk iff the matched PSK is the Pairing PSK; a PIN method otherwise.
+        # pairing_psk iff the matched PSK is the Pairing PSK; a pairing-code method otherwise.
         method_fits_psk = (method is PairMethod.PAIRING_PSK) == (
             self._noise_psk.category is PskCategory.PAIRING
         )
@@ -700,30 +700,36 @@ class SendspinConnection:
             await self._abort_pairing(PairAbortReason.METHOD_NOT_SUPPORTED)
         return pairing
 
-    async def _validate_pin_length(self, pin_length: int | None) -> int:
-        """Validate the activation's dynamic ``pin_length``, aborting when unacceptable."""
-        min_length = await self._min_pin_length()
-        if pin_length is None or not min_length <= pin_length <= MAX_PIN_DIGITS:
-            await self._abort_pairing(PairAbortReason.PIN_LENGTH_UNACCEPTABLE)
-        return pin_length
+    async def _validate_pairing_format(self, pairing_format: str | None) -> str:
+        """Validate that the activation selects a currently offered dynamic format."""
+        offered = await self._dynamic_pairing_formats()
+        if pairing_format not in offered:
+            await self._abort_pairing(PairAbortReason.METHOD_NOT_SUPPORTED)
+        assert pairing_format is not None
+        return pairing_format
 
-    async def _min_pin_length(self) -> int:
-        """Shortest dynamic PIN this client accepts, held to the spec's advertisable range."""
-        config = await self._client.pairing_store.get_pairing_config()
-        return min(max(config.dynamic_pin_min_length, MIN_PIN_DIGITS), MAX_PIN_DIGITS)
+    async def _dynamic_pairing_formats(self) -> tuple[str, ...]:
+        """Return formats currently offered by this client."""
+        return (
+            ("digits", "qr_code") if self._client.pairing_code_display is not None else ("digits",)
+        )
 
     async def _abort_pairing(self, reason: PairAbortReason) -> NoReturn:
         """Send ``pair/abort``; never returns (the abort raises)."""
         assert self._ws is not None
         await abort_pairing(self._ws, reason)
 
-    async def _emit_pin(self, pin: str | None) -> None:
-        """Hand ``pin`` to every configured out-channel, or release them when it is ``None``."""
+    async def _emit_pairing_code(self, pairing_code: str | None) -> None:
+        """Hand ``pairing_code`` to configured out-channels, or release them when ``None``."""
         emissions = []
-        if self._client.pin_display is not None:
-            emissions.append(self._client.pin_display(pin))
-        if self._client.pin_speaker is not None:
-            emissions.append(self._client.pin_speaker(pin, languages=self._activation_languages()))
+        if self._client.pairing_code_display is not None:
+            emissions.append(self._client.pairing_code_display(pairing_code))
+        if self._client.pairing_code_speaker is not None:
+            emissions.append(
+                self._client.pairing_code_speaker(
+                    pairing_code, languages=self._activation_languages()
+                )
+            )
         await asyncio.gather(*emissions)
 
     def _activation_languages(self) -> tuple[str, ...]:
@@ -993,16 +999,19 @@ class SendspinConnection:
 
     async def _pair_method_descriptor(self, method: PairMethod) -> PairMethodDescriptor:
         """Build the ``client/hello`` descriptor for ``method``."""
-        if method is not PairMethod.DYNAMIC_PIN:
+        if method is not PairMethod.DYNAMIC_PAIRING_CODE:
             locations = self._client.secret_locations
             return PairMethodDescriptor(
                 method=method, locations=list(locations) if locations else None
             )
-        out_channels = self._client.pin_out_channels
+        out_channels = self._client.pairing_code_out_channels
+        formats = ["digits"]
+        if self._client.pairing_code_display is not None:
+            formats.append("qr_code")
         return PairMethodDescriptor(
             method=method,
+            formats=formats,
             out_channels=list(out_channels) if out_channels else None,
-            min_pin_length=await self._min_pin_length(),
         )
 
     def _compute_trust(self) -> TrustLevel:

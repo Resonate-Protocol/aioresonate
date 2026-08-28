@@ -1,5 +1,7 @@
 """Tests for :mod:`aiosendspin.noise.trust_store`."""
 
+# ruff: noqa: E501
+
 from __future__ import annotations
 
 import json
@@ -12,7 +14,7 @@ import pytest
 from aiosendspin.models.types import PairMethod
 from aiosendspin.noise.keys import generate_psk, psk_id_for
 from aiosendspin.noise.trust_store import (
-    PIN_ESCALATION_THRESHOLD,
+    PAIRING_CODE_ESCALATION_THRESHOLD,
     ClientPairingRecord,
     ClientPairingStore,
     FileClientPairingStore,
@@ -100,15 +102,15 @@ def test_server_record_with_method_appends_in_first_use_order() -> None:
     record = _server_record()
     assert record.pair_methods == []
     first = record.with_method(PairMethod.PAIRING_PSK)
-    second = first.with_method(PairMethod.DYNAMIC_PIN)
+    second = first.with_method(PairMethod.DYNAMIC_PAIRING_CODE)
     assert first.pair_methods == [PairMethod.PAIRING_PSK]
-    assert second.pair_methods == [PairMethod.PAIRING_PSK, PairMethod.DYNAMIC_PIN]
+    assert second.pair_methods == [PairMethod.PAIRING_PSK, PairMethod.DYNAMIC_PAIRING_CODE]
     assert second.with_method(PairMethod.PAIRING_PSK) is second  # already present, unchanged
 
 
 def test_server_record_pair_methods_round_trip_and_back_compat() -> None:
     """pair_methods round-trips; a legacy dict without the key loads as an empty list."""
-    record = _server_record().with_method(PairMethod.DYNAMIC_PIN)
+    record = _server_record().with_method(PairMethod.DYNAMIC_PAIRING_CODE)
     assert ServerPairingRecord.from_dict(record.to_dict()) == record
     legacy = record.to_dict()
     del legacy["pair_methods"]
@@ -326,36 +328,36 @@ async def test_file_client_store_seeds_shared_record_on_first_open(tmp_path: Pat
 
 
 async def test_file_client_store_persists_state(tmp_path: Path) -> None:
-    """Records, config, accepted Pairing PSK, static PIN, and PIN failures survive a reload."""
+    """Records, config, accepted Pairing PSK, static pairing code, and pairing-code failures survive a reload."""
     path = tmp_path / "client.json"
     store = await FileClientPairingStore.open(path)
     record = _client_record(server_id="server-X")
     pairing = _pairing_psk()
     await store.store_record(record)
     await store.set_pairing_psk(pairing)
-    await store.set_static_pin("12345678")
-    await store.record_pin_failure()
+    await store.set_static_pairing_code("12345678")
+    await store.record_pairing_code_failure()
 
     reloaded = await FileClientPairingStore.open(path)
     assert await reloaded.record_by_server_id("server-X") == record
     assert await reloaded.pairing_psk() == pairing
-    assert await reloaded.static_pin() == "12345678"
-    assert await reloaded.pin_failure_count() == 1
+    assert await reloaded.static_pairing_code() == "12345678"
+    assert await reloaded.pairing_code_failure_count() == 1
 
 
 async def test_file_client_store_migrates_per_method_pin_failures(tmp_path: Path) -> None:
-    """A pre-escalation store carries its dynamic-PIN count over, keeping escalation state."""
+    """A pre-escalation store carries its dynamic-PAIRING_CODE count over, keeping escalation state."""
     path = tmp_path / "client.json"
     await FileClientPairingStore.open(path)
     data = json.loads(path.read_text(encoding="utf-8"))
     data["pin_failures"] = {
-        PairMethod.DYNAMIC_PIN.value: PIN_ESCALATION_THRESHOLD,
-        PairMethod.STATIC_PIN.value: 3,
+        PairMethod.DYNAMIC_PAIRING_CODE.value: PAIRING_CODE_ESCALATION_THRESHOLD,
+        PairMethod.STATIC_PAIRING_CODE.value: 3,
     }
     path.write_text(json.dumps(data), encoding="utf-8")
 
     reloaded = await FileClientPairingStore.open(path)
-    assert await reloaded.pin_failure_count() == PIN_ESCALATION_THRESHOLD
+    assert await reloaded.pairing_code_failure_count() == PAIRING_CODE_ESCALATION_THRESHOLD
 
 
 async def test_file_client_store_persists_last_playback_server(tmp_path: Path) -> None:
@@ -422,25 +424,25 @@ async def test_client_pairing_psk_lifecycle(client_store: ClientPairingStore) ->
     await client_store.clear_pairing_psk()
 
 
-async def test_client_static_pin_lifecycle(client_store: ClientPairingStore) -> None:
-    """The client's configured static PIN: set, look up, replace, clear."""
-    assert await client_store.static_pin() is None
-    await client_store.set_static_pin("12345678")
-    assert await client_store.static_pin() == "12345678"
-    await client_store.set_static_pin("87654321")
-    assert await client_store.static_pin() == "87654321"
-    await client_store.clear_static_pin()
-    assert await client_store.static_pin() is None
+async def test_client_static_pairing_code_lifecycle(client_store: ClientPairingStore) -> None:
+    """The client's configured static pairing code: set, look up, replace, clear."""
+    assert await client_store.static_pairing_code() is None
+    await client_store.set_static_pairing_code("12345678")
+    assert await client_store.static_pairing_code() == "12345678"
+    await client_store.set_static_pairing_code("87654321")
+    assert await client_store.static_pairing_code() == "87654321"
+    await client_store.clear_static_pairing_code()
+    assert await client_store.static_pairing_code() is None
     # Clearing when absent is a no-op.
-    await client_store.clear_static_pin()
+    await client_store.clear_static_pairing_code()
 
 
 @pytest.mark.parametrize("bad_pin", ["1234", "123456789", "abcdefgh", "1234567 "])
-async def test_set_static_pin_rejects_non_8_digit(bad_pin: str) -> None:
-    """The static PIN must be exactly 8 decimal digits (spec definition)."""
+async def test_set_static_pairing_code_rejects_non_8_digit(bad_pin: str) -> None:
+    """The static pairing code must be exactly 8 decimal digits (spec definition)."""
     store = InMemoryClientPairingStore()
     with pytest.raises(ValueError, match="8 decimal digits"):
-        await store.set_static_pin(bad_pin)
+        await store.set_static_pairing_code(bad_pin)
 
 
 async def test_client_store_resolves_by_psk_id_and_finds_by_server_id(
@@ -531,26 +533,28 @@ async def test_client_store_reports_no_storage_accounting_by_default(
     assert await client_store.storage_accounting() is None
 
 
-async def test_pin_failure_counter_increments_and_resets(client_store: ClientPairingStore) -> None:
+async def test_pairing_code_failure_counter_increments_and_resets(
+    client_store: ClientPairingStore,
+) -> None:
     """Failures accumulate and reset clears the counter."""
-    assert await client_store.pin_failure_count() == 0
-    assert await client_store.record_pin_failure() == 1
-    assert await client_store.record_pin_failure() == 2
-    await client_store.reset_pin_failures()
-    assert await client_store.pin_failure_count() == 0
+    assert await client_store.pairing_code_failure_count() == 0
+    assert await client_store.record_pairing_code_failure() == 1
+    assert await client_store.record_pairing_code_failure() == 2
+    await client_store.reset_pairing_code_failures()
+    assert await client_store.pairing_code_failure_count() == 0
 
 
-async def test_pin_escalation_at_threshold_and_clears_on_reset(
+async def test_pairing_code_escalation_at_threshold_and_clears_on_reset(
     client_store: ClientPairingStore,
 ) -> None:
     """Escalation trips at the threshold and clears only on reset."""
-    for _ in range(PIN_ESCALATION_THRESHOLD - 1):
-        await client_store.record_pin_failure()
-    assert not await client_store.is_pin_escalated()
-    await client_store.record_pin_failure()
-    assert await client_store.is_pin_escalated()
-    await client_store.reset_pin_failures()
-    assert not await client_store.is_pin_escalated()
+    for _ in range(PAIRING_CODE_ESCALATION_THRESHOLD - 1):
+        await client_store.record_pairing_code_failure()
+    assert not await client_store.is_pairing_code_escalated()
+    await client_store.record_pairing_code_failure()
+    assert await client_store.is_pairing_code_escalated()
+    await client_store.reset_pairing_code_failures()
+    assert not await client_store.is_pairing_code_escalated()
 
 
 # --- shared-PSK records --------------------------------------------------

@@ -37,7 +37,7 @@ from aiosendspin.noise.session import NoiseCipherSuite
 from aiosendspin.noise.trust_store import ClientPairingStore, ResolvedPsk
 
 from .connection import DECODABLE_CODECS, UNSYNCED_PLAY_LEAD_US, SendspinConnection
-from .models import AudioFormat, PairingSupport, PinDisplay, PinSpeaker, ServerInfo
+from .models import AudioFormat, PairingCodeDisplay, PairingCodeSpeaker, PairingSupport, ServerInfo
 from .source import SourceCapture
 
 logger = logging.getLogger(__name__)
@@ -152,7 +152,7 @@ class SendspinClient:
     """Serializes the admit/displace decision across concurrent connections."""
 
     _pairing_support: PairingSupport | None
-    """Operator wiring whose presence enables the PIN methods, if configured."""
+    """Operator wiring whose presence enables the pairing-code methods, if configured."""
     _pairing_window_opened: asyncio.Event
     """Set when a pairing window opens; wakes a gated attempt's wait."""
     _pairing_window_deadline: float | None = None
@@ -353,26 +353,34 @@ class SendspinClient:
         return self._pairing_store
 
     @property
-    def pin_display(self) -> PinDisplay | None:
-        """Out-channel that surfaces a derived pairing PIN, if configured.
+    def pairing_code_display(self) -> PairingCodeDisplay | None:
+        """Out-channel that surfaces a derived pairing PAIRING_CODE, if configured.
 
-        Called with the PIN string when one is derived, and with ``None`` when the
+        Called with the pairing code string when one is derived, and with ``None`` when the
         pairing exchange ends (success or failure) so the channel can clear.
         """
-        return self._pairing_support.pin_display if self._pairing_support is not None else None
+        return (
+            self._pairing_support.pairing_code_display
+            if self._pairing_support is not None
+            else None
+        )
 
     @property
-    def pin_speaker(self) -> PinSpeaker | None:
-        """Spoken out-channel for a derived pairing PIN, if configured."""
-        return self._pairing_support.pin_speaker if self._pairing_support is not None else None
+    def pairing_code_speaker(self) -> PairingCodeSpeaker | None:
+        """Spoken out-channel for a derived pairing PAIRING_CODE, if configured."""
+        return (
+            self._pairing_support.pairing_code_speaker
+            if self._pairing_support is not None
+            else None
+        )
 
     @property
-    def pin_out_channels(self) -> tuple[str, ...]:
-        """Channels the dynamic PIN is conveyed through, in descriptor order."""
+    def pairing_code_out_channels(self) -> tuple[str, ...]:
+        """Channels the dynamic pairing code is conveyed through, in descriptor order."""
         channels = []
-        if self.pin_display is not None:
+        if self.pairing_code_display is not None:
             channels.append("display")
-        if self.pin_speaker is not None:
+        if self.pairing_code_speaker is not None:
             channels.append("speaker")
         return tuple(channels)
 
@@ -430,13 +438,13 @@ class SendspinClient:
 
     @property
     def implemented_pair_methods(self) -> frozenset[PairMethod]:
-        """Pairing methods this client implements: each PIN method needs its wiring."""
+        """Pairing methods this client implements: each pairing-code method needs its wiring."""
         methods = {PairMethod.PAIRING_PSK}
         if self._pairing_support is not None:
-            if self._pairing_support.offer_static_pin:
-                methods.add(PairMethod.STATIC_PIN)
-            if self.pin_out_channels:
-                methods.add(PairMethod.DYNAMIC_PIN)
+            if self._pairing_support.offer_static_pairing_code:
+                methods.add(PairMethod.STATIC_PAIRING_CODE)
+            if self.pairing_code_out_channels:
+                methods.add(PairMethod.DYNAMIC_PAIRING_CODE)
         return frozenset(methods)
 
     @property

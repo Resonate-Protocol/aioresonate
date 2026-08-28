@@ -22,7 +22,7 @@ from aiosendspin.models.management import (
     RecordModeConfig,
     RecordSummary,
     ServerUnpairMessage,
-    SetDynamicPinConfig,
+    SetDynamicPairingCodeConfig,
     SetPairingPskConfig,
     StorageAccounting,
     UnpairedAccess,
@@ -47,7 +47,7 @@ _PSK_B64 = "a" * 43
         ManagementSetPairingConfigMessage(
             ManagementSetPairingConfigPayload(
                 pairing_psk=SetPairingPskConfig(enabled=False),
-                dynamic_pin=SetDynamicPinConfig(min_pin_length=6),
+                dynamic_pairing_code=SetDynamicPairingCodeConfig(enabled=True),
                 record_mode=RecordModeConfig(psk_id="p1"),
             )
         ),
@@ -147,7 +147,7 @@ def test_get_config_data_round_trips() -> None:
     """A get-pairing-config result round-trips and omits escalated for non-dynamic methods."""
     data = ManagementResultData(
         pairing_psk=PairingMethodConfig(enabled=True),
-        dynamic_pin=PairingMethodConfig(enabled=False, min_pin_length=6, escalated=True),
+        dynamic_pairing_code=PairingMethodConfig(enabled=False, escalated=True),
         record_mode=RecordModeConfig(psk_id="p1"),
         unpaired_access=UnpairedAccess(enabled=False),
     )
@@ -157,4 +157,4 @@ def test_get_config_data_round_trips() -> None:
     assert ClientMessage.from_json(message.to_json()) == message
     raw = orjson.loads(message.to_json())["payload"]["data"]
     assert "escalated" not in raw["pairing_psk"]
-    assert raw["dynamic_pin"]["escalated"] is True
+    assert raw["dynamic_pairing_code"]["escalated"] is True
