@@ -53,7 +53,13 @@ from .pairing import (
     run_static_pairing_code_client,
     run_static_pairing_code_server,
 )
-from .pairing_token import PSKPairingToken, decode_token, encode_token
+from .pairing_token import (
+    PSKPairingToken,
+    decode_pairing_code_token,
+    decode_psk_token,
+    encode_pairing_code_token,
+    encode_psk_token,
+)
 from .session import NoiseCipherSuite, NoiseSession
 from .trust_store import (
     ClientPairingRecord,
@@ -126,8 +132,10 @@ __all__ = [
     "TrustedUnpairedClient",
     "b64url_decode",
     "b64url_encode",
-    "decode_token",
-    "encode_token",
+    "decode_pairing_code_token",
+    "decode_psk_token",
+    "encode_pairing_code_token",
+    "encode_psk_token",
     "generate_psk",
     "psk_id_for",
     "run_dynamic_pairing_code_client",

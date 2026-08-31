@@ -1,7 +1,5 @@
 """Tests for :mod:`aiosendspin.noise.trust_store`."""
 
-# ruff: noqa: E501
-
 from __future__ import annotations
 
 import json
@@ -328,7 +326,7 @@ async def test_file_client_store_seeds_shared_record_on_first_open(tmp_path: Pat
 
 
 async def test_file_client_store_persists_state(tmp_path: Path) -> None:
-    """Records, config, accepted Pairing PSK, static pairing code, and pairing-code failures survive a reload."""
+    """Records, config, Pairing PSK, static code, and failure count survive a reload."""
     path = tmp_path / "client.json"
     store = await FileClientPairingStore.open(path)
     record = _client_record(server_id="server-X")
@@ -346,7 +344,7 @@ async def test_file_client_store_persists_state(tmp_path: Path) -> None:
 
 
 async def test_file_client_store_migrates_per_method_pin_failures(tmp_path: Path) -> None:
-    """A pre-escalation store carries its dynamic-PAIRING_CODE count over, keeping escalation state."""
+    """A pre-escalation store carries its dynamic count over, keeping escalation state."""
     path = tmp_path / "client.json"
     await FileClientPairingStore.open(path)
     data = json.loads(path.read_text(encoding="utf-8"))
@@ -437,12 +435,12 @@ async def test_client_static_pairing_code_lifecycle(client_store: ClientPairingS
     await client_store.clear_static_pairing_code()
 
 
-@pytest.mark.parametrize("bad_pin", ["1234", "123456789", "abcdefgh", "1234567 "])
-async def test_set_static_pairing_code_rejects_non_8_digit(bad_pin: str) -> None:
+@pytest.mark.parametrize("bad_code", ["1234", "123456789", "abcdefgh", "1234567 "])
+async def test_set_static_pairing_code_rejects_non_8_digit(bad_code: str) -> None:
     """The static pairing code must be exactly 8 decimal digits (spec definition)."""
     store = InMemoryClientPairingStore()
     with pytest.raises(ValueError, match="8 decimal digits"):
-        await store.set_static_pairing_code(bad_pin)
+        await store.set_static_pairing_code(bad_code)
 
 
 async def test_client_store_resolves_by_psk_id_and_finds_by_server_id(

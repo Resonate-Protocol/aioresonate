@@ -37,7 +37,14 @@ from aiosendspin.noise.session import NoiseCipherSuite
 from aiosendspin.noise.trust_store import ClientPairingStore, ResolvedPsk
 
 from .connection import DECODABLE_CODECS, UNSYNCED_PLAY_LEAD_US, SendspinConnection
-from .models import AudioFormat, PairingCodeDisplay, PairingCodeSpeaker, PairingSupport, ServerInfo
+from .models import (
+    AudioFormat,
+    PairingCodeDisplay,
+    PairingCodeSpeaker,
+    PairingSupport,
+    QRCodeDisplay,
+    ServerInfo,
+)
 from .source import SourceCapture
 
 logger = logging.getLogger(__name__)
@@ -354,7 +361,7 @@ class SendspinClient:
 
     @property
     def pairing_code_display(self) -> PairingCodeDisplay | None:
-        """Out-channel that surfaces a derived pairing PAIRING_CODE, if configured.
+        """Out-channel that surfaces a derived pairing code, if configured.
 
         Called with the pairing code string when one is derived, and with ``None`` when the
         pairing exchange ends (success or failure) so the channel can clear.
@@ -367,7 +374,7 @@ class SendspinClient:
 
     @property
     def pairing_code_speaker(self) -> PairingCodeSpeaker | None:
-        """Spoken out-channel for a derived pairing PAIRING_CODE, if configured."""
+        """Spoken out-channel for a derived pairing code, if configured."""
         return (
             self._pairing_support.pairing_code_speaker
             if self._pairing_support is not None
@@ -375,10 +382,15 @@ class SendspinClient:
         )
 
     @property
+    def qr_code_display(self) -> QRCodeDisplay | None:
+        """Display that renders the dynamic pairing token as a QR code, if configured."""
+        return self._pairing_support.qr_code_display if self._pairing_support is not None else None
+
+    @property
     def pairing_code_out_channels(self) -> tuple[str, ...]:
         """Channels the dynamic pairing code is conveyed through, in descriptor order."""
         channels = []
-        if self.pairing_code_display is not None:
+        if self.pairing_code_display is not None or self.qr_code_display is not None:
             channels.append("display")
         if self.pairing_code_speaker is not None:
             channels.append("speaker")

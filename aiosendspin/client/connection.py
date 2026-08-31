@@ -8,6 +8,7 @@ import logging
 import struct
 from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager, contextmanager, suppress
+from functools import partial
 from typing import TYPE_CHECKING, NoReturn, assert_never
 
 from aiohttp import ClientWebSocketResponse, WSMessage, WSMsgType, web
@@ -76,6 +77,7 @@ from aiosendspin.models.types import (
     ManagementResult,
     MediaCommand,
     PairAbortReason,
+    PairingCodeFormat,
     PairMethod,
     PlayerCommand,
     Roles,
@@ -591,12 +593,14 @@ class SendspinConnection:
                     handshake_hash=self._handshake_hash,
                     pairing_index=pairing_index,
                     pairing_format=pairing_format,
-                    pairing_code_emitter=self._emit_pairing_code,
+                    pairing_code_emitter=partial(
+                        self._emit_pairing_code, pairing_format=pairing_format
+                    ),
                     server_id=self._server_id,
                     store=store,
                 )
         finally:
-            await self._emit_pairing_code(None)
+            await self._emit_pairing_code(None, pairing_format=pairing_format)
 
     @contextmanager
     def _attempt_in_progress(self) -> Iterator[None]:
@@ -666,7 +670,7 @@ class SendspinConnection:
     async def _supported_pair_methods(self) -> tuple[PairMethod, ...]:
         """Methods this client advertises: each implemented method that config enables.
 
-        ``static_pairing_code`` additionally requires a configured PAIRING_CODE.
+        ``static_pairing_code`` additionally requires a configured pairing code.
         """
         implemented = self._client.implemented_pair_methods
         config = await self._client.pairing_store.get_pairing_config()
@@ -700,27 +704,45 @@ class SendspinConnection:
             await self._abort_pairing(PairAbortReason.METHOD_NOT_SUPPORTED)
         return pairing
 
-    async def _validate_pairing_format(self, pairing_format: str | None) -> str:
-        """Validate that the activation selects a currently offered dynamic format."""
-        offered = await self._dynamic_pairing_formats()
-        if pairing_format not in offered:
-            await self._abort_pairing(PairAbortReason.METHOD_NOT_SUPPORTED)
-        assert pairing_format is not None
-        return pairing_format
+    async def _validate_pairing_format(self, pairing_format: str | None) -> PairingCodeFormat:
+        """Validate that the activation selects a currently offered dynamic format.
 
-    async def _dynamic_pairing_formats(self) -> tuple[str, ...]:
+        An identifier from a newer spec revision does not parse, so it aborts like any
+        other format this client does not offer.
+        """
+        try:
+            selected = PairingCodeFormat(pairing_format)
+        except ValueError:
+            await self._abort_pairing(PairAbortReason.METHOD_NOT_SUPPORTED)
+        if selected not in await self._dynamic_pairing_formats():
+            await self._abort_pairing(PairAbortReason.METHOD_NOT_SUPPORTED)
+        return selected
+
+    async def _dynamic_pairing_formats(self) -> tuple[PairingCodeFormat, ...]:
         """Return formats currently offered by this client."""
-        return (
-            ("digits", "qr_code") if self._client.pairing_code_display is not None else ("digits",)
-        )
+        formats = []
+        if (
+            self._client.pairing_code_display is not None
+            or self._client.pairing_code_speaker is not None
+        ):
+            formats.append(PairingCodeFormat.DIGITS)
+        if self._client.qr_code_display is not None:
+            formats.append(PairingCodeFormat.QR_CODE)
+        return tuple(formats)
 
     async def _abort_pairing(self, reason: PairAbortReason) -> NoReturn:
         """Send ``pair/abort``; never returns (the abort raises)."""
         assert self._ws is not None
         await abort_pairing(self._ws, reason)
 
-    async def _emit_pairing_code(self, pairing_code: str | None) -> None:
-        """Hand ``pairing_code`` to configured out-channels, or release them when ``None``."""
+    async def _emit_pairing_code(
+        self, pairing_code: str | None, *, pairing_format: PairingCodeFormat
+    ) -> None:
+        """Hand ``pairing_code`` to the format's out-channels, or release them when ``None``."""
+        if pairing_format is PairingCodeFormat.QR_CODE:
+            assert self._client.qr_code_display is not None  # validated as offered
+            await self._client.qr_code_display(pairing_code)
+            return
         emissions = []
         if self._client.pairing_code_display is not None:
             emissions.append(self._client.pairing_code_display(pairing_code))
@@ -1005,12 +1027,9 @@ class SendspinConnection:
                 method=method, locations=list(locations) if locations else None
             )
         out_channels = self._client.pairing_code_out_channels
-        formats = ["digits"]
-        if self._client.pairing_code_display is not None:
-            formats.append("qr_code")
         return PairMethodDescriptor(
             method=method,
-            formats=formats,
+            formats=[f.value for f in await self._dynamic_pairing_formats()],
             out_channels=list(out_channels) if out_channels else None,
         )
 

@@ -1,4 +1,4 @@
-"""Tests for dynamic-PAIRING_CODE derivation and commitment (:mod:`aiosendspin.noise.pairing_code`).
+"""Tests for pairing-code derivation and commitment (:mod:`aiosendspin.noise.pairing_code`).
 
 The known-answer values are computed from the spec formula over fixed inputs
 (``h = 0x00..1f``, ``nonce_A = 0x01*32``, ``nonce_B = 0x02*32``) and pinned here
@@ -14,10 +14,8 @@ from aiosendspin.noise.pairing_code import (
     NONCE_SIZE,
     QR_CODE_SIZE,
     commit,
-    decode_qr_token,
     derive_digits,
     derive_qr_code,
-    encode_qr_token,
     generate_nonce,
     verify_commit,
 )
@@ -43,21 +41,26 @@ def test_derive_digits_is_fixed_width_and_input_sensitive() -> None:
     assert derive_digits(H, NONCE_A, bytes([9]) * 32) != base
 
 
-def test_derive_qr_code_round_trips_as_version_one_token() -> None:
-    """The first 24 digest bytes encode and decode as an SP:1 pairing token."""
+def test_derive_qr_code_is_the_digest_prefix() -> None:
+    """The qr_code form is the first 24 bytes of the same digest."""
     code = derive_qr_code(H, NONCE_A, NONCE_B)
     assert len(code) == QR_CODE_SIZE
-    token = encode_qr_token(code)
-    assert token.startswith("SP:1")
-    assert decode_qr_token(token) == code
+    assert derive_qr_code(H, NONCE_A, bytes([9]) * 32) != code
 
 
-def test_qr_token_rejects_wrong_version_and_size() -> None:
-    """Pairing tokens reject unsupported versions and payload sizes."""
-    with pytest.raises(ValueError, match="version"):
-        decode_qr_token("SP:0AAAA")
-    with pytest.raises(ValueError, match="qr_code"):
-        encode_qr_token(b"short")
+# Provenance: SendspinKit/Tests/SendspinKitTests/Resources/cpace-mcf-known-answer.json,
+# dynamic_transcript; independently verified against cpace-py and the Sendspin spec.
+def test_sendspinkit_derivation_vector() -> None:
+    """Both forms match the independently generated SendspinKit dynamic transcript."""
+    handshake_hash = bytes.fromhex(
+        "00112233445566778899aabbccddeeff102132435465768798a9bacbdcedfe0f"
+    )
+    nonce_a = bytes.fromhex("101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f")
+    nonce_b = bytes.fromhex("303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f")
+
+    assert derive_digits(handshake_hash, nonce_a, nonce_b) == "268386"
+    qr_code = derive_qr_code(handshake_hash, nonce_a, nonce_b)
+    assert qr_code.hex() == "3e2e937a82ea414f686a6155b3628640ee30d3fda85dc931"
 
 
 def test_commit_known_answer_and_size() -> None:

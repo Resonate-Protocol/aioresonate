@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import base64
 import hashlib
 import hmac
 import secrets
@@ -55,30 +54,6 @@ def derive_digits(handshake_hash: bytes, nonce_a: bytes, nonce_b: bytes) -> str:
 def derive_qr_code(handshake_hash: bytes, nonce_a: bytes, nonce_b: bytes) -> bytes:
     """Derive the 24-byte binary dynamic pairing code for QR emission."""
     return derive_digest(handshake_hash, nonce_a, nonce_b)[:QR_CODE_SIZE]
-
-
-def encode_qr_token(code: bytes) -> str:
-    """Encode a 24-byte dynamic pairing code as a version-1 pairing token."""
-    _check_size(code, QR_CODE_SIZE, "qr_code")
-    body = base64.b32encode(code).decode("ascii").rstrip("=").replace("2", "9")
-    return f"SP:1{body}"
-
-
-def decode_qr_token(value: str) -> bytes:
-    """Decode a version-1 pairing token, leniently, into its 24-byte code."""
-    text = value.strip().upper()
-    text = text.removeprefix("SP:")
-    if not text or text[0] != "1":
-        raise ValueError("unsupported pairing token version")
-    body = text[1:]
-    pad = (-len(body)) % 8
-    try:
-        payload = base64.b32decode(body.replace("9", "2") + "=" * pad)
-    except ValueError as exc:
-        raise ValueError("malformed pairing token") from exc
-    if len(payload) < QR_CODE_SIZE:
-        raise ValueError("malformed pairing token")
-    return payload[:QR_CODE_SIZE]
 
 
 def _check_size(value: bytes, size: int, name: str) -> None:

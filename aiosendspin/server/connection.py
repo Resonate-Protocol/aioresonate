@@ -96,6 +96,7 @@ from aiosendspin.models.types import (
     GoodbyeReason,
     ManagementResult,
     PairAbortReason,
+    PairingCodeFormat,
     PairMethod,
     PlaybackStateType,
     Roles,
@@ -244,7 +245,7 @@ class SendspinConnection:
         Exactly one of `request` (client-initiated) or `wsock_client` (server-initiated)
         must be provided. For server-initiated connections, `url` should be provided
         for connection reason lookup and client URL registration, and
-        ``expected_client_id`` may be set to pairing_code the handshake to a known peer.
+        ``expected_client_id`` may be set to bind the handshake to a known peer.
         ``pairing_attempt`` carries an operator-initiated pairing intent for this dial.
         """
         self._server = server
@@ -1346,18 +1347,14 @@ class SendspinConnection:
                 if self._pairing_attempt is not None
                 else PairMethod.PAIRING_PSK
             )
-            pairing_format = (
-                self._negotiated_dynamic_pairing_format()
-                if method is PairMethod.DYNAMIC_PAIRING_CODE
-                else None
-            )
-            languages = (
-                list(self._pairing_attempt.languages)
-                if method is PairMethod.DYNAMIC_PAIRING_CODE
-                and self._pairing_attempt is not None
-                and self._pairing_attempt.languages
-                else None
-            )
+            pairing_format: PairingCodeFormat | None = None
+            languages: list[str] | None = None
+            if method is PairMethod.DYNAMIC_PAIRING_CODE:
+                assert self._pairing_attempt is not None
+                pairing_format = self._negotiated_dynamic_pairing_format()
+                # The language hint applies to spoken emission, so only the digits format.
+                if pairing_format is PairingCodeFormat.DIGITS and self._pairing_attempt.languages:
+                    languages = list(self._pairing_attempt.languages)
             # No gate on the hello-advertised methods: the advertisement may lag the client's
             # live pairing config (management can change it mid-connection). The client
             # arbitrates, aborting an unsupported method with ``method_not_supported``.
@@ -1367,7 +1364,9 @@ class SendspinConnection:
                         activities=[Activity.PAIRING],
                         active_roles=[],
                         pairing=ActivatePairing(
-                            method=method, format=pairing_format, languages=languages
+                            method=method,
+                            format=pairing_format.value if pairing_format is not None else None,
+                            languages=languages,
                         ),
                     )
                 ).to_json()
@@ -1394,7 +1393,10 @@ class SendspinConnection:
             return await rehandshake
 
     async def _run_pairing_protocol(
-        self, method: PairMethod, transport: EncryptedWebSocket, pairing_format: str | None
+        self,
+        method: PairMethod,
+        transport: EncryptedWebSocket,
+        pairing_format: PairingCodeFormat | None,
     ) -> ServerPairingRecord | None:
         """Run ``method``'s exchange, returning the record (``None`` when verifying)."""
         assert self._client_id is not None
@@ -1442,9 +1444,12 @@ class SendspinConnection:
             owner=self._pairing_attempt.owner,
         )
 
-    def _negotiated_dynamic_pairing_format(self) -> str:
-        """Return the dynamic emission format selected by the operator."""
+    def _negotiated_dynamic_pairing_format(self) -> PairingCodeFormat:
+        """Return the attempt's emission format, checked against the advertised descriptor."""
         assert self._client_info is not None
+        assert self._pairing_attempt is not None
+        requested = self._pairing_attempt.pairing_format
+        assert requested is not None
         descriptor = next(
             (
                 d
@@ -1453,17 +1458,14 @@ class SendspinConnection:
             ),
             None,
         )
-        offered = descriptor.formats if descriptor is not None else None
-        requested = (
-            self._pairing_attempt.pairing_format if self._pairing_attempt is not None else None
-        )
-        if requested is not None and offered is not None and requested in offered:
+        if descriptor is None:
+            # The advertisement lags a management enable; the client arbitrates.
             return requested
-        if offered and "digits" in offered:
-            return "digits"
-        if offered and "qr_code" in offered:
-            return "qr_code"
-        raise PairingError("client does not offer a dynamic pairing-code format")
+        if not descriptor.formats:
+            raise PairingError("client's dynamic_pairing_code descriptor is missing formats")
+        if requested.value not in descriptor.formats:
+            raise PairingError(f"client does not offer the {requested.value} emission format")
+        return requested
 
     async def _rehandshake_for_pairing_if_needed(self, transport: Transport) -> bool:
         """If the attempt needs a PSK other than the current one, rehandshake and redo hellos."""

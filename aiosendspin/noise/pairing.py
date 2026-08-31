@@ -13,7 +13,7 @@ from cpace import CPace, CPaceError, CPaceRole
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM, ChaCha20Poly1305
 
-from aiosendspin.models.types import PairAbortReason, PairMethod
+from aiosendspin.models.types import PairAbortReason, PairingCodeFormat, PairMethod
 
 from . import pairing_code as pairing_code_mod
 from .keys import PSK_SIZE, b64url_decode, b64url_encode, psk_id_for
@@ -38,6 +38,7 @@ from .models import (
     ServerPairInitMessage,
     ServerPairInitPayload,
 )
+from .pairing_token import decode_pairing_code_token, encode_pairing_code_token
 from .session import NoiseCipherSuite
 from .trust_store import ServerPairingRecord
 
@@ -93,7 +94,7 @@ class PairingCodeProvider(Protocol):
     """Supplies the pairing code the operator entered into the server."""
 
     def __call__(self) -> Awaitable[str]:
-        """Return the operator-entered PAIRING_CODE as an awaitable."""
+        """Return the operator-entered pairing code as an awaitable."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -103,8 +104,8 @@ class PairingAttempt:
     method: PairMethod
     pairing_code_provider: PairingCodeProvider | None = None
     """Required for code methods; supplies the operator-entered pairing code or token."""
-    pairing_format: str | None = None
-    """Dynamic pairing-code format requested by the operator (digits or qr_code)."""
+    pairing_format: PairingCodeFormat | None = None
+    """Emission format for the dynamic pairing code; absent for the other methods."""
     pairing_psk: bytes | None = None
     """Required for the Pairing PSK method; the live PSK pasted from a token."""
     verify: bool = False
@@ -145,14 +146,17 @@ class PairingAttempt:
                 msg = f"{self.method.value} does not use pairing_psk"
                 raise ValueError(msg)
             if self.method is PairMethod.DYNAMIC_PAIRING_CODE:
-                if self.pairing_format not in ("digits", "qr_code", None):
-                    msg = "dynamic pairing format must be digits or qr_code"
+                if self.pairing_format is None:
+                    msg = "dynamic_pairing_code requires pairing_format"
                     raise ValueError(msg)
             elif self.pairing_format is not None:
-                msg = "static pairing code does not use pairing_format"
+                msg = f"{self.method.value} does not use pairing_format"
                 raise ValueError(msg)
         if self.languages and self.method is not PairMethod.DYNAMIC_PAIRING_CODE:
             msg = f"{self.method.value} does not use languages"
+            raise ValueError(msg)
+        if self.languages and self.pairing_format is PairingCodeFormat.QR_CODE:
+            msg = "languages apply to the digits format only"
             raise ValueError(msg)
         if not all(self.languages):
             msg = "languages must not contain a blank tag"
@@ -198,7 +202,7 @@ async def run_dynamic_pairing_code_client(
     *,
     handshake_hash: bytes,
     pairing_index: int,
-    pairing_format: str,
+    pairing_format: PairingCodeFormat,
     pairing_code_emitter: PairingCodeEmitter,
     server_id: str,
     store: ClientPairingStore,
@@ -223,16 +227,12 @@ async def run_dynamic_pairing_code_client(
         nonce_a = _decode_field(
             init.payload.nonce_A, "nonce_A", expect_len=pairing_code_mod.NONCE_SIZE
         )
-        if pairing_format == "digits":
+        if pairing_format is PairingCodeFormat.DIGITS:
             pairing_code = pairing_code_mod.derive_digits(handshake_hash, nonce_a, nonce_b)
             prs = pairing_code.encode("ascii")
-        elif pairing_format == "qr_code":
-            pairing_code = pairing_code_mod.encode_qr_token(
-                pairing_code_mod.derive_qr_code(handshake_hash, nonce_a, nonce_b)
-            )
-            prs = pairing_code_mod.decode_qr_token(pairing_code)
         else:
-            raise PairingError(f"unsupported dynamic pairing format: {pairing_format}")
+            prs = pairing_code_mod.derive_qr_code(handshake_hash, nonce_a, nonce_b)
+            pairing_code = encode_pairing_code_token(prs)
         await pairing_code_emitter(pairing_code)
         try:
             cpace = CPace.start(role=CPaceRole.RESPONDER, prs=prs, sid=sid, ad=_PAKE_AD_CLIENT)
@@ -283,7 +283,7 @@ async def run_dynamic_pairing_code_server(
     handshake_hash: bytes,
     pairing_index: int,
     pairing_code_provider: PairingCodeProvider,
-    pairing_format: str,
+    pairing_format: PairingCodeFormat,
     client_id: str,
     store: ServerPairingStore,
     verify: bool = False,
@@ -309,7 +309,7 @@ async def run_dynamic_pairing_code_server(
             ).to_json(),
         )
         entered = await pairing_code_provider()
-        if pairing_format == "digits":
+        if pairing_format is PairingCodeFormat.DIGITS:
             if (
                 not entered.isascii()
                 or not entered.isdigit()
@@ -317,13 +317,11 @@ async def run_dynamic_pairing_code_server(
             ):
                 raise PairingError("dynamic pairing code must be exactly 6 ASCII digits")
             prs = entered.encode("ascii")
-        elif pairing_format == "qr_code":
-            try:
-                prs = pairing_code_mod.decode_qr_token(entered)
-            except ValueError as exc:
-                raise PairingError("malformed QR pairing token") from exc
         else:
-            raise PairingError(f"unsupported dynamic pairing format: {pairing_format}")
+            try:
+                prs = decode_pairing_code_token(entered)
+            except ValueError as exc:
+                raise PairingError("malformed pairing token") from exc
         try:
             cpace = CPace.start(role=CPaceRole.INITIATOR, prs=prs, sid=sid, ad=_PAKE_AD_SERVER)
         except CPaceError as exc:
@@ -356,16 +354,16 @@ async def run_dynamic_pairing_code_server(
         )
         if not pairing_code_mod.verify_commit(nonce_b, commit_b):
             raise PairingError("revealed nonce_B does not match commit_B")
-        derived = (
-            pairing_code_mod.derive_digits(handshake_hash, nonce_a, nonce_b)
-            if pairing_format == "digits"
+        derived_prs = (
+            pairing_code_mod.derive_digits(handshake_hash, nonce_a, nonce_b).encode("ascii")
+            if pairing_format is PairingCodeFormat.DIGITS
             else pairing_code_mod.derive_qr_code(handshake_hash, nonce_a, nonce_b)
         )
-        entered_code = entered if pairing_format == "digits" else prs
-        if not cpace.verify(
-            _decode_field(confirm.payload.client_kc, "client_kc", expect_len=_KC_TAG_SIZE)
-        ) or (entered_code.encode("ascii") if isinstance(entered_code, str) else entered_code) != (
-            derived.encode("ascii") if isinstance(derived, str) else derived
+        if (
+            not cpace.verify(
+                _decode_field(confirm.payload.client_kc, "client_kc", expect_len=_KC_TAG_SIZE)
+            )
+            or prs != derived_prs
         ):
             await abort_pairing(ws, PairAbortReason.PAIRING_CODE_MISMATCH)
 

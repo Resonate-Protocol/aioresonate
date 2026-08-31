@@ -1,7 +1,5 @@
 """Tests for :mod:`aiosendspin.noise.pairing`."""
 
-# ruff: noqa: E501
-
 from __future__ import annotations
 
 import asyncio
@@ -12,7 +10,7 @@ import pytest
 from cpace import CPace, CPaceRole
 
 from aiosendspin.models.core import ServerActivateMessage, ServerActivatePayload
-from aiosendspin.models.types import Activity, PairAbortReason, PairMethod
+from aiosendspin.models.types import Activity, PairAbortReason, PairingCodeFormat, PairMethod
 from aiosendspin.noise import pairing_code as pairing_code_mod
 from aiosendspin.noise.keys import b64url_decode, b64url_encode, generate_psk, psk_id_for
 from aiosendspin.noise.models import (
@@ -58,19 +56,22 @@ def _added_records(records: Sequence[ClientPairingRecord]) -> list[ClientPairing
     return [r for r in records if r.server_id is not None]
 
 
-async def _pin() -> str:
+async def _code() -> str:
     return "000000"
 
 
-def test_pairing_attempt_verify_is_pin_only() -> None:
+def test_pairing_attempt_verify_is_code_only() -> None:
     """Verify is a pairing code-only re-authentication flag; PAIRING_PSK rejects it."""
     with pytest.raises(ValueError, match="does not support verification"):
         PairingAttempt(method=PairMethod.PAIRING_PSK, pairing_psk=generate_psk(), verify=True)
     assert PairingAttempt(
-        method=PairMethod.STATIC_PAIRING_CODE, pairing_code_provider=_pin, verify=True
+        method=PairMethod.STATIC_PAIRING_CODE, pairing_code_provider=_code, verify=True
     ).verify
     assert PairingAttempt(
-        method=PairMethod.DYNAMIC_PAIRING_CODE, pairing_code_provider=_pin, verify=True
+        method=PairMethod.DYNAMIC_PAIRING_CODE,
+        pairing_code_provider=_code,
+        verify=True,
+        pairing_format=PairingCodeFormat.DIGITS,
     ).verify
 
 
@@ -82,7 +83,7 @@ def test_pairing_attempt_pairing_psk_requires_material() -> None:
         PairingAttempt(method=PairMethod.PAIRING_PSK, pairing_psk=b"\x01" * 16)
     with pytest.raises(ValueError, match="does not use code pairing fields"):
         PairingAttempt(
-            method=PairMethod.PAIRING_PSK, pairing_psk=generate_psk(), pairing_code_provider=_pin
+            method=PairMethod.PAIRING_PSK, pairing_psk=generate_psk(), pairing_code_provider=_code
         )
     with pytest.raises(ValueError, match="does not use on_pair_pending"):
         PairingAttempt(
@@ -95,22 +96,43 @@ def test_pairing_attempt_pairing_psk_requires_material() -> None:
 @pytest.mark.parametrize(
     "method", [PairMethod.DYNAMIC_PAIRING_CODE, PairMethod.STATIC_PAIRING_CODE]
 )
-def test_pairing_attempt_pin_methods_require_pairing_code_provider(method: PairMethod) -> None:
+def test_pairing_attempt_code_methods_require_pairing_code_provider(method: PairMethod) -> None:
     """pairing-code methods must carry a pairing_code_provider and must not carry a pairing_psk."""
     with pytest.raises(ValueError, match="requires pairing_code_provider"):
         PairingAttempt(method=method)
     with pytest.raises(ValueError, match="does not use pairing_psk"):
-        PairingAttempt(method=method, pairing_code_provider=_pin, pairing_psk=generate_psk())
+        PairingAttempt(method=method, pairing_code_provider=_code, pairing_psk=generate_psk())
+
+
+def test_pairing_attempt_pairing_format_is_dynamic_only() -> None:
+    """The emission format is required for dynamic pairing code and rejected for the rest."""
+    with pytest.raises(ValueError, match="requires pairing_format"):
+        PairingAttempt(method=PairMethod.DYNAMIC_PAIRING_CODE, pairing_code_provider=_code)
+    with pytest.raises(ValueError, match="does not use pairing_format"):
+        PairingAttempt(
+            method=PairMethod.STATIC_PAIRING_CODE,
+            pairing_code_provider=_code,
+            pairing_format=PairingCodeFormat.DIGITS,
+        )
+    with pytest.raises(ValueError, match="does not use code pairing fields"):
+        PairingAttempt(
+            method=PairMethod.PAIRING_PSK,
+            pairing_psk=generate_psk(),
+            pairing_format=PairingCodeFormat.DIGITS,
+        )
 
 
 def test_pairing_attempt_languages_are_dynamic_pairing_code_only() -> None:
     """The spoken-emission hint belongs to dynamic pairing code, the other methods reject it."""
     assert PairingAttempt(
-        method=PairMethod.DYNAMIC_PAIRING_CODE, pairing_code_provider=_pin, languages=("ca", "en")
+        method=PairMethod.DYNAMIC_PAIRING_CODE,
+        pairing_code_provider=_code,
+        languages=("ca", "en"),
+        pairing_format=PairingCodeFormat.DIGITS,
     ).languages == ("ca", "en")
     with pytest.raises(ValueError, match="does not use languages"):
         PairingAttempt(
-            method=PairMethod.STATIC_PAIRING_CODE, pairing_code_provider=_pin, languages=("en",)
+            method=PairMethod.STATIC_PAIRING_CODE, pairing_code_provider=_code, languages=("en",)
         )
     with pytest.raises(ValueError, match="does not use languages"):
         PairingAttempt(method=PairMethod.PAIRING_PSK, pairing_psk=generate_psk(), languages=("en",))
@@ -120,7 +142,10 @@ def test_pairing_attempt_rejects_a_blank_language_tag() -> None:
     """A blank tag is not a BCP 47 value, so it must not reach the activation."""
     with pytest.raises(ValueError, match="blank tag"):
         PairingAttempt(
-            method=PairMethod.DYNAMIC_PAIRING_CODE, pairing_code_provider=_pin, languages=("en", "")
+            method=PairMethod.DYNAMIC_PAIRING_CODE,
+            pairing_code_provider=_code,
+            languages=("en", ""),
+            pairing_format=PairingCodeFormat.DIGITS,
         )
 
 
@@ -194,7 +219,7 @@ async def test_pairing_psk_server_times_out_without_finalize(
 async def test_static_pairing_code_server_first_message_wait_times_out(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The static-PAIRING_CODE server times out locally awaiting the client's first pairing message."""
+    """The static-pairing-code server times out awaiting the client's first message."""
     monkeypatch.setattr("aiosendspin.noise.pairing.SERVER_FIRST_MESSAGE_TIMEOUT_S", 0.05)
     _client_ews, server_ews, _client_raw, server_raw = _paired_encrypted_ws()
     server_store = InMemoryServerPairingStore()
@@ -204,7 +229,7 @@ async def test_static_pairing_code_server_first_message_wait_times_out(
             server_ews,
             handshake_hash=_HANDSHAKE_HASH,
             pairing_index=0,
-            pairing_code_provider=_pin,
+            pairing_code_provider=_code,
             client_id="client-X",
             store=server_store,
         )
@@ -271,7 +296,7 @@ async def test_gesture_wait_times_out_after_pair_pending(
             server_ews,
             handshake_hash=_HANDSHAKE_HASH,
             pairing_index=0,
-            pairing_code_provider=_pin,
+            pairing_code_provider=_code,
             client_id="client-X",
             store=server_store,
         )
@@ -332,7 +357,7 @@ async def test_repeated_pair_pending_is_protocol_error() -> None:
             server_ews,
             handshake_hash=_HANDSHAKE_HASH,
             pairing_index=0,
-            pairing_code_provider=_pin,
+            pairing_code_provider=_code,
             client_id="client-A",
             store=server_store,
         )
@@ -354,7 +379,7 @@ async def test_pair_init_index_mismatch_after_pending_is_protocol_error() -> Non
             server_ews,
             handshake_hash=_HANDSHAKE_HASH,
             pairing_index=0,
-            pairing_code_provider=_pin,
+            pairing_code_provider=_code,
             client_id="client-A",
             store=server_store,
         )
@@ -373,18 +398,18 @@ async def test_pair_pending_ahead_of_server_count_is_protocol_error() -> None:
             server_ews,
             handshake_hash=_HANDSHAKE_HASH,
             pairing_index=0,
-            pairing_code_provider=_pin,
+            pairing_code_provider=_code,
             client_id="client-A",
             store=server_store,
         )
 
 
-async def test_static_pairing_code_server_rejects_non_8_digit_operator_pin() -> None:
-    """A non-8-digit operator PAIRING_CODE aborts the server before it emits its PAKE share."""
+async def test_static_pairing_code_server_rejects_non_8_digit_operator_code() -> None:
+    """A non-8-digit operator pairing code aborts the server before it emits its PAKE share."""
     client_ews, server_ews, _client_raw, server_raw = _paired_encrypted_ws()
     server_store = InMemoryServerPairingStore()
 
-    async def bad_pin() -> str:
+    async def bad_code() -> str:
         return "12345"
 
     await client_ews.send_str(
@@ -395,7 +420,7 @@ async def test_static_pairing_code_server_rejects_non_8_digit_operator_pin() -> 
             server_ews,
             handshake_hash=_HANDSHAKE_HASH,
             pairing_index=0,
-            pairing_code_provider=bad_pin,
+            pairing_code_provider=bad_code,
             client_id="client-X",
             store=server_store,
         )
@@ -404,7 +429,7 @@ async def test_static_pairing_code_server_rejects_non_8_digit_operator_pin() -> 
 
 
 async def test_static_pairing_code_server_rejects_dynamic_only_commit_b() -> None:
-    """A static-PAIRING_CODE pair-init carrying commit_B is a protocol error."""
+    """A static-pairing-code pair-init carrying commit_B is a protocol error."""
     client_ews, server_ews, _client_raw, server_raw = _paired_encrypted_ws()
     server_store = InMemoryServerPairingStore()
 
@@ -421,7 +446,7 @@ async def test_static_pairing_code_server_rejects_dynamic_only_commit_b() -> Non
             server_ews,
             handshake_hash=_HANDSHAKE_HASH,
             pairing_index=0,
-            pairing_code_provider=_pin,
+            pairing_code_provider=_code,
             client_id="client-X",
             store=server_store,
         )
@@ -432,7 +457,7 @@ async def test_static_pairing_code_server_rejects_dynamic_only_commit_b() -> Non
 async def test_dynamic_pairing_code_server_times_out_mid_attempt(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The dynamic-PAIRING_CODE server times out locally, with no abort on the wire, if the client stalls."""
+    """The dynamic server times out locally, with no abort on the wire, if the client stalls."""
     monkeypatch.setattr("aiosendspin.noise.pairing.SERVER_ATTEMPT_TIMEOUT_S", 0.05)
     client_ews, server_ews, client_raw, _server_raw = _paired_encrypted_ws()
     server_store = InMemoryServerPairingStore()
@@ -450,8 +475,8 @@ async def test_dynamic_pairing_code_server_times_out_mid_attempt(
             server_ews,
             handshake_hash=_HANDSHAKE_HASH,
             pairing_index=0,
-            pairing_code_provider=_pin,
-            pairing_format="digits",
+            pairing_code_provider=_code,
+            pairing_format=PairingCodeFormat.DIGITS,
             client_id="client-X",
             store=server_store,
         )
@@ -555,7 +580,7 @@ _HANDSHAKE_HASH = bytes(range(32))
 
 
 async def test_dynamic_pairing_code_round_trip() -> None:
-    """A matching PAIRING_CODE authenticates the PAKE and both sides persist the record."""
+    """A matching pairing code authenticates the PAKE and both sides persist the record."""
     client_ews, server_ews, _client_raw, _server_raw = _paired_encrypted_ws()
     client_store = InMemoryClientPairingStore()
     server_store = InMemoryServerPairingStore()
@@ -572,7 +597,7 @@ async def test_dynamic_pairing_code_round_trip() -> None:
             client_ews,
             handshake_hash=_HANDSHAKE_HASH,
             pairing_index=0,
-            pairing_format="digits",
+            pairing_format=PairingCodeFormat.DIGITS,
             pairing_code_emitter=emit,
             server_id="server-X",
             store=client_store,
@@ -581,7 +606,7 @@ async def test_dynamic_pairing_code_round_trip() -> None:
             server_ews,
             handshake_hash=_HANDSHAKE_HASH,
             pairing_index=0,
-            pairing_format="digits",
+            pairing_format=PairingCodeFormat.DIGITS,
             pairing_code_provider=provide,
             client_id="client-A",
             store=server_store,
@@ -596,6 +621,47 @@ async def test_dynamic_pairing_code_round_trip() -> None:
     assert client_record.server_id == "server-X"
     assert server_record.client_id == "client-A"
     assert await server_store.record_by_client_id("client-A") == server_record
+
+
+async def test_dynamic_pairing_code_qr_round_trip() -> None:
+    """A scanned SP:1 token authenticates the PAKE and both sides persist the record."""
+    client_ews, server_ews, _client_raw, _server_raw = _paired_encrypted_ws()
+    client_store = InMemoryClientPairingStore()
+    server_store = InMemoryServerPairingStore()
+    shown: asyncio.Future[str] = asyncio.get_running_loop().create_future()
+
+    async def emit(pairing_code: str) -> None:
+        shown.set_result(pairing_code)
+
+    async def provide() -> str:
+        return await shown  # operator scans the token the client rendered
+
+    _client_ret, server_record = await asyncio.gather(
+        run_dynamic_pairing_code_client(
+            client_ews,
+            handshake_hash=_HANDSHAKE_HASH,
+            pairing_index=0,
+            pairing_format=PairingCodeFormat.QR_CODE,
+            pairing_code_emitter=emit,
+            server_id="server-X",
+            store=client_store,
+        ),
+        run_dynamic_pairing_code_server(
+            server_ews,
+            handshake_hash=_HANDSHAKE_HASH,
+            pairing_index=0,
+            pairing_format=PairingCodeFormat.QR_CODE,
+            pairing_code_provider=provide,
+            client_id="client-A",
+            store=server_store,
+        ),
+    )
+
+    assert shown.result().startswith("SP:1")
+    assert server_record is not None
+    client_record = await client_store.record_by_server_id("server-X")
+    assert client_record is not None
+    assert client_record.psk == server_record.psk
 
 
 async def test_dynamic_pairing_code_server_discards_stale_pair_init() -> None:
@@ -624,7 +690,7 @@ async def test_dynamic_pairing_code_server_discards_stale_pair_init() -> None:
             client_ews,
             handshake_hash=_HANDSHAKE_HASH,
             pairing_index=1,
-            pairing_format="digits",
+            pairing_format=PairingCodeFormat.DIGITS,
             pairing_code_emitter=emit,
             server_id="server-X",
             store=client_store,
@@ -633,7 +699,7 @@ async def test_dynamic_pairing_code_server_discards_stale_pair_init() -> None:
             server_ews,
             handshake_hash=_HANDSHAKE_HASH,
             pairing_index=1,
-            pairing_format="digits",
+            pairing_format=PairingCodeFormat.DIGITS,
             pairing_code_provider=provide,
             client_id="client-A",
             store=server_store,
@@ -656,7 +722,7 @@ async def test_pair_init_ahead_of_server_count_is_protocol_error() -> None:
             server_ews,
             handshake_hash=_HANDSHAKE_HASH,
             pairing_index=0,
-            pairing_code_provider=_pin,
+            pairing_code_provider=_code,
             client_id="client-A",
             store=server_store,
         )
@@ -676,7 +742,7 @@ async def test_dynamic_pairing_code_wrong_code_aborts_and_persists_nothing() -> 
         pairing_code = await shown
         wrong_first = (
             "2" if pairing_code[0] == "1" else "1"
-        )  # guaranteed different from the shown PAIRING_CODE
+        )  # guaranteed different from the shown pairing code
         return wrong_first + pairing_code[1:]
 
     with pytest.raises(PairingAbortError) as excinfo:
@@ -685,7 +751,7 @@ async def test_dynamic_pairing_code_wrong_code_aborts_and_persists_nothing() -> 
                 client_ews,
                 handshake_hash=_HANDSHAKE_HASH,
                 pairing_index=0,
-                pairing_format="digits",
+                pairing_format=PairingCodeFormat.DIGITS,
                 pairing_code_emitter=emit,
                 server_id="server-X",
                 store=client_store,
@@ -694,7 +760,7 @@ async def test_dynamic_pairing_code_wrong_code_aborts_and_persists_nothing() -> 
                 server_ews,
                 handshake_hash=_HANDSHAKE_HASH,
                 pairing_index=0,
-                pairing_format="digits",
+                pairing_format=PairingCodeFormat.DIGITS,
                 pairing_code_provider=provide_wrong,
                 client_id="client-A",
                 store=server_store,
@@ -728,7 +794,7 @@ async def test_client_relays_leave_pairing_without_storing() -> None:
             server_ews,
             handshake_hash=_HANDSHAKE_HASH,
             pairing_index=0,
-            pairing_format="digits",
+            pairing_format=PairingCodeFormat.DIGITS,
             pairing_code_provider=provide,
             client_id="client-A",
             store=server_store,
@@ -745,7 +811,7 @@ async def test_client_relays_leave_pairing_without_storing() -> None:
             client_ews,
             handshake_hash=_HANDSHAKE_HASH,
             pairing_index=0,
-            pairing_format="digits",
+            pairing_format=PairingCodeFormat.DIGITS,
             pairing_code_emitter=emit,
             server_id="server-X",
             store=client_store,
@@ -806,7 +872,7 @@ async def test_static_pairing_code_round_trip() -> None:
     assert await client_store.pairing_code_failure_count() == 1
 
 
-async def test_static_pairing_code_wrong_pin_aborts_and_persists_nothing() -> None:
+async def test_static_pairing_code_wrong_code_aborts_and_persists_nothing() -> None:
     """A static-pairing-code mismatch aborts and stores nothing; the counter stays untouched."""
     client_ews, server_ews, _client_raw, _server_raw = _paired_encrypted_ws()
     client_store = InMemoryClientPairingStore()
@@ -919,7 +985,7 @@ async def test_static_pairing_code_malformed_client_share_raises() -> None:
 async def _honest_pake_to_finalize(
     client_ews: EncryptedWebSocket, *, nonce_b: str | None = None
 ) -> None:
-    """Drive an honest static-PAIRING_CODE PAKE round, stopping just before ``client/pair-finalize``."""
+    """Drive an honest static PAKE round, stopping before ``client/pair-finalize``."""
     sid = b"sendspin-pair-pake-v1" + _HANDSHAKE_HASH + (0).to_bytes(4, "big")
     await client_ews.send_str(
         ClientPairInitMessage(payload=ClientPairInitPayload(pairing_index=0)).to_json()
@@ -943,7 +1009,7 @@ async def _honest_pake_to_finalize(
 
 
 async def test_static_pairing_code_server_rejects_dynamic_only_nonce_b() -> None:
-    """A static-PAIRING_CODE pair-confirm carrying nonce_B is a protocol error."""
+    """A static-pairing-code pair-confirm carrying nonce_B is a protocol error."""
     client_ews, server_ews, _client_raw, _server_raw = _paired_encrypted_ws()
     server_store = InMemoryServerPairingStore()
 
@@ -981,10 +1047,10 @@ async def test_static_pairing_code_server_rejects_dynamic_only_nonce_b() -> None
         ),
     ],
 )
-async def test_pin_finalize_without_valid_wrap_is_protocol_error(
+async def test_pairing_code_finalize_without_valid_wrap_is_protocol_error(
     payload: ClientPairFinalizePayload,
 ) -> None:
-    """A pairing-code flow finalize whose PSK isn't wrapped under the CPace output is a protocol error."""
+    """A finalize whose PSK isn't wrapped under the CPace output is a protocol error."""
     client_ews, server_ews, _client_raw, _server_raw = _paired_encrypted_ws()
     server_store = InMemoryServerPairingStore()
 
@@ -1019,10 +1085,10 @@ async def _dynamic_pake_client(
     mangle_pairing_code: bool = False,
     mangle_nonce: bool = False,
 ) -> None:
-    """Drive a dynamic-PAIRING_CODE PAKE round through ``client/pair-confirm``, optionally cheating.
+    """Drive a dynamic PAKE round through ``client/pair-confirm``, optionally cheating.
 
-    ``mangle_pairing_code`` emits (and uses) a pairing code not bound to the handshake; ``mangle_nonce``
-    reveals a nonce that does not match the commitment.
+    ``mangle_pairing_code`` emits (and uses) a pairing code not bound to the handshake;
+    ``mangle_nonce`` reveals a nonce that does not match the commitment.
     """
     sid = b"sendspin-pair-pake-v1" + _HANDSHAKE_HASH + (0).to_bytes(4, "big")
     nonce_b = pairing_code_mod.generate_nonce()
@@ -1062,7 +1128,7 @@ async def _dynamic_pake_client(
 
 
 async def test_dynamic_pairing_code_mismatched_commit_is_protocol_error() -> None:
-    """A revealed nonce_B that doesn't match commit_B is a protocol error, not pairing_code_mismatch."""
+    """A revealed nonce_B not matching commit_B is a protocol error, not a mismatch."""
     client_ews, server_ews, _client_raw, _server_raw = _paired_encrypted_ws()
     server_store = InMemoryServerPairingStore()
     pairing_code_future: asyncio.Future[str] = asyncio.get_running_loop().create_future()
@@ -1073,7 +1139,7 @@ async def test_dynamic_pairing_code_mismatched_commit_is_protocol_error() -> Non
                 server_ews,
                 handshake_hash=_HANDSHAKE_HASH,
                 pairing_index=0,
-                pairing_format="digits",
+                pairing_format=PairingCodeFormat.DIGITS,
                 pairing_code_provider=lambda: pairing_code_future,
                 client_id="client-A",
                 store=server_store,
@@ -1086,7 +1152,7 @@ async def test_dynamic_pairing_code_mismatched_commit_is_protocol_error() -> Non
 
 
 async def test_dynamic_pairing_code_unbound_code_aborts_pairing_code_mismatch() -> None:
-    """A pairing code not derived from the handshake fails the binding check with pairing_code_mismatch."""
+    """A code not derived from the handshake fails the binding check with a mismatch."""
     client_ews, server_ews, _client_raw, _server_raw = _paired_encrypted_ws()
     server_store = InMemoryServerPairingStore()
     pairing_code_future: asyncio.Future[str] = asyncio.get_running_loop().create_future()
@@ -1097,7 +1163,7 @@ async def test_dynamic_pairing_code_unbound_code_aborts_pairing_code_mismatch() 
                 server_ews,
                 handshake_hash=_HANDSHAKE_HASH,
                 pairing_index=0,
-                pairing_format="digits",
+                pairing_format=PairingCodeFormat.DIGITS,
                 pairing_code_provider=lambda: pairing_code_future,
                 client_id="client-A",
                 store=server_store,

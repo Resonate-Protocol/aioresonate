@@ -1,7 +1,5 @@
 """End-to-end management command tests: records, gating, interleaving."""
 
-# ruff: noqa: E501
-
 from __future__ import annotations
 
 import asyncio
@@ -405,7 +403,8 @@ async def test_set_pairing_config_disables_offered_method() -> None:
             await client.connect(url)
             first = await _await_connected_client(server, identity.peer_id)
             assert first.connection is not None
-            offered = {d.method for d in first.connection._client_info.supported_pair_methods or []}  # noqa: SLF001
+            info = first.connection._client_info  # noqa: SLF001
+            offered = {d.method for d in info.supported_pair_methods or []}
             assert PairMethod.PAIRING_PSK in offered
 
             conn = server.enable_management(identity.peer_id)
@@ -428,14 +427,15 @@ async def test_set_pairing_config_disables_offered_method() -> None:
             await reconnect.connect(url)
             again = await _await_connected_client(server, identity.peer_id)
             assert again.connection is not None
-            offered = {d.method for d in again.connection._client_info.supported_pair_methods or []}  # noqa: SLF001
+            info = again.connection._client_info  # noqa: SLF001
+            offered = {d.method for d in info.supported_pair_methods or []}
             assert PairMethod.PAIRING_PSK not in offered
         finally:
             await reconnect.disconnect()
 
 
 async def test_open_pairing_window_round_trip() -> None:
-    """open-pairing-window opens the client's window; without a pairing-code method it is invalid."""
+    """open-pairing-window opens the window; with no pairing-code method it is invalid."""
     server_store = InMemoryServerPairingStore()
     server = _make_server(server_store)
     identity = Identity.generate()
@@ -468,21 +468,21 @@ async def test_open_pairing_window_round_trip() -> None:
             await client.disconnect()
 
         # A client with no pairing-code method enabled rejects the request as invalid.
-        no_pin = make_sdk_client(
+        no_code = make_sdk_client(
             identity=identity,
             pairing_store=client_store,
             client_name="c",
             roles=[Roles.CONTROLLER],
         )
         try:
-            await no_pin.connect(url)
+            await no_code.connect(url)
             await _await_connected_client(server, identity.peer_id)
             conn = server.enable_management(identity.peer_id)
-            await _await_activity(no_pin, Activity.MANAGEMENT)
+            await _await_activity(no_code, Activity.MANAGEMENT)
             assert await conn.open_pairing_window() is ManagementResult.INVALID
-            assert not no_pin.pairing_window_open
+            assert not no_code.pairing_window_open
         finally:
-            await no_pin.disconnect()
+            await no_code.disconnect()
 
 
 async def test_unpair_drops_record_and_closes() -> None:

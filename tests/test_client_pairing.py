@@ -1,7 +1,5 @@
 """Tests for the client's pair-method cross-check (spec server/hello enforcement)."""
 
-# ruff: noqa: E501
-
 from __future__ import annotations
 
 import asyncio
@@ -20,6 +18,7 @@ from aiosendspin.models.types import (
     GoodbyeReason,
     MediaCommand,
     PairAbortReason,
+    PairingCodeFormat,
     PairMethod,
     Roles,
 )
@@ -167,7 +166,9 @@ async def test_pairing_window_tolerates_bare_leave_activate() -> None:
     connection._ws = ws  # type: ignore[assignment]  # noqa: SLF001
     connection._server_id = "server-1"  # noqa: SLF001
     # Gesture-gated pairing runs over the Sentinel PSK.
-    connection._noise_psk = ResolvedPsk("psk-id", b"\x00" * 32, PskCategory.SENTINEL)  # noqa: SLF001
+    connection._noise_psk = ResolvedPsk(  # noqa: SLF001
+        "psk-id", b"\x00" * 32, PskCategory.SENTINEL
+    )
 
     frame = await connection._gate_on_pairing_window(1)  # noqa: SLF001
 
@@ -192,7 +193,9 @@ def _dynamic_pairing_code_connection() -> tuple[SendspinConnection, _FakeWS]:
     connection._ws = ws  # type: ignore[assignment]  # noqa: SLF001
     connection._server_id = "server-1"  # noqa: SLF001
     connection._handshake_hash = b"\x00" * 32  # noqa: SLF001
-    connection._noise_psk = ResolvedPsk("psk-id", b"\x00" * 32, PskCategory.SENTINEL)  # noqa: SLF001
+    connection._noise_psk = ResolvedPsk(  # noqa: SLF001
+        "psk-id", b"\x00" * 32, PskCategory.SENTINEL
+    )
     return connection, ws
 
 
@@ -223,7 +226,7 @@ async def test_escalated_dynamic_attempt_is_gesture_gated() -> None:
 async def test_ungated_dynamic_attempt_starts_immediately(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A long-PAIRING_CODE, unescalated dynamic attempt runs without pair-pending or a window."""
+    """An unescalated dynamic attempt runs without pair-pending or a window."""
     connection, ws = _dynamic_pairing_code_connection()
     connection._selected_pairing = ActivatePairing(  # noqa: SLF001
         method=PairMethod.DYNAMIC_PAIRING_CODE, format="digits"
@@ -236,8 +239,22 @@ async def test_ungated_dynamic_attempt_starts_immediately(
     monkeypatch.setattr("aiosendspin.client.connection.run_dynamic_pairing_code_client", fake_run)
 
     assert await connection._run_pairing_protocol() is None  # noqa: SLF001
-    assert captured["pairing_format"] == "digits"
+    assert captured["pairing_format"] is PairingCodeFormat.DIGITS
     assert ws.sent == []  # no pair-pending
+
+
+async def test_unrecognized_activation_format_aborts() -> None:
+    """A format identifier from a newer spec revision is one this client does not offer."""
+    connection, ws = _dynamic_pairing_code_connection()
+    connection._selected_pairing = ActivatePairing(  # noqa: SLF001
+        method=PairMethod.DYNAMIC_PAIRING_CODE, format="holographic"
+    )
+
+    with pytest.raises(PairingError):
+        await connection._run_pairing_protocol()  # noqa: SLF001
+
+    abort = PairAbortMessage.from_json(ws.sent[0])
+    assert abort.payload.reason is PairAbortReason.METHOD_NOT_SUPPORTED
 
 
 async def test_gated_attempt_consumes_open_window(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -265,7 +282,7 @@ async def test_gated_attempt_consumes_open_window(monkeypatch: pytest.MonkeyPatc
 async def test_static_pairing_code_attempt_consumes_a_pre_open_window(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A static-pairing-code attempt that finds a window already open spends it rather than leaving it."""
+    """A static-pairing-code attempt spends a window that is already open."""
     connection, ws = _dynamic_pairing_code_connection()
     client = connection._client  # noqa: SLF001
     await client.pairing_store.set_static_pairing_code("12345678")
@@ -274,7 +291,9 @@ async def test_static_pairing_code_attempt_consumes_a_pre_open_window(
         replace(config, static_pairing_code_enabled=True)
     )
     client.open_pairing_window()
-    connection._selected_pairing = ActivatePairing(method=PairMethod.STATIC_PAIRING_CODE)  # noqa: SLF001
+    connection._selected_pairing = ActivatePairing(  # noqa: SLF001
+        method=PairMethod.STATIC_PAIRING_CODE
+    )
 
     async def fake_run(_ws: object, **kwargs: object) -> None:
         pass
@@ -366,7 +385,7 @@ async def test_await_pairing_window_clears_prompt_on_cancel() -> None:
 
 
 async def test_declining_static_pairing_code_drops_it_from_implemented_methods() -> None:
-    """A device with no per-device PAIRING_CODE opts out of static pairing code, which is otherwise offered."""
+    """A device with no per-device code opts out of static pairing code."""
     wired = make_sdk_client(
         client_name="C", roles=[Roles.CONTROLLER], pairing_support=PairingSupport()
     )
@@ -398,7 +417,9 @@ async def test_hello_descriptors_carry_the_wired_channels_and_locations() -> Non
         ),
     )
     connection = SendspinConnection(client)
-    connection._noise_psk = ResolvedPsk("psk-id", b"\x00" * 32, PskCategory.SENTINEL)  # noqa: SLF001
+    connection._noise_psk = ResolvedPsk(  # noqa: SLF001
+        "psk-id", b"\x00" * 32, PskCategory.SENTINEL
+    )
     hello = await connection._build_client_hello()  # noqa: SLF001
     descriptors = {d.method: d for d in hello.payload.supported_pair_methods or []}
     assert descriptors[PairMethod.DYNAMIC_PAIRING_CODE].out_channels == ["display", "speaker"]
@@ -427,7 +448,7 @@ async def test_pairing_code_speaker_receives_the_activation_languages() -> None:
     connection._selected_pairing = ActivatePairing(  # noqa: SLF001
         method=PairMethod.DYNAMIC_PAIRING_CODE, format="digits", languages=["ca", "en"]
     )
-    await connection._emit_pairing_code("123456")  # noqa: SLF001
+    await connection._emit_pairing_code("123456", pairing_format=PairingCodeFormat.DIGITS)  # noqa: SLF001
     assert spoken == [("123456", ("ca", "en"))]
     assert displayed == ["123456"]
 
@@ -527,11 +548,11 @@ async def test_leave_activate_redeclaring_pairing_runs_next_attempt() -> None:
         attempts += 1
         return "leftover"
 
-    async def fake_resolve(leftover: str | None) -> ServerActivatePayload:  # noqa: ARG001
+    async def resolve(leftover: str | None) -> ServerActivatePayload:  # noqa: ARG001
         return next(activates)
 
     connection._run_pairing_protocol = fake_protocol  # type: ignore[method-assign]  # noqa: SLF001
-    connection._resolve_pairing_activate = fake_resolve  # type: ignore[method-assign]  # noqa: SLF001
+    connection._resolve_pairing_activate = resolve  # type: ignore[method-assign]  # noqa: SLF001
 
     try:
         await connection._pair()  # noqa: SLF001

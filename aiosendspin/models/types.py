@@ -256,6 +256,13 @@ class PairMethod(Enum):
     STATIC_PAIRING_CODE = "static_pairing_code"
 
 
+class PairingCodeFormat(Enum):
+    """An emission format for the dynamic pairing code."""
+
+    DIGITS = "digits"
+    QR_CODE = "qr_code"
+
+
 class PairAbortReason(Enum):
     """Reason a pairing attempt was aborted."""
 

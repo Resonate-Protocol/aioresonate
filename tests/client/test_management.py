@@ -1,7 +1,5 @@
 """Unit tests for the client-side management command handlers."""
 
-# ruff: noqa: E501
-
 from __future__ import annotations
 
 from dataclasses import replace
@@ -351,7 +349,7 @@ async def test_set_pairing_config_invalid_static_pairing_code() -> None:
 
 
 async def test_get_pairing_config_omits_static_pairing_code_secret() -> None:
-    """get-config exposes static-PAIRING_CODE policy but never the configured PAIRING_CODE itself."""
+    """get-config exposes static-pairing-code policy but never the configured code itself."""
     store = InMemoryClientPairingStore()
     await store.set_static_pairing_code("12345678")
     payload, _ = await handle_get_pairing_config(store, implemented_pair_methods=_ALL_METHODS)
@@ -373,8 +371,8 @@ async def test_set_pairing_config_unimplemented_method_is_invalid() -> None:
     assert payload.result is ManagementResult.INVALID
 
 
-async def test_set_pairing_config_enable_static_pairing_code_without_pin_is_invalid() -> None:
-    """Enabling static_pairing_code on a client with no static pairing code configured is rejected."""
+async def test_set_pairing_config_enable_static_pairing_code_without_code_is_invalid() -> None:
+    """Enabling static_pairing_code with no code configured is rejected."""
     store = InMemoryClientPairingStore()
     payload, _ = await handle_set_pairing_config(
         store,
@@ -387,7 +385,7 @@ async def test_set_pairing_config_enable_static_pairing_code_without_pin_is_inva
     assert (await store.get_pairing_config()).static_pairing_code_enabled is False
 
 
-async def test_set_pairing_config_enable_static_pairing_code_with_pin_in_patch() -> None:
+async def test_set_pairing_config_enable_static_pairing_code_with_code_in_patch() -> None:
     """Enabling static_pairing_code is fine when the same patch provisions the pairing code."""
     store = InMemoryClientPairingStore()
     payload, _ = await handle_set_pairing_config(
@@ -446,7 +444,7 @@ async def test_set_pairing_config_record_mode_requires_shared_record() -> None:
 # --- open-pairing-window --------------------------------------------------------
 
 
-async def test_open_pairing_window_opens_when_pin_method_offered() -> None:
+async def test_open_pairing_window_opens_when_code_method_offered() -> None:
     """A client offering dynamic pairing code opens the window and reports ok."""
     store = InMemoryClientPairingStore()
     opened: list[None] = []
@@ -479,7 +477,7 @@ async def test_open_pairing_window_with_static_pairing_code_enabled() -> None:
     assert len(opened) == 1
 
 
-async def test_open_pairing_window_invalid_when_no_pin_method_enabled() -> None:
+async def test_open_pairing_window_invalid_when_no_code_method_enabled() -> None:
     """With every pairing-code method disabled or unimplemented, the request is invalid."""
     store = InMemoryClientPairingStore()
     await store.store_pairing_config(

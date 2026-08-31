@@ -18,6 +18,7 @@ from .models import (
     PairingCodeSpeaker,
     PairingSupport,
     PCMFormat,
+    QRCodeDisplay,
     ServerInfo,
 )
 from .source import SourceCapture
@@ -35,6 +36,7 @@ __all__ = [
     "PairingCodeDisplay",
     "PairingCodeSpeaker",
     "PairingSupport",
+    "QRCodeDisplay",
     "SendspinClient",
     "SendspinTimeFilter",
     "ServerInfo",

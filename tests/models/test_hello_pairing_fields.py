@@ -1,7 +1,5 @@
 """Tests for the pairing-related fields on client/hello and server/hello."""
 
-# ruff: noqa: E501
-
 from __future__ import annotations
 
 import orjson
@@ -66,8 +64,8 @@ def test_server_activate_pairing_object_round_trips() -> None:
     assert ServerActivatePayload.from_json('{"activities":["playback"]}').pairing is None
 
 
-def test_activate_pairing_omits_pairing_code_length_for_non_dynamic_methods() -> None:
-    """The pairing object omits pairing_code_length when the method carries none."""
+def test_activate_pairing_omits_format_for_non_dynamic_methods() -> None:
+    """The pairing object omits format when the method carries none."""
     payload = ServerActivatePayload(
         activities=[Activity.PAIRING],
         pairing=ActivatePairing(method=PairMethod.STATIC_PAIRING_CODE),
@@ -76,8 +74,31 @@ def test_activate_pairing_omits_pairing_code_length_for_non_dynamic_methods() ->
     assert raw["pairing"] == {"method": "static_pairing_code"}
 
 
+def test_unrecognized_descriptor_format_still_parses() -> None:
+    """A hello advertising a format from a newer spec revision parses; the reader ignores it."""
+    raw = (
+        '{"client_id":"c1","name":"Client","version":1,"supported_roles":["controller@v1"],'
+        '"supported_pair_methods":[{"method":"dynamic_pairing_code",'
+        '"formats":["digits","holographic"]}]}'
+    )
+    payload = ClientHelloPayload.from_json(raw)
+    assert payload.supported_pair_methods is not None
+    assert payload.supported_pair_methods[0].formats == ["digits", "holographic"]
+
+
+def test_unrecognized_activate_format_still_parses() -> None:
+    """An activate with a newer-revision format parses; the client aborts, not errors."""
+    raw = (
+        '{"activities":["pairing"],'
+        '"pairing":{"method":"dynamic_pairing_code","format":"holographic"}}'
+    )
+    payload = ServerActivatePayload.from_json(raw)
+    assert payload.pairing is not None
+    assert payload.pairing.format == "holographic"
+
+
 def test_activate_pairing_languages_round_trip() -> None:
-    """The dynamic-pairing-code pairing object carries the spoken-emission language hint, or omits it."""
+    """The dynamic pairing object carries the spoken-emission language hint, or omits it."""
     payload = ServerActivatePayload(
         activities=[Activity.PAIRING],
         pairing=ActivatePairing(

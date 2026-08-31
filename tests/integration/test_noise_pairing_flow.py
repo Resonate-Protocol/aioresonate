@@ -1,7 +1,5 @@
 """End-to-end Noise tests: pairing, paired playback, bad PSK, and transition mode."""
 
-# ruff: noqa: E501
-
 from __future__ import annotations
 
 import asyncio
@@ -30,6 +28,7 @@ from aiosendspin.models.types import (
     AudioCodec,
     ClientMessage,
     PairAbortReason,
+    PairingCodeFormat,
     PairMethod,
     PlayerCommand,
     Roles,
@@ -453,7 +452,7 @@ async def test_trusted_client_still_blocked_when_client_disables_unpaired() -> N
 
 
 async def test_live_pairing_dynamic_pairing_code() -> None:
-    """Operator pairs a Sentinel-idle connection via Dynamic PAIRING_CODE."""
+    """Operator pairs a Sentinel-idle connection via a dynamic pairing code."""
     server_store = InMemoryServerPairingStore()
     server = _make_server(server_store)
     client_identity = Identity.generate()
@@ -481,7 +480,9 @@ async def test_live_pairing_dynamic_pairing_code() -> None:
             conn = await _find_connection_by_client_id(server, client_identity.peer_id)
             await conn.initiate_pairing(
                 PairingAttempt(
-                    method=PairMethod.DYNAMIC_PAIRING_CODE, pairing_code_provider=provide
+                    method=PairMethod.DYNAMIC_PAIRING_CODE,
+                    pairing_code_provider=provide,
+                    pairing_format=PairingCodeFormat.DIGITS,
                 )
             )
             await _await_long_term_record(client_store, server.id)
@@ -494,7 +495,7 @@ async def test_live_pairing_dynamic_pairing_code() -> None:
             assert server_record is not None
             assert client_record.psk == server_record.psk
             assert client_record.psk_id == server_record.psk_id
-            # Both floors default to 6, so the negotiated PAIRING_CODE is 6 digits.
+            # The dynamic pairing code is always 6 digits.
             assert len(shown.result()) == 6
         finally:
             await client.disconnect()
@@ -545,6 +546,7 @@ async def test_live_pairing_dynamic_pairing_code_language_hint(
                     method=PairMethod.DYNAMIC_PAIRING_CODE,
                     pairing_code_provider=provide,
                     languages=languages,
+                    pairing_format=PairingCodeFormat.DIGITS,
                 )
             )
             await _await_long_term_record(client_store, server.id)
@@ -582,7 +584,9 @@ async def test_live_pairing_updates_connection_security_trust() -> None:
             conn = await _find_connection_by_client_id(server, client_identity.peer_id)
             await conn.initiate_pairing(
                 PairingAttempt(
-                    method=PairMethod.DYNAMIC_PAIRING_CODE, pairing_code_provider=provide
+                    method=PairMethod.DYNAMIC_PAIRING_CODE,
+                    pairing_code_provider=provide,
+                    pairing_format=PairingCodeFormat.DIGITS,
                 )
             )
             server_client = conn._client  # noqa: SLF001
@@ -595,8 +599,243 @@ async def test_live_pairing_updates_connection_security_trust() -> None:
             await client.disconnect()
 
 
-async def test_live_pairing_method_enabled_after_hello_is_rejected() -> None:
-    """A method absent from client/hello cannot be activated after management enables it."""
+async def test_live_pairing_method_enabled_after_hello_still_pairs() -> None:
+    """A method enabled after client/hello can still pair: the client arbitrates, not the hello."""
+    server_store = InMemoryServerPairingStore()
+    server = _make_server(server_store)
+    client_identity = Identity.generate()
+    client_store = InMemoryClientPairingStore()
+    config = await client_store.get_pairing_config()
+    await client_store.store_pairing_config(replace(config, dynamic_pairing_code_enabled=False))
+
+    shown: asyncio.Future[str] = asyncio.get_running_loop().create_future()
+
+    async def display(pairing_code: str | None) -> None:
+        if pairing_code is not None and not shown.done():
+            shown.set_result(pairing_code)
+
+    async def provide() -> str:
+        return await shown
+
+    async with _serve(server) as url:
+        client = make_sdk_client(
+            identity=client_identity,
+            pairing_store=client_store,
+            client_name="c",
+            roles=[Roles.CONTROLLER],
+            pairing_support=PairingSupport(pairing_code_display=display),
+        )
+        try:
+            await client.connect(url)
+            conn = await _find_connection_by_client_id(server, client_identity.peer_id)
+            assert conn._client_info is not None  # noqa: SLF001
+            info = conn._client_info  # noqa: SLF001
+            offered = {d.method for d in (info.supported_pair_methods or [])}
+            assert PairMethod.DYNAMIC_PAIRING_CODE not in offered
+
+            config = await client_store.get_pairing_config()
+            await client_store.store_pairing_config(
+                replace(config, dynamic_pairing_code_enabled=True)
+            )
+            await conn.initiate_pairing(
+                PairingAttempt(
+                    method=PairMethod.DYNAMIC_PAIRING_CODE,
+                    pairing_code_provider=provide,
+                    pairing_format=PairingCodeFormat.DIGITS,
+                )
+            )
+            await _await_long_term_record(client_store, server.id)
+        finally:
+            await client.disconnect()
+
+
+async def test_live_pairing_qr_code() -> None:
+    """Operator pairs by scanning the client-rendered token; digits channels stay silent."""
+    server_store = InMemoryServerPairingStore()
+    server = _make_server(server_store)
+    client_identity = Identity.generate()
+    client_store = InMemoryClientPairingStore()
+
+    shown: asyncio.Future[str] = asyncio.get_running_loop().create_future()
+    digits_calls: list[str | None] = []
+    spoken_calls: list[tuple[str | None, tuple[str, ...]]] = []
+
+    async def qr_display(token: str | None) -> None:
+        if token is not None and not shown.done():
+            shown.set_result(token)
+
+    async def digits_display(pairing_code: str | None) -> None:
+        digits_calls.append(pairing_code)
+
+    async def speak(pairing_code: str | None, *, languages: tuple[str, ...]) -> None:
+        spoken_calls.append((pairing_code, languages))
+
+    async def provide() -> str:
+        return await shown
+
+    async with _serve(server) as url:
+        client = make_sdk_client(
+            identity=client_identity,
+            pairing_store=client_store,
+            client_name="c",
+            roles=[Roles.CONTROLLER],
+            pairing_support=PairingSupport(
+                pairing_code_display=digits_display,
+                pairing_code_speaker=speak,
+                qr_code_display=qr_display,
+            ),
+        )
+        try:
+            await client.connect(url)
+            conn = await _find_connection_by_client_id(server, client_identity.peer_id)
+            assert conn._client_info is not None  # noqa: SLF001
+            descriptor = next(
+                d
+                for d in (conn._client_info.supported_pair_methods or [])  # noqa: SLF001
+                if d.method is PairMethod.DYNAMIC_PAIRING_CODE
+            )
+            assert descriptor.formats == ["digits", "qr_code"]
+            await conn.initiate_pairing(
+                PairingAttempt(
+                    method=PairMethod.DYNAMIC_PAIRING_CODE,
+                    pairing_code_provider=provide,
+                    pairing_format=PairingCodeFormat.QR_CODE,
+                )
+            )
+            await _await_long_term_record(client_store, server.id)
+            assert shown.result().startswith("SP:1")
+            assert digits_calls == []
+            assert spoken_calls == []
+        finally:
+            await client.disconnect()
+
+
+async def test_live_pairing_ignores_unrecognized_advertised_formats() -> None:
+    """A descriptor format from a newer spec revision is ignored; the known ones still pair."""
+    server_store = InMemoryServerPairingStore()
+    server = _make_server(server_store)
+    client_identity = Identity.generate()
+    client_store = InMemoryClientPairingStore()
+
+    shown: asyncio.Future[str] = asyncio.get_running_loop().create_future()
+
+    async def display(pairing_code: str | None) -> None:
+        if pairing_code is not None and not shown.done():
+            shown.set_result(pairing_code)
+
+    async def provide() -> str:
+        return await shown
+
+    async with _serve(server) as url:
+        client = make_sdk_client(
+            identity=client_identity,
+            pairing_store=client_store,
+            client_name="c",
+            roles=[Roles.CONTROLLER],
+            pairing_support=PairingSupport(pairing_code_display=display),
+        )
+        try:
+            await client.connect(url)
+            conn = await _find_connection_by_client_id(server, client_identity.peer_id)
+            assert conn._client_info is not None  # noqa: SLF001
+            descriptor = next(
+                d
+                for d in (conn._client_info.supported_pair_methods or [])  # noqa: SLF001
+                if d.method is PairMethod.DYNAMIC_PAIRING_CODE
+            )
+            descriptor.formats = ["holographic", "digits"]
+
+            await conn.initiate_pairing(
+                PairingAttempt(
+                    method=PairMethod.DYNAMIC_PAIRING_CODE,
+                    pairing_code_provider=provide,
+                    pairing_format=PairingCodeFormat.DIGITS,
+                )
+            )
+            await _await_long_term_record(client_store, server.id)
+        finally:
+            await client.disconnect()
+
+
+@pytest.mark.parametrize(
+    ("formats", "match"),
+    [
+        (["holographic"], "does not offer the digits"),
+        (None, "missing formats"),
+    ],
+)
+async def test_live_pairing_unusable_advertised_formats(
+    formats: list[str] | None, match: str
+) -> None:
+    """Only unknown formats offer nothing to select; a missing field is nonconformant."""
+    server_store = InMemoryServerPairingStore()
+    server = _make_server(server_store)
+    client_identity = Identity.generate()
+    client_store = InMemoryClientPairingStore()
+
+    async with _serve(server) as url:
+        client = make_sdk_client(
+            identity=client_identity,
+            pairing_store=client_store,
+            client_name="c",
+            roles=[Roles.CONTROLLER],
+            pairing_support=PairingSupport(pairing_code_display=lambda _code: asyncio.sleep(0)),
+        )
+        try:
+            await client.connect(url)
+            conn = await _find_connection_by_client_id(server, client_identity.peer_id)
+            assert conn._client_info is not None  # noqa: SLF001
+            descriptor = next(
+                d
+                for d in (conn._client_info.supported_pair_methods or [])  # noqa: SLF001
+                if d.method is PairMethod.DYNAMIC_PAIRING_CODE
+            )
+            descriptor.formats = formats
+
+            with pytest.raises(PairingError, match=match):
+                await conn.initiate_pairing(
+                    PairingAttempt(
+                        method=PairMethod.DYNAMIC_PAIRING_CODE,
+                        pairing_code_provider=lambda: asyncio.sleep(0),
+                        pairing_format=PairingCodeFormat.DIGITS,
+                    )
+                )
+        finally:
+            await client.disconnect()
+
+
+async def test_live_pairing_unoffered_format_fails_before_activation() -> None:
+    """Requesting qr_code from a digits-only client fails server-side, before any attempt."""
+    server_store = InMemoryServerPairingStore()
+    server = _make_server(server_store)
+    client_identity = Identity.generate()
+    client_store = InMemoryClientPairingStore()
+
+    async with _serve(server) as url:
+        client = make_sdk_client(
+            identity=client_identity,
+            pairing_store=client_store,
+            client_name="c",
+            roles=[Roles.CONTROLLER],
+            pairing_support=PairingSupport(pairing_code_display=lambda _code: asyncio.sleep(0)),
+        )
+        try:
+            await client.connect(url)
+            conn = await _find_connection_by_client_id(server, client_identity.peer_id)
+            with pytest.raises(PairingError, match="does not offer the qr_code"):
+                await conn.initiate_pairing(
+                    PairingAttempt(
+                        method=PairMethod.DYNAMIC_PAIRING_CODE,
+                        pairing_code_provider=lambda: asyncio.sleep(0),
+                        pairing_format=PairingCodeFormat.QR_CODE,
+                    )
+                )
+        finally:
+            await client.disconnect()
+
+
+async def test_live_pairing_unadvertised_format_client_aborts() -> None:
+    """With no descriptor to gate on, an unoffered format reaches the client, which aborts."""
     server_store = InMemoryServerPairingStore()
     server = _make_server(server_store)
     client_identity = Identity.generate()
@@ -615,21 +854,18 @@ async def test_live_pairing_method_enabled_after_hello_is_rejected() -> None:
         try:
             await client.connect(url)
             conn = await _find_connection_by_client_id(server, client_identity.peer_id)
-            assert conn._client_info is not None  # noqa: SLF001
-            offered = {d.method for d in (conn._client_info.supported_pair_methods or [])}  # noqa: SLF001
-            assert PairMethod.DYNAMIC_PAIRING_CODE not in offered
-
-            config = await client_store.get_pairing_config()
             await client_store.store_pairing_config(
                 replace(config, dynamic_pairing_code_enabled=True)
             )
-            with pytest.raises(PairingError, match="does not offer"):
+            with pytest.raises(PairingAbortError) as exc_info:
                 await conn.initiate_pairing(
                     PairingAttempt(
                         method=PairMethod.DYNAMIC_PAIRING_CODE,
                         pairing_code_provider=lambda: asyncio.sleep(0),
+                        pairing_format=PairingCodeFormat.QR_CODE,
                     )
                 )
+            assert exc_info.value.reason is PairAbortReason.METHOD_NOT_SUPPORTED
         finally:
             await client.disconnect()
 
@@ -668,7 +904,9 @@ async def test_live_pairing_method_disabled_after_hello_aborts() -> None:
             with pytest.raises(PairingAbortError) as exc_info:
                 await conn.initiate_pairing(
                     PairingAttempt(
-                        method=PairMethod.DYNAMIC_PAIRING_CODE, pairing_code_provider=provide
+                        method=PairMethod.DYNAMIC_PAIRING_CODE,
+                        pairing_code_provider=provide,
+                        pairing_format=PairingCodeFormat.DIGITS,
                     )
                 )
             assert exc_info.value.reason is PairAbortReason.METHOD_NOT_SUPPORTED
@@ -677,7 +915,9 @@ async def test_live_pairing_method_disabled_after_hello_aborts() -> None:
             )
             await conn.initiate_pairing(
                 PairingAttempt(
-                    method=PairMethod.DYNAMIC_PAIRING_CODE, pairing_code_provider=provide
+                    method=PairMethod.DYNAMIC_PAIRING_CODE,
+                    pairing_code_provider=provide,
+                    pairing_format=PairingCodeFormat.DIGITS,
                 )
             )
             await _await_long_term_record(client_store, server.id)
@@ -692,7 +932,7 @@ async def _await_left_pairing(client: SdkClient) -> None:
 
 
 async def test_live_pairing_dynamic_pairing_code_wrong_then_retry() -> None:
-    """A wrong PAIRING_CODE aborts the attempt but keeps the connection in pairing; a retry succeeds."""
+    """A wrong pairing code aborts the attempt but stays in pairing; a retry succeeds."""
     server_store = InMemoryServerPairingStore()
     server = _make_server(server_store)
     client_identity = Identity.generate()
@@ -733,7 +973,9 @@ async def test_live_pairing_dynamic_pairing_code_wrong_then_retry() -> None:
             with pytest.raises(PairingAbortError) as excinfo:
                 await conn.initiate_pairing(
                     PairingAttempt(
-                        method=PairMethod.DYNAMIC_PAIRING_CODE, pairing_code_provider=provide
+                        method=PairMethod.DYNAMIC_PAIRING_CODE,
+                        pairing_code_provider=provide,
+                        pairing_format=PairingCodeFormat.DIGITS,
                     )
                 )
             assert excinfo.value.reason is PairAbortReason.PAIRING_CODE_MISMATCH
@@ -743,10 +985,12 @@ async def test_live_pairing_dynamic_pairing_code_wrong_then_retry() -> None:
             # One attempt consumed, no re-handshake between attempts, so the index advanced.
             assert conn._pairing_index == 1  # noqa: SLF001
 
-            # Retry on the same connection: a fresh activate → a fresh attempt index and PAIRING_CODE.
+            # Retry on the same connection: fresh activate, fresh attempt index and code.
             await conn.initiate_pairing(
                 PairingAttempt(
-                    method=PairMethod.DYNAMIC_PAIRING_CODE, pairing_code_provider=provide
+                    method=PairMethod.DYNAMIC_PAIRING_CODE,
+                    pairing_code_provider=provide,
+                    pairing_format=PairingCodeFormat.DIGITS,
                 )
             )
             await _await_long_term_record(client_store, server.id)
@@ -799,7 +1043,7 @@ async def test_end_pairing_after_failed_attempt_leaves_pairing() -> None:
         if pairing_code is not None and not shown.done():
             shown.set_result(pairing_code)
 
-    async def wrong_pin() -> str:
+    async def wrong_code() -> str:
         pairing_code = await shown
         return "000000" if pairing_code != "000000" else "111111"
 
@@ -817,7 +1061,9 @@ async def test_end_pairing_after_failed_attempt_leaves_pairing() -> None:
             with pytest.raises(PairingAbortError):
                 await conn.initiate_pairing(
                     PairingAttempt(
-                        method=PairMethod.DYNAMIC_PAIRING_CODE, pairing_code_provider=wrong_pin
+                        method=PairMethod.DYNAMIC_PAIRING_CODE,
+                        pairing_code_provider=wrong_code,
+                        pairing_format=PairingCodeFormat.DIGITS,
                     )
                 )
             assert Activity.PAIRING in client.activities
@@ -870,6 +1116,7 @@ async def test_end_pairing_during_attempt_leaves_pairing() -> None:
                     PairingAttempt(
                         method=PairMethod.DYNAMIC_PAIRING_CODE,
                         pairing_code_provider=stalling_provide,
+                        pairing_format=PairingCodeFormat.DIGITS,
                     )
                 )
             )
@@ -889,7 +1136,9 @@ async def test_end_pairing_during_attempt_leaves_pairing() -> None:
             # The connection is reusable: a fresh attempt on it pairs successfully.
             await conn.initiate_pairing(
                 PairingAttempt(
-                    method=PairMethod.DYNAMIC_PAIRING_CODE, pairing_code_provider=correct_provide
+                    method=PairMethod.DYNAMIC_PAIRING_CODE,
+                    pairing_code_provider=correct_provide,
+                    pairing_format=PairingCodeFormat.DIGITS,
                 )
             )
             await _await_long_term_record(client_store, server.id)
@@ -962,7 +1211,7 @@ async def test_gesture_timeout_leaves_pairing_without_dropping(
 
 
 async def test_end_pairing_during_gesture_wait_unparks_client() -> None:
-    """end_pairing reaches a client parked in the static-PAIRING_CODE gesture wait; it re-pairs after."""
+    """end_pairing reaches a client parked in the static gesture wait; it re-pairs after."""
     server_store = InMemoryServerPairingStore()
     server = _make_server(server_store)
     client_identity = Identity.generate()
@@ -1063,6 +1312,7 @@ async def test_external_cancel_of_initiate_pairing_stays_cancelled() -> None:
                     PairingAttempt(
                         method=PairMethod.DYNAMIC_PAIRING_CODE,
                         pairing_code_provider=stalling_provide,
+                        pairing_format=PairingCodeFormat.DIGITS,
                     )
                 )
             )
@@ -1087,7 +1337,7 @@ async def _paired_client_with_stalled_success_tail(
     client_identity: Identity,
     client_store: InMemoryClientPairingStore,
 ) -> tuple[SdkClient, asyncio.Future[None], asyncio.Event]:
-    """Run a dynamic-pairing-code attempt up to the success re-handshake, which stalls until released.
+    """Run a dynamic attempt up to the success re-handshake, which stalls until released.
 
     Returns (client, attempt future, release event); the attempt has finalized on return.
     """
@@ -1125,7 +1375,11 @@ async def _paired_client_with_stalled_success_tail(
     conn._rehandshake_to = stalled_rehandshake  # type: ignore[method-assign]  # noqa: SLF001
     attempt: asyncio.Future[None] = asyncio.ensure_future(
         conn.initiate_pairing(
-            PairingAttempt(method=PairMethod.DYNAMIC_PAIRING_CODE, pairing_code_provider=provide)
+            PairingAttempt(
+                method=PairMethod.DYNAMIC_PAIRING_CODE,
+                pairing_code_provider=provide,
+                pairing_format=PairingCodeFormat.DIGITS,
+            )
         )
     )
     await entered.wait()
@@ -1314,6 +1568,7 @@ async def test_reverification_leaves_staged_and_trusted_unpaired() -> None:
                     method=PairMethod.DYNAMIC_PAIRING_CODE,
                     pairing_code_provider=provide,
                     verify=True,
+                    pairing_format=PairingCodeFormat.DIGITS,
                 ),
             )
             assert await server_store.staged_pairing_psk(client_identity.peer_id) is not None
@@ -1323,7 +1578,7 @@ async def test_reverification_leaves_staged_and_trusted_unpaired() -> None:
 
 
 async def test_live_pairing_static_pairing_code() -> None:
-    """Operator pairs a Sentinel-idle connection via Static PAIRING_CODE once the window opens."""
+    """Operator pairs a Sentinel-idle connection via a static pairing code once the window opens."""
     server_store = InMemoryServerPairingStore()
     server = _make_server(server_store)
     client_identity = Identity.generate()
@@ -1334,7 +1589,7 @@ async def test_live_pairing_static_pairing_code() -> None:
     await client_store.set_static_pairing_code("12345678")
     await (
         client_store.record_pairing_code_failure()
-    )  # dynamic-PAIRING_CODE counter; static pairing ignores it
+    )  # dynamic pairing-code counter; static pairing ignores it
 
     window_opened = asyncio.get_running_loop().create_future()
 
@@ -1378,7 +1633,7 @@ async def test_live_pairing_static_pairing_code() -> None:
 
 
 async def test_live_pairing_escalated_dynamic_pairing_code_waits_for_window() -> None:
-    """An escalated dynamic-pairing-code attempt is gesture-gated; the gesture unparks it and it pairs."""
+    """An escalated dynamic attempt is gesture-gated; the gesture unparks it and it pairs."""
     server_store = InMemoryServerPairingStore()
     server = _make_server(server_store)
     client_identity = Identity.generate()
@@ -1426,6 +1681,7 @@ async def test_live_pairing_escalated_dynamic_pairing_code_waits_for_window() ->
                     method=PairMethod.DYNAMIC_PAIRING_CODE,
                     pairing_code_provider=provide,
                     on_pair_pending=on_pending,
+                    pairing_format=PairingCodeFormat.DIGITS,
                 )
             )
             await _await_long_term_record(client_store, server.id)
@@ -1486,7 +1742,9 @@ async def test_live_pairing_pauses_writer_during_exchange() -> None:
 
             await conn.initiate_pairing(
                 PairingAttempt(
-                    method=PairMethod.DYNAMIC_PAIRING_CODE, pairing_code_provider=provide
+                    method=PairMethod.DYNAMIC_PAIRING_CODE,
+                    pairing_code_provider=provide,
+                    pairing_format=PairingCodeFormat.DIGITS,
                 )
             )
 
@@ -1514,7 +1772,8 @@ async def test_live_pairing_psk_pauses_writer_across_rehandshakes() -> None:
     class _ObservingStore(InMemoryServerPairingStore):
         async def store_record(self, record: ServerPairingRecord) -> None:
             if conn_holder and not writer_paused_mid_exchange.done():
-                writer_paused_mid_exchange.set_result(conn_holder[0]._writer_task is None)  # noqa: SLF001
+                paused = conn_holder[0]._writer_task is None  # noqa: SLF001
+                writer_paused_mid_exchange.set_result(paused)
             await super().store_record(record)
 
     server_store = _ObservingStore()
@@ -1649,6 +1908,7 @@ async def test_resync_resends_current_player_state() -> None:
                     method=PairMethod.DYNAMIC_PAIRING_CODE,
                     pairing_code_provider=provide,
                     verify=True,
+                    pairing_format=PairingCodeFormat.DIGITS,
                 )
             )
 
@@ -1673,9 +1933,9 @@ async def _await_connected_client(server: SendspinServer, client_id: str) -> Sen
 async def test_reverification_over_long_term_keeps_pairing() -> None:
     """Dynamic pairing code over a long-term PSK re-verifies without disturbing the pairing.
 
-    The server runs the dynamic-PAIRING_CODE PAKE round but leaves pairing instead of finalizing: the
-    connection stays on the *same* long-term PSK, no new record is stored on either side, and
-    roles are reactivated. A successful round resets the failure counter like any other attempt.
+    The server runs the dynamic PAKE round but leaves pairing instead of finalizing: the
+    connection stays on the *same* long-term PSK, no new record is stored on either side,
+    and roles are reactivated. A successful round resets the failure counter like any other.
     """
     server_store = InMemoryServerPairingStore()
     server = _make_server(server_store)
@@ -1731,6 +1991,7 @@ async def test_reverification_over_long_term_keeps_pairing() -> None:
                     method=PairMethod.DYNAMIC_PAIRING_CODE,
                     pairing_code_provider=provide,
                     verify=True,
+                    pairing_format=PairingCodeFormat.DIGITS,
                 ),
             )
 
@@ -1816,6 +2077,7 @@ async def test_reverification_under_escalation_is_gesture_gated() -> None:
                     method=PairMethod.DYNAMIC_PAIRING_CODE,
                     pairing_code_provider=provide,
                     verify=True,
+                    pairing_format=PairingCodeFormat.DIGITS,
                 )
             )
             assert window_opened.done()  # the attempt waited for the gesture
