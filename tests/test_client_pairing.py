@@ -18,6 +18,7 @@ from aiosendspin.models.types import (
     GoodbyeReason,
     MediaCommand,
     PairAbortReason,
+    PairingCodeFormat,
     PairMethod,
     Roles,
 )
@@ -29,8 +30,11 @@ from aiosendspin.noise.models import (
     ServerPairAuthPayload,
 )
 from aiosendspin.noise.pairing import PairingError
-from aiosendspin.noise.pin import MAX_PIN_DIGITS
-from aiosendspin.noise.trust_store import PIN_ESCALATION_THRESHOLD, PskCategory, ResolvedPsk
+from aiosendspin.noise.trust_store import (
+    PAIRING_CODE_ESCALATION_THRESHOLD,
+    PskCategory,
+    ResolvedPsk,
+)
 
 from .conftest import make_sdk_client
 
@@ -74,7 +78,7 @@ async def test_pairing_psk_method_accepted_on_pairing_psk() -> None:
 @pytest.mark.parametrize(
     ("category", "method"),
     [
-        (PskCategory.PAIRING, PairMethod.DYNAMIC_PIN),  # not offered by this client
+        (PskCategory.PAIRING, PairMethod.DYNAMIC_PAIRING_CODE),  # not offered by this client
         (PskCategory.LONG_TERM, PairMethod.PAIRING_PSK),  # not allowed for long-term PSK
         (PskCategory.PAIRING, None),  # missing when 'pairing' is in activities
     ],
@@ -82,7 +86,14 @@ async def test_pairing_psk_method_accepted_on_pairing_psk() -> None:
 async def test_invalid_pair_method_aborts(category: PskCategory, method: PairMethod | None) -> None:
     """A disallowed/unoffered/missing method sends pair/abort and raises."""
     connection, ws = _client_with(category)
-    pairing = ActivatePairing(method=method) if method is not None else None
+    pairing = (
+        ActivatePairing(
+            method=method,
+            format="digits" if method is PairMethod.DYNAMIC_PAIRING_CODE else None,
+        )
+        if method is not None
+        else None
+    )
     with pytest.raises(PairingError):
         await connection._validate_pairing(pairing)  # noqa: SLF001
     abort = PairAbortMessage.from_json(ws.sent[0])
@@ -155,7 +166,9 @@ async def test_pairing_window_tolerates_bare_leave_activate() -> None:
     connection._ws = ws  # type: ignore[assignment]  # noqa: SLF001
     connection._server_id = "server-1"  # noqa: SLF001
     # Gesture-gated pairing runs over the Sentinel PSK.
-    connection._noise_psk = ResolvedPsk("psk-id", b"\x00" * 32, PskCategory.SENTINEL)  # noqa: SLF001
+    connection._noise_psk = ResolvedPsk(  # noqa: SLF001
+        "psk-id", b"\x00" * 32, PskCategory.SENTINEL
+    )
 
     frame = await connection._gate_on_pairing_window(1)  # noqa: SLF001
 
@@ -164,100 +177,36 @@ async def test_pairing_window_tolerates_bare_leave_activate() -> None:
     assert ClientPairPendingMessage.from_json(ws.sent[0]).payload.pairing_index == 1
 
 
-def _dynamic_pin_connection() -> tuple[SendspinConnection, _FakeWS]:
-    """Build a Sentinel-keyed connection whose client offers dynamic PIN."""
+def _dynamic_pairing_code_connection() -> tuple[SendspinConnection, _FakeWS]:
+    """Build a Sentinel-keyed connection whose client offers dynamic pairing code."""
 
-    async def display(pin: str | None) -> None:
+    async def display(pairing_code: str | None) -> None:
         pass
 
     client = make_sdk_client(
         client_name="C",
         roles=[Roles.CONTROLLER],
-        pairing_support=PairingSupport(pin_display=display),
+        pairing_support=PairingSupport(pairing_code_display=display),
     )
     connection = SendspinConnection(client)
     ws = _FakeWS()
     connection._ws = ws  # type: ignore[assignment]  # noqa: SLF001
     connection._server_id = "server-1"  # noqa: SLF001
     connection._handshake_hash = b"\x00" * 32  # noqa: SLF001
-    connection._noise_psk = ResolvedPsk("psk-id", b"\x00" * 32, PskCategory.SENTINEL)  # noqa: SLF001
+    connection._noise_psk = ResolvedPsk(  # noqa: SLF001
+        "psk-id", b"\x00" * 32, PskCategory.SENTINEL
+    )
     return connection, ws
 
 
-async def _set_min_pin_length(connection: SendspinConnection, min_pin_length: int) -> None:
-    store = connection._client.pairing_store  # noqa: SLF001
-    config = await store.get_pairing_config()
-    await store.store_pairing_config(replace(config, dynamic_pin_min_length=min_pin_length))
-
-
-@pytest.mark.parametrize("pin_length", [None, 4, 13])
-async def test_dynamic_activation_with_unacceptable_pin_length_aborts(
-    pin_length: int | None,
-) -> None:
-    """A pairing activation whose pin_length undercuts the floor or the range aborts."""
-    connection, ws = _dynamic_pin_connection()
-    connection._selected_pairing = ActivatePairing(  # noqa: SLF001
-        method=PairMethod.DYNAMIC_PIN, pin_length=pin_length
-    )
-    with pytest.raises(PairingError):
-        await connection._run_pairing_protocol()  # noqa: SLF001
-    abort = PairAbortMessage.from_json(ws.sent[0])
-    assert abort.payload.reason is PairAbortReason.PIN_LENGTH_UNACCEPTABLE
-
-
-async def test_configured_minimum_below_the_spec_floor_still_rejects() -> None:
-    """The spec floor holds even for a store written outside the management API."""
-    connection, ws = _dynamic_pin_connection()
-    await _set_min_pin_length(connection, 2)
-    connection._selected_pairing = ActivatePairing(  # noqa: SLF001
-        method=PairMethod.DYNAMIC_PIN, pin_length=2
-    )
-    with pytest.raises(PairingError):
-        await connection._run_pairing_protocol()  # noqa: SLF001
-    abort = PairAbortMessage.from_json(ws.sent[0])
-    assert abort.payload.reason is PairAbortReason.PIN_LENGTH_UNACCEPTABLE
-
-
-async def test_configured_minimum_above_the_spec_ceiling_is_capped() -> None:
-    """A floor past 12 is advertised capped, since a higher one no server could satisfy."""
-    connection, _ws = _dynamic_pin_connection()
-    await _set_min_pin_length(connection, 20)
-    hello = await connection._build_client_hello()  # noqa: SLF001
-    descriptors = {d.method: d for d in hello.payload.supported_pair_methods or []}
-    assert descriptors[PairMethod.DYNAMIC_PIN].min_pin_length == MAX_PIN_DIGITS
-
-
-async def test_short_pin_attempt_is_gesture_gated() -> None:
-    """A dynamic attempt with pin_length below 6 signals pair-pending and awaits a window."""
-    connection, ws = _dynamic_pin_connection()
-    await _set_min_pin_length(connection, 4)
-    connection._selected_pairing = ActivatePairing(  # noqa: SLF001
-        method=PairMethod.DYNAMIC_PIN, pin_length=4
-    )
-    leave = ServerActivateMessage(
-        payload=ServerActivatePayload(activities=[], active_roles=[])
-    ).to_json()
-
-    async def receive() -> WSMessage:
-        return WSMessage(WSMsgType.TEXT, leave, "")
-
-    ws.receive = receive  # type: ignore[attr-defined]
-
-    frame = await connection._run_pairing_protocol()  # noqa: SLF001
-
-    assert frame == leave
-    pending = ClientPairPendingMessage.from_json(ws.sent[0])
-    assert pending.payload.pairing_index == 1
-
-
 async def test_escalated_dynamic_attempt_is_gesture_gated() -> None:
-    """Once escalated, even a long-PIN dynamic attempt signals pair-pending."""
-    connection, ws = _dynamic_pin_connection()
+    """Once escalated, even a dynamic pairing-code attempt signals pair-pending."""
+    connection, ws = _dynamic_pairing_code_connection()
     store = connection._client.pairing_store  # noqa: SLF001
-    for _ in range(PIN_ESCALATION_THRESHOLD):
-        await store.record_pin_failure()
+    for _ in range(PAIRING_CODE_ESCALATION_THRESHOLD):
+        await store.record_pairing_code_failure()
     connection._selected_pairing = ActivatePairing(  # noqa: SLF001
-        method=PairMethod.DYNAMIC_PIN, pin_length=8
+        method=PairMethod.DYNAMIC_PAIRING_CODE, format="digits"
     )
     leave = ServerActivateMessage(
         payload=ServerActivatePayload(activities=[], active_roles=[])
@@ -277,61 +226,79 @@ async def test_escalated_dynamic_attempt_is_gesture_gated() -> None:
 async def test_ungated_dynamic_attempt_starts_immediately(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A long-PIN, unescalated dynamic attempt runs without pair-pending or a window."""
-    connection, ws = _dynamic_pin_connection()
+    """An unescalated dynamic attempt runs without pair-pending or a window."""
+    connection, ws = _dynamic_pairing_code_connection()
     connection._selected_pairing = ActivatePairing(  # noqa: SLF001
-        method=PairMethod.DYNAMIC_PIN, pin_length=6
+        method=PairMethod.DYNAMIC_PAIRING_CODE, format="digits"
     )
     captured: dict[str, object] = {}
 
     async def fake_run(_ws: object, **kwargs: object) -> None:
         captured.update(kwargs)
 
-    monkeypatch.setattr("aiosendspin.client.connection.run_dynamic_pin_client", fake_run)
+    monkeypatch.setattr("aiosendspin.client.connection.run_dynamic_pairing_code_client", fake_run)
 
     assert await connection._run_pairing_protocol() is None  # noqa: SLF001
-    assert captured["pin_length"] == 6
+    assert captured["pairing_format"] is PairingCodeFormat.DIGITS
     assert ws.sent == []  # no pair-pending
+
+
+async def test_unrecognized_activation_format_aborts() -> None:
+    """A format identifier from a newer spec revision is one this client does not offer."""
+    connection, ws = _dynamic_pairing_code_connection()
+    connection._selected_pairing = ActivatePairing(  # noqa: SLF001
+        method=PairMethod.DYNAMIC_PAIRING_CODE, format="holographic"
+    )
+
+    with pytest.raises(PairingError):
+        await connection._run_pairing_protocol()  # noqa: SLF001
+
+    abort = PairAbortMessage.from_json(ws.sent[0])
+    assert abort.payload.reason is PairAbortReason.METHOD_NOT_SUPPORTED
 
 
 async def test_gated_attempt_consumes_open_window(monkeypatch: pytest.MonkeyPatch) -> None:
     """With a window already open, a gated attempt skips pair-pending and consumes it."""
-    connection, ws = _dynamic_pin_connection()
+    connection, ws = _dynamic_pairing_code_connection()
     client = connection._client  # noqa: SLF001
     store = client.pairing_store
-    for _ in range(PIN_ESCALATION_THRESHOLD):
-        await store.record_pin_failure()
+    for _ in range(PAIRING_CODE_ESCALATION_THRESHOLD):
+        await store.record_pairing_code_failure()
     client.open_pairing_window()
     connection._selected_pairing = ActivatePairing(  # noqa: SLF001
-        method=PairMethod.DYNAMIC_PIN, pin_length=8
+        method=PairMethod.DYNAMIC_PAIRING_CODE, format="digits"
     )
 
     async def fake_run(_ws: object, **kwargs: object) -> None:
         pass
 
-    monkeypatch.setattr("aiosendspin.client.connection.run_dynamic_pin_client", fake_run)
+    monkeypatch.setattr("aiosendspin.client.connection.run_dynamic_pairing_code_client", fake_run)
 
     assert await connection._run_pairing_protocol() is None  # noqa: SLF001
     assert ws.sent == []  # no pair-pending
     assert not client.pairing_window_open  # consumed by the attempt
 
 
-async def test_static_pin_attempt_consumes_a_pre_open_window(
+async def test_static_pairing_code_attempt_consumes_a_pre_open_window(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A static-PIN attempt that finds a window already open spends it rather than leaving it."""
-    connection, ws = _dynamic_pin_connection()
+    """A static-pairing-code attempt spends a window that is already open."""
+    connection, ws = _dynamic_pairing_code_connection()
     client = connection._client  # noqa: SLF001
-    await client.pairing_store.set_static_pin("12345678")
+    await client.pairing_store.set_static_pairing_code("12345678")
     config = await client.pairing_store.get_pairing_config()
-    await client.pairing_store.store_pairing_config(replace(config, static_pin_enabled=True))
+    await client.pairing_store.store_pairing_config(
+        replace(config, static_pairing_code_enabled=True)
+    )
     client.open_pairing_window()
-    connection._selected_pairing = ActivatePairing(method=PairMethod.STATIC_PIN)  # noqa: SLF001
+    connection._selected_pairing = ActivatePairing(  # noqa: SLF001
+        method=PairMethod.STATIC_PAIRING_CODE
+    )
 
     async def fake_run(_ws: object, **kwargs: object) -> None:
         pass
 
-    monkeypatch.setattr("aiosendspin.client.connection.run_static_pin_client", fake_run)
+    monkeypatch.setattr("aiosendspin.client.connection.run_static_pairing_code_client", fake_run)
 
     assert await connection._run_pairing_protocol() is None  # noqa: SLF001
     assert ws.sent == []  # no pair-pending
@@ -340,17 +307,17 @@ async def test_static_pin_attempt_consumes_a_pre_open_window(
 
 async def test_ungated_attempt_consumes_open_window(monkeypatch: pytest.MonkeyPatch) -> None:
     """An ungated attempt still spends an open window: its lifetime ends at pair-init."""
-    connection, ws = _dynamic_pin_connection()
+    connection, ws = _dynamic_pairing_code_connection()
     client = connection._client  # noqa: SLF001
     client.open_pairing_window()
     connection._selected_pairing = ActivatePairing(  # noqa: SLF001
-        method=PairMethod.DYNAMIC_PIN, pin_length=8
+        method=PairMethod.DYNAMIC_PAIRING_CODE, format="digits"
     )
 
     async def fake_run(_ws: object, **kwargs: object) -> None:
         pass
 
-    monkeypatch.setattr("aiosendspin.client.connection.run_dynamic_pin_client", fake_run)
+    monkeypatch.setattr("aiosendspin.client.connection.run_dynamic_pairing_code_client", fake_run)
 
     assert await connection._run_pairing_protocol() is None  # noqa: SLF001
     assert ws.sent == []  # no pair-pending
@@ -417,86 +384,88 @@ async def test_await_pairing_window_clears_prompt_on_cancel() -> None:
     assert prompts == [True, False]
 
 
-async def test_declining_static_pin_drops_it_from_implemented_methods() -> None:
-    """A device with no per-device PIN opts out of static PIN, which is otherwise offered."""
+async def test_declining_static_pairing_code_drops_it_from_implemented_methods() -> None:
+    """A device with no per-device code opts out of static pairing code."""
     wired = make_sdk_client(
         client_name="C", roles=[Roles.CONTROLLER], pairing_support=PairingSupport()
     )
     declined = make_sdk_client(
         client_name="C",
         roles=[Roles.CONTROLLER],
-        pairing_support=PairingSupport(offer_static_pin=False),
+        pairing_support=PairingSupport(offer_static_pairing_code=False),
     )
-    assert PairMethod.STATIC_PIN in wired.implemented_pair_methods
-    assert PairMethod.STATIC_PIN not in declined.implemented_pair_methods
+    assert PairMethod.STATIC_PAIRING_CODE in wired.implemented_pair_methods
+    assert PairMethod.STATIC_PAIRING_CODE not in declined.implemented_pair_methods
 
 
 async def test_hello_descriptors_carry_the_wired_channels_and_locations() -> None:
     """Out-channels follow the wired callbacks, and locations ride the static-secret methods."""
 
-    async def display(pin: str | None) -> None:
+    async def display(pairing_code: str | None) -> None:
         pass
 
-    async def speak(pin: str | None, *, languages: tuple[str, ...]) -> None:
+    async def speak(pairing_code: str | None, *, languages: tuple[str, ...]) -> None:
         pass
 
     client = make_sdk_client(
         client_name="C",
         roles=[Roles.CONTROLLER],
         pairing_support=PairingSupport(
-            pin_display=display,
-            pin_speaker=speak,
+            pairing_code_display=display,
+            pairing_code_speaker=speak,
             secret_locations=("device", "leaflet"),
         ),
     )
     connection = SendspinConnection(client)
-    connection._noise_psk = ResolvedPsk("psk-id", b"\x00" * 32, PskCategory.SENTINEL)  # noqa: SLF001
+    connection._noise_psk = ResolvedPsk(  # noqa: SLF001
+        "psk-id", b"\x00" * 32, PskCategory.SENTINEL
+    )
     hello = await connection._build_client_hello()  # noqa: SLF001
     descriptors = {d.method: d for d in hello.payload.supported_pair_methods or []}
-    assert descriptors[PairMethod.DYNAMIC_PIN].out_channels == ["display", "speaker"]
-    assert descriptors[PairMethod.DYNAMIC_PIN].locations is None
+    assert descriptors[PairMethod.DYNAMIC_PAIRING_CODE].out_channels == ["display", "speaker"]
+    assert descriptors[PairMethod.DYNAMIC_PAIRING_CODE].locations is None
     assert descriptors[PairMethod.PAIRING_PSK].locations == ["device", "leaflet"]
     assert descriptors[PairMethod.PAIRING_PSK].out_channels is None
 
 
-async def test_pin_speaker_receives_the_activation_languages() -> None:
+async def test_pairing_code_speaker_receives_the_activation_languages() -> None:
     """The activation's language preferences reach the spoken channel, which the display omits."""
     spoken: list[tuple[str | None, tuple[str, ...]]] = []
     displayed: list[str | None] = []
 
-    async def display(pin: str | None) -> None:
-        displayed.append(pin)
+    async def display(pairing_code: str | None) -> None:
+        displayed.append(pairing_code)
 
-    async def speak(pin: str | None, *, languages: tuple[str, ...]) -> None:
-        spoken.append((pin, languages))
+    async def speak(pairing_code: str | None, *, languages: tuple[str, ...]) -> None:
+        spoken.append((pairing_code, languages))
 
     client = make_sdk_client(
         client_name="C",
         roles=[Roles.CONTROLLER],
-        pairing_support=PairingSupport(pin_display=display, pin_speaker=speak),
+        pairing_support=PairingSupport(pairing_code_display=display, pairing_code_speaker=speak),
     )
     connection = SendspinConnection(client)
     connection._selected_pairing = ActivatePairing(  # noqa: SLF001
-        method=PairMethod.DYNAMIC_PIN, pin_length=6, languages=["ca", "en"]
+        method=PairMethod.DYNAMIC_PAIRING_CODE, format="digits", languages=["ca", "en"]
     )
-    await connection._emit_pin("123456")  # noqa: SLF001
+    await connection._emit_pairing_code("123456", pairing_format=PairingCodeFormat.DIGITS)  # noqa: SLF001
     assert spoken == [("123456", ("ca", "en"))]
     assert displayed == ["123456"]
 
 
-async def test_pin_speaker_alone_enables_dynamic_pin() -> None:
-    """A speaker-only device offers dynamic PIN, with no display wired."""
+async def test_pairing_code_speaker_alone_enables_dynamic_pairing_code() -> None:
+    """A speaker-only device offers dynamic pairing code, with no display wired."""
 
-    async def speak(pin: str | None, *, languages: tuple[str, ...]) -> None:
+    async def speak(pairing_code: str | None, *, languages: tuple[str, ...]) -> None:
         pass
 
     client = make_sdk_client(
         client_name="C",
         roles=[Roles.CONTROLLER],
-        pairing_support=PairingSupport(pin_speaker=speak),
+        pairing_support=PairingSupport(pairing_code_speaker=speak),
     )
-    assert PairMethod.DYNAMIC_PIN in client.implemented_pair_methods
-    assert client.pin_out_channels == ("speaker",)
+    assert PairMethod.DYNAMIC_PAIRING_CODE in client.implemented_pair_methods
+    assert client.pairing_code_out_channels == ("speaker",)
 
 
 async def test_one_window_admits_a_single_attempt() -> None:
@@ -568,7 +537,7 @@ async def test_leave_activate_redeclaring_pairing_runs_next_attempt() -> None:
             ServerActivatePayload(
                 activities=[Activity.PAIRING],
                 active_roles=[],
-                pairing=ActivatePairing(method=PairMethod.DYNAMIC_PIN, pin_length=6),
+                pairing=ActivatePairing(method=PairMethod.DYNAMIC_PAIRING_CODE, format="digits"),
             ),
             ServerActivatePayload(activities=[], active_roles=[]),
         ]
@@ -579,11 +548,11 @@ async def test_leave_activate_redeclaring_pairing_runs_next_attempt() -> None:
         attempts += 1
         return "leftover"
 
-    async def fake_resolve(leftover: str | None) -> ServerActivatePayload:  # noqa: ARG001
+    async def resolve(leftover: str | None) -> ServerActivatePayload:  # noqa: ARG001
         return next(activates)
 
     connection._run_pairing_protocol = fake_protocol  # type: ignore[method-assign]  # noqa: SLF001
-    connection._resolve_pairing_activate = fake_resolve  # type: ignore[method-assign]  # noqa: SLF001
+    connection._resolve_pairing_activate = resolve  # type: ignore[method-assign]  # noqa: SLF001
 
     try:
         await connection._pair()  # noqa: SLF001

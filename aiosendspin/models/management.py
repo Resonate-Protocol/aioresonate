@@ -123,12 +123,12 @@ class SetPairingPskConfig(SendspinModel):
 
 
 @dataclass
-class SetStaticPinConfig(SendspinModel):
-    """Patch for the static-PIN method; absent fields are left unchanged."""
+class SetStaticPairingCodeConfig(SendspinModel):
+    """Patch for the static-pairing-code method; absent fields are left unchanged."""
 
     enabled: bool | None = None
-    pin: str | None = None
-    """8 decimal digits; replaces the configured static PIN."""
+    code: str | None = None
+    """8 decimal digits; replaces the configured static pairing code."""
 
     class Config(SendspinConfig):
         """Absent (omitted) fields mean 'leave unchanged'."""
@@ -137,12 +137,10 @@ class SetStaticPinConfig(SendspinModel):
 
 
 @dataclass
-class SetDynamicPinConfig(SendspinModel):
-    """Patch for the dynamic-PIN method; absent fields are left unchanged."""
+class SetDynamicPairingCodeConfig(SendspinModel):
+    """Patch for the dynamic pairing-code method; absent fields are left unchanged."""
 
     enabled: bool | None = None
-    min_pin_length: int | None = None
-    """Shortest PIN length in digits the client will accept; must be in 4-12."""
 
     class Config(SendspinConfig):
         """Absent (omitted) fields mean 'leave unchanged'."""
@@ -167,8 +165,8 @@ class ManagementSetPairingConfigPayload(SendspinModel):
     """Partial patch over the client's pairing config; absent method objects are unchanged."""
 
     pairing_psk: SetPairingPskConfig | None = None
-    static_pin: SetStaticPinConfig | None = None
-    dynamic_pin: SetDynamicPinConfig | None = None
+    static_pairing_code: SetStaticPairingCodeConfig | None = None
+    dynamic_pairing_code: SetDynamicPairingCodeConfig | None = None
     record_mode: RecordModeConfig | None = None
     unpaired_access: SetUnpairedAccessConfig | None = None
 
@@ -224,10 +222,10 @@ class PairingMethodConfig(SendspinModel):
     """A method's config in a get-pairing-config result."""
 
     enabled: bool
-    min_pin_length: int | None = None
-    """For dynamic_pin only: shortest PIN length in digits the client will accept (4-12)."""
     escalated: bool | None = None
-    """For dynamic_pin only: ``true`` when the failure counter escalated it to gesture-gating."""
+    """For dynamic pairing code only: ``true`` when the failure counter
+    escalated it to gesture-gating.
+    """
 
     class Config(SendspinConfig):
         """Omit method-specific fields where they do not apply."""
@@ -243,10 +241,10 @@ class ManagementResultData(SendspinModel):
     """Present for list-records."""
     pairing_psk: PairingMethodConfig | None = None
     """Present for get-pairing-config."""
-    static_pin: PairingMethodConfig | None = None
-    """Present for get-pairing-config if the client implements static PIN."""
-    dynamic_pin: PairingMethodConfig | None = None
-    """Present for get-pairing-config if the client implements dynamic PIN."""
+    static_pairing_code: PairingMethodConfig | None = None
+    """Present for get-pairing-config if the client implements static pairing code."""
+    dynamic_pairing_code: PairingMethodConfig | None = None
+    """Present for get-pairing-config if the client implements dynamic pairing code."""
     record_mode: RecordModeConfig | None = None
     """Present for get-pairing-config."""
     unpaired_access: UnpairedAccess | None = None

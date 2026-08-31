@@ -33,7 +33,6 @@ from aiosendspin.models.core import ClientHelloPayload
 from aiosendspin.models.types import ConnectionReason, GoodbyeReason
 from aiosendspin.noise.keys import Identity
 from aiosendspin.noise.pairing import PairingAbortError, PairingAttempt, PairingTimeoutError
-from aiosendspin.noise.pin import DEFAULT_MIN_PIN_DIGITS, MAX_PIN_DIGITS, MIN_PIN_DIGITS
 from aiosendspin.noise.trust_store import ServerPairingStore, TrustedUnpairedClient
 from aiosendspin.util import create_task, get_local_ip
 
@@ -156,7 +155,6 @@ class SendspinServer:
         pairing_store: ServerPairingStore,
         allow_unencrypted: bool = False,
         allow_noncompliant_clients: bool = True,
-        min_pin_length: int = DEFAULT_MIN_PIN_DIGITS,
         clock: Clock | None = None,
     ) -> None:
         """Initialize a Sendspin server instance.
@@ -174,12 +172,8 @@ class SendspinServer:
                 built against pre-1.0 spec drafts when True, reject the client when
                 False. Tolerance is transitional and will be removed in a future
                 version.
-            min_pin_length: Minimum dynamic-PIN length the server accepts.
             clock: Clock source, or None for the default monotonic clock.
         """
-        if not MIN_PIN_DIGITS <= min_pin_length <= MAX_PIN_DIGITS:
-            msg = f"min_pin_length must be in [{MIN_PIN_DIGITS}, {MAX_PIN_DIGITS}]"
-            raise ValueError(msg)
         self._loop = loop
         self._identity = identity
         self._id = identity.peer_id
@@ -187,7 +181,6 @@ class SendspinServer:
         self._pairing_store = pairing_store
         self._allow_unencrypted = allow_unencrypted
         self._allow_noncompliant_clients = allow_noncompliant_clients
-        self._min_pin_length = min_pin_length
         self._clock: Clock = clock or RawMonotonicClock()
 
         self._clients: dict[str, SendspinClient] = {}
@@ -276,11 +269,6 @@ class SendspinServer:
     def name(self) -> str:
         """Return the human-readable server name."""
         return self._name
-
-    @property
-    def min_pin_length(self) -> int:
-        """Server's operator-configured minimum dynamic-PIN length in digits."""
-        return self._min_pin_length
 
     @property
     def clients(self) -> list[SendspinClient]:

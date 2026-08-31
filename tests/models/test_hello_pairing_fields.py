@@ -54,42 +54,69 @@ def test_server_activate_pairing_object_round_trips() -> None:
     """server/activate carries the pairing object when present, else omits it."""
     payload = ServerActivatePayload(
         activities=[Activity.PAIRING],
-        pairing=ActivatePairing(method=PairMethod.DYNAMIC_PIN, pin_length=6),
+        pairing=ActivatePairing(method=PairMethod.DYNAMIC_PAIRING_CODE, format="digits"),
     )
     restored = ServerActivatePayload.from_json(payload.to_json())
-    assert restored.pairing == ActivatePairing(method=PairMethod.DYNAMIC_PIN, pin_length=6)
+    assert restored.pairing == ActivatePairing(
+        method=PairMethod.DYNAMIC_PAIRING_CODE, format="digits"
+    )
     assert restored.activities == [Activity.PAIRING]
     assert ServerActivatePayload.from_json('{"activities":["playback"]}').pairing is None
 
 
-def test_activate_pairing_omits_pin_length_for_non_dynamic_methods() -> None:
-    """The pairing object omits pin_length when the method carries none."""
+def test_activate_pairing_omits_format_for_non_dynamic_methods() -> None:
+    """The pairing object omits format when the method carries none."""
     payload = ServerActivatePayload(
         activities=[Activity.PAIRING],
-        pairing=ActivatePairing(method=PairMethod.STATIC_PIN),
+        pairing=ActivatePairing(method=PairMethod.STATIC_PAIRING_CODE),
     )
     raw = orjson.loads(payload.to_json())
-    assert raw["pairing"] == {"method": "static_pin"}
+    assert raw["pairing"] == {"method": "static_pairing_code"}
+
+
+def test_unrecognized_descriptor_format_still_parses() -> None:
+    """A hello advertising a format from a newer spec revision parses; the reader ignores it."""
+    raw = (
+        '{"client_id":"c1","name":"Client","version":1,"supported_roles":["controller@v1"],'
+        '"supported_pair_methods":[{"method":"dynamic_pairing_code",'
+        '"formats":["digits","holographic"]}]}'
+    )
+    payload = ClientHelloPayload.from_json(raw)
+    assert payload.supported_pair_methods is not None
+    assert payload.supported_pair_methods[0].formats == ["digits", "holographic"]
+
+
+def test_unrecognized_activate_format_still_parses() -> None:
+    """An activate with a newer-revision format parses; the client aborts, not errors."""
+    raw = (
+        '{"activities":["pairing"],'
+        '"pairing":{"method":"dynamic_pairing_code","format":"holographic"}}'
+    )
+    payload = ServerActivatePayload.from_json(raw)
+    assert payload.pairing is not None
+    assert payload.pairing.format == "holographic"
 
 
 def test_activate_pairing_languages_round_trip() -> None:
-    """The dynamic-PIN pairing object carries the spoken-emission language hint, or omits it."""
+    """The dynamic pairing object carries the spoken-emission language hint, or omits it."""
     payload = ServerActivatePayload(
         activities=[Activity.PAIRING],
         pairing=ActivatePairing(
-            method=PairMethod.DYNAMIC_PIN, pin_length=6, languages=["ca", "es", "en"]
+            method=PairMethod.DYNAMIC_PAIRING_CODE, format="digits", languages=["ca", "es", "en"]
         ),
     )
     restored = ServerActivatePayload.from_json(payload.to_json())
     assert restored.pairing is not None
     assert restored.pairing.languages == ["ca", "es", "en"]
-    bare = ActivatePairing(method=PairMethod.DYNAMIC_PIN, pin_length=6)
+    bare = ActivatePairing(method=PairMethod.DYNAMIC_PAIRING_CODE, format="digits")
     assert "languages" not in orjson.loads(bare.to_json())
 
 
 def test_pair_method_descriptor_locations_round_trip() -> None:
     """A static-secret descriptor carries the locations hint, others omit it."""
-    descriptor = PairMethodDescriptor(method=PairMethod.STATIC_PIN, locations=["device", "leaflet"])
+    descriptor = PairMethodDescriptor(
+        method=PairMethod.STATIC_PAIRING_CODE, locations=["device", "leaflet"]
+    )
     restored = PairMethodDescriptor.from_json(descriptor.to_json())
     assert restored.locations == ["device", "leaflet"]
     bare = PairMethodDescriptor(method=PairMethod.PAIRING_PSK)

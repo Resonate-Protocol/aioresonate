@@ -116,12 +116,12 @@ class PairMethodDescriptor(SendspinModel):
 
     method: PairMethod
     """The pairing method identifier."""
+    formats: list[str] | None = None
+    """For dynamic_pairing_code only: emission formats offered by the client."""
     out_channels: list[str] | None = None
-    """For dynamic_pin only: channels through which the PIN is conveyed to the operator."""
-    min_pin_length: int | None = None
-    """For dynamic_pin only: shortest PIN length in digits the client will accept (4-12)."""
+    """For dynamic_pairing_code only: channels through which the code is conveyed."""
     locations: list[str] | None = None
-    """For static_pin and pairing_psk only: where the operator finds the configured secret."""
+    """For static_pairing_code and pairing_psk only: where the operator finds the secret."""
 
     class Config(SendspinConfig):
         """Omit method-specific fields where they do not apply."""
@@ -450,11 +450,10 @@ class ActivatePairing(SendspinModel):
 
     method: PairMethod
     """Pairing method the server picked, drawn from the client's supported_pair_methods."""
-    pin_length: int | None = None
-    """The dynamic PIN length for this session. Required for dynamic_pin; absent otherwise."""
+    format: str | None = None
+    """The dynamic pairing-code emission format; required for dynamic_pairing_code."""
     languages: list[str] | None = None
-    """BCP 47 tags in descending operator preference, for spoken PIN emission. Optional
-    for dynamic_pin; absent otherwise."""
+    """BCP 47 tags in descending operator preference, for spoken pairing-code emission."""
 
     class Config(SendspinConfig):
         """Config for parsing json messages."""

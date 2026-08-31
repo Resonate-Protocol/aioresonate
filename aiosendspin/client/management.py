@@ -24,7 +24,6 @@ from aiosendspin.models.management import (
 )
 from aiosendspin.models.types import ManagementResult, PairMethod
 from aiosendspin.noise.keys import PSK_SIZE, b64url_decode, psk_id_for
-from aiosendspin.noise.pin import MAX_PIN_DIGITS, MIN_PIN_DIGITS
 from aiosendspin.noise.trust_store import (
     ClientPairingRecord,
     PairingPsk,
@@ -38,14 +37,14 @@ if TYPE_CHECKING:
         ManagementAddRecordPayload,
         ManagementRemoveRecordPayload,
         ManagementSetPairingConfigPayload,
-        SetDynamicPinConfig,
+        SetDynamicPairingCodeConfig,
         SetPairingPskConfig,
-        SetStaticPinConfig,
+        SetStaticPairingCodeConfig,
         SetUnpairedAccessConfig,
     )
     from aiosendspin.noise.trust_store import ClientPairingStore
 
-_STATIC_PIN_DIGITS = 8
+_STATIC_CODE_DIGITS = 8
 
 
 class ManagementEffect(Enum):
@@ -137,18 +136,17 @@ async def handle_get_pairing_config(
     config = await store.get_pairing_config()
     data = ManagementResultData(
         pairing_psk=PairingMethodConfig(enabled=config.pairing_psk_enabled),
-        static_pin=(
-            PairingMethodConfig(enabled=config.static_pin_enabled)
-            if PairMethod.STATIC_PIN in implemented_pair_methods
+        static_pairing_code=(
+            PairingMethodConfig(enabled=config.static_pairing_code_enabled)
+            if PairMethod.STATIC_PAIRING_CODE in implemented_pair_methods
             else None
         ),
-        dynamic_pin=(
+        dynamic_pairing_code=(
             PairingMethodConfig(
-                enabled=config.dynamic_pin_enabled,
-                min_pin_length=config.dynamic_pin_min_length,
-                escalated=await store.is_pin_escalated(),
+                enabled=config.dynamic_pairing_code_enabled,
+                escalated=await store.is_pairing_code_escalated(),
             )
-            if PairMethod.DYNAMIC_PIN in implemented_pair_methods
+            if PairMethod.DYNAMIC_PAIRING_CODE in implemented_pair_methods
             else None
         ),
         record_mode=RecordModeConfig(psk_id=config.record_mode_psk_id),
@@ -166,8 +164,8 @@ async def handle_set_pairing_config(
     """Apply a validated config patch (enabled flags, secrets, record mode, unpaired access)."""
     methods = (
         (PairMethod.PAIRING_PSK, payload.pairing_psk),
-        (PairMethod.STATIC_PIN, payload.static_pin),
-        (PairMethod.DYNAMIC_PIN, payload.dynamic_pin),
+        (PairMethod.STATIC_PAIRING_CODE, payload.static_pairing_code),
+        (PairMethod.DYNAMIC_PAIRING_CODE, payload.dynamic_pairing_code),
     )
     # 1. A patch on a method the client does not implement is invalid.
     if any(cfg is not None and method not in implemented_pair_methods for method, cfg in methods):
@@ -179,24 +177,18 @@ async def handle_set_pairing_config(
         if psk_bytes is None:
             return _result(ManagementResult.INVALID), ManagementEffect.NONE
     if (
-        payload.static_pin is not None
-        and payload.static_pin.pin is not None
-        and not _valid_static_pin(payload.static_pin.pin)
+        payload.static_pairing_code is not None
+        and payload.static_pairing_code.code is not None
+        and not _valid_static_pairing_code(payload.static_pairing_code.code)
     ):
         return _result(ManagementResult.INVALID), ManagementEffect.NONE
     if (
-        payload.static_pin is not None
-        and payload.static_pin.enabled is True
-        and payload.static_pin.pin is None
-        and await store.static_pin() is None
+        payload.static_pairing_code is not None
+        and payload.static_pairing_code.enabled is True
+        and payload.static_pairing_code.code is None
+        and await store.static_pairing_code() is None
     ):
-        # Enabling static_pin with no static PIN configured is invalid.
-        return _result(ManagementResult.INVALID), ManagementEffect.NONE
-    if (
-        payload.dynamic_pin is not None
-        and payload.dynamic_pin.min_pin_length is not None
-        and not MIN_PIN_DIGITS <= payload.dynamic_pin.min_pin_length <= MAX_PIN_DIGITS
-    ):
+        # Enabling static_pairing_code with no static pairing code configured is invalid.
         return _result(ManagementResult.INVALID), ManagementEffect.NONE
     if payload.record_mode is not None and not await _is_shared_record(
         store, payload.record_mode.psk_id
@@ -212,27 +204,21 @@ async def handle_set_pairing_config(
             pairing_psk_enabled=_merge_enabled(
                 payload.pairing_psk, current=config.pairing_psk_enabled
             ),
-            static_pin_enabled=_merge_enabled(
-                payload.static_pin, current=config.static_pin_enabled
+            static_pairing_code_enabled=_merge_enabled(
+                payload.static_pairing_code, current=config.static_pairing_code_enabled
             ),
-            dynamic_pin_enabled=_merge_enabled(
-                payload.dynamic_pin, current=config.dynamic_pin_enabled
+            dynamic_pairing_code_enabled=_merge_enabled(
+                payload.dynamic_pairing_code, current=config.dynamic_pairing_code_enabled
             ),
             unpaired_access_enabled=_merge_enabled(
                 payload.unpaired_access, current=config.unpaired_access_enabled
-            ),
-            dynamic_pin_min_length=(
-                payload.dynamic_pin.min_pin_length
-                if payload.dynamic_pin is not None
-                and payload.dynamic_pin.min_pin_length is not None
-                else config.dynamic_pin_min_length
             ),
         )
     )
     if psk_bytes is not None:
         await store.set_pairing_psk(PairingPsk(psk_id=psk_id_for(psk_bytes), psk=psk_bytes))
-    if payload.static_pin is not None and payload.static_pin.pin is not None:
-        await store.set_static_pin(payload.static_pin.pin)
+    if payload.static_pairing_code is not None and payload.static_pairing_code.code is not None:
+        await store.set_static_pairing_code(payload.static_pairing_code.code)
     return _result(ManagementResult.OK), ManagementEffect.NONE
 
 
@@ -244,13 +230,17 @@ async def handle_open_pairing_window(
 ) -> tuple[ManagementResultPayload, ManagementEffect]:
     """Open a pairing window in place of the operator gesture.
 
-    Invalid when no PIN method is enabled; a no-op ``ok`` when a window is
+    Invalid when no pairing-code method is enabled; a no-op ``ok`` when a window is
     already open (``open_window`` is expected to absorb that case).
     """
     config = await store.get_pairing_config()
-    static_enabled = PairMethod.STATIC_PIN in implemented_pair_methods and config.static_pin_enabled
+    static_enabled = (
+        PairMethod.STATIC_PAIRING_CODE in implemented_pair_methods
+        and config.static_pairing_code_enabled
+    )
     dynamic_enabled = (
-        PairMethod.DYNAMIC_PIN in implemented_pair_methods and config.dynamic_pin_enabled
+        PairMethod.DYNAMIC_PAIRING_CODE in implemented_pair_methods
+        and config.dynamic_pairing_code_enabled
     )
     if not (static_enabled or dynamic_enabled):
         return _result(ManagementResult.INVALID), ManagementEffect.NONE
@@ -302,15 +292,19 @@ def _decode_psk(value: str) -> bytes | None:
     return psk if len(psk) == PSK_SIZE else None
 
 
-def _valid_static_pin(pin: str) -> bool:
-    """Return whether ``pin`` is exactly 8 ASCII decimal digits."""
-    return len(pin) == _STATIC_PIN_DIGITS and pin.isascii() and pin.isdigit()
+def _valid_static_pairing_code(pairing_code: str) -> bool:
+    """Return whether ``pairing_code`` is exactly 8 ASCII decimal digits."""
+    return (
+        len(pairing_code) == _STATIC_CODE_DIGITS
+        and pairing_code.isascii()
+        and pairing_code.isdigit()
+    )
 
 
 def _merge_enabled(
     cfg: SetPairingPskConfig
-    | SetStaticPinConfig
-    | SetDynamicPinConfig
+    | SetStaticPairingCodeConfig
+    | SetDynamicPairingCodeConfig
     | SetUnpairedAccessConfig
     | None,
     *,

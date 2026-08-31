@@ -22,14 +22,14 @@ from .keys import (
     generate_psk,
     psk_id_for,
 )
-from .pin import DEFAULT_MIN_PIN_DIGITS, is_valid_static_pin
+from .pairing_code import is_valid_static_pairing_code
 
-# Dynamic-PIN pairing escalates to gesture-gating when its failure counter reaches
+# Dynamic pairing-code pairing escalates to gesture-gating when its failure counter reaches
 # this value.
-PIN_ESCALATION_THRESHOLD: Final[int] = 10
+PAIRING_CODE_ESCALATION_THRESHOLD: Final[int] = 5
 
 __all__ = [
-    "PIN_ESCALATION_THRESHOLD",
+    "PAIRING_CODE_ESCALATION_THRESHOLD",
     "ClientPairingConfig",
     "ClientPairingRecord",
     "ClientPairingStore",
@@ -58,7 +58,7 @@ class PskCategory(StrEnum):
     PAIRING = "pairing"
     """A Pairing PSK distributed out-of-band to admit a new client."""
     SENTINEL = "sentinel"
-    """The published Sentinel PSK — used for PIN pairing and unpaired playback."""
+    """The published Sentinel PSK — used for pairing-code pairing and unpaired playback."""
 
 
 class StorageExhaustedError(Exception):
@@ -186,10 +186,9 @@ class ClientPairingConfig:
     """Pairing policy a client persists."""
 
     pairing_psk_enabled: bool = True
-    dynamic_pin_enabled: bool = True
-    static_pin_enabled: bool = False
+    dynamic_pairing_code_enabled: bool = True
+    static_pairing_code_enabled: bool = False
     unpaired_access_enabled: bool = False
-    dynamic_pin_min_length: int = DEFAULT_MIN_PIN_DIGITS
     record_mode_psk_id: str
     """Shared-PSK record used as the storage-exhaustion fallback when pairing."""
 
@@ -197,10 +196,9 @@ class ClientPairingConfig:
         """Serialize to a JSON-friendly dict."""
         return {
             "pairing_psk_enabled": self.pairing_psk_enabled,
-            "dynamic_pin_enabled": self.dynamic_pin_enabled,
-            "static_pin_enabled": self.static_pin_enabled,
+            "dynamic_pin_enabled": self.dynamic_pairing_code_enabled,
+            "static_pin_enabled": self.static_pairing_code_enabled,
             "unpaired_access_enabled": self.unpaired_access_enabled,
-            "dynamic_pin_min_length": self.dynamic_pin_min_length,
             "record_mode_psk_id": self.record_mode_psk_id,
         }
 
@@ -209,12 +207,9 @@ class ClientPairingConfig:
         """Reconstruct from ``to_dict`` output (defaults for absent keys)."""
         return cls(
             pairing_psk_enabled=_bool(data, "pairing_psk_enabled", default=True),
-            dynamic_pin_enabled=_bool(data, "dynamic_pin_enabled", default=True),
-            static_pin_enabled=_bool(data, "static_pin_enabled", default=False),
+            dynamic_pairing_code_enabled=_bool(data, "dynamic_pin_enabled", default=True),
+            static_pairing_code_enabled=_bool(data, "static_pin_enabled", default=False),
             unpaired_access_enabled=_bool(data, "unpaired_access_enabled", default=False),
-            dynamic_pin_min_length=_int(
-                data, "dynamic_pin_min_length", default=DEFAULT_MIN_PIN_DIGITS
-            ),
             record_mode_psk_id=_str(data, "record_mode_psk_id"),
         )
 
@@ -415,32 +410,35 @@ class ClientPairingStore(ABC):
         """Return the accepted Pairing PSK, if any."""
 
     @abstractmethod
-    async def set_static_pin(self, pin: str) -> None:
-        """Set the configured static PIN (8 decimal digits), replacing any existing one."""
+    async def set_static_pairing_code(self, pairing_code: str) -> None:
+        """Set the configured static pairing code (8 decimal digits), replacing any existing one."""
 
     @abstractmethod
-    async def clear_static_pin(self) -> None:
-        """Remove the configured static PIN (no-op if absent)."""
+    async def clear_static_pairing_code(self) -> None:
+        """Remove the configured static pairing code (no-op if absent)."""
 
     @abstractmethod
-    async def static_pin(self) -> str | None:
-        """Return the configured static PIN, if any."""
+    async def static_pairing_code(self) -> str | None:
+        """Return the configured static pairing code, if any."""
 
     @abstractmethod
-    async def pin_failure_count(self) -> int:
-        """Return the persisted dynamic-PIN failure count."""
+    async def pairing_code_failure_count(self) -> int:
+        """Return the persisted dynamic-pairing-code failure count."""
 
     @abstractmethod
-    async def record_pin_failure(self) -> int:
-        """Increment the dynamic-PIN failure counter and return the new count."""
+    async def record_pairing_code_failure(self) -> int:
+        """Increment the dynamic-pairing-code failure counter and return the new count."""
 
     @abstractmethod
-    async def reset_pin_failures(self) -> None:
-        """Reset the dynamic-PIN failure counter to zero (on ``server_kc`` success)."""
+    async def reset_pairing_code_failures(self) -> None:
+        """Reset the dynamic-pairing-code failure counter to zero (on ``server_kc`` success)."""
 
     @abstractmethod
-    async def is_pin_escalated(self) -> bool:
-        """Return whether dynamic PIN is escalated to gesture-gating (count at threshold)."""
+    async def is_pairing_code_escalated(self) -> bool:
+        """Return whether dynamic pairing code is escalated to gesture-gating.
+
+        Escalation begins when the failure count reaches the threshold.
+        """
 
     @abstractmethod
     async def get_last_playback_server_id(self) -> str | None:
@@ -639,7 +637,7 @@ class _ClientPairingStoreBase(ClientPairingStore):
         """Start with empty state; subclasses provision the shared-PSK fallback record."""
         self._records: dict[str, ClientPairingRecord] = {}
         self._pairing_psk: PairingPsk | None = None
-        self._static_pin: str | None = None
+        self._static_pairing_code: str | None = None
         self._pin_failures = 0
         self._pairing_config: ClientPairingConfig | None = None
         self._last_playback_server_id: str | None = None
@@ -729,42 +727,42 @@ class _ClientPairingStoreBase(ClientPairingStore):
         """Return the accepted Pairing PSK, if any."""
         return self._pairing_psk
 
-    async def set_static_pin(self, pin: str) -> None:
-        """Set the configured static PIN, replacing any existing one."""
-        if not is_valid_static_pin(pin):
-            raise ValueError("static PIN must be exactly 8 decimal digits")
-        self._static_pin = pin
+    async def set_static_pairing_code(self, pairing_code: str) -> None:
+        """Set the configured static pairing code, replacing any existing one."""
+        if not is_valid_static_pairing_code(pairing_code):
+            raise ValueError("static pairing code must be exactly 8 decimal digits")
+        self._static_pairing_code = pairing_code
         await self._save()
 
-    async def clear_static_pin(self) -> None:
-        """Remove the configured static PIN (no-op if absent)."""
-        if self._static_pin is not None:
-            self._static_pin = None
+    async def clear_static_pairing_code(self) -> None:
+        """Remove the configured static pairing code (no-op if absent)."""
+        if self._static_pairing_code is not None:
+            self._static_pairing_code = None
             await self._save()
 
-    async def static_pin(self) -> str | None:
-        """Return the configured static PIN, if any."""
-        return self._static_pin
+    async def static_pairing_code(self) -> str | None:
+        """Return the configured static pairing code, if any."""
+        return self._static_pairing_code
 
-    async def pin_failure_count(self) -> int:
-        """Return the dynamic-PIN failure count."""
+    async def pairing_code_failure_count(self) -> int:
+        """Return the dynamic-pairing-code failure count."""
         return self._pin_failures
 
-    async def record_pin_failure(self) -> int:
-        """Increment the dynamic-PIN failure counter and return the new count."""
+    async def record_pairing_code_failure(self) -> int:
+        """Increment the dynamic-pairing-code failure counter and return the new count."""
         self._pin_failures += 1
         await self._save()
         return self._pin_failures
 
-    async def reset_pin_failures(self) -> None:
-        """Reset the dynamic-PIN failure counter to zero (no-op if already zero)."""
+    async def reset_pairing_code_failures(self) -> None:
+        """Reset the dynamic-pairing-code failure counter to zero (no-op if already zero)."""
         if self._pin_failures:
             self._pin_failures = 0
             await self._save()
 
-    async def is_pin_escalated(self) -> bool:
-        """Return whether dynamic PIN has escalated to gesture-gating."""
-        return self._pin_failures >= PIN_ESCALATION_THRESHOLD
+    async def is_pairing_code_escalated(self) -> bool:
+        """Return whether dynamic pairing code has escalated to gesture-gating."""
+        return self._pin_failures >= PAIRING_CODE_ESCALATION_THRESHOLD
 
 
 class InMemoryClientPairingStore(_ClientPairingStoreBase):
@@ -808,11 +806,12 @@ class FileClientPairingStore(_ClientPairingStoreBase):
         self._pairing_config = ClientPairingConfig.from_dict(_object(data, "pairing_config"))
         raw_psk = data.get("pairing_psk")
         self._pairing_psk = PairingPsk.from_dict(raw_psk) if isinstance(raw_psk, Mapping) else None
-        self._static_pin = _opt_str(data, "static_pin")
+        self._static_pairing_code = _opt_str(data, "static_pin")
         raw_failures = data.get("pin_failures", 0)
         if isinstance(raw_failures, Mapping):
-            # Pre-escalation format kept per-method counters; carry over dynamic_pin's.
-            raw_failures = raw_failures.get(PairMethod.DYNAMIC_PIN.value, 0)
+            # Pre-escalation format kept per-method counters; carry over the
+            # dynamic pairing-code counter.
+            raw_failures = raw_failures.get(PairMethod.DYNAMIC_PAIRING_CODE.value, 0)
         if isinstance(raw_failures, bool) or not isinstance(raw_failures, int):
             msg = "pairing store 'pin_failures' must be an integer"
             raise TypeError(msg)
@@ -835,7 +834,7 @@ class FileClientPairingStore(_ClientPairingStoreBase):
                 "records": {psk_id: r.to_dict() for psk_id, r in self._records.items()},
                 "pairing_config": self._pairing_config.to_dict(),
                 "pairing_psk": self._pairing_psk.to_dict() if self._pairing_psk else None,
-                "static_pin": self._static_pin,
+                "static_pin": self._static_pairing_code,
                 "pin_failures": self._pin_failures,
                 "last_playback_server_id": self._last_playback_server_id,
             }
