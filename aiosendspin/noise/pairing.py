@@ -54,7 +54,9 @@ _PAKE_AD_CLIENT = b"client"  # CPace ADb (responder)
 _PAKE_SHARE_SIZE = 32
 _KC_TAG_SIZE = 64
 _PSK_WRAP_LABEL = b"sendspin-pair-psk-wrap-v1"
-_PSK_WRAP_NONCE = bytes(12)
+_NONCE_WRAP_LABEL = b"sendspin-pair-nonce-wrap-v1"
+_WRAP_NONCE = bytes(12)  # zero nonce is safe: each wrap key is per-field and used once
+_AEAD_TAG_SIZE = 16
 _CLIENT_ATTEMPT_TIMEOUT_S: float = 120.0
 # Server bounds raise PairingTimeoutError, sending no pairing message: no pair/abort reason is
 # available to a server for its own timeout. They exceed the client's attempt timeout so the
@@ -260,11 +262,14 @@ async def run_dynamic_pairing_code_client(
             await store.record_pairing_code_failure()
             await abort_pairing(ws, PairAbortReason.PAIRING_CODE_MISMATCH)
         await store.reset_pairing_code_failures()
+        wrapped_nonce = _wrap_aead(
+            ws.session.suite, _wrap_key(_NONCE_WRAP_LABEL, sid, cpace)
+        ).encrypt(_WRAP_NONCE, nonce_b, None)
         await ws.send_str(
             ClientPairConfirmMessage(
                 payload=ClientPairConfirmPayload(
                     client_kc=b64url_encode(cpace.tag()),
-                    nonce_B=b64url_encode(nonce_b),
+                    wrapped_nonce_B=b64url_encode(wrapped_nonce),
                 ),
             ).to_json(),
         )
@@ -273,7 +278,7 @@ async def run_dynamic_pairing_code_client(
             ws,
             server_id=server_id,
             store=store,
-            wrap_key=_wrap_key(sid, cpace),
+            wrap_key=_wrap_key(_PSK_WRAP_LABEL, sid, cpace),
         )
 
 
@@ -347,11 +352,25 @@ async def run_dynamic_pairing_code_server(
         )
 
         confirm = await _receive_pairing(ws, ClientPairConfirmMessage)
-        if confirm.payload.nonce_B is None:
-            raise PairingError("client/pair-confirm missing nonce_B for dynamic pairing code")
-        nonce_b = _decode_field(
-            confirm.payload.nonce_B, "nonce_B", expect_len=pairing_code_mod.NONCE_SIZE
+        if not cpace.verify(
+            _decode_field(confirm.payload.client_kc, "client_kc", expect_len=_KC_TAG_SIZE)
+        ):
+            await abort_pairing(ws, PairAbortReason.PAIRING_CODE_MISMATCH)
+        if confirm.payload.wrapped_nonce_B is None:
+            raise PairingError(
+                "client/pair-confirm missing wrapped_nonce_B for dynamic pairing code"
+            )
+        wrapped_nonce = _decode_field(
+            confirm.payload.wrapped_nonce_B,
+            "wrapped_nonce_B",
+            expect_len=pairing_code_mod.NONCE_SIZE + _AEAD_TAG_SIZE,
         )
+        try:
+            nonce_b = _wrap_aead(
+                ws.session.suite, _wrap_key(_NONCE_WRAP_LABEL, sid, cpace)
+            ).decrypt(_WRAP_NONCE, wrapped_nonce, None)
+        except InvalidTag as exc:
+            raise PairingError("malformed wrapped_nonce_B: AEAD failure") from exc
         if not pairing_code_mod.verify_commit(nonce_b, commit_b):
             raise PairingError("revealed nonce_B does not match commit_B")
         derived_prs = (
@@ -359,13 +378,8 @@ async def run_dynamic_pairing_code_server(
             if pairing_format is PairingCodeFormat.DIGITS
             else pairing_code_mod.derive_qr_code(handshake_hash, nonce_a, nonce_b)
         )
-        if (
-            not cpace.verify(
-                _decode_field(confirm.payload.client_kc, "client_kc", expect_len=_KC_TAG_SIZE)
-            )
-            or prs != derived_prs
-        ):
-            await abort_pairing(ws, PairAbortReason.PAIRING_CODE_MISMATCH)
+        if prs != derived_prs:
+            raise PairingError("entered pairing code is not bound to this connection")
 
         return await _finalize_server(
             ws,
@@ -373,7 +387,7 @@ async def run_dynamic_pairing_code_server(
             store=store,
             method=PairMethod.DYNAMIC_PAIRING_CODE,
             verify=verify,
-            wrap_key=_wrap_key(sid, cpace),
+            wrap_key=_wrap_key(_PSK_WRAP_LABEL, sid, cpace),
             owner=owner,
         )
 
@@ -438,7 +452,7 @@ async def run_static_pairing_code_client(
             ws,
             server_id=server_id,
             store=store,
-            wrap_key=_wrap_key(sid, cpace),
+            wrap_key=_wrap_key(_PSK_WRAP_LABEL, sid, cpace),
         )
 
 
@@ -496,8 +510,10 @@ async def run_static_pairing_code_server(
         )
 
         confirm = await _receive_pairing(ws, ClientPairConfirmMessage)
-        if confirm.payload.nonce_B is not None:
-            raise PairingError("client/pair-confirm carries nonce_B for static pairing code")
+        if confirm.payload.wrapped_nonce_B is not None:
+            raise PairingError(
+                "client/pair-confirm carries wrapped_nonce_B for static pairing code"
+            )
         if not cpace.verify(
             _decode_field(confirm.payload.client_kc, "client_kc", expect_len=_KC_TAG_SIZE)
         ):
@@ -509,7 +525,7 @@ async def run_static_pairing_code_server(
             store=store,
             method=PairMethod.STATIC_PAIRING_CODE,
             verify=verify,
-            wrap_key=_wrap_key(sid, cpace),
+            wrap_key=_wrap_key(_PSK_WRAP_LABEL, sid, cpace),
             owner=owner,
         )
 
@@ -530,7 +546,7 @@ async def _finalize_client(
     if wrap_key is None:
         payload = ClientPairFinalizePayload(long_term_psk=b64url_encode(psk))
     else:
-        wrapped = _wrap_aead(ws.session.suite, wrap_key).encrypt(_PSK_WRAP_NONCE, psk, None)
+        wrapped = _wrap_aead(ws.session.suite, wrap_key).encrypt(_WRAP_NONCE, psk, None)
         payload = ClientPairFinalizePayload(wrapped_psk=b64url_encode(wrapped))
     await ws.send_str(ClientPairFinalizeMessage(payload=payload).to_json())
     reply = await _receive_pairing_frame(ws, ServerPairFinalizeMessage)
@@ -589,9 +605,11 @@ def _unwrap_psk(
         return _decode_field(payload.long_term_psk, "long_term_psk", expect_len=PSK_SIZE)
     if payload.wrapped_psk is None:
         raise PairingError("client/pair-finalize is missing wrapped_psk")
-    wrapped = _decode_field(payload.wrapped_psk, "wrapped_psk", expect_len=PSK_SIZE + 16)
+    wrapped = _decode_field(
+        payload.wrapped_psk, "wrapped_psk", expect_len=PSK_SIZE + _AEAD_TAG_SIZE
+    )
     try:
-        psk = _wrap_aead(suite, wrap_key).decrypt(_PSK_WRAP_NONCE, wrapped, None)
+        psk = _wrap_aead(suite, wrap_key).decrypt(_WRAP_NONCE, wrapped, None)
     except InvalidTag as exc:
         raise PairingError("malformed wrapped_psk: AEAD failure") from exc
     return psk
@@ -748,13 +766,13 @@ def _pake_sid(handshake_hash: bytes, pairing_index: int) -> bytes:
     return _PAKE_SID_LABEL + handshake_hash + pairing_index.to_bytes(4, "big")
 
 
-def _wrap_key(sid: bytes, cpace: CPace) -> bytes:
-    """Derive the PSK wrap key from the CPace output."""
-    return hashlib.sha256(_PSK_WRAP_LABEL + sid + cpace.isk).digest()
+def _wrap_key(label: bytes, sid: bytes, cpace: CPace) -> bytes:
+    """Derive a per-field wrap key from the CPace output."""
+    return hashlib.sha256(label + sid + cpace.isk).digest()
 
 
 def _wrap_aead(suite: NoiseCipherSuite, wrap_key: bytes) -> AESGCM | ChaCha20Poly1305:
-    """Build the negotiated suite's AEAD, keyed for PSK wrapping."""
+    """Build the negotiated suite's AEAD, keyed for wrapping."""
     if suite is NoiseCipherSuite.AESGCM:
         return AESGCM(wrap_key)
     return ChaCha20Poly1305(wrap_key)
