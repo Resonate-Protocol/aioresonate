@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 from collections.abc import Sequence
 from datetime import UTC, datetime
 
 import pytest
 from cpace import CPace, CPaceRole
+from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
 
 from aiosendspin.models.core import ServerActivateMessage, ServerActivatePayload
 from aiosendspin.models.types import Activity, PairAbortReason, PairingCodeFormat, PairMethod
@@ -982,8 +984,14 @@ async def test_static_pairing_code_malformed_client_share_raises() -> None:
     assert await server_store.record_by_client_id("client-A") is None
 
 
+def _wrap_nonce_b(sid: bytes, cpace: CPace, nonce: bytes) -> str:
+    """Independently wrap ``nonce`` as ``wrapped_nonce_B`` (tests run the chachapoly suite)."""
+    key = hashlib.sha256(b"sendspin-pair-nonce-wrap-v1" + sid + cpace.isk).digest()
+    return b64url_encode(ChaCha20Poly1305(key).encrypt(bytes(12), nonce, None))
+
+
 async def _honest_pake_to_finalize(
-    client_ews: EncryptedWebSocket, *, nonce_b: str | None = None
+    client_ews: EncryptedWebSocket, *, wrapped_nonce_b: str | None = None
 ) -> None:
     """Drive an honest static PAKE round, stopping before ``client/pair-finalize``."""
     sid = b"sendspin-pair-pake-v1" + _HANDSHAKE_HASH + (0).to_bytes(4, "big")
@@ -1003,20 +1011,22 @@ async def _honest_pake_to_finalize(
     await client_ews.receive()  # server/pair-confirm
     await client_ews.send_str(
         ClientPairConfirmMessage(
-            payload=ClientPairConfirmPayload(client_kc=b64url_encode(cpace.tag()), nonce_B=nonce_b),
+            payload=ClientPairConfirmPayload(
+                client_kc=b64url_encode(cpace.tag()), wrapped_nonce_B=wrapped_nonce_b
+            ),
         ).to_json(),
     )
 
 
-async def test_static_pairing_code_server_rejects_dynamic_only_nonce_b() -> None:
-    """A static-pairing-code pair-confirm carrying nonce_B is a protocol error."""
+async def test_static_pairing_code_server_rejects_dynamic_only_wrapped_nonce_b() -> None:
+    """A static-pairing-code pair-confirm carrying wrapped_nonce_B is a protocol error."""
     client_ews, server_ews, _client_raw, _server_raw = _paired_encrypted_ws()
     server_store = InMemoryServerPairingStore()
 
     async def provide() -> str:
         return _STATIC_PAIRING_CODE
 
-    with pytest.raises(PairingError, match="nonce_B for static pairing code"):
+    with pytest.raises(PairingError, match="wrapped_nonce_B for static pairing code"):
         await asyncio.gather(
             run_static_pairing_code_server(
                 server_ews,
@@ -1026,9 +1036,7 @@ async def test_static_pairing_code_server_rejects_dynamic_only_nonce_b() -> None
                 client_id="client-A",
                 store=server_store,
             ),
-            _honest_pake_to_finalize(
-                client_ews, nonce_b=b64url_encode(pairing_code_mod.generate_nonce())
-            ),
+            _honest_pake_to_finalize(client_ews, wrapped_nonce_b=b64url_encode(bytes(48))),
         )
 
     assert await server_store.record_by_client_id("client-A") is None
@@ -1084,11 +1092,14 @@ async def _dynamic_pake_client(
     *,
     mangle_pairing_code: bool = False,
     mangle_nonce: bool = False,
+    mangle_wrap: bool = False,
+    omit_wrap: bool = False,
 ) -> None:
     """Drive a dynamic PAKE round through ``client/pair-confirm``, optionally cheating.
 
     ``mangle_pairing_code`` emits (and uses) a pairing code not bound to the handshake;
-    ``mangle_nonce`` reveals a nonce that does not match the commitment.
+    ``mangle_nonce`` reveals a nonce that does not match the commitment; ``mangle_wrap``
+    sends an undecryptable ``wrapped_nonce_B``; ``omit_wrap`` sends none at all.
     """
     sid = b"sendspin-pair-pake-v1" + _HANDSHAKE_HASH + (0).to_bytes(4, "big")
     nonce_b = pairing_code_mod.generate_nonce()
@@ -1117,11 +1128,16 @@ async def _dynamic_pake_client(
     cpace.derive(b64url_decode(auth.payload.pake_msg_1), b"server")
     await client_ews.receive()  # server/pair-confirm
     revealed = pairing_code_mod.generate_nonce() if mangle_nonce else nonce_b
+    wrapped_nonce_b: str | None = _wrap_nonce_b(sid, cpace, revealed)
+    if mangle_wrap:
+        wrapped_nonce_b = b64url_encode(bytes(48))
+    if omit_wrap:
+        wrapped_nonce_b = None
     await client_ews.send_str(
         ClientPairConfirmMessage(
             payload=ClientPairConfirmPayload(
                 client_kc=b64url_encode(cpace.tag()),
-                nonce_B=b64url_encode(revealed),
+                wrapped_nonce_B=wrapped_nonce_b,
             ),
         ).to_json(),
     )
@@ -1151,13 +1167,13 @@ async def test_dynamic_pairing_code_mismatched_commit_is_protocol_error() -> Non
     assert await server_store.record_by_client_id("client-A") is None
 
 
-async def test_dynamic_pairing_code_unbound_code_aborts_pairing_code_mismatch() -> None:
-    """A code not derived from the handshake fails the binding check with a mismatch."""
+async def test_dynamic_pairing_code_unbound_code_is_protocol_error() -> None:
+    """A code not derived from the handshake fails the binding check with a protocol error."""
     client_ews, server_ews, _client_raw, _server_raw = _paired_encrypted_ws()
     server_store = InMemoryServerPairingStore()
     pairing_code_future: asyncio.Future[str] = asyncio.get_running_loop().create_future()
 
-    with pytest.raises(PairingAbortError) as excinfo:
+    with pytest.raises(PairingError, match="not bound to this connection") as excinfo:
         await asyncio.gather(
             run_dynamic_pairing_code_server(
                 server_ews,
@@ -1171,7 +1187,55 @@ async def test_dynamic_pairing_code_unbound_code_aborts_pairing_code_mismatch() 
             _dynamic_pake_client(client_ews, pairing_code_future, mangle_pairing_code=True),
         )
 
-    assert excinfo.value.reason is PairAbortReason.PAIRING_CODE_MISMATCH
+    assert not isinstance(excinfo.value, PairingAbortError)
+    assert await server_store.record_by_client_id("client-A") is None
+
+
+async def test_dynamic_pairing_code_undecryptable_wrapped_nonce_is_protocol_error() -> None:
+    """A wrapped_nonce_B not sealed under the CPace output is a protocol error."""
+    client_ews, server_ews, _client_raw, _server_raw = _paired_encrypted_ws()
+    server_store = InMemoryServerPairingStore()
+    pairing_code_future: asyncio.Future[str] = asyncio.get_running_loop().create_future()
+
+    with pytest.raises(PairingError, match="AEAD failure") as excinfo:
+        await asyncio.gather(
+            run_dynamic_pairing_code_server(
+                server_ews,
+                handshake_hash=_HANDSHAKE_HASH,
+                pairing_index=0,
+                pairing_format=PairingCodeFormat.DIGITS,
+                pairing_code_provider=lambda: pairing_code_future,
+                client_id="client-A",
+                store=server_store,
+            ),
+            _dynamic_pake_client(client_ews, pairing_code_future, mangle_wrap=True),
+        )
+
+    assert not isinstance(excinfo.value, PairingAbortError)
+    assert await server_store.record_by_client_id("client-A") is None
+
+
+async def test_dynamic_pairing_code_missing_wrapped_nonce_is_protocol_error() -> None:
+    """A dynamic pair-confirm without wrapped_nonce_B is a protocol error."""
+    client_ews, server_ews, _client_raw, _server_raw = _paired_encrypted_ws()
+    server_store = InMemoryServerPairingStore()
+    pairing_code_future: asyncio.Future[str] = asyncio.get_running_loop().create_future()
+
+    with pytest.raises(PairingError, match="missing wrapped_nonce_B") as excinfo:
+        await asyncio.gather(
+            run_dynamic_pairing_code_server(
+                server_ews,
+                handshake_hash=_HANDSHAKE_HASH,
+                pairing_index=0,
+                pairing_format=PairingCodeFormat.DIGITS,
+                pairing_code_provider=lambda: pairing_code_future,
+                client_id="client-A",
+                store=server_store,
+            ),
+            _dynamic_pake_client(client_ews, pairing_code_future, omit_wrap=True),
+        )
+
+    assert not isinstance(excinfo.value, PairingAbortError)
     assert await server_store.record_by_client_id("client-A") is None
 
 
