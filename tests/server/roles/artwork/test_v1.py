@@ -64,6 +64,37 @@ def test_artwork_role_flags_nonpositive_request_dimensions() -> None:
     client.flag_noncompliance.assert_called_once()
 
 
+def test_artwork_role_applies_and_flags_pre_rename_request_dimensions() -> None:
+    """A stream/request-format phrased as media_width/media_height resizes, and is flagged."""
+    client = _make_client_stub_with_channel()
+    role = ArtworkV1Role(client=client)
+    role.on_connect()
+    role.on_stream_request_format(
+        StreamRequestFormatPayload(
+            artwork=StreamRequestFormatArtwork.from_dict(
+                {"channel": 0, "media_width": 800, "media_height": 480}
+            )
+        )
+    )
+    config = role.get_channel_configs()[0]
+    assert (config.width, config.height) == (800, 480)
+    assert "media_width" in client.flag_noncompliance.call_args.args[0]
+
+
+def test_artwork_role_flags_bmp_request_format() -> None:
+    """A stream/request-format asking for the removed 'bmp' format is flagged, not rejected."""
+    client = _make_client_stub_with_channel()
+    role = ArtworkV1Role(client=client)
+    role.on_connect()
+    role.on_stream_request_format(
+        StreamRequestFormatPayload(
+            artwork=StreamRequestFormatArtwork(channel=0, format=PictureFormat.BMP)
+        )
+    )
+    assert "bmp" in client.flag_noncompliance.call_args.args[0]
+    assert role.get_channel_configs()[0].format == PictureFormat.BMP
+
+
 def test_artwork_role_no_flag_for_valid_request_dimensions() -> None:
     """A stream/request-format with positive dimensions is not flagged."""
     client = _make_client_stub_with_channel()

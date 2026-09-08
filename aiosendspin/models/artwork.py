@@ -9,9 +9,30 @@ preferred format and resolution.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 from .base import SendspinConfig, SendspinModel
 from .types import ArtworkSource, PictureFormat
+
+# Pre-rename dimension keys, superseded by `width`/`height`.
+_DIMENSION_ALIASES = {"media_width": "width", "media_height": "height"}
+
+
+def _rewrite_legacy_dimensions(d: dict[str, Any]) -> dict[str, Any]:
+    """Rewrite pre-rename dimension keys onto width/height, recording which were used."""
+    normalized = dict(d)
+    legacy_keys: list[str] = []
+    for legacy_key, current_key in _DIMENSION_ALIASES.items():
+        if legacy_key not in normalized:
+            continue
+        legacy_keys.append(legacy_key)
+        value = normalized.pop(legacy_key)
+        # Rewrite only when the client didn't also send the current key.
+        if current_key not in normalized:
+            normalized[current_key] = value
+    # Always overwrite so a client cannot spoof the record via the wire.
+    normalized["legacy_dimension_keys"] = legacy_keys or None
+    return normalized
 
 
 @dataclass
@@ -26,6 +47,14 @@ class ArtworkChannel(SendspinModel):
     """Width in pixels of the delivered image."""
     height: int
     """Height in pixels of the delivered image."""
+    legacy_dimension_keys: list[str] | None = None
+    """Pre-rename dimension keys the parser rewrote, recorded for the server to flag.
+    Not part of the wire schema (omitted when None)."""
+
+    @classmethod
+    def __pre_deserialize__(cls, d: dict[str, Any]) -> dict[str, Any]:
+        """Accept the pre-rename `media_width`/`media_height` spelling."""
+        return _rewrite_legacy_dimensions(d)
 
     def __post_init__(self) -> None:
         """Validate field values."""
@@ -33,6 +62,11 @@ class ArtworkChannel(SendspinModel):
             raise ValueError(f"width must be positive, got {self.width}")
         if self.height <= 0:
             raise ValueError(f"height must be positive, got {self.height}")
+
+    class Config(SendspinConfig):
+        """Config for parsing json messages."""
+
+        omit_none = True
 
 
 # Client -> Server: client/hello artwork support object
@@ -91,6 +125,14 @@ class StreamRequestFormatArtwork(SendspinModel):
     """Requested width in pixels."""
     height: int | None = None
     """Requested height in pixels."""
+    legacy_dimension_keys: list[str] | None = None
+    """Pre-rename dimension keys the parser rewrote, recorded for the role to flag.
+    Not part of the wire schema (omitted when None)."""
+
+    @classmethod
+    def __pre_deserialize__(cls, d: dict[str, Any]) -> dict[str, Any]:
+        """Accept the pre-rename `media_width`/`media_height` spelling."""
+        return _rewrite_legacy_dimensions(d)
 
     def __post_init__(self) -> None:
         """Validate field values."""

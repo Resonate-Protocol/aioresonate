@@ -24,7 +24,7 @@ from aiosendspin.models.core import (
     StreamStartMessage,
     StreamStartPayload,
 )
-from aiosendspin.models.types import ArtworkSource
+from aiosendspin.models.types import ArtworkSource, PictureFormat
 from aiosendspin.server.roles.artwork.group import ArtworkGroupRole
 from aiosendspin.server.roles.base import Role
 
@@ -184,6 +184,8 @@ class ArtworkV1Role(Role):
             )
             return
 
+        self._flag_legacy_artwork_wire(artwork_request)
+
         invalid_dims = [
             name
             for name, value in (
@@ -202,6 +204,18 @@ class ArtworkV1Role(Role):
             return
 
         self._update_channel_config(artwork_request)
+
+    def _flag_legacy_artwork_wire(self, request: StreamRequestFormatArtwork) -> None:
+        """Flag a request phrased on the wire the spec superseded."""
+        if request.legacy_dimension_keys:
+            self._client.flag_noncompliance(
+                "stream/request-format artwork used pre-rename dimension keys: "
+                + ", ".join(request.legacy_dimension_keys)
+            )
+        if request.format is PictureFormat.BMP:
+            self._client.flag_noncompliance(
+                "stream/request-format artwork requested the removed 'bmp' format"
+            )
 
     def _update_channel_config(self, request: StreamRequestFormatArtwork) -> None:
         """Update channel config from a request and send updated stream/start."""
