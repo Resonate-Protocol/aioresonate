@@ -187,6 +187,7 @@ class MediaCommand(Enum):
 class PictureFormat(Enum):
     """Supported image formats for artwork/media art."""
 
+    # Removed from the spec, still served to clients that declare it.
     BMP = "bmp"
     JPEG = "jpeg"
     PNG = "png"

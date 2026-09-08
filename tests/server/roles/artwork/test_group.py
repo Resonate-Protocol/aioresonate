@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+from io import BytesIO
 from unittest.mock import MagicMock
 
 import pytest
 from PIL import Image
 
-from aiosendspin.models.types import ArtworkSource
+from aiosendspin.models.types import ArtworkSource, PictureFormat
 from aiosendspin.server.roles.artwork.events import ArtworkClearedEvent, ArtworkUpdatedEvent
 from aiosendspin.server.roles.artwork.group import ArtworkGroupRole
 
@@ -54,3 +55,26 @@ async def test_clear_album_artwork_emits_cleared_event() -> None:
     assert event.source == ArtworkSource.ALBUM
     assert event.timestamp_us == 123_456
     assert agr.get_album_artwork() is None
+
+
+def test_encode_letterboxes_to_the_declared_dimensions() -> None:
+    """An off-aspect source is padded to exactly the declared size, never cropped."""
+    agr = ArtworkGroupRole(_make_group_stub())
+    image = Image.new("RGB", (400, 400), (255, 0, 0))
+
+    encoded = agr._process_and_encode_image(image, 800, 480, PictureFormat.PNG)  # noqa: SLF001
+
+    with Image.open(BytesIO(encoded)) as decoded:
+        assert decoded.size == (800, 480)
+        assert decoded.convert("RGB").getpixel((0, 0)) == (0, 0, 0)
+
+
+def test_encode_still_supports_bmp() -> None:
+    """A client declaring the removed 'bmp' format still gets a BMP image."""
+    agr = ArtworkGroupRole(_make_group_stub())
+    image = Image.new("RGB", (400, 400), (255, 0, 0))
+
+    encoded = agr._process_and_encode_image(image, 320, 320, PictureFormat.BMP)  # noqa: SLF001
+
+    with Image.open(BytesIO(encoded)) as decoded:
+        assert decoded.format == "BMP"

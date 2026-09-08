@@ -24,7 +24,7 @@ from aiosendspin.models.core import (
     StreamStartMessage,
     StreamStartPayload,
 )
-from aiosendspin.models.types import ArtworkSource
+from aiosendspin.models.types import ArtworkSource, PictureFormat
 from aiosendspin.server.roles.artwork.group import ArtworkGroupRole
 from aiosendspin.server.roles.base import Role
 
@@ -112,8 +112,8 @@ class ArtworkV1Role(Role):
                 StreamArtworkChannelConfig(
                     source=channel.source,
                     format=channel.format,
-                    width=channel.media_width,
-                    height=channel.media_height,
+                    width=channel.width,
+                    height=channel.height,
                 )
             )
 
@@ -184,11 +184,13 @@ class ArtworkV1Role(Role):
             )
             return
 
+        self._flag_legacy_artwork_wire(artwork_request)
+
         invalid_dims = [
             name
             for name, value in (
-                ("media_width", artwork_request.media_width),
-                ("media_height", artwork_request.media_height),
+                ("width", artwork_request.width),
+                ("height", artwork_request.height),
             )
             if value is not None and value <= 0
         ]
@@ -203,6 +205,18 @@ class ArtworkV1Role(Role):
 
         self._update_channel_config(artwork_request)
 
+    def _flag_legacy_artwork_wire(self, request: StreamRequestFormatArtwork) -> None:
+        """Flag a request phrased on the wire the spec superseded."""
+        if request.legacy_dimension_keys:
+            self._client.flag_noncompliance(
+                "stream/request-format artwork used pre-rename dimension keys: "
+                + ", ".join(request.legacy_dimension_keys)
+            )
+        if request.format is PictureFormat.BMP:
+            self._client.flag_noncompliance(
+                "stream/request-format artwork requested the removed 'bmp' format"
+            )
+
     def _update_channel_config(self, request: StreamRequestFormatArtwork) -> None:
         """Update channel config from a request and send updated stream/start."""
         current = self._channel_configs[request.channel]
@@ -210,12 +224,8 @@ class ArtworkV1Role(Role):
         updated = ArtworkChannel(
             source=request.source if request.source is not None else current.source,
             format=request.format if request.format is not None else current.format,
-            media_width=request.media_width
-            if request.media_width is not None
-            else current.media_width,
-            media_height=request.media_height
-            if request.media_height is not None
-            else current.media_height,
+            width=request.width if request.width is not None else current.width,
+            height=request.height if request.height is not None else current.height,
         )
 
         self._channel_configs[request.channel] = updated

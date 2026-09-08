@@ -98,6 +98,7 @@ from aiosendspin.models.types import (
     PairAbortReason,
     PairingCodeFormat,
     PairMethod,
+    PictureFormat,
     PlaybackStateType,
     Roles,
     ServerMessage,
@@ -134,6 +135,8 @@ from .roles.negotiation import negotiate_roles
 from .roles.registry import ROLE_FACTORIES, ROLE_SUPPORT_SPECS, role_requires_pairing
 
 if TYPE_CHECKING:
+    from aiosendspin.models.artwork import ClientHelloArtworkSupport
+
     from .audio import BufferTracker
     from .group import SendspinGroup
     from .roles.base import BinaryHandling, Role
@@ -1093,6 +1096,8 @@ class SendspinConnection:
                 "client/hello sent support objects for unlisted roles: "
                 + ", ".join(client_info.unlisted_support_roles)
             )
+        if client_info.artwork_support is not None:
+            self._flag_legacy_artwork_wire(client_info.artwork_support)
         if unimplemented := self._unimplemented_roles(client_info.supported_roles):
             self._logger.info(
                 "Client offered roles/versions this server does not implement: %s", unimplemented
@@ -1127,6 +1132,18 @@ class SendspinConnection:
                 client_info, negotiated_roles=self._negotiated_roles
             )
         return True
+
+    def _flag_legacy_artwork_wire(self, support: ClientHelloArtworkSupport) -> None:
+        """Flag artwork channels declared on the wire the spec superseded."""
+        legacy_keys = sorted(
+            {key for channel in support.channels for key in channel.legacy_dimension_keys or ()}
+        )
+        if legacy_keys:
+            self._flag_noncompliance(
+                "client/hello artwork used pre-rename dimension keys: " + ", ".join(legacy_keys)
+            )
+        if any(channel.format is PictureFormat.BMP for channel in support.channels):
+            self._flag_noncompliance("client/hello artwork declared the removed 'bmp' format")
 
     async def _admit_legacy_client_id(self, client_id: str) -> bool:
         """Whether an unauthenticated (legacy) hello may claim ``client_id``."""

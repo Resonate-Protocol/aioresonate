@@ -81,8 +81,8 @@ class ArtworkGroupRole(GroupRole):
             img_data = await asyncio.to_thread(
                 self._process_and_encode_image,
                 image,
-                channel_config.media_width,
-                channel_config.media_height,
+                channel_config.width,
+                channel_config.height,
                 channel_config.format,
             )
             role.send_artwork(channel, img_data, timestamp_us)

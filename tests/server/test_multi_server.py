@@ -362,6 +362,68 @@ class TestEncryptedActivities:
         assert await conn._exchange_hellos() is False  # noqa: SLF001
         assert "client-1" not in strict_server._clients  # noqa: SLF001
 
+    @staticmethod
+    def _pre_rename_artwork_hello() -> str:
+        return orjson.dumps(
+            {
+                "type": "client/hello",
+                "payload": {
+                    "client_id": "client-1",
+                    "name": "client-1",
+                    "version": 1,
+                    "supported_roles": ["artwork@v1"],
+                    "artwork@v1_support": {
+                        "channels": [
+                            {
+                                "source": "album",
+                                "format": "bmp",
+                                "media_width": 300,
+                                "media_height": 200,
+                            }
+                        ]
+                    },
+                },
+            }
+        ).decode()
+
+    @staticmethod
+    def _prime_encrypted_hello(conn: SendspinConnection, raw: str) -> None:
+        psk = generate_psk()
+        conn._client_id = "client-1"  # noqa: SLF001
+        conn._noise_psk = ResolvedPsk(  # noqa: SLF001
+            psk_id=psk_id_for(psk),
+            psk=psk,
+            category=PskCategory.LONG_TERM,
+            counterparty_id="client-1",
+        )
+        conn._transport = _FakeTransport([WSMessage(WSMsgType.TEXT, raw, "")])  # type: ignore[assignment]  # noqa: SLF001
+
+    @pytest.mark.asyncio
+    async def test_pre_rename_artwork_hello_admitted_and_logged(
+        self, mock_server: _MockServer, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A pre-rename artwork hello is admitted, with both deviations logged."""
+        conn = SendspinConnection(mock_server, wsock_client=AsyncMock())
+        self._prime_encrypted_hello(conn, self._pre_rename_artwork_hello())
+
+        with caplog.at_level("INFO"):
+            assert await conn._exchange_hellos() is True  # noqa: SLF001
+        assert "pre-rename dimension keys" in caplog.text
+        assert "'bmp' format" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_strict_server_rejects_pre_rename_artwork_hello(self) -> None:
+        """Strict mode rejects the pre-rename artwork wire instead of tolerating it."""
+        loop = asyncio.get_running_loop()
+        strict_server = _MockServer(
+            loop=loop, clock=LoopClock(loop), allow_noncompliant_clients=False
+        )
+        conn = SendspinConnection(strict_server, wsock_client=AsyncMock())
+        self._prime_encrypted_hello(conn, self._pre_rename_artwork_hello())
+
+        assert await conn._exchange_hellos() is False  # noqa: SLF001
+        assert "client-1" not in strict_server._clients  # noqa: SLF001
+
     @pytest.mark.asyncio
     async def test_message_loop_hard_rejects_on_compliance_error(
         self, mock_server: _MockServer
@@ -682,8 +744,8 @@ class TestCustomRoleSupportParsing:
                         {
                             "source": "album",
                             "format": "jpeg",
-                            "media_width": 300,
-                            "media_height": 300,
+                            "width": 300,
+                            "height": 300,
                         }
                     ]
                 },
@@ -747,6 +809,37 @@ class TestCustomRoleSupportParsing:
 
         with pytest.raises(ValueError, match=missing_support_key):
             SendspinConnection._deserialize_client_message(raw)  # noqa: SLF001
+
+    def test_deserialize_artwork_hello_accepts_pre_rename_dimensions(self) -> None:
+        """media_width/media_height are rewritten to width/height and recorded."""
+        raw = orjson.dumps(
+            {
+                "type": "client/hello",
+                "payload": {
+                    "client_id": "c1",
+                    "name": "Client",
+                    "version": 1,
+                    "supported_roles": ["artwork@v1"],
+                    "artwork@v1_support": {
+                        "channels": [
+                            {
+                                "source": "album",
+                                "format": "jpeg",
+                                "media_width": 300,
+                                "media_height": 200,
+                            }
+                        ]
+                    },
+                },
+            }
+        ).decode()
+
+        msg = SendspinConnection._deserialize_client_message(raw)  # noqa: SLF001
+        assert isinstance(msg, ClientHelloMessage)
+        assert msg.payload.artwork_support is not None
+        channel = msg.payload.artwork_support.channels[0]
+        assert (channel.width, channel.height) == (300, 200)
+        assert channel.legacy_dimension_keys == ["media_width", "media_height"]
 
     def test_deserialize_client_hello_records_legacy_support_key_use(self) -> None:
         """Unversioned support keys are rewritten to v1 aliases and recorded, not logged."""
