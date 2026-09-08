@@ -84,8 +84,8 @@ class PlayerStatePayload(SendspinModel):
     """Volume range 0-100, only included if 'volume' in supported_commands."""
     muted: bool | None = None
     """Mute state, only included if 'mute' in supported_commands."""
-    static_delay_ms: int | None = None
-    """Static delay in milliseconds (0-5000). Required on the initial state message;
+    output_delay_ms: int | None = None
+    """Output delay in milliseconds (0-5000). Required on the initial state message;
     omitted in incremental updates means unchanged."""
     required_lead_time_ms: int | None = None
     """Minimum startup lead time in milliseconds (0-30000). Required on the initial state
@@ -93,31 +93,31 @@ class PlayerStatePayload(SendspinModel):
 
     Measured from the server transmit time of the start/restart trigger (stream/start
     or stream/clear) to the timestamp of the first subsequent audio chunk. Covers codec
-    init, decode warmup, audio backend buffering, and DAC latency. Excludes static_delay_ms.
+    init, decode warmup, audio backend buffering, and DAC latency. Excludes output_delay_ms.
     """
     min_buffer_ms: int | None = None
     """Requested minimum ongoing buffer duration in milliseconds (0-30000). Required on
     the initial state message; omitted in incremental updates means unchanged.
 
     Maintained during playback (primarily for live streams) to absorb network jitter and
-    decode/playback timing variance. Excludes static_delay_ms.
+    decode/playback timing variance. Excludes output_delay_ms.
     """
     supported_commands: list[PlayerCommand] | None = None
-    """Subset of: 'set_static_delay'. Commands this player supports via client/state."""
+    """Subset of: 'set_output_delay'. Commands this player supports via client/state."""
 
     def __post_init__(self) -> None:
         """Validate field values."""
         if self.volume is not None and not 0 <= self.volume <= 100:
             raise ValueError(f"Volume must be in range 0-100, got {self.volume}")
-        if self.static_delay_ms is not None and not 0 <= self.static_delay_ms <= 5000:
-            raise ValueError(f"static_delay_ms must be in range 0-5000, got {self.static_delay_ms}")
+        if self.output_delay_ms is not None and not 0 <= self.output_delay_ms <= 5000:
+            raise ValueError(f"output_delay_ms must be in range 0-5000, got {self.output_delay_ms}")
         if self.required_lead_time_ms is not None and not 0 <= self.required_lead_time_ms <= 30000:
             raise ValueError(
                 f"required_lead_time_ms must be in range 0-30000, got {self.required_lead_time_ms}"
             )
         if self.min_buffer_ms is not None and not 0 <= self.min_buffer_ms <= 30000:
             raise ValueError(f"min_buffer_ms must be in range 0-30000, got {self.min_buffer_ms}")
-        VALID_STATE_COMMANDS = {PlayerCommand.SET_STATIC_DELAY}  # noqa: N806
+        VALID_STATE_COMMANDS = {PlayerCommand.SET_OUTPUT_DELAY}  # noqa: N806
         if self.supported_commands:
             invalid = [c for c in self.supported_commands if c not in VALID_STATE_COMMANDS]
             if invalid:
@@ -143,8 +143,8 @@ class PlayerCommandPayload(SendspinModel):
     """Volume range 0-100, only set if command is volume."""
     mute: bool | None = None
     """True to mute, false to unmute, only set if command is mute."""
-    static_delay_ms: int | None = None
-    """Delay in milliseconds (0-5000), only set if command is set_static_delay."""
+    output_delay_ms: int | None = None
+    """Delay in milliseconds (0-5000), only set if command is set_output_delay."""
 
     def __post_init__(self) -> None:
         """Validate field values and command consistency."""
@@ -162,18 +162,18 @@ class PlayerCommandPayload(SendspinModel):
         elif self.mute is not None:
             raise ValueError(f"Mute should not be provided for command '{self.command.value}'")
 
-        if self.command == PlayerCommand.SET_STATIC_DELAY:
-            if self.static_delay_ms is None:
+        if self.command == PlayerCommand.SET_OUTPUT_DELAY:
+            if self.output_delay_ms is None:
                 raise ValueError(
-                    "static_delay_ms must be provided when command is 'set_static_delay'"
+                    "output_delay_ms must be provided when command is 'set_output_delay'"
                 )
-            if not 0 <= self.static_delay_ms <= 5000:
+            if not 0 <= self.output_delay_ms <= 5000:
                 raise ValueError(
-                    f"static_delay_ms must be in range 0-5000, got {self.static_delay_ms}"
+                    f"output_delay_ms must be in range 0-5000, got {self.output_delay_ms}"
                 )
-        elif self.static_delay_ms is not None:
+        elif self.output_delay_ms is not None:
             raise ValueError(
-                f"static_delay_ms should not be provided for command '{self.command.value}'"
+                f"output_delay_ms should not be provided for command '{self.command.value}'"
             )
 
     class Config(SendspinConfig):
