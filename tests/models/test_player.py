@@ -8,51 +8,51 @@ from aiosendspin.models.player import PlayerCommandPayload, PlayerStatePayload
 from aiosendspin.models.types import PlayerCommand
 
 
-def test_player_state_static_delay_serializes_when_set() -> None:
-    """static_delay_ms is serialized when explicitly set."""
-    payload = PlayerStatePayload(static_delay_ms=0)
+def test_player_state_output_delay_serializes_when_set() -> None:
+    """output_delay_ms is serialized when explicitly set."""
+    payload = PlayerStatePayload(output_delay_ms=0)
     data = payload.to_dict()
-    assert "static_delay_ms" in data
-    assert data["static_delay_ms"] == 0
+    assert "output_delay_ms" in data
+    assert data["output_delay_ms"] == 0
 
 
-def test_player_state_static_delay_omitted_when_unset() -> None:
-    """static_delay_ms is omitted when not provided so partial deltas don't reset it."""
+def test_player_state_output_delay_omitted_when_unset() -> None:
+    """output_delay_ms is omitted when not provided so partial deltas don't reset it."""
     payload = PlayerStatePayload()
     data = payload.to_dict()
-    assert "static_delay_ms" not in data
+    assert "output_delay_ms" not in data
 
 
-def test_player_state_static_delay_range_valid() -> None:
+def test_player_state_output_delay_range_valid() -> None:
     """Maximum value 5000 is accepted."""
-    payload = PlayerStatePayload(static_delay_ms=5000)
-    assert payload.static_delay_ms == 5000
+    payload = PlayerStatePayload(output_delay_ms=5000)
+    assert payload.output_delay_ms == 5000
 
 
-def test_player_state_static_delay_range_invalid() -> None:
+def test_player_state_output_delay_range_invalid() -> None:
     """Values above 5000 are rejected."""
-    with pytest.raises(ValueError, match="static_delay_ms"):
-        PlayerStatePayload(static_delay_ms=5001)
+    with pytest.raises(ValueError, match="output_delay_ms"):
+        PlayerStatePayload(output_delay_ms=5001)
 
 
-def test_player_state_static_delay_negative_invalid() -> None:
+def test_player_state_output_delay_negative_invalid() -> None:
     """Negative values are rejected."""
-    with pytest.raises(ValueError, match="static_delay_ms"):
-        PlayerStatePayload(static_delay_ms=-1)
+    with pytest.raises(ValueError, match="output_delay_ms"):
+        PlayerStatePayload(output_delay_ms=-1)
 
 
 def test_player_state_supported_commands_serializes() -> None:
     """supported_commands serializes enum values as strings."""
-    payload = PlayerStatePayload(supported_commands=[PlayerCommand.SET_STATIC_DELAY])
+    payload = PlayerStatePayload(supported_commands=[PlayerCommand.SET_OUTPUT_DELAY])
     data = payload.to_dict()
-    assert data["supported_commands"] == ["set_static_delay"]
+    assert data["supported_commands"] == ["set_output_delay"]
 
 
 def test_player_state_backward_compat_no_delay() -> None:
-    """Omitted static_delay_ms parses as None so server treats it as 'unchanged'."""
+    """Omitted output_delay_ms parses as None so server treats it as 'unchanged'."""
     data = '{"volume": 50}'
     payload = PlayerStatePayload.from_json(data)
-    assert payload.static_delay_ms is None
+    assert payload.output_delay_ms is None
 
 
 def test_player_state_timing_defaults_to_none() -> None:
@@ -81,31 +81,31 @@ def test_player_state_min_buffer_negative_invalid() -> None:
         PlayerStatePayload(min_buffer_ms=-1)
 
 
-def test_player_command_set_static_delay_valid() -> None:
-    """SET_STATIC_DELAY command accepts valid delay value."""
-    cmd = PlayerCommandPayload(command=PlayerCommand.SET_STATIC_DELAY, static_delay_ms=300)
-    assert cmd.static_delay_ms == 300
+def test_player_command_set_output_delay_valid() -> None:
+    """SET_OUTPUT_DELAY command accepts valid delay value."""
+    cmd = PlayerCommandPayload(command=PlayerCommand.SET_OUTPUT_DELAY, output_delay_ms=300)
+    assert cmd.output_delay_ms == 300
 
 
-def test_player_command_set_static_delay_missing() -> None:
-    """SET_STATIC_DELAY command requires static_delay_ms."""
-    with pytest.raises(ValueError, match="static_delay_ms must be provided"):
-        PlayerCommandPayload(command=PlayerCommand.SET_STATIC_DELAY)
+def test_player_command_set_output_delay_missing() -> None:
+    """SET_OUTPUT_DELAY command requires output_delay_ms."""
+    with pytest.raises(ValueError, match="output_delay_ms must be provided"):
+        PlayerCommandPayload(command=PlayerCommand.SET_OUTPUT_DELAY)
 
 
-def test_player_command_set_static_delay_out_of_range() -> None:
-    """SET_STATIC_DELAY command rejects out-of-range values."""
-    with pytest.raises(ValueError, match="static_delay_ms"):
-        PlayerCommandPayload(command=PlayerCommand.SET_STATIC_DELAY, static_delay_ms=6000)
+def test_player_command_set_output_delay_out_of_range() -> None:
+    """SET_OUTPUT_DELAY command rejects out-of-range values."""
+    with pytest.raises(ValueError, match="output_delay_ms"):
+        PlayerCommandPayload(command=PlayerCommand.SET_OUTPUT_DELAY, output_delay_ms=6000)
 
 
-def test_player_command_volume_rejects_static_delay() -> None:
-    """VOLUME command rejects static_delay_ms parameter."""
-    with pytest.raises(ValueError, match="static_delay_ms should not"):
-        PlayerCommandPayload(command=PlayerCommand.VOLUME, volume=50, static_delay_ms=100)
+def test_player_command_volume_rejects_output_delay() -> None:
+    """VOLUME command rejects output_delay_ms parameter."""
+    with pytest.raises(ValueError, match="output_delay_ms should not"):
+        PlayerCommandPayload(command=PlayerCommand.VOLUME, volume=50, output_delay_ms=100)
 
 
 def test_player_state_rejects_invalid_supported_commands() -> None:
-    """State-level supported_commands only allows set_static_delay."""
+    """State-level supported_commands only allows set_output_delay."""
     with pytest.raises(ValueError, match="Invalid state-level"):
         PlayerStatePayload(supported_commands=[PlayerCommand.VOLUME])

@@ -17,9 +17,9 @@ class VolumeChangedEvent(ClientRoleEvent):
 
 @dataclass
 class StaticDelayChangedEvent(ClientRoleEvent):
-    """The static delay of the player was changed."""
+    """The output delay of the player was changed."""
 
-    static_delay_ms: int
+    output_delay_ms: int
 
 
 @dataclass

@@ -817,12 +817,12 @@ class PushStream:
                 result.append((client, role))
         return result
 
-    def _max_active_static_delay_us(self) -> int:
-        """Return the largest static delay among active audio roles."""
+    def _max_active_output_delay_us(self) -> int:
+        """Return the largest output delay among active audio roles."""
         roles = self._get_audio_roles()
         if not roles:
             return 0
-        return max(role.get_static_delay_us() for _, role in roles)
+        return max(role.get_output_delay_us() for _, role in roles)
 
     def _role_send_ahead_us(self, role: Role) -> int:
         """Per-role send-ahead floor.
@@ -833,7 +833,7 @@ class PushStream:
         playback begins and extra lead would only add latency.
         """
         min_buffer_us = role.get_min_buffer_us()
-        static_us = role.get_static_delay_us()
+        static_us = role.get_output_delay_us()
         if self._is_live:
             return min_buffer_us + static_us
         return max(min_buffer_us, role.get_required_lead_time_us()) + static_us
@@ -921,7 +921,7 @@ class PushStream:
         max_timing_us = max(active_timings)
         now_us = self._clock.now_us()
         ahead_us = max_timing_us - now_us
-        effective_limit_us = max_buffer_us + self._max_active_static_delay_us()
+        effective_limit_us = max_buffer_us + self._max_active_output_delay_us()
         if ahead_us > effective_limit_us:
             await asyncio.sleep(min((ahead_us - effective_limit_us) / 1_000_000, 1.0))
 
